@@ -1,0 +1,81 @@
+# 编译输出和构建目录
+*/*build*/*
+*/bin/*
+*/dist/*
+build/
+bin/
+dist/
+
+# Qt 临时文件
+*.user
+*.autosave
+*.pro.user
+*.pro.user.*
+
+# 编译器临时文件
+*.o
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.ncb
+*.idb
+*.ipch
+*.suo
+*.sdf
+*.opensdf
+*.vcxproj.filters
+*.vcxproj.user
+
+# 动态库和可执行文件
+*.dll
+*.exe
+*.so
+*.so.*
+*.dylib
+*.app
+
+# FFmpeg 二进制文件(库文件和 DLL),但保留头文件(include)
+src/thridparty/ffmpeg/windows/bin/
+src/thridparty/ffmpeg/windows/lib/
+src/thridparty/ffmpeg/windows/doc/
+src/thridparty/ffmpeg/windows/presets/
+src/thridparty/ffmpeg/linux/bin/
+src/thridparty/ffmpeg/linux/lib/
+src/thridparty/ffmpeg/linux/doc/
+src/thridparty/ffmpeg/linux/man/
+src/thridparty/ffmpeg/linux/presets/
+
+# 文档文件
+*.txt
+*.md.bak
+
+# 压缩文件
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# Node.js
+*/node_modules/*
+
+# IDE 配置文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志文件
+*.log
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+desktop.ini

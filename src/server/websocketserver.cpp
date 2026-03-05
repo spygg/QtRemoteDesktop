@@ -1,0 +1,202 @@
+#include "websocketserver.h"
+#include <QDataStream>
+#include <QDebug>
+#include <QJsonDocument>
+#include <QJsonObject>
+
+WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent)
+    : QObject(parent)
+    , server_(new QWebSocketServer(QStringLiteral("RemoteDesktopServer"),
+          mode,
+          this))
+{
+    connect(server_, &QWebSocketServer::newConnection,
+        this, &WebSocketServer::onNewConnection);
+}
+
+WebSocketServer::~WebSocketServer()
+{
+    server_->close();
+    qDeleteAll(clients_);
+}
+
+bool WebSocketServer::listen(const QHostAddress& address, quint16 port)
+{
+    if (!server_->listen(address, port)) {
+        qCritical() << "WebSocket server failed to listen:" << server_->errorString();
+        return false;
+    }
+
+    // 如果是 SecureMode，输出 WSS 字样
+    if (server_->secureMode() == QWebSocketServer::SecureMode) {
+        qInfo() << "WebSocket server (WSS) listening on" << address.toString() << ":" << port;
+    } else {
+        qInfo() << "WebSocket server (WS) listening on" << address.toString() << ":" << port;
+    }
+
+    return true;
+}
+
+void WebSocketServer::broadcastCodecConfig(const QByteArray& extra)
+{
+    QJsonObject obj;
+    obj["type"] = "codec_config";
+    obj["extradata"] = QString::fromLatin1(extra.toBase64());
+    broadcastJson(obj);
+}
+
+void WebSocketServer::onNewConnection()
+{
+    QWebSocket* socket = server_->nextPendingConnection();
+    QString clientId = QUuid::createUuid().toString();
+
+    clients_[clientId] = socket;
+    socketToId_[socket] = clientId;
+
+    connect(socket, &QWebSocket::disconnected, this, &WebSocketServer::onSocketDisconnected);
+    connect(socket, &QWebSocket::textMessageReceived, this, &WebSocketServer::onTextMessageReceived);
+    connect(socket, &QWebSocket::binaryMessageReceived, this, &WebSocketServer::onBinaryMessageReceived);
+
+    emit clientConnected(clientId);
+}
+
+void WebSocketServer::onSocketDisconnected()
+{
+    QWebSocket* socket = qobject_cast<QWebSocket*>(sender());
+    if (!socket)
+        return;
+
+    QString clientId = socketToId_.take(socket);
+    clients_.remove(clientId);
+    socket->deleteLater();
+
+    emit clientDisconnected(clientId);
+}
+
+void WebSocketServer::onTextMessageReceived(const QString& message)
+{
+    QWebSocket* socket = qobject_cast<QWebSocket*>(sender());
+    if (!socket)
+        return;
+    QString clientId = socketToId_[socket];
+
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError) {
+        qWarning() << "Invalid JSON from client:" << error.errorString();
+        return;
+    }
+    if (!doc.isObject())
+        return;
+
+    QJsonObject obj = doc.object();
+    QString type = obj["type"].toString();
+
+    if (type == "change_codec") {
+        QString codec = obj["codec"].toString();
+        emit codecChangeRequested(codec);
+    } else if (type == "set_mode") { // 处理模式切换请求
+        QString mode = obj["mode"].toString();
+        emit modeChangeRequested(mode);
+    } else {
+        emit inputReceived(clientId, obj);
+    }
+}
+// void WebSocketServer::onTextMessageReceived(const QString& message)
+// {
+//     QWebSocket* socket = qobject_cast<QWebSocket*>(sender());
+//     if (!socket)
+//         return;
+//     QString clientId = socketToId_[socket];
+
+//     QJsonParseError error;
+//     QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
+//     if (error.error != QJsonParseError::NoError) {
+//         qWarning() << "Invalid JSON from client:" << error.errorString();
+//         return;
+//     }
+//     if (!doc.isObject())
+//         return;
+
+//     QJsonObject obj = doc.object();
+//     QString type = obj["type"].toString();
+
+//     // 特殊处理编码器切换请求
+//     if (type == "change_codec") {
+//         QString codec = obj["codec"].toString();
+//         emit codecChangeRequested(codec);
+//     } else {
+//         // 其他输入事件转发给上层
+//         emit inputReceived(clientId, obj);
+//     }
+// }
+
+void WebSocketServer::onBinaryMessageReceived(const QByteArray& message)
+{
+    // 客户端目前不会发送二进制，忽略
+    Q_UNUSED(message)
+}
+
+void WebSocketServer::setSslConfiguration(const QSslConfiguration& config)
+{
+    sslConfig_ = config;
+    server_->setSslConfiguration(sslConfig_); // 设置 SSL 配置（仅当 mode 为 SecureMode 时有效）
+}
+
+void WebSocketServer::broadcastFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp)
+{
+    if (clients_.isEmpty())
+        return;
+
+    // 构造二进制包： [1字节帧类型] [4字节大端长度] [8字节大端时间戳] [数据]
+    QByteArray packet;
+    QDataStream stream(&packet, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    stream << quint8(isKeyframe ? 0x01 : 0x02);
+    stream << quint32(data.size());
+    stream << qint64(timestamp);
+    packet.append(data);
+
+    for (QWebSocket* socket : clients_.values()) {
+        if (socket->state() == QAbstractSocket::ConnectedState) {
+            socket->sendBinaryMessage(packet);
+        }
+    }
+}
+
+void WebSocketServer::sendJson(const QString& clientId, const QJsonObject& data)
+{
+    QWebSocket* socket = clients_.value(clientId);
+    if (socket && socket->state() == QAbstractSocket::ConnectedState) {
+        QJsonDocument doc(data);
+        socket->sendTextMessage(QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+    }
+}
+
+void WebSocketServer::broadcastJson(const QJsonObject& data)
+{
+    if (clients_.isEmpty())
+        return;
+
+    QJsonDocument doc(data);
+    QByteArray message = doc.toJson(QJsonDocument::Compact);
+
+    for (QWebSocket* socket : clients_.values()) {
+        if (socket->state() == QAbstractSocket::ConnectedState) {
+            socket->sendTextMessage(QString::fromUtf8(message));
+        }
+    }
+}
+
+void WebSocketServer::broadcastBinary(const QByteArray& data)
+{
+    if (clients_.isEmpty())
+        return;
+
+    for (QWebSocket* socket : clients_.values()) {
+        if (socket->state() == QAbstractSocket::ConnectedState) {
+            socket->sendBinaryMessage(data);
+        }
+    }
+}

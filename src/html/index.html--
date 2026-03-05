@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qt5 远程桌面</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a1a;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #screen {
+            max-width: 100%;
+            max-height: 100%;
+            background: #000;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #status {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            color: #0f0;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: monospace;
+            z-index: 1000;
+        }
+        #codec-selector {
+            position: fixed;
+            top: 10px;
+            right: 120px;
+            background: rgba(0,0,0,0.7);
+            color: #fff;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 12px;
+            z-index: 1000;
+        }
+        #toolbar {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            display: flex;
+            gap: 8px;
+            z-index: 1000;
+        }
+        .btn {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .btn:hover { background: rgba(255,255,255,0.2); }
+        .btn.active { background: #0066cc; }
+
+        /* 连接断开遮罩 */
+        #overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            z-index: 2000;
+        }
+        #overlay.active { display: flex; }
+        .spinner {
+            width: 40px; height: 40px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* 编码器选择面板 */
+        #codec-panel {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            padding: 20px;
+            display: none;
+            flex-direction: column;
+            gap: 12px;
+            min-width: 300px;
+            z-index: 3000;
+        }
+        #codec-panel.active { display: flex; }
+        .codec-option {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 4px;
+            padding: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .codec-option:hover { background: rgba(255,255,255,0.2); }
+        .codec-option.selected { background: rgba(0,102,204,0.3); border-color: #0066cc; }
+        .codec-info {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+        .codec-name { font-weight: bold; }
+        .codec-status { color: #0f0; }
+        .codec-desc { color: #aaa; font-size: 11px; }
+        .codec-error { color: #f00; font-size: 11px; display: none; }
+    </style>
+</head>
+<body>
+    <div id="status">🔴 未连接</div>
+
+    <div id="codec-selector">编码器: 自动检测</div>
+
+    <div id="toolbar">
+        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 高</button>
+        <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">全屏</button>
+        <button class="btn" onclick="sendCtrlAltDel()">Ctrl+Alt+Del</button>
+    </div>
+
+    <div id="container">
+        <canvas id="screen"></canvas>
+    </div>
+
+    <div id="overlay">
+        <div class="spinner"></div>
+        <p style="color:#fff;margin-top:16px;">连接中...</p>
+    </div>
+
+    <div id="codec-panel">
+        <h3 style="color:#fff;margin-bottom:10px;">选择编码器</h3>
+        <div class="codec-option" data-codec="h264" onclick="selectCodec('h264')">
+            <div class="codec-info">
+                <span class="codec-name">H.264 / AVC</span>
+                <span class="codec-status" id="h264-status">✓ 支持</span>
+            </div>
+            <div class="codec-desc">高压缩率，通用兼容，推荐</div>
+            <div class="codec-error" id="h264-error"></div>
+        </div>
+        <div class="codec-option" data-codec="vp8" onclick="selectCodec('vp8')">
+            <div class="codec-info">
+                <span class="codec-name">VP8</span>
+                <span class="codec-status" id="vp8-status">✓ 支持</span>
+            </div>
+            <div class="codec-desc">开源编码器，WebRTC 标准</div>
+            <div class="codec-error" id="vp8-error"></div>
+        </div>
+        <div class="codec-option" data-codec="vp9" onclick="selectCodec('vp9')">
+            <div class="codec-info">
+                <span class="codec-name">VP9</span>
+                <span class="codec-status" id="vp9-status">✓ 支持</span>
+            </div>
+            <div class="codec-desc">VP8 升级版，更高压缩率</div>
+            <div class="codec-error" id="vp9-error"></div>
+        </div>
+        <div class="codec-option" data-codec="av1" onclick="selectCodec('av1')">
+            <div class="codec-info">
+                <span class="codec-name">AV1</span>
+                <span class="codec-status" id="av1-status">⚠️ 测试中</span>
+            </div>
+            <div class="codec-desc">新一代开源编码器，高压缩率</div>
+            <div class="codec-error" id="av1-error"></div>
+        </div>
+        <div class="codec-option" data-codec="mpeg4" onclick="selectCodec('mpeg4')">
+            <div class="codec-info">
+                <span class="codec-name">MPEG-4 Part 2</span>
+                <span class="codec-status" id="mpeg4-status">✓ 支持</span>
+            </div>
+            <div class="codec-desc">旧标准，兼容性较好</div>
+            <div class="codec-error" id="mpeg4-error"></div>
+        </div>
+        <div class="codec-option" data-codec="mjpeg" onclick="selectCodec('mjpeg')">
+            <div class="codec-info">
+                <span class="codec-name">Motion JPEG</span>
+                <span class="codec-status" id="mjpeg-status">✓ 支持</span>
+            </div>
+            <div class="codec-desc">每帧独立压缩，高质量但体积大</div>
+            <div class="codec-error" id="mjpeg-error"></div>
+        </div>
+        <div style="margin-top:10px; display:flex; gap:8px;">
+            <button class="btn" onclick="applyCodecSelection()" style="flex:1;">应用</button>
+            <button class="btn" onclick="closeCodecPanel()" style="flex:1;">取消</button>
+        </div>
+    </div>
+
+    <script>
+        // ==================== 浏览器支持的编码器检测 ====================
+        const SUPPORTED_CODECS = {
+            // H.264 / AVC (主流浏览器支持)
+            h264: {
+                codecString: 'avc1.42001E',  // Baseline profile
+                desc: 'H.264 / AVC',
+                priority: 1,  // 优先级最高
+                canDecode: null,  // 运行时检测
+                profiles: [
+                    'avc1.42001E',  // Baseline 3.0
+                    'avc1.4D401E',  // Main 3.0
+                    'avc1.64001E'   // High 3.0
+                ]
+            },
+            // VP8 (Chrome, Firefox, Edge 支持)
+            vp8: {
+                codecString: 'vp8',
+                desc: 'VP8',
+                priority: 2,
+                canDecode: null
+            },
+            // VP9 (Chrome, Firefox, Edge 支持)
+            vp9: {
+                codecString: 'vp09.00.10.08',
+                desc: 'VP9',
+                priority: 3,
+                canDecode: null,
+                profiles: [
+                    'vp09.00.10.08',  // VP9 profile 0
+                    'vp09.02.10.10'   // VP9 profile 2
+                ]
+            },
+            // AV1 (较新浏览器支持)
+            av1: {
+                codecString: 'av01.0.04M.08',
+                desc: 'AV1',
+                priority: 4,
+                canDecode: null
+            },
+            // MPEG-4 Part 2 (Safari, IE 支持)
+            mpeg4: {
+                codecString: 'mp4v.20.9',
+                desc: 'MPEG-4 Part 2',
+                priority: 5,
+                canDecode: null
+            },
+            // Motion JPEG (所有浏览器支持)
+            mjpeg: {
+                codecString: 'mjpeg',
+                desc: 'Motion JPEG',
+                priority: 6,
+                canDecode: null
+            }
+        };
+
+        // ==================== 配置 ====================
+        const CONFIG = {
+            wsUrl: `ws://${location.hostname}:8080`,
+            targetFps: 30,
+            keyframeInterval: 1000,
+            autoCodecDetection: true,
+            defaultCodec: 'h264'  // 默认使用 H.264
+        };
+
+        // ==================== 状态管理 ====================
+        const state = {
+            ws: null,
+            decoder: null,
+            canvas: document.getElementById('screen'),
+            ctx: document.getElementById('screen').getContext('2d', { alpha: false }),
+            connected: false,
+            screenWidth: 0,
+            screenHeight: 0,
+            scaleX: 1,
+            scaleY: 1,
+            highQuality: true,
+            selectedCodec: null,
+            supportedCodecs: [],
+            lastFrameTime: 0,
+            fpsCount: 0,
+            fpsTimer: null
+        };
+
+        // ==================== 编码器检测 ====================
+        async function detectSupportedCodecs() {
+            console.log('检测浏览器支持的编码器...');
+
+            if (!('VideoDecoder' in window)) {
+                alert('浏览器不支持 WebCodecs API，请使用 Chrome 94+、Edge 94+、Firefox 93+');
+                return [];
+            }
+
+            const results = [];
+
+            for (const [codecKey, codecInfo] of Object.entries(SUPPORTED_CODECS)) {
+                try {
+                    // 对于有多个 profile 的编码器，尝试所有
+                    const profiles = codecInfo.profiles || [codecInfo.codecString];
+                    let supported = false;
+
+                    for (const profile of profiles) {
+                        const support = await VideoDecoder.isConfigSupported({
+                            codec: profile,
+                            width: 640,
+                            height: 480
+                        });
+
+                        if (support.supported) {
+                            supported = true;
+                            codecInfo.bestProfile = profile;
+                            break;
+                        }
+                    }
+
+                    codecInfo.canDecode = supported;
+                    results.push({
+                        key: codecKey,
+                        name: codecInfo.desc,
+                        supported: supported,
+                        priority: codecInfo.priority,
+                        codecString: codecInfo.bestProfile || codecInfo.codecString
+                    });
+
+                    // 更新 UI 状态
+                    const statusEl = document.getElementById(`${codecKey}-status`);
+                    if (statusEl) {
+                        statusEl.textContent = supported ? '✓ 支持' : '✗ 不支持';
+                        statusEl.style.color = supported ? '#0f0' : '#f00';
+                    }
+
+                } catch (error) {
+                    console.warn(`检测 ${codecKey} 支持失败:`, error);
+                    codecInfo.canDecode = false;
+
+                    const statusEl = document.getElementById(`${codecKey}-status`);
+                    if (statusEl) {
+                        statusEl.textContent = '✗ 错误';
+                        statusEl.style.color = '#f00';
+                    }
+                }
+            }
+
+            // 按优先级排序
+            state.supportedCodecs = results
+                .filter(codec => codec.supported)
+                .sort((a, b) => a.priority - b.priority);
+
+            console.log('支持的编码器:', state.supportedCodecs);
+            return state.supportedCodecs;
+        }
+
+        // ==================== 通用视频解码器 ====================
+        class VideoDecoderWrapper {
+            constructor() {
+                this.decoder = null;
+                this.codec = null;
+                this.initialized = false;
+            }
+
+            async init(codecKey) {
+                const codecInfo = SUPPORTED_CODECS[codecKey];
+                if (!codecInfo || !codecInfo.canDecode) {
+                    throw new Error(`编码器 ${codecKey} 不支持`);
+                }
+
+                this.codec = codecKey;
+                this.decoder = new VideoDecoder({
+                    output: this.handleFrame.bind(this),
+                    error: (e) => {
+                        console.error('解码器错误:', e);
+                        this.handleDecodeError(e);
+                    }
+                });
+
+                // 初始配置（需要关键帧数据才能完全配置）
+                this.initialized = false;
+                this.waitingForKeyframe = true;
+
+                console.log(`初始化 ${codecInfo.desc} 解码器`);
+                return true;
+            }
+
+            configure(extraData) {
+                if (!this.decoder) return;
+
+                const codecInfo = SUPPORTED_CODECS[this.codec];
+                try {
+                    const config = {
+                        codec: codecInfo.bestProfile || codecInfo.codecString,
+                        optimizeForLatency: true,
+                        hardwareAcceleration: 'prefer-hardware'
+                    };
+
+                    // 对于某些编码器需要额外的配置数据
+                    if (extraData && extraData.length > 0) {
+                        config.description = extraData;
+                    }
+
+                    this.decoder.configure(config);
+                    this.initialized = true;
+                    this.waitingForKeyframe = false;
+                    console.log(`解码器配置成功: ${config.codec}`);
+
+                } catch (error) {
+                    console.error('解码器配置失败:', error);
+                    this.handleDecodeError(error);
+                }
+            }
+
+            decode(data, isKeyframe, timestamp) {
+                if (!this.decoder || this.decoder.state === 'closed') return;
+
+                // 如果是关键帧且解码器未完全初始化，尝试重新配置
+                if (isKeyframe && this.waitingForKeyframe) {
+                    this.configure(data.slice(0, Math.min(100, data.length))); // 使用前100字节作为配置数据
+                }
+
+                if (!this.initialized && isKeyframe) {
+                    this.configure(data.slice(0, Math.min(100, data.length)));
+                }
+
+                if (!this.initialized) {
+                    console.warn('解码器未初始化，丢弃帧');
+                    return;
+                }
+
+                const chunk = new EncodedVideoChunk({
+                    type: isKeyframe ? 'key' : 'delta',
+                    timestamp: timestamp,
+                    data: data
+                });
+
+                try {
+                    this.decoder.decode(chunk);
+                } catch (error) {
+                    console.error('解码失败:', error);
+                    if (isKeyframe) {
+                        // 关键帧解码失败，尝试重新配置
+                        this.configure(data.slice(0, Math.min(100, data.length)));
+                    }
+                }
+            }
+
+            handleFrame(frame) {
+                if (frame.displayWidth === 0 || frame.displayHeight === 0) {
+                    frame.close();
+                    return;
+                }
+
+                // 自适应画布尺寸
+                if (state.canvas.width !== frame.displayWidth ||
+                    state.canvas.height !== frame.displayHeight) {
+                    state.canvas.width = frame.displayWidth;
+                    state.canvas.height = frame.displayHeight;
+                    updateScale();
+
+                    console.log(`画面尺寸: ${frame.displayWidth}x${frame.displayHeight}`);
+                    send({ type: 'screen_size', width: frame.displayWidth, height: frame.displayHeight });
+                }
+
+                // 高性能渲染
+                state.ctx.drawImage(frame, 0, 0, frame.displayWidth, frame.displayHeight);
+                frame.close();
+
+                // 更新 FPS 显示
+                updateFps();
+            }
+
+            handleDecodeError(error) {
+                console.error('解码器错误，尝试切换到其他编码器:', error);
+
+                // 标记当前编码器为失败
+                const codecEl = document.getElementById(`${this.codec}-error`);
+                if (codecEl) {
+                    codecEl.textContent = `错误: ${error.message}`;
+                    codecEl.style.display = 'block';
+                }
+
+                // 尝试切换到下一个支持的编码器
+                if (state.supportedCodecs.length > 1) {
+                    const currentIndex = state.supportedCodecs.findIndex(c => c.key === this.codec);
+                    const nextIndex = (currentIndex + 1) % state.supportedCodecs.length;
+                    const nextCodec = state.supportedCodecs[nextIndex];
+
+                    console.log(`切换到编码器: ${nextCodec.key}`);
+                    selectCodec(nextCodec.key);
+
+                    // 通知服务器切换编码器
+                    if (state.ws?.readyState === WebSocket.OPEN) {
+                        send({ type: 'change_codec', codec: nextCodec.key });
+                    }
+                }
+            }
+
+            close() {
+                if (this.decoder) {
+                    this.decoder.close();
+                    this.decoder = null;
+                }
+                this.initialized = false;
+            }
+        }
+
+        // ==================== WebSocket 连接 ====================
+        async function connect() {
+            const overlay = document.getElementById('overlay');
+            overlay.classList.add('active');
+
+            // 检测支持的编码器
+            await detectSupportedCodecs();
+
+            // 如果支持自动检测，选择优先级最高的编码器
+            if (CONFIG.autoCodecDetection && state.supportedCodecs.length > 0) {
+                const bestCodec = state.supportedCodecs[0];
+                state.selectedCodec = bestCodec.key;
+                updateCodecSelector(bestCodec.name);
+            } else {
+                state.selectedCodec = CONFIG.defaultCodec;
+            }
+
+            state.ws = new WebSocket(CONFIG.wsUrl);
+            state.ws.binaryType = 'arraybuffer';
+
+            state.ws.onopen = () => {
+                state.connected = true;
+                updateStatus('🟢 已连接 | 检测编码器中...');
+                overlay.classList.remove('active');
+
+                // 初始化解码器
+                state.decoder = new VideoDecoderWrapper();
+                state.decoder.init(state.selectedCodec).catch(err => {
+                    console.error('解码器初始化失败:', err);
+                    showCodecPanel();
+                });
+
+                // 发送连接信息，包括支持的编码器列表
+                const supported = state.supportedCodecs.map(c => c.key);
+                send({
+                    type: 'connect',
+                    version: '1.0',
+                    supportedCodecs: supported,
+                    preferredCodec: state.selectedCodec
+                });
+            };
+
+            state.ws.onclose = () => {
+                state.connected = false;
+                updateStatus('🔴 连接断开，5秒后重连...');
+                if (state.decoder) {
+                    state.decoder.close();
+                }
+                setTimeout(connect, 5000);
+            };
+
+            state.ws.onerror = (e) => {
+                console.error('WebSocket 错误:', e);
+                updateStatus('❌ 连接错误');
+            };
+
+            state.ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    handleBinary(new Uint8Array(event.data));
+                } else {
+                    handleJson(JSON.parse(event.data));
+                }
+            };
+        }
+
+        function handleBinary(data) {
+            if (data.length < 13) return;
+
+            const view = new DataView(data.buffer);
+            const frameType = data[0]; // 0x01=关键帧, 0x02=差异帧
+            const dataLength = view.getUint32(1, false);
+            const timestamp = view.getBigInt64(5, false);
+            const videoData = data.slice(13, 13 + dataLength);
+
+            const isKeyframe = frameType === 0x01;
+
+            if (state.decoder) {
+                state.decoder.decode(videoData, isKeyframe, Number(timestamp));
+            }
+        }
+
+        function handleJson(msg) {
+            switch(msg.type) {
+                case 'server_info':
+                    console.log('服务器信息:', msg);
+                    if (msg.codec && msg.codec !== state.selectedCodec) {
+                        console.log(`服务器使用编码器: ${msg.codec}`);
+                        // 服务器指定了编码器，尝试切换
+                        if (SUPPORTED_CODECS[msg.codec]?.canDecode) {
+                            selectCodec(msg.codec);
+                        }
+                    }
+                    break;
+
+                case 'screen_info':
+                    state.screenWidth = msg.width;
+                    state.screenHeight = msg.height;
+                    updateScale();
+                    console.log(`屏幕分辨率: ${msg.width}x${msg.height}`);
+                    break;
+
+                case 'codec_changed':
+                    console.log(`服务器切换编码器到: ${msg.codec}`);
+                    selectCodec(msg.codec);
+                    break;
+
+                case 'error':
+                    console.error('服务器错误:', msg.message);
+                    showCodecPanel();
+                    break;
+            }
+        }
+
+        function send(data) {
+            if (state.ws?.readyState === WebSocket.OPEN) {
+                state.ws.send(JSON.stringify(data));
+            }
+        }
+
+        // ==================== 编码器选择 ====================
+        function selectCodec(codecKey) {
+            // 更新 UI
+            document.querySelectorAll('.codec-option').forEach(el => {
+                el.classList.remove('selected');
+            });
+            document.querySelector(`.codec-option[data-codec="${codecKey}"]`).classList.add('selected');
+
+            // 更新状态
+            const codecInfo = SUPPORTED_CODECS[codecKey];
+            if (codecInfo) {
+                state.selectedCodec = codecKey;
+                updateCodecSelector(codecInfo.desc);
+
+                // 重新初始化解码器
+                if (state.decoder) {
+                    state.decoder.close();
+                }
+                state.decoder = new VideoDecoderWrapper();
+                state.decoder.init(codecKey).catch(err => {
+                    console.error(`编码器 ${codecKey} 初始化失败:`, err);
+                });
+            }
+        }
+
+        function applyCodecSelection() {
+            closeCodecPanel();
+
+            if (state.selectedCodec && state.ws?.readyState === WebSocket.OPEN) {
+                send({
+                    type: 'change_codec',
+                    codec: state.selectedCodec
+                });
+            }
+        }
+
+        function showCodecPanel() {
+            document.getElementById('codec-panel').classList.add('active');
+        }
+
+        function closeCodecPanel() {
+            document.getElementById('codec-panel').classList.remove('active');
+        }
+
+        function updateCodecSelector(name) {
+            document.getElementById('codec-selector').textContent = `编码器: ${name}`;
+        }
+
+        // ==================== 输入处理 ====================
+        function setupInputs() {
+            const canvas = state.canvas;
+
+            // 鼠标移动 (节流)
+            let lastMove = 0;
+            canvas.addEventListener('mousemove', (e) => {
+                const now = performance.now();
+                if (now - lastMove < 1000/60) return;
+                lastMove = now;
+
+                const rect = canvas.getBoundingClientRect();
+                const x = Math.round((e.clientX - rect.left) * state.scaleX);
+                const y = Math.round((e.clientY - rect.top) * state.scaleY);
+
+                send({
+                    type: 'mousemove',
+                    x: x,
+                    y: y
+                });
+            });
+
+            canvas.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                const rect = canvas.getBoundingClientRect();
+                const x = Math.round((e.clientX - rect.left) * state.scaleX);
+                const y = Math.round((e.clientY - rect.top) * state.scaleY);
+
+                send({
+                    type: 'mousedown',
+                    x: x,
+                    y: y,
+                    button: e.button
+                });
+            });
+
+            canvas.addEventListener('mouseup', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = Math.round((e.clientX - rect.left) * state.scaleX);
+                const y = Math.round((e.clientY - rect.top) * state.scaleY);
+
+                send({
+                    type: 'mouseup',
+                    x: x,
+                    y: y,
+                    button: e.button
+                });
+            });
+
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                send({
+                    type: 'wheel',
+                    delta: -Math.sign(e.deltaY)
+                });
+            }, { passive: false });
+
+            // 键盘
+            const keysPressed = new Set();
+            window.addEventListener('keydown', (e) => {
+                e.preventDefault();
+                if (keysPressed.has(e.code)) return;
+
+                keysPressed.add(e.code);
+                send({
+                    type: 'keydown',
+                    keycode: e.keyCode,
+                    code: e.code,
+                    ctrl: e.ctrlKey,
+                    alt: e.altKey,
+                    shift: e.ctrlKey,
+                    meta: e.metaKey
+                });
+            });
+
+            window.addEventListener('keyup', (e) => {
+                keysPressed.delete(e.code);
+                send({
+                    type: 'keyup',
+                    keycode: e.keyCode,
+                    code: e.code
+                });
+            });
+
+            canvas.addEventListener('contextmenu', e => e.preventDefault());
+        }
+
+        // ==================== UI 功能 ====================
+        function updateScale() {
+            const rect = state.canvas.getBoundingClientRect();
+            if (state.screenWidth > 0 && state.screenHeight > 0) {
+                state.scaleX = state.screenWidth / rect.width;
+                state.scaleY = state.screenHeight / rect.height;
+            }
+        }
+
+        function updateStatus(text) {
+            document.getElementById('status').textContent = text;
+        }
+
+        function updateFps() {
+            const now = performance.now();
+            state.fpsCount++;
+
+            if (!state.fpsTimer) {
+                state.fpsTimer = now;
+            } else if (now - state.fpsTimer >= 1000) {
+                const fps = Math.round((state.fpsCount * 1000) / (now - state.fpsTimer));
+                updateStatus(`🟢 已连接 | ${fps} FPS | ${state.selectedCodec.toUpperCase()}`);
+                state.fpsCount = 0;
+                state.fpsTimer = now;
+            }
+        }
+
+        function toggleQuality() {
+            state.highQuality = !state.highQuality;
+            document.getElementById('btn-quality').textContent =
+                '画质: ' + (state.highQuality ? '高' : '低');
+            send({
+                type: 'config',
+                quality: state.highQuality ? 'high' : 'low',
+                fps: state.highQuality ? 30 : 15
+            });
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        function sendCtrlAltDel() {
+            send({ type: 'hotkey', keys: ['ctrl', 'alt', 'delete'] });
+        }
+
+        // ==================== 启动 ====================
+        window.onload = async () => {
+            console.log('开始初始化远程桌面客户端...');
+
+            // 检查 WebCodecs 支持
+            if (!('VideoDecoder' in window)) {
+                alert('您的浏览器不支持 WebCodecs API，请使用最新版本的 Chrome、Edge 或 Firefox。');
+                updateStatus('❌ 浏览器不支持 WebCodecs API');
+                return;
+            }
+
+            // 检测支持的编码器
+            const supported = await detectSupportedCodecs();
+            if (supported.length === 0) {
+                alert('您的浏览器不支持任何视频编码器，请使用支持 WebCodecs 的现代浏览器。');
+                updateStatus('❌ 无支持的编码器');
+                return;
+            }
+
+            console.log(`发现 ${supported.length} 个支持的编码器`);
+
+            setupInputs();
+            connect();
+
+            // 窗口大小改变时更新缩放
+            window.addEventListener('resize', updateScale);
+
+            // 显示编码器选择按钮
+            document.getElementById('codec-selector').addEventListener('click', showCodecPanel);
+        };
+
+        window.addEventListener('beforeunload', () => {
+            if (state.decoder) {
+                state.decoder.close();
+            }
+        });
+    </script>
+</body>
+</html>

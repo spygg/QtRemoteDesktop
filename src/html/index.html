@@ -1,0 +1,483 @@
+<!-- 资源文件: :/html/index.html -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qt5 远程桌面</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #1a1a1a; 
+            overflow: hidden; 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #screen {
+            max-width: 100%;
+            max-height: 100%;
+            background: #000;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #status {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            color: #0f0;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: monospace;
+            z-index: 1000;
+        }
+        #toolbar {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            display: flex;
+            gap: 8px;
+            z-index: 1000;
+        }
+        .btn {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .btn:hover { background: rgba(255,255,255,0.2); }
+        .btn.active { background: #0066cc; }
+        
+        /* 远程光标 */
+        #remote-cursor {
+            position: fixed;
+            pointer-events: none;
+            z-index: 9999;
+            transition: transform 0.05s linear;
+            filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.5));
+        }
+        
+        /* 连接断开遮罩 */
+        #overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            z-index: 2000;
+        }
+        #overlay.active { display: flex; }
+        .spinner {
+            width: 40px; height: 40px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="status">🔴 未连接</div>
+    
+    <div id="toolbar">
+        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 高</button>
+        <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">全屏</button>
+        <button class="btn" onclick="sendCtrlAltDel()">Ctrl+Alt+Del</button>
+    </div>
+    
+    <div id="container">
+        <canvas id="screen"></canvas>
+    </div>
+    
+    <img id="remote-cursor" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' stroke='%23000' stroke-width='1' d='M0 0l6.5 19.5L10 12l7.5 2.5z'/%3E%3C/svg%3E" style="display:none;">
+    
+    <div id="overlay">
+        <div class="spinner"></div>
+        <p style="color:#fff;margin-top:16px;">连接中...</p>
+    </div>
+
+    <script>
+        // ==================== 配置 ====================
+        const CONFIG = {
+            wsUrl: `ws://${location.hostname}:websocketPort`,
+            targetFps: 30,
+            keyframeInterval: 1000, // 请求关键帧间隔
+        };
+
+        // ==================== 状态管理 ====================
+        const state = {
+            ws: null,
+            decoder: null,
+            canvas: document.getElementById('screen'),
+            ctx: document.getElementById('screen').getContext('2d', { alpha: false }),
+            connected: false,
+            screenWidth: 0,
+            screenHeight: 0,
+            scaleX: 1,
+            scaleY: 1,
+            highQuality: true,
+            mouseX: 0,
+            mouseY: 0,
+            keysPressed: new Set(),
+        };
+
+        // ==================== WebCodecs 解码器 ====================
+        class H264Decoder {
+            constructor() {
+                this.decoder = null;
+                this.init();
+            }
+
+            async init() {
+                if (!('VideoDecoder' in window)) {
+                    console.warn('WebCodecs not supported, requesting image mode');
+                    send({ type: 'set_mode', mode: 'image' });  // 发送切换请求
+                    return;
+                }
+
+                this.decoder = new VideoDecoder({
+                    output: this.handleFrame.bind(this),
+                    error: (e) => console.error('Decode error:', e)
+                });
+
+                // 等待首个关键帧获取 SPS/PPS 后配置
+                this.configured = false;
+            }
+
+            configure(extraData) {
+                // 从关键帧提取 codec string (如 avc1.42001f)
+                this.decoder.configure({
+                    codec: 'avc1.42001f', // H264 Baseline
+                    optimizeForLatency: true,
+                    hardwareAcceleration: 'prefer-hardware',
+                    description: extraData // SPS/PPS
+                });
+                this.configured = true;
+            }
+
+            decode(data, isKeyframe, timestamp) {
+                if (!this.configured && isKeyframe) {
+                    // 从关键帧提取 extradata (简化处理)
+                    this.configure(new Uint8Array(0));
+                }
+                
+                if (!this.configured) return;
+
+                const chunk = new EncodedVideoChunk({
+                    type: isKeyframe ? 'key' : 'delta',
+                    timestamp: timestamp,
+                    data: data
+                });
+
+                this.decoder.decode(chunk);
+            }
+
+            handleFrame(frame) {
+                // 自适应画布尺寸
+                if (state.canvas.width !== frame.displayWidth || 
+                    state.canvas.height !== frame.displayHeight) {
+                    state.canvas.width = frame.displayWidth;
+                    state.canvas.height = frame.displayHeight;
+                    updateScale();
+                }
+
+                // 高性能渲染
+                state.ctx.drawImage(frame, 0, 0);
+                frame.close();
+                
+                updateFps();
+            }
+        }
+
+        // ==================== WebSocket 连接 ====================
+        function connect() {
+            const overlay = document.getElementById('overlay');
+            overlay.classList.add('active');
+
+            state.ws = new WebSocket(CONFIG.wsUrl);
+            state.ws.binaryType = 'arraybuffer';
+
+            state.ws.onopen = () => {
+                state.connected = true;
+                updateStatus('🟢 已连接');
+                overlay.classList.remove('active');
+                
+                // 初始化解码器
+                state.decoder = new H264Decoder();
+                
+                // 发送认证 (可扩展)
+                send({ type: 'auth', version: '1.0' });
+            };
+
+            state.ws.onclose = () => {
+                state.connected = false;
+                updateStatus('🔴 连接断开，5秒后重连...');
+                setTimeout(connect, 5000);
+            };
+
+            state.ws.onerror = (e) => {
+                console.error('WebSocket error:', e);
+                updateStatus('❌ 连接错误');
+            };
+
+            state.ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    handleBinary(new Uint8Array(event.data));
+                } else {
+                    handleJson(JSON.parse(event.data));
+                }
+            };
+        }
+
+        function handleBinary(data) {
+            const view = new DataView(data.buffer);
+            const frameType = data[0]; // 第一个字节
+
+            if (frameType === 0x03) {
+                // 图片模式：JPEG 帧
+                const dataLength = view.getUint32(1, false);
+                const jpegData = data.slice(5, 5 + dataLength);
+                displayJpegFrame(jpegData);
+            } else if (frameType === 0x01 || frameType === 0x02) {
+                // 视频模式：H.264 帧（原有逻辑）
+                if (data.length < 13) return;
+                const dataLength = view.getUint32(1, false);
+                const timestamp = view.getBigInt64(5, false);
+                const h264Data = data.slice(13, 13 + dataLength);
+                const isKeyframe = frameType === 0x01;
+
+                if (state.decoder) {
+                    state.decoder.decode(h264Data, isKeyframe, Number(timestamp));
+                }
+            } else {
+                console.warn('Unknown frame type:', frameType);
+            }
+        }
+
+
+        function displayJpegFrame(jpegData) {
+            // 将 JPEG 数据转为 Blob URL
+            const blob = new Blob([jpegData], { type: 'image/jpeg' });
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = () => {
+                // 绘制到 canvas
+                if (state.canvas.width !== img.width || state.canvas.height !== img.height) {
+                    state.canvas.width = img.width;
+                    state.canvas.height = img.height;
+                    updateScale();
+                }
+                state.ctx.drawImage(img, 0, 0);
+                URL.revokeObjectURL(url);
+                updateFps();  // 同样可以统计 FPS
+            };
+            img.src = url;
+        }
+
+        function handleJson(msg) {
+            switch(msg.type) {
+                case 'screen_info':
+                    state.screenWidth = msg.width;
+                    state.screenHeight = msg.height;
+                    updateScale();
+                    console.log(`屏幕分辨率: ${msg.width}x${msg.height}`);
+                    break;
+                case 'cursor_pos':
+                    console.log('Cursor position:', msg.x, msg.y);
+                    updateRemoteCursor(msg.x, msg.y);
+                    break;
+                case 'codec_config':
+                        const extra = Uint8Array.from(atob(msg.extradata), c => c.charCodeAt(0));
+                        if (state.decoder) state.decoder.configure(extra);
+                        break;
+            }
+        }
+
+        function send(data) {
+            if (state.ws?.readyState === WebSocket.OPEN) {
+                state.ws.send(JSON.stringify(data));
+            }
+        }
+
+        // ==================== 输入处理 ====================
+        function setupInputs() {
+            const canvas = state.canvas;
+
+            // 鼠标移动 (节流)
+            let lastMove = 0;
+            canvas.addEventListener('mousemove', (e) => {
+                const now = performance.now();
+                if (now - lastMove < 1000/60) return; // 60Hz 节流
+                lastMove = now;
+
+                const pos = getCanvasPos(e);
+                state.mouseX = pos.x;
+                state.mouseY = pos.y;
+                
+                send({
+                    type: 'mousemove',
+                    x: Math.round(pos.x),
+                    y: Math.round(pos.y)
+                });
+            });
+
+            // 鼠标按钮
+            canvas.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                const pos = getCanvasPos(e);
+                send({
+                    type: 'mousedown',
+                    x: Math.round(pos.x),
+                    y: Math.round(pos.y),
+                    button: e.button // 0=left, 1=middle, 2=right
+                });
+            });
+
+            canvas.addEventListener('mouseup', (e) => {
+                const pos = getCanvasPos(e);
+                send({
+                    type: 'mouseup',
+                    x: Math.round(pos.x),
+                    y: Math.round(pos.y),
+                    button: e.button
+                });
+            });
+
+            // 滚轮
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                send({
+                    type: 'wheel',
+                    delta: -Math.sign(e.deltaY) // 1=up, -1=down
+                });
+            }, { passive: false });
+
+            // 键盘
+            window.addEventListener('keydown', (e) => {
+                e.preventDefault();
+                if (state.keysPressed.has(e.code)) return; // 防重复
+                
+                state.keysPressed.add(e.code);
+                send({
+                    type: 'keydown',
+                    keycode: e.keyCode,
+                    code: e.code,
+                    ctrl: e.ctrlKey,
+                    alt: e.altKey,
+                    shift: e.shiftKey,
+                    meta: e.metaKey
+                });
+            });
+
+            window.addEventListener('keyup', (e) => {
+                state.keysPressed.delete(e.code);
+                send({
+                    type: 'keyup',
+                    keycode: e.keyCode,
+                    code: e.code
+                });
+            });
+
+            // 防止右键菜单
+            canvas.addEventListener('contextmenu', e => e.preventDefault());
+            
+            // 剪贴板同步
+            window.addEventListener('paste', (e) => {
+                const text = e.clipboardData.getData('text');
+                send({ type: 'clipboard', data: text, action: 'paste' });
+            });
+        }
+
+        function getCanvasPos(e) {
+            const rect = state.canvas.getBoundingClientRect();
+            return {
+                x: (e.clientX - rect.left) * state.scaleX,
+                y: (e.clientY - rect.top) * state.scaleY
+            };
+        }
+
+        // ==================== UI 功能 ====================
+        function updateScale() {
+            const rect = state.canvas.getBoundingClientRect();
+            state.scaleX = state.screenWidth / rect.width;
+            state.scaleY = state.screenHeight / rect.height;
+        }
+
+        function updateStatus(text) {
+            document.getElementById('status').textContent = text;
+        }
+
+        function updateRemoteCursor(x, y) {
+            const cursor = document.getElementById('remote-cursor');
+            const rect = state.canvas.getBoundingClientRect();
+            cursor.style.display = 'block';
+            // 将服务器坐标映射到客户端坐标
+            const clientX = rect.left + (x * rect.width / state.screenWidth);
+            const clientY = rect.top + (y * rect.height / state.screenHeight);
+            console.log('Update cursor:', x, y, '->', clientX, clientY, 'screen:', state.screenWidth, state.screenHeight);
+            cursor.style.transform = `translate(${clientX}px, ${clientY}px)`;
+        }
+
+        let fpsCount = 0, lastFpsTime = performance.now();
+        function updateFps() {
+            fpsCount++;
+            const now = performance.now();
+            if (now - lastFpsTime >= 1000) {
+                updateStatus(`🟢 已连接 | ${fpsCount} FPS`);
+                fpsCount = 0;
+                lastFpsTime = now;
+            }
+        }
+
+        function toggleQuality() {
+            state.highQuality = !state.highQuality;
+            document.getElementById('btn-quality').textContent = 
+                '画质: ' + (state.highQuality ? '高' : '低');
+            send({ 
+                type: 'config', 
+                quality: state.highQuality ? 'high' : 'low',
+                fps: state.highQuality ? 30 : 15 
+            });
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        function sendCtrlAltDel() {
+            // 特殊组合键处理
+            send({ type: 'hotkey', keys: ['ctrl', 'alt', 'delete'] });
+        }
+
+        // ==================== 启动 ====================
+        window.onload = () => {
+            setupInputs();
+            connect();
+            
+            // 窗口大小改变时更新缩放
+            window.addEventListener('resize', updateScale);
+        };
+
+        // 防止意外关闭
+        window.onbeforeunload = () => '确定要断开远程桌面连接吗？';
+    </script>
+</body>
+</html>

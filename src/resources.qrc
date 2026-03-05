@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/">
+        <file>html/index.html</file>
+        <file>sslperm/cacert.crt</file>
+        <file>sslperm/privkey.pem</file>
+    </qresource>
+</RCC>
