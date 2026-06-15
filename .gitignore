@@ -48,6 +48,8 @@ src/thridparty/ffmpeg/linux/presets/
 
 # 文档文件
 *.txt
+!CMakeLists.txt
+!**/CMakeLists.txt
 *.md.bak
 
 # 压缩文件

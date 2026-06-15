@@ -199,7 +199,8 @@ bool RDPServer::initialize(quint16 port)
         this, [this](bool locked) {
             wsServer_->broadcastJson(QJsonObject{
                 {"type", "screen_locked"},
-                {"locked", locked}
+                {"locked", locked},
+                {"hint", QString::fromUtf8("黑屏为正常现象，Windows 锁屏后无法捕获画面")}
             });
             if (locked) {
                 qInfo() << "Screen locked, connecting keyboard service...";

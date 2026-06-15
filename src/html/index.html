@@ -664,6 +664,7 @@
                     break;
                 case 'screen_locked':
                     document.getElementById('lock-overlay').classList.toggle('active', msg.locked);
+                    if (msg.hint) document.querySelector('#lock-overlay .lock-hint').textContent = msg.locked ? msg.hint : '';
                     break;
                 case 'file_upload_done':
                     refreshFileList();
