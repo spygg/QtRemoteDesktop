@@ -171,14 +171,17 @@ void InputManager::sendXModifier(X11KeySym ks, bool isDown) {
 #endif
 
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift) {
+    // Only try ToUnicode for keys that actually produce characters
+    bool isCharKey = code.startsWith("Key") || code.startsWith("Digit")
+        || code == "Space" || code == "Enter" || code == "Tab"
+        || code == "Comma" || code == "Period" || code == "Semicolon" || code == "Quote"
+        || code == "BracketLeft" || code == "BracketRight" || code == "Backslash"
+        || code == "Minus" || code == "Equal" || code == "Backquote" || code == "Slash";
+
 #ifdef Q_OS_WIN
     // ===== Service path (SYSTEM-level keyboard injector) =====
     if (servicePipe_ != INVALID_HANDLE_VALUE) {
-        // Character-producing keys → send via Unicode (works on secure desktop)
-        int vkForUnicode = (keycode == VK_RETURN) ? VK_RETURN :
-                           (keycode == VK_BACK) ? VK_BACK :
-                           (keycode >= 0x20 && keycode <= 0xFE) ? keycode : 0;
-        if (isDown && vkForUnicode) {
+        if (isDown && isCharKey) {
             BYTE kbdState[256] = {0};
             if (shift) kbdState[VK_SHIFT] = 0x80;
             if (ctrl)  kbdState[VK_CONTROL] = 0x80;
@@ -200,11 +203,7 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
     }
 
     // ===== Normal path (SendInput directly) =====
-    // 安全桌面: SendInput 被 UIPI 阻止, 优先用 Unicode 尝试
-    int vkForUnicode = (keycode == VK_RETURN) ? VK_RETURN :
-                       (keycode == VK_BACK) ? VK_BACK :
-                       (keycode >= 0x20 && keycode <= 0xFE) ? keycode : 0;
-    if (isDown && vkForUnicode) {
+    if (isDown && isCharKey) {
         BYTE keyboardState[256] = {0};
         if (shift) keyboardState[VK_SHIFT] = 0x80;
         if (ctrl)  keyboardState[VK_CONTROL] = 0x80;

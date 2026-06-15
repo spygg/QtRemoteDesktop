@@ -28,6 +28,38 @@ static void InjectChar(wchar_t ch) {
     SendInput(2, inputs, sizeof(INPUT));
 }
 
+static void InjectMouseMove(int x, int y) {
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dx = x * 65535 / GetSystemMetrics(SM_CXSCREEN);
+    in.mi.dy = y * 65535 / GetSystemMetrics(SM_CYSCREEN);
+    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+static void InjectMouseButton(int x, int y, int button, BOOL isDown) {
+    InjectMouseMove(x, y);
+    DWORD flags = 0;
+    switch (button) {
+        case 0: flags = isDown ? MOUSEEVENTF_LEFTDOWN   : MOUSEEVENTF_LEFTUP;   break;
+        case 1: flags = isDown ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP; break;
+        case 2: flags = isDown ? MOUSEEVENTF_RIGHTDOWN  : MOUSEEVENTF_RIGHTUP;  break;
+        default: return;
+    }
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = flags;
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+static void InjectWheel(int delta) {
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.mouseData = delta * WHEEL_DELTA;
+    in.mi.dwFlags = MOUSEEVENTF_WHEEL;
+    SendInput(1, &in, sizeof(INPUT));
+}
+
 // ======================== Pipe Server (runs in helper) ========================
 
 static int RunPipeServer() {
