@@ -823,6 +823,9 @@ void RDPServer::sendJpegFrame(const QImage& frame)
         return;
     }
 
+    if (wsServer_->clients().isEmpty())
+        return;
+
     QByteArray jpegData;
     QBuffer buffer(&jpegData);
     buffer.open(QIODevice::WriteOnly);
