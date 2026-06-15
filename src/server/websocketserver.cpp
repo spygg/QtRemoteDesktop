@@ -16,8 +16,15 @@ WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent
 
 WebSocketServer::~WebSocketServer()
 {
+    // 先断开信号，防止删除时触发 onSocketDisconnected
+    for (QWebSocket* socket : clients_.values()) {
+        disconnect(socket, nullptr, this, nullptr);
+    }
+
     server_->close();
     qDeleteAll(clients_);
+    clients_.clear();
+    socketToId_.clear();
 }
 
 bool WebSocketServer::listen(const QHostAddress& address, quint16 port)
@@ -133,8 +140,27 @@ void WebSocketServer::onTextMessageReceived(const QString& message)
 
 void WebSocketServer::onBinaryMessageReceived(const QByteArray& message)
 {
-    // 客户端目前不会发送二进制，忽略
-    Q_UNUSED(message)
+    if (message.size() < 1) return;
+    quint8 frameType = static_cast<quint8>(message[0]);
+
+    if (frameType == 0x10) {
+        // 文件上传数据块: [0x10][4-byte path length][path UTF8][4-byte data length][data]
+        if (message.size() < 9) return;
+        QDataStream stream(message);
+        stream.setByteOrder(QDataStream::BigEndian);
+        stream.skipRawData(1); // skip frame type
+
+        quint32 pathLen, dataLen;
+        stream >> pathLen >> dataLen;
+
+        if (message.size() < (int)(9 + pathLen + dataLen)) return;
+
+        QString path = QString::fromUtf8(message.constData() + 9, pathLen);
+        QByteArray data(message.constData() + 9 + pathLen, dataLen);
+
+        emit fileChunkReceived(path, data);
+    }
+    // Other binary types ignored
 }
 
 void WebSocketServer::setSslConfiguration(const QSslConfiguration& config)
@@ -198,5 +224,13 @@ void WebSocketServer::broadcastBinary(const QByteArray& data)
         if (socket->state() == QAbstractSocket::ConnectedState) {
             socket->sendBinaryMessage(data);
         }
+    }
+}
+
+void WebSocketServer::sendBinaryToClient(const QString& clientId, const QByteArray& data)
+{
+    QWebSocket* socket = clients_.value(clientId);
+    if (socket && socket->state() == QAbstractSocket::ConnectedState) {
+        socket->sendBinaryMessage(data);
     }
 }

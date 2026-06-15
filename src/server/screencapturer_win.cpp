@@ -12,9 +12,9 @@
 #include <VersionHelpers.h>
 
 // 在 Windows 平台下添加 GDI 截屏类
-class GdiCapturer {
+class GdiCapturer : public PlatformCapturer {
 public:
-    bool initialize()
+    bool initialize() override
     {
         // 获取屏幕尺寸
         hdcScreen_ = GetDC(nullptr);
@@ -50,28 +50,29 @@ public:
         bitmapInfo_.bmiHeader.biBitCount = 32; // 32-bit BGRA
         bitmapInfo_.bmiHeader.biCompression = BI_RGB;
         bitmapInfo_.bmiHeader.biSizeImage = 0;
+        buffer_.resize(width_ * height_ * 4);
 
         return true;
     }
 
-    bool captureFrame(QImage& outImage)
+    bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
+        if (updated) *updated = true;
         // 复制屏幕到内存 DC
         if (!BitBlt(hdcMem_, 0, 0, width_, height_, hdcScreen_, 0, 0, SRCCOPY)) {
             return false;
         }
 
-        // 获取位图数据
-        // 方法1：使用 GetDIBits 直接获取像素数据
-        std::vector<uchar> buffer(width_ * height_ * 4);
-        bitmapInfo_.bmiHeader.biSizeImage = buffer.size();
-        if (!GetDIBits(hdcScreen_, hBitmap_, 0, height_, buffer.data(), &bitmapInfo_, DIB_RGB_COLORS)) {
+        // 获取位图数据（复用预分配缓冲区）
+        buffer_.resize(width_ * height_ * 4);
+        bitmapInfo_.bmiHeader.biSizeImage = static_cast<DWORD>(buffer_.size());
+        if (!GetDIBits(hdcScreen_, hBitmap_, 0, height_, buffer_.data(), &bitmapInfo_, DIB_RGB_COLORS)) {
             return false;
         }
 
         // 创建 QImage (BGRA -> RGB888)
         outImage = QImage(width_, height_, QImage::Format_RGB888);
-        const uchar* src = buffer.data();
+        const uchar* src = buffer_.data();
         uchar* dst = outImage.bits();
         int dstStep = outImage.bytesPerLine(); // 可能 = width_ * 3
         int srcStep = width_ * 4; // BGRA 每行字节数
@@ -105,11 +106,12 @@ private:
     HBITMAP hBitmap_ = nullptr;
     int width_ = 0, height_ = 0;
     BITMAPINFO bitmapInfo_;
+    std::vector<uchar> buffer_; // 复用像素缓冲区
 };
 
 #if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
 // 1. Windows 8+ 使用 DXGI 高性能捕获
-class DXGICapturer {
+class DXGICapturer : public PlatformCapturer {
     ID3D11Device* device_ = nullptr;
     ID3D11DeviceContext* context_ = nullptr;
 
@@ -120,9 +122,10 @@ class DXGICapturer {
 
     UINT64 lastFrameNumber_ = 0; // 添加帧序号追踪
     LARGE_INTEGER lastTimestamp_;
+    ID3D11Texture2D* stagingTexture_ = nullptr;
 
 public:
-    bool initialize()
+    bool initialize() override
     {
 
         // 创建设备和上下文（与之前相同）
@@ -137,11 +140,19 @@ public:
 
         // 获取 DXGI 设备、适配器、输出
         IDXGIDevice* dxgiDevice = nullptr;
-        device_->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice);
+        if (FAILED(device_->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice)) || !dxgiDevice)
+            return false;
         IDXGIAdapter* adapter = nullptr;
-        dxgiDevice->GetAdapter(&adapter);
+        if (FAILED(dxgiDevice->GetAdapter(&adapter)) || !adapter) {
+            dxgiDevice->Release();
+            return false;
+        }
         IDXGIOutput* output = nullptr;
-        adapter->EnumOutputs(0, &output);
+        if (FAILED(adapter->EnumOutputs(0, &output)) || !output) {
+            adapter->Release();
+            dxgiDevice->Release();
+            return false;
+        }
 
         // 获取输出描述（主显示器尺寸）
         DXGI_OUTPUT_DESC outputDesc;
@@ -174,10 +185,9 @@ public:
         return true;
     }
 
-    bool captureFrame(QImage& outImage, bool& frameUpdated)
+    bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
-
-        frameUpdated = false;
+        bool frameUpdated = false;
 
         IDXGIResource* desktopResource = nullptr;
         DXGI_OUTDUPL_FRAME_INFO frameInfo;
@@ -215,25 +225,35 @@ public:
             return false;
         }
 
-        // 创建 staging 纹理
+        // 创建或复用 staging 纹理
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
 
-        D3D11_TEXTURE2D_DESC stagingDesc = desc;
-        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        stagingDesc.Usage = D3D11_USAGE_STAGING;
-        stagingDesc.BindFlags = 0;
-        stagingDesc.MiscFlags = 0;
-
-        ID3D11Texture2D* stagingTexture = nullptr;
-        hr = device_->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
-        if (FAILED(hr)) {
-            texture->Release();
-            deskDupl_->ReleaseFrame();
-            return false;
+        if (stagingTexture_) {
+            D3D11_TEXTURE2D_DESC existingDesc;
+            stagingTexture_->GetDesc(&existingDesc);
+            if (existingDesc.Width != desc.Width || existingDesc.Height != desc.Height) {
+                stagingTexture_->Release();
+                stagingTexture_ = nullptr;
+            }
         }
 
-        context_->CopyResource(stagingTexture, texture);
+        if (!stagingTexture_) {
+            D3D11_TEXTURE2D_DESC stagingDesc = desc;
+            stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            stagingDesc.Usage = D3D11_USAGE_STAGING;
+            stagingDesc.BindFlags = 0;
+            stagingDesc.MiscFlags = 0;
+
+            hr = device_->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture_);
+            if (FAILED(hr)) {
+                texture->Release();
+                deskDupl_->ReleaseFrame();
+                return false;
+            }
+        }
+
+        context_->CopyResource(stagingTexture_, texture);
 
         // 现在可以安全释放原始纹理和帧
         texture->Release();
@@ -241,9 +261,8 @@ public:
 
         // 映射数据
         D3D11_MAPPED_SUBRESOURCE mapped;
-        hr = context_->Map(stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
+        hr = context_->Map(stagingTexture_, 0, D3D11_MAP_READ, 0, &mapped);
         if (FAILED(hr)) {
-            stagingTexture->Release();
             return false;
         }
 
@@ -265,16 +284,50 @@ public:
             }
         }
 
-        context_->Unmap(stagingTexture, 0);
-        stagingTexture->Release();
+        context_->Unmap(stagingTexture_, 0);
+        // stagingTexture_ 复用，不释放
 
-        frameUpdated = true;
+        if (updated) *updated = true;
 
         return true;
     }
 
+    void resetDuplication()
+    {
+        if (deskDupl_) {
+            deskDupl_->Release();
+            deskDupl_ = nullptr;
+        }
+        if (!device_) return;
+
+        IDXGIDevice* dxgiDevice = nullptr;
+        if (FAILED(device_->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice)) || !dxgiDevice)
+            return;
+        IDXGIAdapter* adapter = nullptr;
+        if (FAILED(dxgiDevice->GetAdapter(&adapter)) || !adapter) {
+            dxgiDevice->Release();
+            return;
+        }
+        IDXGIOutput* output = nullptr;
+        if (FAILED(adapter->EnumOutputs(0, &output)) || !output) {
+            adapter->Release();
+            dxgiDevice->Release();
+            return;
+        }
+        IDXGIOutput1* output1 = nullptr;
+        if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1)) && output1) {
+            output1->DuplicateOutput(device_, &deskDupl_);
+            output1->Release();
+        }
+        output->Release();
+        adapter->Release();
+        dxgiDevice->Release();
+    }
+
     ~DXGICapturer()
     {
+        if (stagingTexture_)
+            stagingTexture_->Release();
 
         if (deskDupl_)
             deskDupl_->Release();
@@ -294,7 +347,7 @@ void ScreenCapturer::captureFrame()
 #if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
     if (useDXGI_ && dxgiCapturer_) {
         bool updated = false;
-        if (dxgiCapturer_->captureFrame(frame, updated)) {
+        if (dxgiCapturer_->captureFrame(frame, &updated)) {
             if (updated) {
                 // 只有真正有新帧时才发送
                 emit frameCaptured(frame);
@@ -309,12 +362,12 @@ void ScreenCapturer::captureFrame()
 #endif
 
     if (useGDI_ && gdiCapturer_ && gdiCapturer_->captureFrame(frame)) {
-        if (!lastFrame_.isNull() && frame == lastFrame_) {
+        quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
+        if (checksum == lastFrameChecksum_) {
             // 画面无变化，跳过
             return;
         }
-
-        lastFrame_ = frame.copy();
+        lastFrameChecksum_ = checksum;
 
         emit frameCaptured(frame);
         return;
@@ -324,12 +377,12 @@ void ScreenCapturer::captureFrame()
     QPixmap pixmap = screen_->grabWindow(0);
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
-    if (!lastFrame_.isNull() && frame == lastFrame_) {
+    quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
+    if (checksum == lastFrameChecksum_) {
         // 画面无变化，跳过
         return;
     }
-
-    lastFrame_ = frame.copy();
+    lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);
 }
@@ -349,13 +402,15 @@ bool ScreenCapturer::start(int fps)
 #endif
 
     // 如果 DXGI 不可用，尝试 GDI
-    gdiCapturer_ = new GdiCapturer();
-    if (gdiCapturer_->initialize()) {
-        useGDI_ = true;
-        qInfo() << "Using GDI capture as backup";
-    } else {
-        delete gdiCapturer_;
-        gdiCapturer_ = nullptr;
+    if (!useDXGI_) {
+        gdiCapturer_ = new GdiCapturer();
+        if (gdiCapturer_->initialize()) {
+            useGDI_ = true;
+            qInfo() << "Using GDI capture as backup";
+        } else {
+            delete gdiCapturer_;
+            gdiCapturer_ = nullptr;
+        }
     }
 
     captureTimer_->start(1000 / fps);

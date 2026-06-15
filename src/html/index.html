@@ -28,7 +28,7 @@
         }
         #status {
             position: fixed;
-            top: 10px;
+            bottom: 10px;
             left: 10px;
             color: #0f0;
             background: rgba(0,0,0,0.7);
@@ -37,27 +37,60 @@
             font-size: 12px;
             font-family: monospace;
             z-index: 1000;
+            transition: opacity 0.3s;
         }
+        /* 工具栏：顶部居中，自动隐藏 */
         #toolbar {
             position: fixed;
-            top: 10px;
-            right: 10px;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%) translateY(-100%);
             display: flex;
-            gap: 8px;
+            gap: 2px;
             z-index: 1000;
+            background: rgba(30,30,30,0.92);
+            border-radius: 0 0 10px 10px;
+            padding: 6px 10px;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+            backdrop-filter: blur(8px);
+        }
+        #toolbar.visible {
+            transform: translateX(-50%) translateY(0);
+        }
+        /* 鼠标触发区域 */
+        #toolbar-trigger {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 6px;
+            z-index: 999;
         }
         .btn {
-            background: rgba(255,255,255,0.1);
-            border: 1px solid rgba(255,255,255,0.2);
-            color: #fff;
-            padding: 6px 12px;
-            border-radius: 4px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.15);
+            color: #eee;
+            padding: 6px 14px;
+            border-radius: 6px;
             cursor: pointer;
-            font-size: 12px;
-            transition: all 0.2s;
+            font-size: 13px;
+            transition: all 0.15s;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
-        .btn:hover { background: rgba(255,255,255,0.2); }
-        .btn.active { background: #0066cc; }
+        .btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
+        .btn.active { background: rgba(0,102,204,0.6); border-color: rgba(0,102,204,0.8); }
+        .btn .shortcut {
+            font-size: 10px;
+            color: rgba(255,255,255,0.4);
+            background: rgba(255,255,255,0.08);
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
         
         /* 远程光标 */
         #remote-cursor {
@@ -88,15 +121,184 @@
             animation: spin 1s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* 文件传输面板 */
+        #file-panel {
+            position: fixed;
+            right: -360px;
+            top: 0;
+            bottom: 0;
+            width: 350px;
+            background: rgba(24,24,28,0.97);
+            border-left: 1px solid rgba(255,255,255,0.1);
+            z-index: 1500;
+            display: flex;
+            flex-direction: column;
+            transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            backdrop-filter: blur(12px);
+        }
+        #file-panel.open { right: 0; }
+        #file-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            color: #eee;
+            font-size: 14px;
+        }
+        #file-panel-header .close-btn {
+            background: none;
+            border: none;
+            color: #aaa;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 4px 8px;
+        }
+        #file-panel-header .close-btn:hover { color: #fff; }
+        #file-path-bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        #file-path-input {
+            flex: 1;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.12);
+            color: #eee;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: monospace;
+        }
+        #file-path-input:focus { outline: none; border-color: rgba(0,102,204,0.6); }
+        .file-action-btn {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.12);
+            color: #ccc;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .file-action-btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
+        #file-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0;
+        }
+        #file-list::-webkit-scrollbar { width: 6px; }
+        #file-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+        .file-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 16px;
+            cursor: pointer;
+            color: #ddd;
+            font-size: 13px;
+            transition: background 0.1s;
+        }
+        .file-item:hover { background: rgba(255,255,255,0.08); }
+        .file-item .icon { font-size: 16px; width: 20px; text-align: center; }
+        .file-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .file-item .size { color: #888; font-size: 11px; }
+        #file-panel-footer {
+            padding: 10px 12px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            gap: 8px;
+        }
+        #file-upload-input, #folder-upload-input { display: none; }
+        #transfer-status {
+            position: fixed;
+            bottom: 40px;
+            left: 10px;
+            background: rgba(0,0,0,0.85);
+            color: #0f0;
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-family: monospace;
+            z-index: 2000;
+            display: none;
+        }
+
+        /* 传输监视器 */
+        #transfer-monitor {
+            position: fixed;
+            bottom: 80px;
+            left: 10px;
+            background: rgba(0,0,0,0.88);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: #eee;
+            font-size: 12px;
+            font-family: monospace;
+            z-index: 2001;
+            min-width: 300px;
+            display: none;
+            backdrop-filter: blur(8px);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+        #transfer-monitor.active { display: block; }
+        #transfer-monitor-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+        }
+        #transfer-monitor-icon { font-size: 16px; }
+        #transfer-monitor-name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #fff;
+        }
+        #transfer-monitor-bar {
+            height: 6px;
+            background: rgba(255,255,255,0.12);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 4px;
+        }
+        #transfer-monitor-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #0a0, #0f0);
+            border-radius: 3px;
+            transition: width 0.2s;
+        }
+        #transfer-monitor-stats {
+            display: flex;
+            justify-content: space-between;
+            color: #aaa;
+            font-size: 11px;
+        }
+        #transfer-monitor-cancel {
+            background: none;
+            border: none;
+            color: #f66;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 0 4px;
+        }
+        #transfer-monitor-cancel:hover { color: #f00; }
     </style>
 </head>
 <body>
     <div id="status">🔴 未连接</div>
     
+    <div id="toolbar-trigger"></div>
     <div id="toolbar">
-        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 高</button>
-        <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">全屏</button>
-        <button class="btn" onclick="sendCtrlAltDel()">Ctrl+Alt+Del</button>
+        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 高<span class="shortcut">⌃⇧Q</span></button>
+        <button class="btn" id="btn-fps" onclick="toggleFps()">FPS: 开</button>
+        <button class="btn" id="btn-files" onclick="toggleFilePanel()">📁 文件</button>
+        <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">全屏<span class="shortcut">F11</span></button>
     </div>
     
     <div id="container">
@@ -108,6 +310,41 @@
     <div id="overlay">
         <div class="spinner"></div>
         <p style="color:#fff;margin-top:16px;">连接中...</p>
+    </div>
+
+    <!-- 文件传输面板 -->
+    <div id="file-panel">
+        <div id="file-panel-header">
+            <span>📁 文件管理</span>
+            <button class="close-btn" onclick="toggleFilePanel()">✕</button>
+        </div>
+        <div id="file-path-bar">
+            <input type="text" id="file-path-input" value="/" onkeydown="if(event.key==='Enter')navigateTo(this.value)">
+            <button class="file-action-btn" onclick="navigateTo(document.getElementById('file-path-input').value)">跳转</button>
+            <button class="file-action-btn" onclick="refreshFileList()">刷新</button>
+        </div>
+        <div id="file-list"></div>
+        <div id="file-panel-footer" style="flex-direction:column;gap:4px">
+            <button class="file-action-btn" onclick="document.getElementById('file-upload-input').click()">⬆ 上传文件</button>
+            <button class="file-action-btn" onclick="document.getElementById('folder-upload-input').click()">⬆ 上传文件夹</button>
+            <input type="file" id="file-upload-input" multiple onchange="handleFileUpload(this.files)">
+            <input type="file" id="folder-upload-input" webkitdirectory onchange="handleFileUpload(this.files)">
+        </div>
+    </div>
+    <div id="transfer-status"></div>
+
+    <!-- 传输监视器 -->
+    <div id="transfer-monitor">
+        <div id="transfer-monitor-header">
+            <span id="transfer-monitor-icon">⬇</span>
+            <span id="transfer-monitor-name"></span>
+            <button id="transfer-monitor-cancel" onclick="cancelCurrentTransfer()" title="取消">✕</button>
+        </div>
+        <div id="transfer-monitor-bar"><div id="transfer-monitor-fill"></div></div>
+        <div id="transfer-monitor-stats">
+            <span id="transfer-monitor-progress">0%</span>
+            <span id="transfer-monitor-speed">0 KB/s</span>
+        </div>
     </div>
 
     <script>
@@ -130,6 +367,7 @@
             scaleX: 1,
             scaleY: 1,
             highQuality: true,
+            showFps: true,
             mouseX: 0,
             mouseY: 0,
             keysPressed: new Set(),
@@ -252,6 +490,21 @@
                 const dataLength = view.getUint32(1, false);
                 const jpegData = data.slice(5, 5 + dataLength);
                 displayJpegFrame(jpegData);
+            } else if (frameType === 0x12) {
+                // 分块下载数据: [0x12][4-path len][path UTF8][8-offset][4-chunk len][data]
+                if (data.length < 17) return;
+                let pos = 1;
+                const pathLen = view.getUint32(pos, false); pos += 4;
+                const pathStr = new TextDecoder().decode(data.slice(pos, pos + pathLen)); pos += pathLen;
+                const offset = Number(view.getBigUint64(pos, false)); pos += 8;
+                const chunkLen = view.getUint32(pos, false); pos += 4;
+                const chunkData = new Uint8Array(data.slice(pos, pos + chunkLen));
+
+                const entry = downloadBuffers[pathStr];
+                if (entry) {
+                    entry.data.set(chunkData, offset);
+                    entry.received += chunkLen;
+                }
             } else if (frameType === 0x01 || frameType === 0x02) {
                 // 视频模式：H.264 帧（原有逻辑）
                 if (data.length < 13) return;
@@ -263,6 +516,22 @@
                 if (state.decoder) {
                     state.decoder.decode(h264Data, isKeyframe, Number(timestamp));
                 }
+            } else if (frameType === 0x11) {
+                // 文件下载包: [0x11][4-byte path length][path UTF8][4-byte data length][data]
+                if (data.length < 9) return;
+                const pathLen = view.getUint32(1, false);
+                const dataLen = view.getUint32(5 + pathLen, false);
+                const pathStr = new TextDecoder().decode(data.slice(5, 5 + pathLen));
+                const fileData = data.slice(9 + pathLen, 9 + pathLen + dataLen);
+                // Trigger browser download
+                const blob = new Blob([fileData]);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = pathStr.split('/').pop();
+                a.click();
+                URL.revokeObjectURL(url);
+                showTransferStatus(`下载完成: ${a.download}`, 2000);
             } else {
                 console.warn('Unknown frame type:', frameType);
             }
@@ -297,13 +566,68 @@
                     console.log(`屏幕分辨率: ${msg.width}x${msg.height}`);
                     break;
                 case 'cursor_pos':
-                    console.log('Cursor position:', msg.x, msg.y);
                     updateRemoteCursor(msg.x, msg.y);
                     break;
                 case 'codec_config':
                         const extra = Uint8Array.from(atob(msg.extradata), c => c.charCodeAt(0));
                         if (state.decoder) state.decoder.configure(extra);
                         break;
+                case 'file_list':
+                    if (msg.items) renderFileList(msg.items);
+                    if (msg.path) {
+                        currentRemotePath = msg.path;
+                        document.getElementById('file-path-input').value = msg.path;
+                    }
+                    break;
+                case 'file_download_start':
+                    // 初始化分块下载缓冲区
+                    downloadBuffers[msg.path] = {
+                        data: new Uint8Array(msg.totalSize),
+                        received: 0,
+                        totalSize: msg.totalSize,
+                        name: msg.name
+                    };
+                    currentTransferPath = msg.path;
+                    currentTransferType = 'download';
+                    showTransferMonitor('⬇', msg.name, 0, msg.totalSize, 0);
+                    break;
+                case 'file_download_end':
+                    // 完成分块下载，触发浏览器下载
+                    const dlEntry = downloadBuffers[msg.path];
+                    if (dlEntry) {
+                        const blob = new Blob([dlEntry.data]);
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = dlEntry.name;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                        showTransferStatus(`下载完成: ${dlEntry.name}`, 2000);
+                        delete downloadBuffers[msg.path];
+                    }
+                    if (currentTransferPath === msg.path) {
+                        hideTransferMonitor();
+                    }
+                    break;
+                case 'transfer_progress':
+                    if (msg.path === currentTransferPath) {
+                        const pct = msg.total > 0 ? Math.round(msg.transferred / msg.total * 100) : 0;
+                        showTransferMonitor(currentTransferType === 'upload' ? '⬆' : '⬇',
+                            msg.path.split('/').pop(), msg.transferred, msg.total, msg.speedKBps);
+                        if (msg.transferred >= msg.total) {
+                            setTimeout(hideTransferMonitor, 1000);
+                        }
+                    }
+                    break;
+                case 'file_download':
+                    if (msg.error) alert('下载失败: ' + msg.error);
+                    break;
+                case 'file_upload_done':
+                    refreshFileList();
+                    if (currentTransferPath === msg.path) {
+                        setTimeout(hideTransferMonitor, 500);
+                    }
+                    break;
             }
         }
 
@@ -368,8 +692,23 @@
 
             // 键盘
             window.addEventListener('keydown', (e) => {
+                // ---- 工具栏快捷键（仅使用不冲突的键） ----
+                // F11: 全屏切换（浏览器标准快捷键）
+                // Ctrl+Shift+Q: 画质切换（罕见组合，不冲突）
+                if (e.code === 'F11') {
+                    toggleFullscreen();
+                    e.preventDefault();
+                    return;
+                }
+                if (e.ctrlKey && e.shiftKey && e.code === 'KeyQ') {
+                    toggleQuality();
+                    e.preventDefault();
+                    return;
+                }
+
+                // 防止远程输入重复
                 e.preventDefault();
-                if (state.keysPressed.has(e.code)) return; // 防重复
+                if (state.keysPressed.has(e.code)) return;
                 
                 state.keysPressed.add(e.code);
                 send({
@@ -390,6 +729,19 @@
                     keycode: e.keyCode,
                     code: e.code
                 });
+            });
+
+            // 窗口失焦时释放所有按下的键，避免按键卡死
+            window.addEventListener('blur', () => {
+                state.keysPressed.forEach(code => {
+                    // 发送 keyup 释放所有卡住的按键
+                    send({
+                        type: 'keyup',
+                        keycode: 0,
+                        code: code
+                    });
+                });
+                state.keysPressed.clear();
             });
 
             // 防止右键菜单
@@ -428,7 +780,6 @@
             // 将服务器坐标映射到客户端坐标
             const clientX = rect.left + (x * rect.width / state.screenWidth);
             const clientY = rect.top + (y * rect.height / state.screenHeight);
-            console.log('Update cursor:', x, y, '->', clientX, clientY, 'screen:', state.screenWidth, state.screenHeight);
             cursor.style.transform = `translate(${clientX}px, ${clientY}px)`;
         }
 
@@ -437,7 +788,9 @@
             fpsCount++;
             const now = performance.now();
             if (now - lastFpsTime >= 1000) {
-                updateStatus(`🟢 已连接 | ${fpsCount} FPS`);
+                if (state.showFps) {
+                    updateStatus(`🟢 已连接 | ${fpsCount} FPS`);
+                }
                 fpsCount = 0;
                 lastFpsTime = now;
             }
@@ -445,8 +798,8 @@
 
         function toggleQuality() {
             state.highQuality = !state.highQuality;
-            document.getElementById('btn-quality').textContent = 
-                '画质: ' + (state.highQuality ? '高' : '低');
+            const btn = document.getElementById('btn-quality');
+            btn.innerHTML = '画质: ' + (state.highQuality ? '高' : '低') + '<span class="shortcut">⌃⇧Q</span>';
             send({ 
                 type: 'config', 
                 quality: state.highQuality ? 'high' : 'low',
@@ -462,9 +815,186 @@
             }
         }
 
-        function sendCtrlAltDel() {
-            // 特殊组合键处理
-            send({ type: 'hotkey', keys: ['ctrl', 'alt', 'delete'] });
+        function toggleFps() {
+            state.showFps = !state.showFps;
+            const btn = document.getElementById('btn-fps');
+            btn.textContent = 'FPS: ' + (state.showFps ? '开' : '关');
+            if (!state.showFps) {
+                updateStatus('🟢 已连接');
+            }
+        }
+
+        // ==================== 文件传输 ====================
+        let currentRemotePath = '/';
+        const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+        let uploadQueue = [];
+        let isUploading = false;
+
+        // 下载缓冲区（分块下载）
+        let downloadBuffers = {};
+        // 传输监视器状态
+        let currentTransferPath = null;
+        let currentTransferType = ''; // 'upload' or 'download'
+
+        function toggleFilePanel() {
+            const panel = document.getElementById('file-panel');
+            const wasOpen = panel.classList.toggle('open');
+            if (wasOpen && document.getElementById('file-list').innerHTML === '') {
+                navigateTo(currentRemotePath);
+            }
+        }
+
+        function navigateTo(path) {
+            currentRemotePath = path;
+            document.getElementById('file-path-input').value = path;
+            send({ type: 'file_list', path: path });
+        }
+
+        function refreshFileList() {
+            send({ type: 'file_list', path: currentRemotePath });
+        }
+
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+            if (bytes < 1024*1024*1024) return (bytes/1024/1024).toFixed(1) + ' MB';
+            return (bytes/1024/1024/1024).toFixed(2) + ' GB';
+        }
+
+        function renderFileList(items) {
+            const container = document.getElementById('file-list');
+            container.innerHTML = '';
+            // Parent dir
+            if (currentRemotePath !== '/') {
+                const parentPath = currentRemotePath.replace(/\/$/, '').replace(/\/[^/]*$/, '') || '/';
+                container.innerHTML += `<div class="file-item" onclick="navigateTo('${parentPath}')">
+                    <span class="icon">📂</span><span class="name">..</span><span class="size"></span></div>`;
+            }
+            // Dirs first, then files
+            const dirs = items.filter(i => i.isDir).sort((a,b) => a.name.localeCompare(b.name));
+            const files = items.filter(i => !i.isDir).sort((a,b) => a.name.localeCompare(b.name));
+            for (const item of dirs) {
+                const fullPath = (currentRemotePath === '/' ? '' : currentRemotePath) + '/' + item.name;
+                container.innerHTML += `<div class="file-item">
+                    <span class="icon">📁</span>
+                    <span class="name" ondblclick="navigateTo('${fullPath}')">${item.name}</span>
+                    <span class="size"><button class="file-action-btn" onclick="event.stopPropagation();downloadFile('${item.name}')">⬇</button></span>
+                </div>`;
+            }
+            for (const item of files) {
+                container.innerHTML += `<div class="file-item" onclick="downloadFile('${item.name}')">
+                    <span class="icon">📄</span><span class="name">${item.name}</span><span class="size">${formatSize(item.size)}</span></div>`;
+            }
+        }
+
+        function downloadFile(fileName) {
+            const filePath = (currentRemotePath === '/' ? '' : currentRemotePath) + '/' + fileName;
+            send({ type: 'file_download', path: filePath, name: fileName });
+        }
+
+        function handleFileUpload(fileList) {
+            for (const file of fileList) {
+                uploadQueue.push(file);
+            }
+            document.getElementById('file-upload-input').value = '';
+            processUploadQueue();
+        }
+
+        function processUploadQueue() {
+            if (isUploading || uploadQueue.length === 0) return;
+            isUploading = true;
+            const file = uploadQueue.shift();
+            uploadFileChunked(file);
+        }
+
+        async function uploadFileChunked(file) {
+            const relativePath = file.webkitRelativePath || file.name;
+            const remotePath = (currentRemotePath === '/' ? '' : currentRemotePath) + '/' + relativePath;
+            currentTransferPath = remotePath;
+            currentTransferType = 'upload';
+            showTransferMonitor('⬆', file.name, 0, file.size, 0);
+            showTransferStatus(`上传: ${file.name} (0%)`);
+
+            try {
+                // Send start message
+                send({ type: 'file_upload_start', path: remotePath, name: file.name, size: file.size });
+
+                let offset = 0;
+                while (offset < file.size) {
+                    const end = Math.min(offset + CHUNK_SIZE, file.size);
+                    const blob = file.slice(offset, end);
+                    const buffer = await blob.arrayBuffer();
+
+                    // Build binary packet: [0x10][4-byte path length][path UTF8][4-byte data length][data]
+                    const pathBytes = new TextEncoder().encode(remotePath);
+                    const header = new ArrayBuffer(9);
+                    const view = new DataView(header);
+                    view.setUint8(0, 0x10); // file chunk type
+                    view.setUint32(1, pathBytes.length, false);
+                    view.setUint32(5, buffer.byteLength, false);
+
+                    const packet = new Uint8Array(9 + pathBytes.length + buffer.byteLength);
+                    packet.set(new Uint8Array(header), 0);
+                    packet.set(pathBytes, 9);
+                    packet.set(new Uint8Array(buffer), 9 + pathBytes.length);
+
+                    state.ws.send(packet);
+                    offset = end;
+
+                    const pct = Math.round(offset / file.size * 100);
+                    showTransferMonitor('⬆', file.name, offset, file.size, 0);
+                    showTransferStatus(`上传: ${file.name} (${pct}%)`);
+
+                    // Yield to let WebSocket drain
+                    await new Promise(r => setTimeout(r, 10));
+                }
+
+                send({ type: 'file_upload_done', path: remotePath, name: file.name });
+                showTransferStatus(`上传完成: ${file.name}`, 2000);
+                setTimeout(hideTransferMonitor, 500);
+            } catch (err) {
+                console.error('Upload failed:', err);
+                showTransferStatus(`上传失败: ${file.name}`, 3000);
+            } finally {
+                isUploading = false;
+                processUploadQueue();
+            }
+        }
+
+        function showTransferMonitor(icon, name, transferred, total, speedKBps) {
+            const mon = document.getElementById('transfer-monitor');
+            document.getElementById('transfer-monitor-icon').textContent = icon;
+            document.getElementById('transfer-monitor-name').textContent = name;
+            const pct = total > 0 ? Math.round(transferred / total * 100) : 0;
+            document.getElementById('transfer-monitor-fill').style.width = pct + '%';
+            document.getElementById('transfer-monitor-progress').textContent =
+                formatSize(transferred) + ' / ' + formatSize(total) + ' (' + pct + '%)';
+            document.getElementById('transfer-monitor-speed').textContent =
+                speedKBps > 0 ? speedKBps.toFixed(1) + ' KB/s' : '';
+            mon.classList.add('active');
+        }
+
+        function hideTransferMonitor() {
+            document.getElementById('transfer-monitor').classList.remove('active');
+            currentTransferPath = null;
+        }
+
+        function cancelCurrentTransfer() {
+            // Clear download buffer if exists
+            if (currentTransferPath && downloadBuffers[currentTransferPath]) {
+                delete downloadBuffers[currentTransferPath];
+            }
+            hideTransferMonitor();
+            showTransferStatus('传输已取消', 2000);
+        }
+
+        function showTransferStatus(text, autoHideMs = 0) {
+            const el = document.getElementById('transfer-status');
+            el.textContent = text;
+            el.style.display = 'block';
+            if (autoHideMs > 0) {
+                setTimeout(() => { el.style.display = 'none'; }, autoHideMs);
+            }
         }
 
         // ==================== 启动 ====================
@@ -474,6 +1004,26 @@
             
             // 窗口大小改变时更新缩放
             window.addEventListener('resize', updateScale);
+
+            // ---- 工具栏自动隐藏 ----
+            const toolbar = document.getElementById('toolbar');
+            const trigger = document.getElementById('toolbar-trigger');
+            let toolbarTimer = null;
+
+            function showToolbar() {
+                clearTimeout(toolbarTimer);
+                toolbar.classList.add('visible');
+            }
+            function hideToolbar() {
+                toolbarTimer = setTimeout(() => toolbar.classList.remove('visible'), 600);
+            }
+
+            // 鼠标移到顶部触发区 → 显示
+            trigger.addEventListener('mouseenter', showToolbar);
+            // 鼠标进入工具栏 → 保持显示
+            toolbar.addEventListener('mouseenter', () => clearTimeout(toolbarTimer));
+            // 鼠标离开工具栏 → 延迟隐藏
+            toolbar.addEventListener('mouseleave', hideToolbar);
         };
 
         // 防止意外关闭

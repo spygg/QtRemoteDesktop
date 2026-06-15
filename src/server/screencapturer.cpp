@@ -30,8 +30,19 @@ void ScreenCapturer::stop()
     captureTimer_->stop();
 
 #ifdef Q_OS_WIN
+    delete gdiCapturer_;
+    gdiCapturer_ = nullptr;
+    useGDI_ = false;
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
     delete dxgiCapturer_;
     dxgiCapturer_ = nullptr;
     useDXGI_ = false;
+#endif
+#endif
+
+#ifdef Q_OS_LINUX
+    delete x11Capturer_;
+    x11Capturer_ = nullptr;
+    useX11_ = false;
 #endif
 }

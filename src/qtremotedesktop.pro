@@ -6,12 +6,14 @@ QT += core widgets network websockets
 
 SOURCES +=\
     $$PWD/main.cpp \
+    $$PWD/server/filetransferservice.cpp \
     $$PWD/server/inputmanager.cpp \
     $$PWD/server/rdpserver.cpp \
     $$PWD/server/screencapturer.cpp \
     $$PWD/server/websocketserver.cpp
 
 HEADERS += \
+    server/filetransferservice.h \
     server/inputmanager.h \
     server/rdpserver.h \
     server/screencapturer.h \

@@ -1,5 +1,6 @@
 // server/rdp_server.cpp
 #include "rdpserver.h"
+#include "filetransferservice.h"
 #include "inputmanager.h"
 #include "screencapturer.h"
 #include "websocketserver.h"
@@ -11,9 +12,11 @@
 #include <QBuffer>
 #include <QCursor>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QScreen>
 #include <QSslCertificate>
+
 
 RDPServer::RDPServer(QObject* parent)
     : QObject(parent)
@@ -24,6 +27,10 @@ RDPServer::RDPServer(QObject* parent)
 
 RDPServer::~RDPServer()
 {
+    if (transferThread_ && transferThread_->isRunning()) {
+        transferThread_->quit();
+        transferThread_->wait(3000);
+    }
     if (sslConfiguration_) {
         delete sslConfiguration_;
         sslConfiguration_ = nullptr;
@@ -114,6 +121,65 @@ bool RDPServer::initialize(quint16 port)
 
     connect(wsServer_.get(), &WebSocketServer::modeChangeRequested,
         this, &RDPServer::onModeChangeRequested);
+
+    // Initialize file transfer service on dedicated thread
+    transferThread_ = new QThread(this);
+    fileTransferService_ = new FileTransferService();
+    fileTransferService_->moveToThread(transferThread_);
+
+    connect(transferThread_, &QThread::finished,
+        fileTransferService_, &QObject::deleteLater);
+
+    // Main thread requests -> worker thread processing
+    connect(this, &RDPServer::requestFileList,
+        fileTransferService_, &FileTransferService::processFileList);
+    connect(this, &RDPServer::requestDownload,
+        fileTransferService_, &FileTransferService::processDownload);
+    connect(this, &RDPServer::requestUploadStart,
+        fileTransferService_, &FileTransferService::processUploadStart);
+    connect(this, &RDPServer::requestUploadDone,
+        fileTransferService_, &FileTransferService::processUploadDone);
+
+    // Upload chunk signal directly from WebSocket to service
+    connect(wsServer_.get(), &WebSocketServer::fileChunkReceived,
+        fileTransferService_, &FileTransferService::processUploadChunk);
+
+    // Service responses -> WebSocket sends (main thread)
+    connect(fileTransferService_, &FileTransferService::jsonResponse,
+        this, [this](const QString& clientId, const QJsonObject& obj) {
+            wsServer_->sendJson(clientId, obj);
+        });
+
+    connect(fileTransferService_, &FileTransferService::downloadChunkReady,
+        this, [this](const QString& clientId, const QString& path,
+                     qint64 offset, const QByteArray& data, qint64 totalSize) {
+            Q_UNUSED(totalSize);
+            QByteArray pathUtf8 = path.toUtf8();
+            QByteArray packet;
+            QDataStream stream(&packet, QIODevice::WriteOnly);
+            stream.setByteOrder(QDataStream::BigEndian);
+            stream << quint8(0x12);
+            stream << quint32(pathUtf8.size());
+            stream << quint64(offset);
+            stream << quint32(data.size());
+            packet.append(pathUtf8);
+            packet.append(data);
+            wsServer_->sendBinaryToClient(clientId, packet);
+        });
+
+    connect(fileTransferService_, &FileTransferService::transferProgress,
+        this, [this](const QString& clientId, const QString& path,
+                     qint64 transferred, qint64 total, double speedKBps) {
+            wsServer_->sendJson(clientId, QJsonObject{
+                {"type", "transfer_progress"},
+                {"path", path},
+                {"transferred", transferred},
+                {"total", total},
+                {"speedKBps", speedKBps}
+            });
+        });
+
+    transferThread_->start();
 
     if (!wsServer_->listen(QHostAddress::Any, wsPort_)) {
         qCritical() << "Failed to start WebSocket server on port" << wsPort_;
@@ -224,6 +290,11 @@ void RDPServer::onHttpNewConnection()
 
 QByteArray RDPServer::loadHtmlResource()
 {
+    static QByteArray cachedHtml;
+    static bool initialized = false;
+    if (initialized)
+        return cachedHtml;
+
     // 从 Qt 资源系统加载 HTML
     QFile file(":/html/index.html");
     if (file.open(QIODevice::ReadOnly)) {
@@ -232,7 +303,10 @@ QByteArray RDPServer::loadHtmlResource()
 
         html = html.replace("ws://", QString("ws%1://").arg(sslConfiguration_ ? "s" : "").toUtf8());
         html = html.replace("websocketPort", QString("%1").arg(wsPort_).toUtf8());
-        return html;
+
+        cachedHtml = html;
+        initialized = true;
+        return cachedHtml;
     }
 
     qWarning() << "Failed to load HTML from Qt resources";
@@ -254,11 +328,15 @@ void RDPServer::onHttpRequest()
     if (!socket)
         return;
 
+    // 简单处理：至少要有完整的请求行
+    if (!socket->canReadLine())
+        return;
+
     QByteArray request = socket->readAll();
     QString requestStr = QString::fromUtf8(request);
 
-    // 解析 HTTP GET 请求
-    if (requestStr.startsWith("GET")) {
+    // 只处理 GET / 请求
+    if (requestStr.startsWith("GET /")) {
         QByteArray html = loadHtmlResource();
 
         // 构造 HTTP 响应
@@ -271,6 +349,15 @@ void RDPServer::onHttpRequest()
         response += "\r\n";
         response += html;
 
+        socket->write(response);
+        socket->flush();
+        socket->disconnectFromHost();
+    } else {
+        QByteArray response;
+        response += "HTTP/1.1 405 Method Not Allowed\r\n";
+        response += "Content-Length: 0\r\n";
+        response += "Connection: close\r\n";
+        response += "\r\n";
         socket->write(response);
         socket->flush();
         socket->disconnectFromHost();
@@ -337,8 +424,6 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 
 void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& input)
 {
-    Q_UNUSED(clientId);
-
     QString type = input["type"].toString();
 
     if (type == "mousemove") {
@@ -362,6 +447,15 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     } else if (type == "wheel") {
         int delta = input["delta"].toInt();
         inputManager_->injectWheel(delta);
+    } else if (type == "file_list") {
+        emit requestFileList(clientId, input["path"].toString());
+    } else if (type == "file_download") {
+        emit requestDownload(clientId, input["path"].toString());
+    } else if (type == "file_upload_start") {
+        emit requestUploadStart(clientId, input["path"].toString(),
+                                input["size"].toVariant().toLongLong());
+    } else if (type == "file_upload_done") {
+        emit requestUploadDone(clientId, input["path"].toString());
     }
 }
 
@@ -377,19 +471,23 @@ void RDPServer::onFrameCaptured(const QImage& frame)
         sendJpegFrame(frame); // 新建函数，用于 JPEG 压缩和发送
     }
 
-    // 鼠标光标位置广播（与模式无关）
+    // 鼠标光标位置广播（仅在位置变化时发送，避免每帧无意义传输）
     QPoint cursorPos = QCursor::pos();
     int relativeX = cursorPos.x() - screenGeometry_.x();
     int relativeY = cursorPos.y() - screenGeometry_.y();
 
-    QJsonObject cursorInfo;
-    cursorInfo["type"] = "cursor_pos";
-    cursorInfo["x"] = relativeX;
-    cursorInfo["y"] = relativeY;
+    if (lastCursorPos_.x() != relativeX || lastCursorPos_.y() != relativeY) {
+        lastCursorPos_ = QPoint(relativeX, relativeY);
 
-    QStringList clientList = wsServer_->clients();
-    if (!clientList.isEmpty()) {
-        wsServer_->sendJson(clientList.first(), cursorInfo);
+        QJsonObject cursorInfo;
+        cursorInfo["type"] = "cursor_pos";
+        cursorInfo["x"] = relativeX;
+        cursorInfo["y"] = relativeY;
+
+        QStringList clientList = wsServer_->clients();
+        if (!clientList.isEmpty()) {
+            wsServer_->sendJson(clientList.first(), cursorInfo);
+        }
     }
 }
 
@@ -406,6 +504,11 @@ void RDPServer::onFrameForImageMode(const QImage& frame)
 
 void RDPServer::sendJpegFrame(const QImage& frame)
 {
+    if (frame.isNull()) {
+        qWarning() << "sendJpegFrame: null frame";
+        return;
+    }
+
     QByteArray jpegData;
     QBuffer buffer(&jpegData);
     buffer.open(QIODevice::WriteOnly);
@@ -459,6 +562,15 @@ bool RDPServer::switchToVideoMode()
         return true;
 
 #ifdef USE_FFMPEG
+    // 如果编码器已被释放，重新创建
+    if (!videoEncoder_) {
+        videoEncoder_ = std::unique_ptr<VideoEncoder>(new VideoEncoder(this));
+        connect(videoEncoder_.get(), &VideoEncoder::encodedFrame,
+            this, &RDPServer::onEncodedFrame);
+        connect(videoEncoder_.get(), &VideoEncoder::codecConfigChanged,
+            this, &RDPServer::onCodecConfigChanged);
+    }
+
     // 尝试重新初始化视频编码器
     if (!videoEncoder_->initialize(CodecType::H264,
             screenCapturer_->width(),
@@ -482,3 +594,5 @@ bool RDPServer::switchToVideoMode()
     return false;
 #endif
 }
+
+

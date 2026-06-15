@@ -29,12 +29,16 @@ public:
 
     void broadcastBinary(const QByteArray& data);
 
+    // 发送二进制数据给指定客户端
+    void sendBinaryToClient(const QString& clientId, const QByteArray& data);
+
 signals:
     void clientConnected(const QString& clientId);
     void clientDisconnected(const QString& clientId);
     void inputReceived(const QString& clientId, const QJsonObject& data);
     void codecChangeRequested(const QString& codec); // 客户端请求切换编码器
     void modeChangeRequested(const QString& mode); // 新增
+    void fileChunkReceived(const QString& path, const QByteArray& data); // 文件上传数据块
 
 private slots:
     void onNewConnection();

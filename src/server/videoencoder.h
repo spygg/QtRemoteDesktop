@@ -47,6 +47,7 @@ private:
     QMutex mutex_;
     QWaitCondition condition_;
     QQueue<QImage> frameQueue_;
+    static constexpr int kMaxFrameQueueSize = 10; // 队列上限，防止 OOM
     bool abort_ = false;
 
     AVCodecContext* codecCtx_ = nullptr;

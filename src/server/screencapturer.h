@@ -18,6 +18,15 @@ class GdiCapturer;
 class DXGICapturer;
 #endif
 
+// 平台捕获器公共基类，确保跨文件 delete 安全
+class PlatformCapturer {
+public:
+    virtual ~PlatformCapturer() = default;
+    virtual bool initialize() = 0;
+    virtual bool captureFrame(QImage& outImage, bool* updated = nullptr) = 0;
+    virtual void resetDamage() {}
+};
+
 class ScreenCapturer : public QObject {
     Q_OBJECT
 
@@ -42,26 +51,22 @@ private:
     QScreen* screen_ = nullptr;
     int fps_ = 30;
 
-    QImage lastFrame_;
+    quint16 lastFrameChecksum_ = 0;
 
 #ifdef Q_OS_WIN
-    GdiCapturer* gdiCapturer_ = nullptr;
+    PlatformCapturer* gdiCapturer_ = nullptr;
     bool useGDI_ = false;
 #endif
 
 #if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
-    // DXGI 相关成员...
-    DXGICapturer* dxgiCapturer_ = nullptr; // 原始指针，配合 RAII
-
+    PlatformCapturer* dxgiCapturer_ = nullptr;
     bool useDXGI_ = false;
-    // Windows DXGI 优化捕获
     bool initDXGI();
     void captureDXGI();
 #endif
 
 #ifdef Q_OS_LINUX
-    // Linux X11 优化捕获
-    class X11Capturer* x11Capturer_ = nullptr;
+    PlatformCapturer* x11Capturer_ = nullptr;
     bool useX11_ = false;
 #endif
 };

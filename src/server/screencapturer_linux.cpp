@@ -12,7 +12,7 @@
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xrender.h>
 
-class X11Capturer {
+class X11Capturer : public PlatformCapturer {
     Display* display_ = nullptr;
     Window rootWindow_;
     int width_ = 0;
@@ -22,7 +22,7 @@ class X11Capturer {
     bool damageSupported_ = false;
 
 public:
-    bool initialize()
+    bool initialize() override
     {
         display_ = XOpenDisplay(nullptr);
         if (!display_) {
@@ -50,22 +50,24 @@ public:
         return true;
     }
 
-    QImage capture()
+    bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
+        if (updated) *updated = true;
+
         XImage* ximage = XGetImage(display_, rootWindow_, 0, 0, width_, height_, AllPlanes, ZPixmap);
         if (!ximage) {
-            return QImage();
+            return false;
         }
 
         // 创建 RGB888 格式的 QImage
-        QImage image(width_, height_, QImage::Format_RGB888);
+        outImage = QImage(width_, height_, QImage::Format_RGB888);
 
         // 假设 XImage 是 BGRA 格式（常见的 X11 格式）
         uchar* src = reinterpret_cast<uchar*>(ximage->data);
-        uchar* dst = image.bits();
+        uchar* dst = outImage.bits();
 
         int srcStep = ximage->bytes_per_line;
-        int dstStep = image.bytesPerLine();
+        int dstStep = outImage.bytesPerLine();
 
         for (int y = 0; y < height_; y++) {
             const uchar* srcLine = src + y * srcStep;
@@ -80,10 +82,10 @@ public:
         }
 
         XDestroyImage(ximage);
-        return image;
+        return true;
     }
 
-    void resetDamage()
+    void resetDamage() override
     {
         if (damageSupported_) {
             XDamageSubtract(display_, damage_, None, None);
@@ -124,13 +126,16 @@ void ScreenCapturer::captureFrame()
 {
     QImage frame;
     if (useX11_ && x11Capturer_) {
-        frame = x11Capturer_->capture();
+        if (!x11Capturer_->captureFrame(frame)) {
+            return;
+        }
 
-        if (!lastFrame_.isNull() && frame == lastFrame_) {
+        quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
+        if (checksum == lastFrameChecksum_) {
             // 画面无变化，跳过
             return;
         }
-        lastFrame_ = frame.copy();
+        lastFrameChecksum_ = checksum;
 
         emit frameCaptured(frame);
         x11Capturer_->resetDamage();
@@ -141,12 +146,12 @@ void ScreenCapturer::captureFrame()
     QPixmap pixmap = screen_->grabWindow(0);
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
-    if (!lastFrame_.isNull() && frame == lastFrame_) {
+    quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
+    if (checksum == lastFrameChecksum_) {
         // 画面无变化，跳过
         return;
     }
-
-    lastFrame_ = frame.copy();
+    lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);
 }

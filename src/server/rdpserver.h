@@ -10,10 +10,12 @@
 #include <QSslSocket>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QThread>
 #include <memory>
 
 class WebSocketServer;
 class ScreenCapturer;
+class FileTransferService;
 
 #ifdef USE_FFMPEG
 class VideoEncoder;
@@ -42,18 +44,22 @@ private slots:
     void onHttpRequest();
     void onCodecConfigChanged(const QByteArray& extradata);
 
-    void onFrameForImageMode(const QImage& frame); // 图片模式下的帧处理槽
+    void onFrameForImageMode(const QImage& frame);
 
     void onModeChangeRequested(const QString& mode);
+
+signals:
+    void requestFileList(const QString& clientId, const QString& path);
+    void requestDownload(const QString& clientId, const QString& path);
+    void requestUploadStart(const QString& clientId, const QString& path, qint64 size);
+    void requestUploadDone(const QString& clientId, const QString& path);
 
 private:
     void setupHttpServer();
     QByteArray loadHtmlResource();
 
-    void sendJpegFrame(const QImage& frame); // JPEG 压缩并发送
+    void sendJpegFrame(const QImage& frame);
 
-    // std::unique_ptr<QTcpServer> httpServer_;
-    // 自定义 SSL TCP 服务器
     class SslTcpServer : public QTcpServer {
     public:
         SslTcpServer(RDPServer* server)
@@ -73,7 +79,7 @@ private:
     friend class SslTcpServer;
     void handleIncomingSslConnection(qintptr socketDescriptor);
 
-    std::unique_ptr<SslTcpServer> httpServer_; // 改为自定义服务器
+    std::unique_ptr<SslTcpServer> httpServer_;
     std::unique_ptr<WebSocketServer> wsServer_;
     std::unique_ptr<ScreenCapturer> screenCapturer_;
 #ifdef USE_FFMPEG
@@ -82,22 +88,24 @@ private:
 
     std::unique_ptr<InputManager> inputManager_;
 
+    FileTransferService* fileTransferService_ = nullptr;
+    QThread* transferThread_ = nullptr;
+
     bool isRunning_ = false;
     quint16 httpPort_;
     quint16 wsPort_;
 
-    QRect screenGeometry_; // 存储屏幕几何信息
+    QRect screenGeometry_;
+    QPoint lastCursorPos_{-1, -1};
 
     QSslConfiguration* sslConfiguration_;
 
-    // bool useVideoMode_ = true; // 默认真实用视频编码模式
-
     enum class ServerMode { Video,
         Image };
-    ServerMode currentMode_ = ServerMode::Video; // 默认为视频模式
+    ServerMode currentMode_ = ServerMode::Video;
 
     void switchToImageMode();
-    bool switchToVideoMode(); // 返回是否切换成功
+    bool switchToVideoMode();
 };
 
 #endif

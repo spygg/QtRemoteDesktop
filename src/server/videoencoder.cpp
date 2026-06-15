@@ -137,6 +137,10 @@ bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, in
 void VideoEncoder::encode(const QImage& frame)
 {
     QMutexLocker locker(&mutex_);
+    // 队列满时丢弃最旧帧，防止内存无限增长
+    if (frameQueue_.size() >= kMaxFrameQueueSize) {
+        frameQueue_.dequeue();
+    }
     frameQueue_.enqueue(frame.copy()); // 深拷贝
     condition_.wakeOne();
 }
