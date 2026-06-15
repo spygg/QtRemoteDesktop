@@ -212,6 +212,24 @@
             gap: 8px;
         }
         #file-upload-input, #folder-upload-input { display: none; }
+        /* 锁屏遮罩 */
+        #lock-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.85);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            z-index: 3000;
+            backdrop-filter: blur(4px);
+        }
+        #lock-overlay.active { display: flex; }
+        #lock-overlay { pointer-events: none; }
+        #lock-overlay * { pointer-events: none; }
+        #lock-overlay .lock-icon { font-size: 64px; margin-bottom: 16px; }
+        #lock-overlay .lock-text { color: #fff; font-size: 24px; font-weight: 300; }
+        #lock-overlay .lock-hint { color: #aaa; font-size: 14px; margin-top: 8px; }
         #transfer-status {
             position: fixed;
             bottom: 40px;
@@ -332,6 +350,13 @@
         </div>
     </div>
     <div id="transfer-status"></div>
+
+    <!-- 锁屏遮罩 -->
+    <div id="lock-overlay">
+        <div class="lock-icon">🔒</div>
+        <div class="lock-text">屏幕已锁定</div>
+        <div class="lock-hint">键盘输入已传输，请输入密码后按 Enter 解锁</div>
+    </div>
 
     <!-- 传输监视器 -->
     <div id="transfer-monitor">
@@ -621,6 +646,9 @@
                     break;
                 case 'file_download':
                     if (msg.error) alert('下载失败: ' + msg.error);
+                    break;
+                case 'screen_locked':
+                    document.getElementById('lock-overlay').classList.toggle('active', msg.locked);
                     break;
                 case 'file_upload_done':
                     refreshFileList();

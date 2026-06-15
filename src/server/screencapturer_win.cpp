@@ -340,6 +340,24 @@ public:
 };
 #endif
 
+static bool isFrameBlack(const QImage& frame)
+{
+    if (frame.isNull() || frame.width() < 10 || frame.height() < 10)
+        return true;
+    int sampleCount = 0;
+    int darkCount = 0;
+    int step = qMax(1, qMin(frame.width(), frame.height()) / 20);
+    for (int y = 0; y < frame.height(); y += step) {
+        const uchar* line = frame.constScanLine(y);
+        for (int x = 0; x < frame.width(); x += step) {
+            sampleCount++;
+            if (line[x * 3] + line[x * 3 + 1] + line[x * 3 + 2] < 18)
+                darkCount++;
+        }
+    }
+    return sampleCount > 0 && (darkCount * 100 / sampleCount) > 90;
+}
+
 void ScreenCapturer::captureFrame()
 {
     QImage frame;
@@ -348,40 +366,70 @@ void ScreenCapturer::captureFrame()
     if (useDXGI_ && dxgiCapturer_) {
         bool updated = false;
         if (dxgiCapturer_->captureFrame(frame, &updated)) {
-            if (updated) {
-                // 只有真正有新帧时才发送
-                emit frameCaptured(frame);
+            dxgiRetryCount_ = 0;
+            if (screenLocked_) {
+                screenLocked_ = false;
+                emit screenLocked(false);
             }
+            if (updated)
+                emit frameCaptured(frame);
             return;
         }
 
-        // DXGI 失败，降级到 GDI
-        qWarning() << "DXGI failed, falling back to GDI";
-        useDXGI_ = false;
+        dxgiRetryCount_++;
+
+        if (dxgiRetryCount_ >= 60) {
+            qWarning() << "DXGI persistently failing, falling back to GDI";
+            useDXGI_ = false;
+        }
+
+        if (dxgiRetryCount_ >= 5 && !screenLocked_) {
+            screenLocked_ = true;
+            emit screenLocked(true);
+        }
+        return;
     }
 #endif
 
+    // GDI / 回退路径: 捕获安全桌面时可能返回黑帧, 抑制并保持 screenLocked
     if (useGDI_ && gdiCapturer_ && gdiCapturer_->captureFrame(frame)) {
-        quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
-        if (checksum == lastFrameChecksum_) {
-            // 画面无变化，跳过
+        if (isFrameBlack(frame)) {
+            if (!screenLocked_) {
+                screenLocked_ = true;
+                emit screenLocked(true);
+            }
             return;
         }
+        if (screenLocked_) {
+            screenLocked_ = false;
+            emit screenLocked(false);
+        }
+        quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
+        if (checksum == lastFrameChecksum_)
+            return;
         lastFrameChecksum_ = checksum;
-
         emit frameCaptured(frame);
         return;
     }
 
-    // 回退到Qt抓屏
     QPixmap pixmap = screen_->grabWindow(0);
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
-    quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
-    if (checksum == lastFrameChecksum_) {
-        // 画面无变化，跳过
+    if (isFrameBlack(frame)) {
+        if (!screenLocked_) {
+            screenLocked_ = true;
+            emit screenLocked(true);
+        }
         return;
     }
+    if (screenLocked_) {
+        screenLocked_ = false;
+        emit screenLocked(false);
+    }
+
+    quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
+    if (checksum == lastFrameChecksum_)
+        return;
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);

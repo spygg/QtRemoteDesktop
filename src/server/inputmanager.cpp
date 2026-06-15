@@ -121,10 +121,41 @@ void InputManager::sendXModifier(X11KeySym ks, bool isDown) {
 #endif
 
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift) {
-    // 先同步修饰键状态，再进行按键注入
+#ifdef Q_OS_WIN
+    // 安全桌面 (Winlogon): SendInput VK 模式被 UIPI 阻止
+    // KEYEVENTF_UNICODE 发送实际字符, 可绕过部分 UIPI 限制 (如 TabTip 机制)
+    // 此处不调用 updateModifiers, 因为 modifier VK 事件同样被阻止
+    // 字符正确性通过 ToUnicode + keyboardState 保证
+    int vkForUnicode = (keycode == VK_RETURN) ? VK_RETURN :
+                       (keycode == VK_BACK) ? VK_BACK :
+                       (keycode >= 0x20 && keycode <= 0xFE) ? keycode : 0;
+    if (isDown && vkForUnicode) {
+        BYTE keyboardState[256] = {0};
+        if (shift) keyboardState[VK_SHIFT] = 0x80;
+        if (ctrl)  keyboardState[VK_CONTROL] = 0x80;
+        if (alt)   keyboardState[VK_MENU] = 0x80;
+
+        wchar_t chars[4] = {0};
+        int ret = ToUnicode(static_cast<UINT>(keycode), 0, keyboardState, chars, 4, 1);
+        if (ret >= 1 && chars[0] > 0x07) {
+            INPUT inpDown = {};
+            inpDown.type = INPUT_KEYBOARD;
+            inpDown.ki.dwFlags = KEYEVENTF_UNICODE;
+            inpDown.ki.wScan = chars[0];
+            SendInput(1, &inpDown, sizeof(INPUT));
+
+            INPUT inpUp = {};
+            inpUp.type = INPUT_KEYBOARD;
+            inpUp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+            inpUp.ki.wScan = chars[0];
+            SendInput(1, &inpUp, sizeof(INPUT));
+            return;
+        }
+    }
+
+    // 普通桌面: 标准 VK 方式
     updateModifiers(ctrl, alt, shift);
 
-#ifdef Q_OS_WIN
     INPUT input = {};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = keycode;

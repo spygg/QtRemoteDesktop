@@ -42,6 +42,7 @@ public:
 
 signals:
     void frameCaptured(const QImage& frame);
+    void screenLocked(bool locked);
 
 private slots:
     void captureFrame();
@@ -52,6 +53,8 @@ private:
     int fps_ = 30;
 
     quint16 lastFrameChecksum_ = 0;
+    bool screenLocked_ = false;
+    int dxgiRetryCount_ = 0;
 
 #ifdef Q_OS_WIN
     PlatformCapturer* gdiCapturer_ = nullptr;

@@ -190,6 +190,17 @@ bool RDPServer::initialize(quint16 port)
     screenCapturer_ = std::unique_ptr<ScreenCapturer>(new ScreenCapturer(this));
     connect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
         this, &RDPServer::onFrameCaptured);
+    connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
+        this, [this](bool locked) {
+            wsServer_->broadcastJson(QJsonObject{
+                {"type", "screen_locked"},
+                {"locked", locked}
+            });
+            if (locked)
+                qInfo() << "Screen locked, capture paused";
+            else
+                qInfo() << "Screen unlocked, capture resumed";
+        });
 
     // 获取屏幕几何信息
     QScreen* screen = QGuiApplication::primaryScreen();
