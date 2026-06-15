@@ -83,12 +83,12 @@ clean: CMakeFiles/QtRemoteDesktop_autogen.dir/clean
 CMakeFiles/QtRemoteDesktop.dir/all: CMakeFiles/QtRemoteDesktop_autogen.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktop.dir\build.make CMakeFiles/QtRemoteDesktop.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktop.dir\build.make CMakeFiles/QtRemoteDesktop.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=1,2,3,4,5,6,7,8,9,10,11 "Built target QtRemoteDesktop"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=1,2,3,4,5,6,7,8,9,10,11,12 "Built target QtRemoteDesktop"
 .PHONY : CMakeFiles/QtRemoteDesktop.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/QtRemoteDesktop.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles 13
+	$(CMAKE_COMMAND) -E cmake_progress_start D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles 14
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 CMakeFiles/QtRemoteDesktop.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles 0
 .PHONY : CMakeFiles/QtRemoteDesktop.dir/rule
@@ -109,7 +109,7 @@ CMakeFiles/QtRemoteDesktop.dir/clean:
 CMakeFiles/QtRemoteDesktopKeyboardSvc.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktopKeyboardSvc.dir\build.make CMakeFiles/QtRemoteDesktopKeyboardSvc.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktopKeyboardSvc.dir\build.make CMakeFiles/QtRemoteDesktopKeyboardSvc.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=12,13,14 "Built target QtRemoteDesktopKeyboardSvc"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=13,14,15 "Built target QtRemoteDesktopKeyboardSvc"
 .PHONY : CMakeFiles/QtRemoteDesktopKeyboardSvc.dir/all
 
 # Build rule for subdir invocation for target.
@@ -135,7 +135,7 @@ CMakeFiles/QtRemoteDesktopKeyboardSvc.dir/clean:
 CMakeFiles/QtRemoteDesktop_autogen.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktop_autogen.dir\build.make CMakeFiles/QtRemoteDesktop_autogen.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktop_autogen.dir\build.make CMakeFiles/QtRemoteDesktop_autogen.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=15,16 "Built target QtRemoteDesktop_autogen"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=16,17 "Built target QtRemoteDesktop_autogen"
 .PHONY : CMakeFiles/QtRemoteDesktop_autogen.dir/all
 
 # Build rule for subdir invocation for target.

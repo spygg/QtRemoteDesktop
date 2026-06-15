@@ -70,6 +70,7 @@ include CMakeFiles/QtRemoteDesktop.dir/flags.make
 
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/resources.qrc
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/html/index.html
+qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/html/login.html
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/sslperm/cacert.crt
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/sslperm/privkey.pem
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Generating qrc_resources.cpp"
@@ -105,11 +106,26 @@ CMakeFiles/QtRemoteDesktop.dir/main.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/QtRemoteDesktop.dir/main.cpp.s"
 	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S D:\code\radiometer\help\qtremotedesktop\src\main.cpp -o CMakeFiles\QtRemoteDesktop.dir\main.cpp.s
 
+CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/flags.make
+CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/includes_CXX.rsp
+CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj: D:/code/radiometer/help/qtremotedesktop/src/server/authmanager.cpp
+CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj"
+	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj -MF CMakeFiles\QtRemoteDesktop.dir\server\authmanager.cpp.obj.d -o CMakeFiles\QtRemoteDesktop.dir\server\authmanager.cpp.obj -c D:\code\radiometer\help\qtremotedesktop\src\server\authmanager.cpp
+
+CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.i"
+	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E D:\code\radiometer\help\qtremotedesktop\src\server\authmanager.cpp > CMakeFiles\QtRemoteDesktop.dir\server\authmanager.cpp.i
+
+CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.s"
+	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S D:\code\radiometer\help\qtremotedesktop\src\server\authmanager.cpp -o CMakeFiles\QtRemoteDesktop.dir\server\authmanager.cpp.s
+
 CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/flags.make
 CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/includes_CXX.rsp
 CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj: D:/code/radiometer/help/qtremotedesktop/src/server/filetransferservice.cpp
 CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj"
 	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj -MF CMakeFiles\QtRemoteDesktop.dir\server\filetransferservice.cpp.obj.d -o CMakeFiles\QtRemoteDesktop.dir\server\filetransferservice.cpp.obj -c D:\code\radiometer\help\qtremotedesktop\src\server\filetransferservice.cpp
 
 CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.i: cmake_force
@@ -124,7 +140,7 @@ CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj: CMakeFiles/QtRemoteD
 CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/includes_CXX.rsp
 CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj: D:/code/radiometer/help/qtremotedesktop/src/server/inputmanager.cpp
 CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj"
 	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj -MF CMakeFiles\QtRemoteDesktop.dir\server\inputmanager.cpp.obj.d -o CMakeFiles\QtRemoteDesktop.dir\server\inputmanager.cpp.obj -c D:\code\radiometer\help\qtremotedesktop\src\server\inputmanager.cpp
 
 CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.i: cmake_force
@@ -139,7 +155,7 @@ CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj: CMakeFiles/QtRemoteDesk
 CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/includes_CXX.rsp
 CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj: D:/code/radiometer/help/qtremotedesktop/src/server/rdpserver.cpp
 CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj"
 	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj -MF CMakeFiles\QtRemoteDesktop.dir\server\rdpserver.cpp.obj.d -o CMakeFiles\QtRemoteDesktop.dir\server\rdpserver.cpp.obj -c D:\code\radiometer\help\qtremotedesktop\src\server\rdpserver.cpp
 
 CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.i: cmake_force
@@ -154,7 +170,7 @@ CMakeFiles/QtRemoteDesktop.dir/server/screencapturer.cpp.obj: CMakeFiles/QtRemot
 CMakeFiles/QtRemoteDesktop.dir/server/screencapturer.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/includes_CXX.rsp
 CMakeFiles/QtRemoteDesktop.dir/server/screencapturer.cpp.obj: D:/code/radiometer/help/qtremotedesktop/src/server/screencapturer.cpp
 CMakeFiles/QtRemoteDesktop.dir/server/screencapturer.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/screencapturer.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/screencapturer.cpp.obj"
 	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/QtRemoteDesktop.dir/server/screencapturer.cpp.obj -MF CMakeFiles\QtRemoteDesktop.dir\server\screencapturer.cpp.obj.d -o CMakeFiles\QtRemoteDesktop.dir\server\screencapturer.cpp.obj -c D:\code\radiometer\help\qtremotedesktop\src\server\screencapturer.cpp
 
 CMakeFiles/QtRemoteDesktop.dir/server/screencapturer.cpp.i: cmake_force
@@ -169,7 +185,7 @@ CMakeFiles/QtRemoteDesktop.dir/server/websocketserver.cpp.obj: CMakeFiles/QtRemo
 CMakeFiles/QtRemoteDesktop.dir/server/websocketserver.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/includes_CXX.rsp
 CMakeFiles/QtRemoteDesktop.dir/server/websocketserver.cpp.obj: D:/code/radiometer/help/qtremotedesktop/src/server/websocketserver.cpp
 CMakeFiles/QtRemoteDesktop.dir/server/websocketserver.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/websocketserver.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/websocketserver.cpp.obj"
 	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/QtRemoteDesktop.dir/server/websocketserver.cpp.obj -MF CMakeFiles\QtRemoteDesktop.dir\server\websocketserver.cpp.obj.d -o CMakeFiles\QtRemoteDesktop.dir\server\websocketserver.cpp.obj -c D:\code\radiometer\help\qtremotedesktop\src\server\websocketserver.cpp
 
 CMakeFiles/QtRemoteDesktop.dir/server/websocketserver.cpp.i: cmake_force
@@ -184,7 +200,7 @@ CMakeFiles/QtRemoteDesktop.dir/server/screencapturer_win.cpp.obj: CMakeFiles/QtR
 CMakeFiles/QtRemoteDesktop.dir/server/screencapturer_win.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/includes_CXX.rsp
 CMakeFiles/QtRemoteDesktop.dir/server/screencapturer_win.cpp.obj: D:/code/radiometer/help/qtremotedesktop/src/server/screencapturer_win.cpp
 CMakeFiles/QtRemoteDesktop.dir/server/screencapturer_win.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/screencapturer_win.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/server/screencapturer_win.cpp.obj"
 	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/QtRemoteDesktop.dir/server/screencapturer_win.cpp.obj -MF CMakeFiles\QtRemoteDesktop.dir\server\screencapturer_win.cpp.obj.d -o CMakeFiles\QtRemoteDesktop.dir\server\screencapturer_win.cpp.obj -c D:\code\radiometer\help\qtremotedesktop\src\server\screencapturer_win.cpp
 
 CMakeFiles/QtRemoteDesktop.dir/server/screencapturer_win.cpp.i: cmake_force
@@ -199,7 +215,7 @@ CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj: CMakeFiles/QtRemoteDesktop
 CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/includes_CXX.rsp
 CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj: qrc_resources.cpp
 CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj: CMakeFiles/QtRemoteDesktop.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj"
 	E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj -MF CMakeFiles\QtRemoteDesktop.dir\qrc_resources.cpp.obj.d -o CMakeFiles\QtRemoteDesktop.dir\qrc_resources.cpp.obj -c D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\qrc_resources.cpp
 
 CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.i: cmake_force
@@ -214,6 +230,7 @@ CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.s: cmake_force
 QtRemoteDesktop_OBJECTS = \
 "CMakeFiles/QtRemoteDesktop.dir/QtRemoteDesktop_autogen/mocs_compilation.cpp.obj" \
 "CMakeFiles/QtRemoteDesktop.dir/main.cpp.obj" \
+"CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj" \
 "CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj" \
 "CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj" \
 "CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj" \
@@ -227,6 +244,7 @@ QtRemoteDesktop_EXTERNAL_OBJECTS =
 
 D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/QtRemoteDesktop_autogen/mocs_compilation.cpp.obj
 D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/main.cpp.obj
+D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj
 D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj
 D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj
 D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/server/rdpserver.cpp.obj
@@ -243,7 +261,7 @@ D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: E:/programes/Qt
 D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/linkLibs.rsp
 D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/objects1.rsp
 D:/code/radiometer/help/qtremotedesktop/bin/QtRemoteDesktop.exe: CMakeFiles/QtRemoteDesktop.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Linking CXX executable D:\code\radiometer\help\qtremotedesktop\bin\QtRemoteDesktop.exe"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Linking CXX executable D:\code\radiometer\help\qtremotedesktop\bin\QtRemoteDesktop.exe"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles\QtRemoteDesktop.dir\link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

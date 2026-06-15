@@ -5,6 +5,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/QtRemoteDesktop.dir/main.cpp.obj.d"
   "CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj"
   "CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj.d"
+  "CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj"
+  "CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj.d"
   "CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj"
   "CMakeFiles/QtRemoteDesktop.dir/server/filetransferservice.cpp.obj.d"
   "CMakeFiles/QtRemoteDesktop.dir/server/inputmanager.cpp.obj"

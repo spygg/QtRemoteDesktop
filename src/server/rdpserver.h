@@ -15,6 +15,7 @@
 
 class WebSocketServer;
 class ScreenCapturer;
+class AuthManager;
 class FileTransferService;
 
 #ifdef USE_FFMPEG
@@ -57,6 +58,13 @@ signals:
 private:
     void setupHttpServer();
     QByteArray loadHtmlResource();
+    QByteArray loadLoginHtml();
+    void serveLoginPage(QTcpSocket* socket);
+    void handleLoginPost(QTcpSocket* socket, const QByteArray& body);
+    QString extractSessionToken(const QByteArray& request);
+    QByteArray buildHttpResponse(int statusCode, const QString& statusText,
+                                 const QString& contentType, const QByteArray& body,
+                                 const QString& extraHeaders = QString());
 
     void sendJpegFrame(const QImage& frame);
 
@@ -88,6 +96,7 @@ private:
 
     std::unique_ptr<InputManager> inputManager_;
 
+    AuthManager* authManager_ = nullptr;
     FileTransferService* fileTransferService_ = nullptr;
     QThread* transferThread_ = nullptr;
 

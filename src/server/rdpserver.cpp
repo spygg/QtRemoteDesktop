@@ -1,5 +1,6 @@
 // server/rdp_server.cpp
 #include "rdpserver.h"
+#include "authmanager.h"
 #include "filetransferservice.h"
 #include "inputmanager.h"
 #include "screencapturer.h"
@@ -13,6 +14,7 @@
 #include <QCursor>
 #include <QFile>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QScreen>
 #include <QSslCertificate>
@@ -100,6 +102,9 @@ bool RDPServer::initialize(quint16 port)
     httpPort_ = port;
     wsPort_ = port + 1;
 
+    // 初始化认证管理器
+    authManager_ = new AuthManager(this);
+
     // 设置 HTTP 服务器
     setupHttpServer();
 
@@ -160,10 +165,10 @@ bool RDPServer::initialize(quint16 port)
             stream.setByteOrder(QDataStream::BigEndian);
             stream << quint8(0x12);
             stream << quint32(pathUtf8.size());
+            stream.writeRawData(pathUtf8.constData(), pathUtf8.size());
             stream << quint64(offset);
             stream << quint32(data.size());
-            packet.append(pathUtf8);
-            packet.append(data);
+            stream.writeRawData(data.constData(), data.size());
             wsServer_->sendBinaryToClient(clientId, packet);
         });
 
@@ -337,46 +342,193 @@ QByteArray RDPServer::loadHtmlResource()
 </html>)";
 }
 
+QByteArray RDPServer::loadLoginHtml()
+{
+    QFile file(":/html/login.html");
+    if (file.open(QIODevice::ReadOnly)) {
+        return file.readAll();
+    }
+    return R"(<!DOCTYPE html>
+<html><head><title>Login</title></head>
+<body><h1>Login page not found</h1></body></html>)";
+}
+
+QByteArray RDPServer::buildHttpResponse(int statusCode, const QString& statusText,
+                                         const QString& contentType, const QByteArray& body,
+                                         const QString& extraHeaders)
+{
+    QByteArray resp;
+    resp += "HTTP/1.1 " + QByteArray::number(statusCode) + " " + statusText.toUtf8() + "\r\n";
+    resp += "Content-Type: " + contentType.toUtf8() + "\r\n";
+    resp += "Content-Length: " + QByteArray::number(body.size()) + "\r\n";
+    resp += "Access-Control-Allow-Origin: *\r\n";
+    if (!extraHeaders.isEmpty())
+        resp += extraHeaders.toUtf8() + "\r\n";
+    resp += "Connection: close\r\n";
+    resp += "\r\n";
+    resp += body;
+    return resp;
+}
+
+void RDPServer::serveLoginPage(QTcpSocket* socket)
+{
+    QByteArray html = loadLoginHtml();
+    QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html);
+    socket->write(resp);
+    socket->flush();
+    socket->disconnectFromHost();
+}
+
+void RDPServer::handleLoginPost(QTcpSocket* socket, const QByteArray& body)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(body);
+    QString error;
+    QString token;
+
+    if (doc.isObject()) {
+        QJsonObject obj = doc.object();
+        QString username = obj["username"].toString();
+        QString password = obj["password"].toString();
+
+        if (authManager_->validateUser(username, password)) {
+            token = authManager_->createSession(username);
+        } else {
+            error = "用户名或密码错误";
+        }
+    } else {
+        error = "无效的请求数据";
+    }
+
+    QJsonObject result;
+    result["success"] = token.isEmpty() ? false : true;
+    if (!token.isEmpty())
+        result["token"] = token;
+    if (!error.isEmpty())
+        result["error"] = error;
+
+    QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+    QString extraHeaders = "Set-Cookie: session=" + token + "; path=/; max-age=86400; SameSite=Lax";
+    QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp, extraHeaders);
+    socket->write(resp);
+    socket->flush();
+    socket->disconnectFromHost();
+}
+
+QString RDPServer::extractSessionToken(const QByteArray& request)
+{
+    QString req = QString::fromUtf8(request);
+    // Check Cookie header
+    int cookieIdx = req.indexOf("Cookie:", 0, Qt::CaseInsensitive);
+    if (cookieIdx >= 0) {
+        int lineEnd = req.indexOf('\n', cookieIdx);
+        QString cookieLine = req.mid(cookieIdx, lineEnd - cookieIdx);
+        // Extract session=...;
+        int sessIdx = cookieLine.indexOf("session=", 0, Qt::CaseInsensitive);
+        if (sessIdx >= 0) {
+            sessIdx += 8; // skip "session="
+            int endIdx = cookieLine.indexOf(';', sessIdx);
+            if (endIdx < 0) endIdx = cookieLine.indexOf('\r', sessIdx);
+            if (endIdx < 0) endIdx = cookieLine.indexOf('\n', sessIdx);
+            if (endIdx < 0) endIdx = cookieLine.length();
+            return cookieLine.mid(sessIdx, endIdx - sessIdx).trimmed();
+        }
+    }
+    // Also check query string
+    int qsIdx = req.indexOf("?token=");
+    if (qsIdx >= 0) {
+        int endIdx = req.indexOf(' ', qsIdx);
+        if (endIdx < 0) endIdx = req.indexOf('\r', qsIdx);
+        if (endIdx < 0) endIdx = req.indexOf('\n', qsIdx);
+        return req.mid(qsIdx + 7, endIdx - qsIdx - 7);
+    }
+    return QString();
+}
+
 void RDPServer::onHttpRequest()
 {
     QTcpSocket* socket = qobject_cast<QTcpSocket*>(sender());
-    if (!socket)
-        return;
+    if (!socket) return;
 
-    // 简单处理：至少要有完整的请求行
-    if (!socket->canReadLine())
-        return;
+    if (!socket->canReadLine()) return;
 
-    QByteArray request = socket->readAll();
+    // Read request line + headers
+    QByteArray request;
+    while (socket->canReadLine()) {
+        QByteArray line = socket->readLine();
+        request += line;
+        if (line == "\r\n" || line == "\n")
+            break;
+    }
+
     QString requestStr = QString::fromUtf8(request);
 
-    // 只处理 GET / 请求
-    if (requestStr.startsWith("GET /")) {
-        QByteArray html = loadHtmlResource();
+    // POST /login — handle login
+    if (requestStr.startsWith("POST /login ")) {
+        // Read Content-Length to get the body
+        int bodyLen = 0;
+        int clIdx = requestStr.indexOf("Content-Length:", 0, Qt::CaseInsensitive);
+        if (clIdx >= 0) {
+            int colonIdx = requestStr.indexOf(':', clIdx);
+            int lineEnd = requestStr.indexOf('\n', clIdx);
+            bodyLen = requestStr.mid(colonIdx + 1, lineEnd - colonIdx - 1).trimmed().toInt();
+        }
 
-        // 构造 HTTP 响应
-        QByteArray response;
-        response += "HTTP/1.1 200 OK\r\n";
-        response += "Content-Type: text/html; charset=utf-8\r\n";
-        response += "Access-Control-Allow-Origin: *\r\n";
-        response += "Content-Length: " + QByteArray::number(html.size()) + "\r\n";
-        response += "Connection: close\r\n";
-        response += "\r\n";
-        response += html;
+        if (bodyLen <= 0) {
+            // No body, reject
+            QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain", "Missing request body");
+            socket->write(resp);
+            socket->flush();
+            socket->disconnectFromHost();
+            return;
+        }
 
-        socket->write(response);
-        socket->flush();
-        socket->disconnectFromHost();
-    } else {
-        QByteArray response;
-        response += "HTTP/1.1 405 Method Not Allowed\r\n";
-        response += "Content-Length: 0\r\n";
-        response += "Connection: close\r\n";
-        response += "\r\n";
-        socket->write(response);
-        socket->flush();
-        socket->disconnectFromHost();
+        if (socket->bytesAvailable() < bodyLen) {
+            // Body not fully arrived yet, wait for next readyRead
+            // Store partial state somehow or just drop (rare for small POST)
+            QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain", "Incomplete request");
+            socket->write(resp);
+            socket->flush();
+            socket->disconnectFromHost();
+            return;
+        }
+
+        QByteArray body = socket->read(bodyLen);
+        handleLoginPost(socket, body);
+        return;
     }
+
+    if (!requestStr.startsWith("GET /")) {
+        socket->disconnectFromHost();
+        return;
+    }
+
+    // Read remaining data (mostly done, but drain any leftover)
+    request += socket->readAll();
+
+    // Extract path
+    int pathEnd = requestStr.indexOf(' ', 4);
+    QString path = (pathEnd > 4) ? requestStr.mid(4, pathEnd - 4) : "/";
+
+    // Protected routes
+    if (path == "/" || path.startsWith("/?")) {
+        QString token = extractSessionToken(request);
+        if (!authManager_->validateSession(token)) {
+            serveLoginPage(socket);
+            return;
+        }
+    }
+
+    // Serve page
+    QByteArray html;
+    if (path == "/login" || path.startsWith("/login?"))
+        html = loadLoginHtml();
+    else
+        html = loadHtmlResource();
+
+    QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html);
+    socket->write(resp);
+    socket->flush();
+    socket->disconnectFromHost();
 }
 
 void RDPServer::start()
@@ -417,6 +569,13 @@ void RDPServer::start()
 
 void RDPServer::onClientConnected(const QString& clientId)
 {
+    // Validate auth token
+    QString token = wsServer_->clientToken(clientId);
+    if (!authManager_->validateSession(token)) {
+        qWarning() << "Client rejected (invalid token):" << clientId;
+        wsServer_->dropClient(clientId);
+        return;
+    }
     qInfo() << "Client connected:" << clientId;
     // 发送屏幕分辨率
     QJsonObject info;

@@ -22,6 +22,8 @@ public:
     // 发送 JSON 给指定客户端
     void sendJson(const QString& clientId, const QJsonObject& data);
     QStringList clients() const { return clients_.keys(); }
+    QString clientToken(const QString& clientId) const;
+    void dropClient(const QString& clientId);
 
     void broadcastCodecConfig(const QByteArray& extra);
     void broadcastJson(const QJsonObject& data);
@@ -50,6 +52,7 @@ private:
     QWebSocketServer* server_;
     QMap<QString, QWebSocket*> clients_;
     QMap<QWebSocket*, QString> socketToId_;
+    QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;
 };
 

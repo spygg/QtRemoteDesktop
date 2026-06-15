@@ -374,8 +374,13 @@
 
     <script>
         // ==================== 配置 ====================
+        function getCookie(name) {
+            const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+            return match ? decodeURIComponent(match[2]) : '';
+        }
+        const sessionToken = getCookie('session') || location.search.match(/[?&]token=([^&]+)/)?.[1] || '';
         const CONFIG = {
-            wsUrl: `ws://${location.hostname}:websocketPort`,
+            wsUrl: `ws://${location.hostname}:websocketPort${sessionToken ? '?token=' + sessionToken : ''}`,
             targetFps: 30,
             keyframeInterval: 1000, // 请求关键帧间隔
         };

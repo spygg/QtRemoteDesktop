@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>远程桌面 - 登录</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a1a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            color: #eee;
+        }
+        .login-box {
+            background: rgba(30,30,35,0.95);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 40px;
+            width: 360px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+        .login-box h1 {
+            text-align: center;
+            font-size: 22px;
+            font-weight: 400;
+            margin-bottom: 8px;
+        }
+        .login-box .subtitle {
+            text-align: center;
+            color: #888;
+            font-size: 13px;
+            margin-bottom: 28px;
+        }
+        .field {
+            margin-bottom: 16px;
+        }
+        .field label {
+            display: block;
+            font-size: 13px;
+            color: #aaa;
+            margin-bottom: 6px;
+        }
+        .field input {
+            width: 100%;
+            padding: 10px 14px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 6px;
+            color: #eee;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .field input:focus {
+            border-color: #06a;
+        }
+        #login-btn {
+            width: 100%;
+            padding: 10px;
+            background: #06a;
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            font-size: 15px;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-top: 8px;
+        }
+        #login-btn:hover { background: #0870c0; }
+        #login-btn:disabled { background: #345; cursor: not-allowed; }
+        #error-msg {
+            color: #f55;
+            font-size: 13px;
+            text-align: center;
+            margin-top: 12px;
+            display: none;
+        }
+        #error-msg.visible { display: block; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>远程桌面</h1>
+        <div class="subtitle">请登录以访问远程桌面</div>
+        <div class="field">
+            <label for="username">用户名</label>
+            <input type="text" id="username" placeholder="请输入用户名" autocomplete="username">
+        </div>
+        <div class="field">
+            <label for="password">密码</label>
+            <input type="password" id="password" placeholder="密码" autocomplete="current-password">
+        </div>
+        <button id="login-btn" onclick="doLogin()">登 录</button>
+        <div id="error-msg"></div>
+    </div>
+
+    <script>
+        document.getElementById('password').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') doLogin();
+        });
+
+        async function doLogin() {
+            const btn = document.getElementById('login-btn');
+            const err = document.getElementById('error-msg');
+            err.classList.remove('visible');
+
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            if (!username || !password) {
+                err.textContent = '请输入用户名和密码';
+                err.classList.add('visible');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '登录中...';
+
+            try {
+                const resp = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const result = await resp.json();
+
+                if (result.success) {
+                    document.cookie = 'session=' + result.token + '; path=/; max-age=86400';
+                    window.location.href = '/';
+                } else {
+                    err.textContent = result.error || '登录失败';
+                    err.classList.add('visible');
+                }
+            } catch (e) {
+                err.textContent = '网络错误: ' + e.message;
+                err.classList.add('visible');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '登 录';
+            }
+        }
+    </script>
+</body>
+</html>

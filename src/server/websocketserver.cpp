@@ -3,6 +3,8 @@
 #include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QUrl>
+#include <QUrlQuery>
 
 WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent)
     : QObject(parent)
@@ -57,8 +59,20 @@ void WebSocketServer::onNewConnection()
     QWebSocket* socket = server_->nextPendingConnection();
     QString clientId = QUuid::createUuid().toString();
 
+    // Extract auth token from query string
+    QUrl url = socket->requestUrl();
+    QString token;
+    #if QT_VERSION >= QT_VERSION_CHECK(5, 12, 0)
+        token = QUrlQuery(url).queryItemValue("token");
+    #else
+        QUrlQuery query(url);
+        token = query.queryItemValue("token");
+    #endif
+
     clients_[clientId] = socket;
     socketToId_[socket] = clientId;
+    if (!token.isEmpty())
+        clientTokens_[clientId] = token;
 
     connect(socket, &QWebSocket::disconnected, this, &WebSocketServer::onSocketDisconnected);
     connect(socket, &QWebSocket::textMessageReceived, this, &WebSocketServer::onTextMessageReceived);
@@ -161,6 +175,23 @@ void WebSocketServer::onBinaryMessageReceived(const QByteArray& message)
         emit fileChunkReceived(path, data);
     }
     // Other binary types ignored
+}
+
+QString WebSocketServer::clientToken(const QString& clientId) const
+{
+    return clientTokens_.value(clientId);
+}
+
+void WebSocketServer::dropClient(const QString& clientId)
+{
+    QWebSocket* socket = clients_.value(clientId);
+    if (socket) {
+        socket->close(QWebSocketProtocol::CloseCodeNormal, "Authentication failed");
+        socket->deleteLater();
+        clients_.remove(clientId);
+        socketToId_.remove(socket);
+        clientTokens_.remove(clientId);
+    }
 }
 
 void WebSocketServer::setSslConfiguration(const QSslConfiguration& config)

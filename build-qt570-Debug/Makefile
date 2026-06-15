@@ -226,6 +226,30 @@ qrc_resources.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktop.dir\build.make CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.s
 .PHONY : qrc_resources.cpp.s
 
+server/authmanager.obj: server/authmanager.cpp.obj
+.PHONY : server/authmanager.obj
+
+# target to build an object file
+server/authmanager.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktop.dir\build.make CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.obj
+.PHONY : server/authmanager.cpp.obj
+
+server/authmanager.i: server/authmanager.cpp.i
+.PHONY : server/authmanager.i
+
+# target to preprocess a source file
+server/authmanager.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktop.dir\build.make CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.i
+.PHONY : server/authmanager.cpp.i
+
+server/authmanager.s: server/authmanager.cpp.s
+.PHONY : server/authmanager.s
+
+# target to generate assembly for a file
+server/authmanager.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\QtRemoteDesktop.dir\build.make CMakeFiles/QtRemoteDesktop.dir/server/authmanager.cpp.s
+.PHONY : server/authmanager.cpp.s
+
 server/filetransferservice.obj: server/filetransferservice.cpp.obj
 .PHONY : server/filetransferservice.obj
 
@@ -438,6 +462,9 @@ help:
 	@echo ... qrc_resources.obj
 	@echo ... qrc_resources.i
 	@echo ... qrc_resources.s
+	@echo ... server/authmanager.obj
+	@echo ... server/authmanager.i
+	@echo ... server/authmanager.s
 	@echo ... server/filetransferservice.obj
 	@echo ... server/filetransferservice.i
 	@echo ... server/filetransferservice.s
