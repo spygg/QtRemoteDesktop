@@ -18,6 +18,10 @@ public:
     void removeSession(const QString& token);
     void cleanExpiredSessions();
 
+    QStringList users() const;
+    bool addUser(const QString& username, const QString& password);
+    bool removeUser(const QString& username);
+
 private:
     struct UserEntry { QString passwordHash; };
     struct Session { QString username; qint64 expiry; };

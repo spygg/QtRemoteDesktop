@@ -72,6 +72,7 @@ CMakeFiles/QtRemoteDesktop_autogen: qrc_resources.cpp
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/resources.qrc
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/html/index.html
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/html/login.html
+qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/html/user-management.html
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/sslperm/cacert.crt
 qrc_resources.cpp: D:/code/radiometer/help/qtremotedesktop/src/sslperm/privkey.pem
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=D:\code\radiometer\help\qtremotedesktop\build-qt570-Debug\CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Generating qrc_resources.cpp"

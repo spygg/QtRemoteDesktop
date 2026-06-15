@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用户管理</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a1a;
+            color: #eee;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            padding: 40px;
+        }
+        h1 { font-size: 22px; font-weight: 400; margin-bottom: 24px; }
+        .card {
+            background: rgba(30,30,35,0.95);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 24px;
+            max-width: 500px;
+            margin-bottom: 20px;
+        }
+        .card h2 { font-size: 16px; font-weight: 400; margin-bottom: 16px; color: #ccc; }
+        .field { margin-bottom: 12px; }
+        .field label { display: block; font-size: 13px; color: #aaa; margin-bottom: 4px; }
+        .field input {
+            width: 100%; padding: 8px 12px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 6px; color: #eee; font-size: 14px; outline: none;
+        }
+        .field input:focus { border-color: #06a; }
+        .btn {
+            padding: 8px 20px; border: none; border-radius: 6px;
+            font-size: 14px; cursor: pointer; transition: background 0.2s;
+        }
+        .btn-primary { background: #06a; color: #fff; }
+        .btn-primary:hover { background: #0870c0; }
+        .btn-danger { background: #a33; color: #fff; }
+        .btn-danger:hover { background: #c44; }
+        .btn-secondary { background: rgba(255,255,255,0.1); color: #eee; }
+        .btn-secondary:hover { background: rgba(255,255,255,0.2); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        #error-msg, #success-msg {
+            font-size: 13px; margin-top: 8px; display: none;
+        }
+        #error-msg.visible { display: block; color: #f55; }
+        #success-msg.visible { display: block; color: #5f5; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+        th { font-size: 13px; color: #888; font-weight: 400; }
+        td { font-size: 14px; }
+        .user-actions { display: flex; gap: 6px; }
+        .empty { color: #666; text-align: center; padding: 20px; font-size: 14px; }
+        .back-link {
+            display: inline-block; margin-bottom: 16px; color: #888;
+            text-decoration: none; font-size: 13px;
+        }
+        .back-link:hover { color: #06a; }
+    </style>
+</head>
+<body>
+    <a class="back-link" href="/">&larr; 返回远程桌面</a>
+    <h1>用户管理</h1>
+
+    <div class="card" id="add-card">
+        <h2>新增用户</h2>
+        <div class="field">
+            <label for="new-username">用户名</label>
+            <input type="text" id="new-username" placeholder="请输入用户名">
+        </div>
+        <div class="field">
+            <label for="new-password">密码（可选，留空表示无密码登录）</label>
+            <input type="password" id="new-password" placeholder="留空则无需密码">
+        </div>
+        <button class="btn btn-primary" id="add-btn" onclick="addUser()">新增</button>
+        <div id="error-msg"></div>
+        <div id="success-msg"></div>
+    </div>
+
+    <div class="card">
+        <h2>用户列表</h2>
+        <table>
+            <thead><tr><th>用户名</th><th>密码</th><th>操作</th></tr></thead>
+            <tbody id="user-list">
+                <tr><td class="empty" colspan="3">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        async function api(method, url, body) {
+            const opts = { method, headers: {} };
+            if (body) {
+                opts.headers['Content-Type'] = 'application/json';
+                opts.body = JSON.stringify(body);
+            }
+            const resp = await fetch(url, opts);
+            return resp.json();
+        }
+
+        async function loadUsers() {
+            const data = await api('GET', '/api/users');
+            const tbody = document.getElementById('user-list');
+            if (data.users && data.users.length > 0) {
+                tbody.innerHTML = data.users.map(u => {
+                    const hasPwd = u.hasPassword ? '是' : '否';
+                    const canDelete = data.canDelete;
+                    return `<tr>
+                        <td>${u.username}</td>
+                        <td>${hasPwd}</td>
+                        <td class="user-actions">
+                            ${canDelete ? `<button class="btn btn-danger" onclick="deleteUser('${u.username}')">删除</button>` : ''}
+                        </td>
+                    </tr>`;
+                }).join('');
+            } else {
+                tbody.innerHTML = '<tr><td class="empty" colspan="3">暂无用户</td></tr>';
+            }
+        }
+
+        async function addUser() {
+            const btn = document.getElementById('add-btn');
+            const err = document.getElementById('error-msg');
+            const suc = document.getElementById('success-msg');
+            err.classList.remove('visible');
+            suc.classList.remove('visible');
+
+            const username = document.getElementById('new-username').value.trim();
+            const password = document.getElementById('new-password').value;
+            if (!username) {
+                err.textContent = '请输入用户名';
+                err.classList.add('visible');
+                return;
+            }
+
+            btn.disabled = true;
+            const result = await api('POST', '/api/users/add', { username, password });
+            btn.disabled = false;
+
+            if (result.success) {
+                suc.textContent = '用户 ' + username + ' 添加成功';
+                suc.classList.add('visible');
+                document.getElementById('new-username').value = '';
+                document.getElementById('new-password').value = '';
+                loadUsers();
+            } else {
+                err.textContent = result.error || '添加失败';
+                err.classList.add('visible');
+            }
+        }
+
+        async function deleteUser(username) {
+            if (!confirm('确定要删除用户 "' + username + '" 吗？')) return;
+            const result = await api('POST', '/api/users/delete', { username });
+            if (result.success) {
+                loadUsers();
+            } else {
+                alert(result.error || '删除失败');
+            }
+        }
+
+        loadUsers();
+    </script>
+</body>
+</html>

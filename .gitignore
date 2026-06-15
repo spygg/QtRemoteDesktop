@@ -2,7 +2,7 @@
 */*build*/*
 */bin/*
 */dist/*
-build/
+build*/
 bin/
 dist/
 

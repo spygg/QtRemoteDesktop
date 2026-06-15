@@ -126,6 +126,31 @@ void AuthManager::removeSession(const QString& token) {
     sessions_.remove(token);
 }
 
+QStringList AuthManager::users() const {
+    return users_.keys();
+}
+
+bool AuthManager::addUser(const QString& username, const QString& password) {
+    if (username.isEmpty() || users_.contains(username))
+        return false;
+    UserEntry entry;
+    entry.passwordHash = md5Hex(password);
+    users_[username] = entry;
+    saveConfig();
+    return true;
+}
+
+bool AuthManager::removeUser(const QString& username) {
+    // Prevent removing the last user
+    if (users_.size() <= 1)
+        return false;
+    if (!users_.contains(username))
+        return false;
+    users_.remove(username);
+    saveConfig();
+    return true;
+}
+
 void AuthManager::cleanExpiredSessions() {
     qint64 now = currentSecsSinceEpoch();
     for (auto it = sessions_.begin(); it != sessions_.end(); ) {

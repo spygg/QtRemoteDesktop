@@ -61,6 +61,9 @@ private:
     QByteArray loadLoginHtml();
     void serveLoginPage(QTcpSocket* socket);
     void handleLoginPost(QTcpSocket* socket, const QByteArray& body);
+    void handleApiUsers(QTcpSocket* socket);
+    void handleApiAddUser(QTcpSocket* socket, const QByteArray& body);
+    void handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body);
     QString extractSessionToken(const QByteArray& request);
     QByteArray buildHttpResponse(int statusCode, const QString& statusText,
                                  const QString& contentType, const QByteArray& body,

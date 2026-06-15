@@ -462,73 +462,213 @@ void RDPServer::onHttpRequest()
 
     QString requestStr = QString::fromUtf8(request);
 
-    // POST /login — handle login
-    if (requestStr.startsWith("POST /login ")) {
-        // Read Content-Length to get the body
-        int bodyLen = 0;
+    // Helper to read POST body from socket
+    auto readPostBody = [&](int& bodyLen) -> QByteArray {
         int clIdx = requestStr.indexOf("Content-Length:", 0, Qt::CaseInsensitive);
         if (clIdx >= 0) {
             int colonIdx = requestStr.indexOf(':', clIdx);
             int lineEnd = requestStr.indexOf('\n', clIdx);
             bodyLen = requestStr.mid(colonIdx + 1, lineEnd - colonIdx - 1).trimmed().toInt();
         }
+        if (bodyLen <= 0) return QByteArray();
+        if (socket->bytesAvailable() < bodyLen) return QByteArray();
+        return socket->read(bodyLen);
+    };
 
-        if (bodyLen <= 0) {
-            // No body, reject
-            QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain", "Missing request body");
-            socket->write(resp);
-            socket->flush();
-            socket->disconnectFromHost();
+    // Extract path for all requests
+    int firstSpace = requestStr.indexOf(' ');
+    int secondSpace = requestStr.indexOf(' ', firstSpace + 1);
+    QString path = (firstSpace >= 0 && secondSpace > firstSpace) ? requestStr.mid(firstSpace + 1, secondSpace - firstSpace - 1) : "/";
+    QString method = requestStr.startsWith("POST") ? "POST" : "GET";
+
+    // === POST handlers ===
+    if (method == "POST") {
+        if (path == "/login" || path.startsWith("/login?")) {
+            int bodyLen = 0;
+            QByteArray body = readPostBody(bodyLen);
+            if (body.isEmpty()) {
+                QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain; charset=utf-8", "Missing request body");
+                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                return;
+            }
+            handleLoginPost(socket, body);
             return;
         }
 
-        if (socket->bytesAvailable() < bodyLen) {
-            // Body not fully arrived yet, wait for next readyRead
-            // Store partial state somehow or just drop (rare for small POST)
-            QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain", "Incomplete request");
-            socket->write(resp);
-            socket->flush();
-            socket->disconnectFromHost();
+        if (path == "/api/users/add" || path.startsWith("/api/users/add?")) {
+            // Require auth
+            QString token = extractSessionToken(request);
+            if (!authManager_->validateSession(token)) {
+                QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject{{"success", false}, {"error", "未登录"}}).toJson(QJsonDocument::Compact));
+                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                return;
+            }
+            int bodyLen = 0;
+            QByteArray body = readPostBody(bodyLen);
+            if (body.isEmpty()) {
+                QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject{{"success", false}, {"error", "Missing request body"}}).toJson(QJsonDocument::Compact));
+                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                return;
+            }
+            handleApiAddUser(socket, body);
             return;
         }
 
-        QByteArray body = socket->read(bodyLen);
-        handleLoginPost(socket, body);
+        if (path == "/api/users/delete" || path.startsWith("/api/users/delete?")) {
+            QString token = extractSessionToken(request);
+            if (!authManager_->validateSession(token)) {
+                QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject{{"success", false}, {"error", "未登录"}}).toJson(QJsonDocument::Compact));
+                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                return;
+            }
+            int bodyLen = 0;
+            QByteArray body = readPostBody(bodyLen);
+            if (body.isEmpty()) {
+                QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject{{"success", false}, {"error", "Missing request body"}}).toJson(QJsonDocument::Compact));
+                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                return;
+            }
+            handleApiDeleteUser(socket, body);
+            return;
+        }
+
+        // Unknown POST
+        QByteArray resp = buildHttpResponse(404, "Not Found", "text/plain; charset=utf-8", "Not Found");
+        socket->write(resp); socket->flush(); socket->disconnectFromHost();
         return;
     }
 
+    // === GET handlers ===
     if (!requestStr.startsWith("GET /")) {
         socket->disconnectFromHost();
         return;
     }
 
-    // Read remaining data (mostly done, but drain any leftover)
+    // Read remaining data
     request += socket->readAll();
 
-    // Extract path
-    int pathEnd = requestStr.indexOf(' ', 4);
-    QString path = (pathEnd > 4) ? requestStr.mid(4, pathEnd - 4) : "/";
-
-    // Protected routes
-    if (path == "/" || path.startsWith("/?")) {
-        QString token = extractSessionToken(request);
-        if (!authManager_->validateSession(token)) {
-            serveLoginPage(socket);
-            return;
-        }
+    // Unprotected GET routes
+    if (path == "/login" || path.startsWith("/login?")) {
+        QByteArray html = loadLoginHtml();
+        QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html);
+        socket->write(resp); socket->flush(); socket->disconnectFromHost();
+        return;
     }
 
-    // Serve page
+    // Protected routes — require valid session
+    QString token = extractSessionToken(request);
+    if (!authManager_->validateSession(token)) {
+        if (path.startsWith("/api/")) {
+            QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
+                QJsonDocument(QJsonObject{{"success", false}, {"error", "未登录"}}).toJson(QJsonDocument::Compact));
+            socket->write(resp); socket->flush(); socket->disconnectFromHost();
+        } else {
+            serveLoginPage(socket);
+        }
+        return;
+    }
+
+    // Serve API or page
+    if (path == "/api/users" || path.startsWith("/api/users?")) {
+        handleApiUsers(socket);
+        return;
+    }
+
     QByteArray html;
-    if (path == "/login" || path.startsWith("/login?"))
-        html = loadLoginHtml();
-    else
+    if (path == "/admin/users" || path.startsWith("/admin/users?")) {
+        QFile file(":/html/user-management.html");
+        if (file.open(QIODevice::ReadOnly)) html = file.readAll();
+        else html = loadHtmlResource();
+    } else {
         html = loadHtmlResource();
+    }
 
     QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html);
     socket->write(resp);
     socket->flush();
     socket->disconnectFromHost();
+}
+
+void RDPServer::handleApiUsers(QTcpSocket* socket)
+{
+    QJsonArray usersArr;
+    QStringList usernames = authManager_->users();
+    foreach (const QString& u, usernames) {
+        QJsonObject uo;
+        uo["username"] = u;
+        uo["hasPassword"] = true; // we don't expose empty-password status via API for security
+        usersArr.append(uo);
+    }
+
+    QJsonObject result;
+    result["success"] = true;
+    result["users"] = usersArr;
+    result["canDelete"] = usernames.size() > 1;
+
+    QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+    QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+    socket->write(resp); socket->flush(); socket->disconnectFromHost();
+}
+
+void RDPServer::handleApiAddUser(QTcpSocket* socket, const QByteArray& body)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(body);
+    QJsonObject result;
+
+    if (doc.isObject()) {
+        QJsonObject obj = doc.object();
+        QString username = obj["username"].toString().trimmed();
+        QString password = obj["password"].toString();
+
+        if (username.isEmpty()) {
+            result["success"] = false;
+            result["error"] = "用户名不能为空";
+        } else if (authManager_->addUser(username, password)) {
+            result["success"] = true;
+        } else {
+            result["success"] = false;
+            result["error"] = "用户名已存在或添加失败";
+        }
+    } else {
+        result["success"] = false;
+        result["error"] = "无效的请求数据";
+    }
+
+    QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+    QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+    socket->write(resp); socket->flush(); socket->disconnectFromHost();
+}
+
+void RDPServer::handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(body);
+    QJsonObject result;
+
+    if (doc.isObject()) {
+        QJsonObject obj = doc.object();
+        QString username = obj["username"].toString();
+
+        if (username.isEmpty()) {
+            result["success"] = false;
+            result["error"] = "用户名不能为空";
+        } else if (authManager_->removeUser(username)) {
+            result["success"] = true;
+        } else {
+            result["success"] = false;
+            result["error"] = "删除失败：用户不存在或无法删除最后一个用户";
+        }
+    } else {
+        result["success"] = false;
+        result["error"] = "无效的请求数据";
+    }
+
+    QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+    QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+    socket->write(resp); socket->flush(); socket->disconnectFromHost();
 }
 
 void RDPServer::start()
