@@ -196,10 +196,14 @@ bool RDPServer::initialize(quint16 port)
                 {"type", "screen_locked"},
                 {"locked", locked}
             });
-            if (locked)
-                qInfo() << "Screen locked, capture paused";
-            else
-                qInfo() << "Screen unlocked, capture resumed";
+            if (locked) {
+                qInfo() << "Screen locked, connecting keyboard service...";
+                if (!inputManager_->connectKeyboardService())
+                    qWarning() << "Keyboard service unavailable, input limited";
+            } else {
+                qInfo() << "Screen unlocked, disconnecting keyboard service";
+                inputManager_->disconnectKeyboardService();
+            }
         });
 
     // 获取屏幕几何信息
