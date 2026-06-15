@@ -171,7 +171,7 @@ void InputManager::sendXModifier(X11KeySym ks, bool isDown) {
 #endif
 
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift) {
-    // Only try ToUnicode for keys that actually produce characters
+    // Keys that actually produce characters (for ToUnicode path)
     bool isCharKey = code.startsWith("Key") || code.startsWith("Digit")
         || code == "Space" || code == "Enter" || code == "Tab"
         || code == "Comma" || code == "Period" || code == "Semicolon" || code == "Quote"
@@ -179,9 +179,10 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         || code == "Minus" || code == "Equal" || code == "Backquote" || code == "Slash";
 
 #ifdef Q_OS_WIN
-    // ===== Service path (SYSTEM-level keyboard injector) =====
+    // ===== Service connected → forward ALL keys to secure desktop helper =====
     if (servicePipe_ != INVALID_HANDLE_VALUE) {
         if (isDown && isCharKey) {
+            // Character key: try Unicode via ToUnicode
             BYTE kbdState[256] = {0};
             if (shift) kbdState[VK_SHIFT] = 0x80;
             if (ctrl)  kbdState[VK_CONTROL] = 0x80;
@@ -194,7 +195,7 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
                 return;
             }
         }
-        // Non-char or keyup → VK event
+        // Non-char key, char key with failed ToUnicode, or keyup → VK event
         BYTE vkBuf[5] = {0};
         *reinterpret_cast<UINT*>(vkBuf) = static_cast<UINT>(keycode);
         vkBuf[4] = isDown ? 1 : 0;
@@ -202,7 +203,7 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         return;
     }
 
-    // ===== Normal path (SendInput directly) =====
+    // ===== Service NOT connected → SendInput directly =====
     if (isDown && isCharKey) {
         BYTE keyboardState[256] = {0};
         if (shift) keyboardState[VK_SHIFT] = 0x80;

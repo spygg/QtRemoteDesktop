@@ -202,7 +202,12 @@ bool RDPServer::initialize(quint16 port)
                 {"locked", locked}
             });
             if (locked) {
-                qInfo() << "Screen locked, input limited (keyboard service not required)";
+                qInfo() << "Screen locked, connecting keyboard service...";
+                if (!inputManager_->connectKeyboardService())
+                    qWarning() << "Keyboard service unavailable, input limited";
+            } else {
+                qInfo() << "Screen unlocked, disconnecting keyboard service";
+                inputManager_->disconnectKeyboardService();
             }
         });
 

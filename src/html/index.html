@@ -473,6 +473,8 @@
         }
 
         // ==================== WebSocket 连接 ====================
+        let wsReconnectCount = 0;
+
         function connect() {
             const overlay = document.getElementById('overlay');
             overlay.classList.add('active');
@@ -481,6 +483,7 @@
             state.ws.binaryType = 'arraybuffer';
 
             state.ws.onopen = () => {
+                wsReconnectCount = 0;
                 state.connected = true;
                 updateStatus('🟢 已连接');
                 overlay.classList.remove('active');
@@ -494,6 +497,12 @@
 
             state.ws.onclose = () => {
                 state.connected = false;
+                wsReconnectCount++;
+                if (wsReconnectCount > 3) {
+                    // Server likely restarted and session is gone, redirect to login
+                    window.location.href = '/login';
+                    return;
+                }
                 updateStatus('🔴 连接断开，5秒后重连...');
                 setTimeout(connect, 5000);
             };
