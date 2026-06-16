@@ -289,6 +289,12 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
     else if (code == "F10") keySym = XK_F10;
     else if (code == "F11") keySym = XK_F11;
     else if (code == "F12") keySym = XK_F12;
+    else if (code == "ControlLeft")  keySym = XK_Control_L;
+    else if (code == "ControlRight") keySym = XK_Control_R;
+    else if (code == "ShiftLeft")    keySym = XK_Shift_L;
+    else if (code == "ShiftRight")   keySym = XK_Shift_R;
+    else if (code == "AltLeft")      keySym = XK_Alt_L;
+    else if (code == "AltRight")     keySym = XK_Alt_R;
     else if (code.startsWith("Numpad")) {
         if (code == "NumpadEnter")     keySym = XK_Return;
         else if (code == "NumpadAdd")       keySym = XK_KP_Add;
@@ -312,6 +318,17 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         if (keySym == NoSymbol) {
             qWarning() << "InputManager: unmapped key code:" << code << "keycode:" << keycode;
         }
+    }
+
+    // Sync modifier state before key injection
+    updateModifiers(ctrl, alt, shift);
+
+    // Modifier keys already handled by updateModifiers, skip duplicate injection
+    if (code == "ControlLeft" || code == "ControlRight" ||
+        code == "ShiftLeft" || code == "ShiftRight" ||
+        code == "AltLeft" || code == "AltRight" ||
+        code == "MetaLeft" || code == "MetaRight") {
+        return;
     }
 
     KeyCode xKeyCode = XKeysymToKeycode(xdisp(xDisplay_), keySym);
