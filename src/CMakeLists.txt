@@ -76,9 +76,9 @@ endif()
 
 # 平台特定源文件
 if(WIN32)
-    list(APPEND SOURCES server/screencapturer_win.cpp)
+    list(APPEND SOURCES server/screencapturer_win.cpp server/inputmanager_win.cpp)
 elseif(UNIX AND NOT APPLE)
-    list(APPEND SOURCES server/screencapturer_linux.cpp)
+    list(APPEND SOURCES server/screencapturer_linux.cpp server/inputmanager_linux.cpp)
 endif()
 
 add_executable(${PROJECT_NAME}

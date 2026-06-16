@@ -71,6 +71,7 @@ private:
 #ifdef Q_OS_LINUX
     PlatformCapturer* x11Capturer_ = nullptr;
     bool useX11_ = false;
+    int captureFailCount_ = 0;
 #endif
 };
 

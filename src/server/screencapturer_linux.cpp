@@ -4,6 +4,24 @@
 #include <QDebug>
 #include <QPixmap>
 
+static bool isFrameBlack(const QImage& frame)
+{
+    if (frame.isNull() || frame.width() < 10 || frame.height() < 10)
+        return true;
+    int sampleCount = 0;
+    int darkCount = 0;
+    int step = qMax(1, qMin(frame.width(), frame.height()) / 20);
+    for (int y = 0; y < frame.height(); y += step) {
+        const uchar* line = frame.constScanLine(y);
+        for (int x = 0; x < frame.width(); x += step) {
+            sampleCount++;
+            if (line[x * 3] + line[x * 3 + 1] + line[x * 3 + 2] < 18)
+                darkCount++;
+        }
+    }
+    return sampleCount > 0 && (darkCount * 100 / sampleCount) > 90;
+}
+
 // sudo apt install libx11-dev libxtst-dev libxdamage-dev libxcomposite-dev libxrender-dev
 
 // Linux 平台使用 X11 + Damage 扩展优化捕获
@@ -127,7 +145,25 @@ void ScreenCapturer::captureFrame()
     QImage frame;
     if (useX11_ && x11Capturer_) {
         if (!x11Capturer_->captureFrame(frame)) {
+            captureFailCount_++;
+            if (captureFailCount_ >= 5 && !screenLocked_) {
+                screenLocked_ = true;
+                emit screenLocked(true);
+            }
             return;
+        }
+        captureFailCount_ = 0;
+
+        if (isFrameBlack(frame)) {
+            if (!screenLocked_) {
+                screenLocked_ = true;
+                emit screenLocked(true);
+            }
+            return;
+        }
+        if (screenLocked_) {
+            screenLocked_ = false;
+            emit screenLocked(false);
         }
 
         quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
@@ -145,6 +181,18 @@ void ScreenCapturer::captureFrame()
     // 回退到Qt抓屏
     QPixmap pixmap = screen_->grabWindow(0);
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
+
+    if (isFrameBlack(frame)) {
+        if (!screenLocked_) {
+            screenLocked_ = true;
+            emit screenLocked(true);
+        }
+        return;
+    }
+    if (screenLocked_) {
+        screenLocked_ = false;
+        emit screenLocked(false);
+    }
 
     quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
     if (checksum == lastFrameChecksum_) {

@@ -197,17 +197,33 @@ bool RDPServer::initialize(quint16 port)
             wsServer_->broadcastJson(QJsonObject {
                 { "type", "screen_locked" },
                 { "locked", locked },
-                { "hint", QString::fromUtf8("黑屏为正常现象，Windows 锁屏后无法捕获画面") } });
+                { "hint", locked ? QString::fromUtf8(
+#ifdef Q_OS_WIN
+                                       "如需在锁屏界面输入密码，请先以管理员身份运行："
+                                       "QtRemoteDesktopKeyboardSvc.exe --install && "
+                                       "net start QtRemoteDesktopKeyboardSvc"
+#elif defined(Q_OS_LINUX)
+                    "如需在锁屏界面输入密码，请先执行："
+                    "sudo usermod -aG input $USER && "
+                    "sudo modprobe uinput && sudo chmod 666 /dev/uinput"
+#endif
+                                       "然后直接输入密码回车即可")
+                                 : QString() } });
             if (locked) {
-                qInfo() << "Screen locked, connecting keyboard service...";
+                qInfo() << "Screen locked, switching to kernel-level input";
 #ifdef Q_OS_WIN
                 if (!inputManager_->connectKeyboardService())
                     qWarning() << "Keyboard service unavailable, input limited";
+#elif defined(Q_OS_LINUX)
+                if (!inputManager_->initUinput())
+                    qWarning() << "uinput unavailable, XTest fallback";
 #endif
             } else {
-                qInfo() << "Screen unlocked, disconnecting keyboard service";
+                qInfo() << "Screen unlocked, restoring normal input";
 #ifdef Q_OS_WIN
                 inputManager_->disconnectKeyboardService();
+#elif defined(Q_OS_LINUX)
+                inputManager_->destroyUinput();
 #endif
             }
         });
@@ -259,7 +275,7 @@ void RDPServer::setupHttpServer()
 
 void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
 {
-    if (useSsl_) {
+    if (useSsl_ && QSslSocket::supportsSsl()) {
         QSslSocket* sslSocket = new QSslSocket(this);
         if (!sslSocket->setSocketDescriptor(socketDescriptor)) {
             qWarning() << "Failed to set socket descriptor to QSslSocket";

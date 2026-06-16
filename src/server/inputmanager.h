@@ -22,9 +22,6 @@ public:
     void injectMouseMove(int x, int y);
     void injectMouseButton(int x, int y, int button, bool isDown);
     void injectWheel(int delta);
-    void injectKeyboard(int keycode, bool isDown, bool ctrl = false,
-                        bool alt = false, bool shift = false);
-
     void injectKeyboard(int keycode, const QString &code, bool isDown, bool ctrl, bool alt, bool shift);
 
 #ifdef Q_OS_WIN
@@ -32,6 +29,11 @@ public:
     bool connectKeyboardService();
     void disconnectKeyboardService();
     bool isKeyboardServiceConnected() const { return servicePipe_ != INVALID_HANDLE_VALUE; }
+#elif defined(Q_OS_LINUX)
+    // Switch to kernel-level uinput (works on lock screen / Wayland)
+    bool initUinput();
+    void destroyUinput();
+    bool isUinputActive() const { return uinputFd_ >= 0; }
 #endif
 
 private:
@@ -47,6 +49,11 @@ private:
 #ifdef Q_OS_LINUX
     void* xDisplay_ = nullptr;
     void sendXModifier(X11KeySym ks, bool isDown);
+    int uinputFd_ = -1;
+    bool sendUinputKey(unsigned short linuxKeycode, bool isDown);
+    unsigned short keysymToLinuxKeycode(unsigned long ks);
+    unsigned long lockScreenWindow_ = 0;
+    void focusLockScreenWindow(void* dpy);
 #endif
 
     bool ctrlDown_  = false;
