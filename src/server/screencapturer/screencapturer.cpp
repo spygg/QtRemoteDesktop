@@ -22,3 +22,14 @@ void ScreenCapturer::stop()
     captureTimer_->stop();
     cleanupPlatform();
 }
+
+void ScreenCapturer::suspend()
+{
+    captureTimer_->stop();
+}
+
+void ScreenCapturer::resume()
+{
+    if (!captureTimer_->isActive())
+        captureTimer_->start(1000 / fps_);
+}

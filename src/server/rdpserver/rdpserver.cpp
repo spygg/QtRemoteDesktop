@@ -787,6 +787,10 @@ void RDPServer::start()
         return;
     }
 
+    // 如果还没有客户端连接，立即暂停捕获以降低 CPU
+    if (wsServer_->clients().isEmpty())
+        screenCapturer_->suspend();
+
     isRunning_ = true;
     qInfo() << "RDP Server started, mode:" << (currentMode_ == ServerMode::Video ? "video" : "image");
 }
@@ -802,6 +806,11 @@ void RDPServer::onClientConnected(const QString& clientId)
         return;
     }
     qInfo() << "Client connected:" << clientId;
+
+    // 有客户端连接 → 恢复屏幕捕获
+    if (screenCapturer_)
+        screenCapturer_->resume();
+
     // 发送屏幕分辨率
     QJsonObject info;
     info["type"] = "screen_info";
@@ -819,6 +828,10 @@ void RDPServer::onClientConnected(const QString& clientId)
 void RDPServer::onClientDisconnected(const QString& clientId)
 {
     qInfo() << "Client disconnected:" << clientId;
+
+    // 没有客户端了 → 暂停屏幕捕获，降低 CPU
+    if (wsServer_->clients().isEmpty() && screenCapturer_)
+        screenCapturer_->suspend();
 }
 
 void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& input)
@@ -860,9 +873,11 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 
 void RDPServer::onFrameCaptured(const QImage& frame)
 {
+    if (wsServer_->clients().isEmpty())
+        return;
+
 #ifdef USE_FFMPEG
     if (currentMode_ == ServerMode::Video) {
-
         videoEncoder_->encode(frame);
     } else
 #endif

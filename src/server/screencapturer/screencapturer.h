@@ -36,6 +36,8 @@ public:
 
     bool start(int fps);
     void stop();
+    void suspend();  // 暂停捕获（不销毁平台捕获器）
+    void resume();   // 恢复捕获
 
     int width() const { return screen_->size().width(); }
     int height() const { return screen_->size().height(); }

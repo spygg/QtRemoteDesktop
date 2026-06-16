@@ -912,12 +912,32 @@
             return (bytes/1024/1024/1024).toFixed(2) + ' GB';
         }
 
+        function parentDir(path) {
+            if (path === '/' || path === '') return '/';
+            // Remove trailing slashes/backslashes
+            let p = path.replace(/[/\\]+$/, '');
+            let idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+            if (idx <= 0) return '/';
+            return p.substring(0, idx);
+        }
+
+        function joinPath(parent, name) {
+            if (parent === '/' || parent === '') {
+                // Windows drive letter like "C:" → no extra separator
+                return (name.match(/^[A-Za-z]:$/)) ? name : '/' + name;
+            }
+            // If parent ends with separator, don't add another
+            if (parent.endsWith('/') || parent.endsWith('\\'))
+                return parent + name;
+            return parent + '/' + name;
+        }
+
         function renderFileList(items) {
             const container = document.getElementById('file-list');
             container.innerHTML = '';
             // Parent dir
             if (currentRemotePath !== '/') {
-                const parentPath = currentRemotePath.replace(/\/$/, '').replace(/\/[^/]*$/, '') || '/';
+                const parentPath = parentDir(currentRemotePath);
                 container.innerHTML += `<div class="file-item" onclick="navigateTo('${parentPath}')">
                     <span class="icon">📂</span><span class="name">..</span><span class="size"></span></div>`;
             }
@@ -925,7 +945,7 @@
             const dirs = items.filter(i => i.isDir).sort((a,b) => a.name.localeCompare(b.name));
             const files = items.filter(i => !i.isDir).sort((a,b) => a.name.localeCompare(b.name));
             for (const item of dirs) {
-                const fullPath = (currentRemotePath === '/' ? '' : currentRemotePath) + '/' + item.name;
+                const fullPath = joinPath(currentRemotePath, item.name);
                 container.innerHTML += `<div class="file-item">
                     <span class="icon">📁</span>
                     <span class="name" ondblclick="navigateTo('${fullPath}')">${item.name}</span>
@@ -939,7 +959,7 @@
         }
 
         function downloadFile(fileName) {
-            const filePath = (currentRemotePath === '/' ? '' : currentRemotePath) + '/' + fileName;
+            const filePath = joinPath(currentRemotePath, fileName);
             send({ type: 'file_download', path: filePath, name: fileName });
         }
 
@@ -960,7 +980,7 @@
 
         async function uploadFileChunked(file) {
             const relativePath = file.webkitRelativePath || file.name;
-            const remotePath = (currentRemotePath === '/' ? '' : currentRemotePath) + '/' + relativePath;
+            const remotePath = joinPath(currentRemotePath, relativePath);
             currentTransferPath = remotePath;
             currentTransferType = 'upload';
             showTransferMonitor('⬆', file.name, 0, file.size, 0);

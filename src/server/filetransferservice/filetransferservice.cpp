@@ -103,11 +103,66 @@ QByteArray FileTransferService::createTarForDirectory(const QString& dirPath)
 
 void FileTransferService::processFileList(const QString& clientId, const QString& path)
 {
-    QString safePath = sanitizeFilePath(path);
-    QDir dir(safePath);
+#ifdef Q_OS_WIN
+    // Windows: path "/" or empty → list drives
+    if (path == "/" || path.isEmpty()) {
+        QFileInfoList drives = QDir::drives();
+        QJsonArray items;
+        for (const QFileInfo& drive : drives) {
+            QJsonObject item;
+            // drive.absolutePath() returns "C:/", extract "C:"
+            QString driveName = QDir::toNativeSeparators(drive.absolutePath());
+            if (driveName.endsWith('\\'))
+                driveName.chop(1);
+            item["name"] = driveName;
+            item["isDir"] = true;
+            item["size"] = 0;
+            items.append(item);
+        }
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_list"},
+            {"path", "/"},
+            {"items", items}
+        });
+        return;
+    }
+
+    // Convert forward slashes to native, ensure drive root has separator
+    QString nativePath = QDir::fromNativeSeparators(path);
+    if (nativePath.length() == 2 && nativePath[1] == ':')
+        nativePath += '\\';
+
+    QDir dir(nativePath);
     if (!dir.exists()) {
         emit jsonResponse(clientId, QJsonObject{
-            {"type", "file_list"}, {"path", safePath}, {"error", "Directory not found"}
+            {"type", "file_list"}, {"path", path}, {"error", "Directory not found"}
+        });
+        return;
+    }
+
+    QFileInfoList entries = dir.entryInfoList(
+        QDir::AllEntries | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
+
+    QJsonArray items;
+    for (const QFileInfo& fi : entries) {
+        QJsonObject item;
+        item["name"] = fi.fileName();
+        item["isDir"] = fi.isDir();
+        item["size"] = fi.isDir() ? 0 : fi.size();
+        items.append(item);
+    }
+
+    emit jsonResponse(clientId, QJsonObject{
+        {"type", "file_list"},
+        {"path", QDir::toNativeSeparators(dir.absolutePath())},
+        {"items", items}
+    });
+#else
+    // Linux: existing behavior
+    QDir dir(path);
+    if (!dir.exists()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_list"}, {"path", path}, {"error", "Directory not found"}
         });
         return;
     }
@@ -129,6 +184,7 @@ void FileTransferService::processFileList(const QString& clientId, const QString
         {"path", dir.absolutePath()},
         {"items", items}
     });
+#endif
 }
 
 void FileTransferService::processDownload(const QString& clientId, const QString& path)
