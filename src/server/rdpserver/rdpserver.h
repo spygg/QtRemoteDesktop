@@ -5,12 +5,15 @@
 #include <QHostAddress>
 #include <QImage>
 #include <QJsonObject>
+#include <QMutex>
 #include <QObject>
+#include <QQueue>
 #include <QSslKey>
 #include <QSslSocket>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QThread>
+#include <QWaitCondition>
 #include <memory>
 
 class WebSocketServer;
@@ -23,6 +26,32 @@ class VideoEncoder;
 #endif
 
 class InputManager;
+
+// 独立线程 JPEG 压缩器：捕获帧不经主线程阻塞，直接在后台压缩
+class JpegCompressor : public QObject {
+    Q_OBJECT
+public:
+    explicit JpegCompressor(QObject* parent = nullptr);
+    ~JpegCompressor();
+
+    void start() { thread_.start(); }
+    void enqueue(const QImage& frame);
+    void shutdown();
+
+signals:
+    void jpegCompressed(const QByteArray& data);
+
+private slots:
+    void processLoop();
+
+private:
+    QThread thread_;
+    QMutex mutex_;
+    QWaitCondition cond_;
+    QQueue<QImage> queue_;
+    bool abort_ = false;
+    enum { kMaxQueueSize = 5 };
+};
 
 class RDPServer : public QObject {
     Q_OBJECT
@@ -45,7 +74,7 @@ private slots:
     void onHttpRequest();
     void onCodecConfigChanged(const QByteArray& extradata);
 
-    void onFrameForImageMode(const QImage& frame);
+    void onJpegCompressed(const QByteArray& data);
 
     void onModeChangeRequested(const QString& mode);
 
@@ -66,10 +95,8 @@ private:
     void handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body);
     QString extractSessionToken(const QByteArray& request);
     QByteArray buildHttpResponse(int statusCode, const QString& statusText,
-                                 const QString& contentType, const QByteArray& body,
-                                 const QString& extraHeaders = QString());
-
-    void sendJpegFrame(const QImage& frame);
+        const QString& contentType, const QByteArray& body,
+        const QString& extraHeaders = QString());
 
     class SslTcpServer : public QTcpServer {
     public:
@@ -98,6 +125,7 @@ private:
 #endif
 
     std::unique_ptr<InputManager> inputManager_;
+    std::unique_ptr<JpegCompressor> jpegCompressor_;
 
     AuthManager* authManager_ = nullptr;
     FileTransferService* fileTransferService_ = nullptr;
@@ -108,7 +136,7 @@ private:
     quint16 wsPort_;
 
     QRect screenGeometry_;
-    QPoint lastCursorPos_{-1, -1};
+    QPoint lastCursorPos_ { -1, -1 };
 
     bool useSsl_ = true;
     QSslConfiguration* sslConfiguration_;
@@ -121,6 +149,10 @@ private:
     bool switchToVideoMode();
 
     void loadServerConfig(const QString& configPath);
+    void saveServerConfig(const QString& configPath);
+
+public:
+    static QStringList getLocalIpAddr();
 };
 
 #endif

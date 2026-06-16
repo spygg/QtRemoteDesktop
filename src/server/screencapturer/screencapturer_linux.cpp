@@ -173,7 +173,11 @@ void ScreenCapturer::captureFrame()
             emit screenLocked(false);
         }
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        quint16 checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
+#else
         quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
+#endif
         if (checksum == lastFrameChecksum_) {
             // 画面无变化，跳过
             return;
@@ -201,7 +205,11 @@ void ScreenCapturer::captureFrame()
         emit screenLocked(false);
     }
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    quint16 checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
+#else
     quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
+#endif
     if (checksum == lastFrameChecksum_) {
         // 画面无变化，跳过
         return;

@@ -17,8 +17,73 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkInterface>
 #include <QScreen>
 #include <QSslCertificate>
+
+// ==================== JpegCompressor ====================
+JpegCompressor::JpegCompressor(QObject* parent)
+    : QObject(parent)
+{
+    moveToThread(&thread_);
+    connect(&thread_, &QThread::started, this, &JpegCompressor::processLoop);
+}
+
+JpegCompressor::~JpegCompressor()
+{
+    shutdown();
+}
+
+void JpegCompressor::shutdown()
+{
+    {
+        QMutexLocker locker(&mutex_);
+        abort_ = true;
+        cond_.wakeAll();
+    }
+    thread_.quit();
+    if (!thread_.wait(3000)) {
+        qWarning() << "JpegCompressor thread did not stop within 3s, terminating...";
+        thread_.terminate();
+        thread_.wait();
+    }
+}
+
+void JpegCompressor::enqueue(const QImage& frame)
+{
+    QMutexLocker locker(&mutex_);
+    if (queue_.size() >= kMaxQueueSize)
+        queue_.dequeue();
+    queue_.enqueue(frame.copy());
+    cond_.wakeOne();
+}
+
+void JpegCompressor::processLoop()
+{
+    while (!abort_) {
+        QImage image;
+        {
+            QMutexLocker locker(&mutex_);
+            while (queue_.isEmpty() && !abort_)
+                cond_.wait(&mutex_);
+            if (abort_)
+                break;
+            image = queue_.dequeue();
+        }
+
+        QByteArray jpegData;
+        QBuffer buffer(&jpegData);
+        buffer.open(QIODevice::WriteOnly);
+        if (!image.save(&buffer, "JPEG", 80)) {
+            qWarning() << "JpegCompressor: failed to compress frame";
+            continue;
+        }
+        buffer.close();
+
+        emit jpegCompressed(jpegData);
+    }
+}
+// ==================== RDPServer ====================
 
 RDPServer::RDPServer(QObject* parent)
     : QObject(parent)
@@ -62,10 +127,48 @@ void RDPServer::loadServerConfig(const QString& configPath)
     if (root.contains("ssl"))
         useSsl_ = root["ssl"].toBool();
 
+    // 当不支持时候就算了
+    if (useSsl_ && !QSslSocket::supportsSsl()) {
+        useSsl_ = false;
+
+        qInfo() << "do NOT supportsSsl set useSsl to false";
+    }
+
     if (root.contains("httpPort"))
         httpPort_ = static_cast<quint16>(root["httpPort"].toInt());
 
     qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_;
+}
+
+void RDPServer::saveServerConfig(const QString& configPath)
+{
+    QString path = configPath.isEmpty()
+        ? QCoreApplication::applicationDirPath() + "/server_config.json"
+        : configPath;
+
+    QJsonObject root;
+
+    // 读取已有的配置文件，保留 users 等其他字段
+    QFile file(path);
+    if (file.open(QIODevice::ReadOnly)) {
+        QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        if (doc.isObject())
+            root = doc.object();
+        file.close();
+    }
+
+    // 更新 ssl 和 httpPort 为当前运行值
+    root["ssl"] = useSsl_;
+    root["httpPort"] = httpPort_;
+
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QJsonDocument doc(root);
+        file.write(doc.toJson(QJsonDocument::Indented));
+        file.close();
+        qInfo() << "Server config saved to" << path;
+    } else {
+        qWarning() << "Failed to save server config to" << path;
+    }
 }
 
 void RDPServer::loadSslConfig()
@@ -139,6 +242,9 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride)
     // 命令行参数 --no-ssl 覆盖配置文件
     if (!useSslOverride)
         useSsl_ = false;
+
+    // 将当前运行配置写回文件（ssl、httpPort 等）
+    saveServerConfig(configPath);
 
     wsPort_ = httpPort_ + 1;
 
@@ -274,6 +380,12 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride)
     }
     screenGeometry_ = screen->geometry();
 
+    // 初始化 JPEG 压缩器（独立线程）
+    jpegCompressor_ = std::unique_ptr<JpegCompressor>(new JpegCompressor(nullptr));
+    connect(jpegCompressor_.get(), &JpegCompressor::jpegCompressed,
+        this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
+    jpegCompressor_->start();
+
 #ifdef USE_FFMPEG
     // 初始化视频编码器 (使用 Qt5 的 QMediaRecorder 或自定义 FFmpeg)
     // videoEncoder_ = std::make_unique<VideoEncoder>(this);
@@ -301,6 +413,35 @@ void RDPServer::onCodecConfigChanged(const QByteArray& extradata)
     wsServer_->broadcastJson(obj);
 }
 
+QStringList RDPServer::getLocalIpAddr()
+{
+    QStringList ipList;
+    QList<QNetworkInterface> interfaceList = QNetworkInterface::allInterfaces();
+    foreach (QNetworkInterface interfaceItem, interfaceList) {
+        if (interfaceItem.flags().testFlag(QNetworkInterface::IsUp)
+            && interfaceItem.flags().testFlag(QNetworkInterface::IsRunning)
+            && interfaceItem.flags().testFlag(QNetworkInterface::CanBroadcast)
+            && interfaceItem.flags().testFlag(QNetworkInterface::CanMulticast)
+            && !interfaceItem.flags().testFlag(QNetworkInterface::IsLoopBack)
+            && !interfaceItem.humanReadableName().contains("VirtualBox", Qt::CaseInsensitive)
+            && !interfaceItem.humanReadableName().contains("VMware", Qt::CaseInsensitive)) {
+            QList<QNetworkAddressEntry> addressEntryList = interfaceItem.addressEntries();
+
+            foreach (QNetworkAddressEntry addressEntryItem, addressEntryList) {
+                if (addressEntryItem.ip().protocol() == QAbstractSocket::IPv4Protocol) {
+                    ipList.append(addressEntryItem.ip().toString());
+                }
+            }
+        }
+    }
+
+    if (ipList.size() == 0) {
+        ipList.append("127.0.0.1");
+    }
+
+    return ipList;
+}
+
 void RDPServer::setupHttpServer()
 {
     // httpServer_ = std::make_unique<SslTcpServer>(this);
@@ -311,7 +452,10 @@ void RDPServer::setupHttpServer()
     if (!httpServer_->listen(QHostAddress::Any, httpPort)) {
         qWarning() << "HTTP server failed to listen on port" << httpPort;
     } else {
-        qInfo() << "HTTP server listening on port" << httpPort;
+
+        foreach (const QString& ip, getLocalIpAddr()) {
+            qInfo() << QString("listen  http%1://%2:%3").arg(useSsl_ ? "s" : "").arg(ip).arg(httpPort);
+        }
     }
 }
 
@@ -776,7 +920,7 @@ void RDPServer::start()
         // disconnect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
         //     videoEncoder_.get(), &VideoEncoder::encode);
         // connect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
-        //     this, &RDPServer::onFrameForImageMode);
+        //     this, &RDPServer::onJpegCompressed);
 
         switchToImageMode(); // 切换到图片模式
     }
@@ -882,7 +1026,9 @@ void RDPServer::onFrameCaptured(const QImage& frame)
     } else
 #endif
     {
-        sendJpegFrame(frame); // 新建函数，用于 JPEG 压缩和发送
+        // 将帧交给独立线程进行 JPEG 压缩，不阻塞主线程
+        if (jpegCompressor_)
+            jpegCompressor_->enqueue(frame);
     }
 
     // 鼠标光标位置广播（仅在位置变化时发送，避免每帧无意义传输）
@@ -905,47 +1051,23 @@ void RDPServer::onFrameCaptured(const QImage& frame)
     }
 }
 
-void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp)
+void RDPServer::onJpegCompressed(const QByteArray& jpegData)
 {
-    // 广播给所有客户端
-    wsServer_->broadcastFrame(data, isKeyframe, timestamp);
-}
-
-void RDPServer::onFrameForImageMode(const QImage& frame)
-{
-    sendJpegFrame(frame);
-}
-
-void RDPServer::sendJpegFrame(const QImage& frame)
-{
-    if (frame.isNull()) {
-        qWarning() << "sendJpegFrame: null frame";
-        return;
-    }
-
-    if (wsServer_->clients().isEmpty())
-        return;
-
-    QByteArray jpegData;
-    QBuffer buffer(&jpegData);
-    buffer.open(QIODevice::WriteOnly);
-    // 保存为 JPEG，质量可根据需要调整（0-100）
-    if (!frame.save(&buffer, "JPEG", 80)) {
-        qWarning() << "Failed to compress frame to JPEG";
-        return;
-    }
-    buffer.close();
-
     // 构造二进制包： [1字节类型标识(0x03)] [4字节大端长度] [JPEG数据]
     QByteArray packet;
     QDataStream stream(&packet, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
-    stream << quint8(0x03); // 图片模式标识
-    stream << quint32(jpegData.size()); // 数据长度
-    packet.append(jpegData); // JPEG 数据
+    stream << quint8(0x03);
+    stream << quint32(jpegData.size());
+    packet.append(jpegData);
 
-    // 广播给所有客户端
     wsServer_->broadcastBinary(packet);
+}
+
+void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp)
+{
+    // 广播给所有客户端
+    wsServer_->broadcastFrame(data, isKeyframe, timestamp);
 }
 
 void RDPServer::switchToImageMode()
