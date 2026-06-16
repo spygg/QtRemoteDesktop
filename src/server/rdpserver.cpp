@@ -19,7 +19,6 @@
 #include <QScreen>
 #include <QSslCertificate>
 
-
 RDPServer::RDPServer(bool useSsl, QObject* parent)
     : QObject(parent)
     , useSsl_(useSsl)
@@ -43,11 +42,13 @@ RDPServer::~RDPServer()
 
 void RDPServer::loadSslConfig()
 {
-    if (!useSsl_)
-        return;
     qDebug() << "SSL supported:" << QSslSocket::supportsSsl();
     qDebug() << "SSL library version:" << QSslSocket::sslLibraryVersionString();
     qDebug() << "SSL library build version:" << QSslSocket::sslLibraryBuildVersionString();
+
+    if (!useSsl_ || !QSslSocket::supportsSsl()) {
+        return;
+    }
 
     // Load the SSL certificate
     QFile certFile(":/sslperm/cacert.crt");
@@ -160,8 +161,7 @@ bool RDPServer::initialize(quint16 port)
         });
 
     connect(fileTransferService_, &FileTransferService::downloadChunkReady,
-        this, [this](const QString& clientId, const QString& path,
-                     qint64 offset, const QByteArray& data, qint64 totalSize) {
+        this, [this](const QString& clientId, const QString& path, qint64 offset, const QByteArray& data, qint64 totalSize) {
             Q_UNUSED(totalSize);
             QByteArray pathUtf8 = path.toUtf8();
             QByteArray packet;
@@ -177,15 +177,8 @@ bool RDPServer::initialize(quint16 port)
         });
 
     connect(fileTransferService_, &FileTransferService::transferProgress,
-        this, [this](const QString& clientId, const QString& path,
-                     qint64 transferred, qint64 total, double speedKBps) {
-            wsServer_->sendJson(clientId, QJsonObject{
-                {"type", "transfer_progress"},
-                {"path", path},
-                {"transferred", transferred},
-                {"total", total},
-                {"speedKBps", speedKBps}
-            });
+        this, [this](const QString& clientId, const QString& path, qint64 transferred, qint64 total, double speedKBps) {
+            wsServer_->sendJson(clientId, QJsonObject { { "type", "transfer_progress" }, { "path", path }, { "transferred", transferred }, { "total", total }, { "speedKBps", speedKBps } });
         });
 
     transferThread_->start();
@@ -201,11 +194,10 @@ bool RDPServer::initialize(quint16 port)
         this, &RDPServer::onFrameCaptured);
     connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
         this, [this](bool locked) {
-            wsServer_->broadcastJson(QJsonObject{
-                {"type", "screen_locked"},
-                {"locked", locked},
-                {"hint", QString::fromUtf8("黑屏为正常现象，Windows 锁屏后无法捕获画面")}
-            });
+            wsServer_->broadcastJson(QJsonObject {
+                { "type", "screen_locked" },
+                { "locked", locked },
+                { "hint", QString::fromUtf8("黑屏为正常现象，Windows 锁屏后无法捕获画面") } });
             if (locked) {
                 qInfo() << "Screen locked, connecting keyboard service...";
 #ifdef Q_OS_WIN
@@ -355,8 +347,8 @@ QByteArray RDPServer::loadLoginHtml()
 }
 
 QByteArray RDPServer::buildHttpResponse(int statusCode, const QString& statusText,
-                                         const QString& contentType, const QByteArray& body,
-                                         const QString& extraHeaders)
+    const QString& contentType, const QByteArray& body,
+    const QString& extraHeaders)
 {
     QByteArray resp;
     resp += "HTTP/1.1 " + QByteArray::number(statusCode) + " " + statusText.toUtf8() + "\r\n";
@@ -428,9 +420,12 @@ QString RDPServer::extractSessionToken(const QByteArray& request)
         if (sessIdx >= 0) {
             sessIdx += 8; // skip "session="
             int endIdx = cookieLine.indexOf(';', sessIdx);
-            if (endIdx < 0) endIdx = cookieLine.indexOf('\r', sessIdx);
-            if (endIdx < 0) endIdx = cookieLine.indexOf('\n', sessIdx);
-            if (endIdx < 0) endIdx = cookieLine.length();
+            if (endIdx < 0)
+                endIdx = cookieLine.indexOf('\r', sessIdx);
+            if (endIdx < 0)
+                endIdx = cookieLine.indexOf('\n', sessIdx);
+            if (endIdx < 0)
+                endIdx = cookieLine.length();
             return cookieLine.mid(sessIdx, endIdx - sessIdx).trimmed();
         }
     }
@@ -438,8 +433,10 @@ QString RDPServer::extractSessionToken(const QByteArray& request)
     int qsIdx = req.indexOf("?token=");
     if (qsIdx >= 0) {
         int endIdx = req.indexOf(' ', qsIdx);
-        if (endIdx < 0) endIdx = req.indexOf('\r', qsIdx);
-        if (endIdx < 0) endIdx = req.indexOf('\n', qsIdx);
+        if (endIdx < 0)
+            endIdx = req.indexOf('\r', qsIdx);
+        if (endIdx < 0)
+            endIdx = req.indexOf('\n', qsIdx);
         return req.mid(qsIdx + 7, endIdx - qsIdx - 7);
     }
     return QString();
@@ -448,9 +445,11 @@ QString RDPServer::extractSessionToken(const QByteArray& request)
 void RDPServer::onHttpRequest()
 {
     QTcpSocket* socket = qobject_cast<QTcpSocket*>(sender());
-    if (!socket) return;
+    if (!socket)
+        return;
 
-    if (!socket->canReadLine()) return;
+    if (!socket->canReadLine())
+        return;
 
     // Read request line + headers
     QByteArray request;
@@ -471,8 +470,10 @@ void RDPServer::onHttpRequest()
             int lineEnd = requestStr.indexOf('\n', clIdx);
             bodyLen = requestStr.mid(colonIdx + 1, lineEnd - colonIdx - 1).trimmed().toInt();
         }
-        if (bodyLen <= 0) return QByteArray();
-        if (socket->bytesAvailable() < bodyLen) return QByteArray();
+        if (bodyLen <= 0)
+            return QByteArray();
+        if (socket->bytesAvailable() < bodyLen)
+            return QByteArray();
         return socket->read(bodyLen);
     };
 
@@ -489,7 +490,9 @@ void RDPServer::onHttpRequest()
             QByteArray body = readPostBody(bodyLen);
             if (body.isEmpty()) {
                 QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain; charset=utf-8", "Missing request body");
-                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
                 return;
             }
             handleLoginPost(socket, body);
@@ -501,16 +504,20 @@ void RDPServer::onHttpRequest()
             QString token = extractSessionToken(request);
             if (!authManager_->validateSession(token)) {
                 QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
-                    QJsonDocument(QJsonObject{{"success", false}, {"error", "未登录"}}).toJson(QJsonDocument::Compact));
-                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", "未登录" } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
                 return;
             }
             int bodyLen = 0;
             QByteArray body = readPostBody(bodyLen);
             if (body.isEmpty()) {
                 QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8",
-                    QJsonDocument(QJsonObject{{"success", false}, {"error", "Missing request body"}}).toJson(QJsonDocument::Compact));
-                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", "Missing request body" } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
                 return;
             }
             handleApiAddUser(socket, body);
@@ -521,16 +528,20 @@ void RDPServer::onHttpRequest()
             QString token = extractSessionToken(request);
             if (!authManager_->validateSession(token)) {
                 QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
-                    QJsonDocument(QJsonObject{{"success", false}, {"error", "未登录"}}).toJson(QJsonDocument::Compact));
-                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", "未登录" } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
                 return;
             }
             int bodyLen = 0;
             QByteArray body = readPostBody(bodyLen);
             if (body.isEmpty()) {
                 QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8",
-                    QJsonDocument(QJsonObject{{"success", false}, {"error", "Missing request body"}}).toJson(QJsonDocument::Compact));
-                socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", "Missing request body" } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
                 return;
             }
             handleApiDeleteUser(socket, body);
@@ -539,7 +550,9 @@ void RDPServer::onHttpRequest()
 
         // Unknown POST
         QByteArray resp = buildHttpResponse(404, "Not Found", "text/plain; charset=utf-8", "Not Found");
-        socket->write(resp); socket->flush(); socket->disconnectFromHost();
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
         return;
     }
 
@@ -556,7 +569,9 @@ void RDPServer::onHttpRequest()
     if (path == "/login" || path.startsWith("/login?")) {
         QByteArray html = loadLoginHtml();
         QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html);
-        socket->write(resp); socket->flush(); socket->disconnectFromHost();
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
         return;
     }
 
@@ -565,8 +580,10 @@ void RDPServer::onHttpRequest()
     if (!authManager_->validateSession(token)) {
         if (path.startsWith("/api/")) {
             QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
-                QJsonDocument(QJsonObject{{"success", false}, {"error", "未登录"}}).toJson(QJsonDocument::Compact));
-            socket->write(resp); socket->flush(); socket->disconnectFromHost();
+                QJsonDocument(QJsonObject { { "success", false }, { "error", "未登录" } }).toJson(QJsonDocument::Compact));
+            socket->write(resp);
+            socket->flush();
+            socket->disconnectFromHost();
         } else {
             serveLoginPage(socket);
         }
@@ -582,8 +599,10 @@ void RDPServer::onHttpRequest()
     QByteArray html;
     if (path == "/admin/users" || path.startsWith("/admin/users?")) {
         QFile file(":/html/user-management.html");
-        if (file.open(QIODevice::ReadOnly)) html = file.readAll();
-        else html = loadHtmlResource();
+        if (file.open(QIODevice::ReadOnly))
+            html = file.readAll();
+        else
+            html = loadHtmlResource();
     } else {
         html = loadHtmlResource();
     }
@@ -612,7 +631,9 @@ void RDPServer::handleApiUsers(QTcpSocket* socket)
 
     QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
     QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
-    socket->write(resp); socket->flush(); socket->disconnectFromHost();
+    socket->write(resp);
+    socket->flush();
+    socket->disconnectFromHost();
 }
 
 void RDPServer::handleApiAddUser(QTcpSocket* socket, const QByteArray& body)
@@ -641,7 +662,9 @@ void RDPServer::handleApiAddUser(QTcpSocket* socket, const QByteArray& body)
 
     QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
     QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
-    socket->write(resp); socket->flush(); socket->disconnectFromHost();
+    socket->write(resp);
+    socket->flush();
+    socket->disconnectFromHost();
 }
 
 void RDPServer::handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body)
@@ -669,7 +692,9 @@ void RDPServer::handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body)
 
     QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
     QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
-    socket->write(resp); socket->flush(); socket->disconnectFromHost();
+    socket->write(resp);
+    socket->flush();
+    socket->disconnectFromHost();
 }
 
 void RDPServer::start()
@@ -768,7 +793,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         emit requestDownload(clientId, input["path"].toString());
     } else if (type == "file_upload_start") {
         emit requestUploadStart(clientId, input["path"].toString(),
-                                input["size"].toVariant().toLongLong());
+            input["size"].toVariant().toLongLong());
     } else if (type == "file_upload_done") {
         emit requestUploadDone(clientId, input["path"].toString());
     }
@@ -912,5 +937,3 @@ bool RDPServer::switchToVideoMode()
     return false;
 #endif
 }
-
-
