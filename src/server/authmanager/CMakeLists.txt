@@ -1,0 +1,7 @@
+set(AUTH_MANAGER AuthManager)
+set(HEADERS authmanager.h)
+set(SOURCES authmanager.cpp)
+add_library(${AUTH_MANAGER} STATIC ${HEADERS} ${SOURCES})
+target_include_directories(${AUTH_MANAGER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core)
+target_link_libraries(${AUTH_MANAGER} PUBLIC Qt${QT_VERSION_MAJOR}::Core)

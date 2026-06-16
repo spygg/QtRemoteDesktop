@@ -1,19 +1,20 @@
 #include "authmanager.h"
-#include <QCryptographicHash>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
-#include <QDebug>
 
 // Qt 5.7 compatibility
 #if QT_VERSION < QT_VERSION_CHECK(5, 10, 0)
 #include <QDateTime>
 static qint64 currentSecsSinceEpoch() { return QDateTime::currentDateTime().toTime_t(); }
-static QByteArray randomBytes(int count) {
+static QByteArray randomBytes(int count)
+{
     QByteArray data;
     data.resize(count);
     for (int i = 0; i < count; i++)
@@ -23,7 +24,8 @@ static QByteArray randomBytes(int count) {
 #else
 #include <QRandomGenerator>
 static qint64 currentSecsSinceEpoch() { return QDateTime::currentSecsSinceEpoch(); }
-static QByteArray randomBytes(int count) {
+static QByteArray randomBytes(int count)
+{
     QByteArray data;
     data.resize(count);
     for (int i = 0; i < count; i++)
@@ -39,11 +41,13 @@ AuthManager::AuthManager(QObject* parent)
     loadConfig();
 }
 
-QString AuthManager::md5Hex(const QString& input) {
+QString AuthManager::md5Hex(const QString& input)
+{
     return QString(QCryptographicHash::hash(input.toUtf8(), QCryptographicHash::Md5).toHex());
 }
 
-void AuthManager::loadConfig() {
+void AuthManager::loadConfig()
+{
     users_.clear();
     QFile file(configPath_);
 
@@ -66,13 +70,14 @@ void AuthManager::loadConfig() {
     if (users_.isEmpty()) {
         qInfo() << "No users configured, creating default admin user";
         UserEntry entry;
-        entry.passwordHash = md5Hex("tk001");
+        entry.passwordHash = md5Hex("tk001@lt");
         users_["admin"] = entry;
         saveConfig();
     }
 }
 
-void AuthManager::saveConfig() {
+void AuthManager::saveConfig()
+{
     QJsonObject root;
     QJsonObject users;
     for (auto it = users_.begin(); it != users_.end(); ++it) {
@@ -90,17 +95,21 @@ void AuthManager::saveConfig() {
     }
 }
 
-bool AuthManager::validateUser(const QString& username, const QString& password) {
+bool AuthManager::validateUser(const QString& username, const QString& password)
+{
     auto it = users_.find(username);
-    if (it == users_.end()) return false;
+    if (it == users_.end())
+        return false;
     return it.value().passwordHash == md5Hex(password);
 }
 
-QString AuthManager::generateToken() {
+QString AuthManager::generateToken()
+{
     return randomBytes(32).toHex();
 }
 
-QString AuthManager::createSession(const QString& username) {
+QString AuthManager::createSession(const QString& username)
+{
     cleanExpiredSessions();
     QString token = generateToken();
     Session sess;
@@ -110,27 +119,34 @@ QString AuthManager::createSession(const QString& username) {
     return token;
 }
 
-bool AuthManager::validateSession(const QString& token) const {
+bool AuthManager::validateSession(const QString& token) const
+{
     auto it = sessions_.find(token);
-    if (it == sessions_.end()) return false;
+    if (it == sessions_.end())
+        return false;
     return currentSecsSinceEpoch() < it.value().expiry;
 }
 
-QString AuthManager::sessionUser(const QString& token) const {
+QString AuthManager::sessionUser(const QString& token) const
+{
     auto it = sessions_.find(token);
-    if (it == sessions_.end()) return QString();
+    if (it == sessions_.end())
+        return QString();
     return it.value().username;
 }
 
-void AuthManager::removeSession(const QString& token) {
+void AuthManager::removeSession(const QString& token)
+{
     sessions_.remove(token);
 }
 
-QStringList AuthManager::users() const {
+QStringList AuthManager::users() const
+{
     return users_.keys();
 }
 
-bool AuthManager::addUser(const QString& username, const QString& password) {
+bool AuthManager::addUser(const QString& username, const QString& password)
+{
     if (username.isEmpty() || users_.contains(username))
         return false;
     UserEntry entry;
@@ -140,7 +156,8 @@ bool AuthManager::addUser(const QString& username, const QString& password) {
     return true;
 }
 
-bool AuthManager::removeUser(const QString& username) {
+bool AuthManager::removeUser(const QString& username)
+{
     // Prevent removing the last user
     if (users_.size() <= 1)
         return false;
@@ -151,9 +168,10 @@ bool AuthManager::removeUser(const QString& username) {
     return true;
 }
 
-void AuthManager::cleanExpiredSessions() {
+void AuthManager::cleanExpiredSessions()
+{
     qint64 now = currentSecsSinceEpoch();
-    for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+    for (auto it = sessions_.begin(); it != sessions_.end();) {
         if (now >= it.value().expiry)
             it = sessions_.erase(it);
         else

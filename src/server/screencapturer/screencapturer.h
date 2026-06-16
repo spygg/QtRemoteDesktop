@@ -48,6 +48,8 @@ private slots:
     void captureFrame();
 
 private:
+    void cleanupPlatform();
+
     QTimer* captureTimer_ = nullptr;
     QScreen* screen_ = nullptr;
     int fps_ = 30;

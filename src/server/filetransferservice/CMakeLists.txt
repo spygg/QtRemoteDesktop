@@ -1,0 +1,7 @@
+set(FILE_TRANSFER_SERVICE FileTransferService)
+set(HEADERS filetransferservice.h)
+set(SOURCES filetransferservice.cpp)
+add_library(${FILE_TRANSFER_SERVICE} STATIC ${HEADERS} ${SOURCES})
+target_include_directories(${FILE_TRANSFER_SERVICE} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core)
+target_link_libraries(${FILE_TRANSFER_SERVICE} PUBLIC Qt${QT_VERSION_MAJOR}::Core)

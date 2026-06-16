@@ -1,0 +1,7 @@
+set(WEBSOCKET_SERVER WebsocketServer)
+set(HEADERS websocketserver.h)
+set(SOURCES websocketserver.cpp)
+add_library(${WEBSOCKET_SERVER} STATIC ${HEADERS} ${SOURCES})
+target_include_directories(${WEBSOCKET_SERVER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Network WebSockets)
+target_link_libraries(${WEBSOCKET_SERVER} PUBLIC Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::WebSockets)

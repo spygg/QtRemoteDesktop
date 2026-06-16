@@ -22,6 +22,13 @@ static bool isFrameBlack(const QImage& frame)
     return sampleCount > 0 && (darkCount * 100 / sampleCount) > 90;
 }
 
+void ScreenCapturer::cleanupPlatform()
+{
+    delete x11Capturer_;
+    x11Capturer_ = nullptr;
+    useX11_ = false;
+}
+
 // sudo apt install libx11-dev libxtst-dev libxdamage-dev libxcomposite-dev libxrender-dev
 
 // Linux 平台使用 X11 + Damage 扩展优化捕获

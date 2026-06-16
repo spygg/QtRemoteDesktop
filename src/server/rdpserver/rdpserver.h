@@ -28,10 +28,10 @@ class RDPServer : public QObject {
     Q_OBJECT
 
 public:
-    explicit RDPServer(bool useSsl = true, QObject* parent = nullptr);
+    explicit RDPServer(QObject* parent = nullptr);
     ~RDPServer();
 
-    bool initialize(quint16 wsPort = 8080);
+    bool initialize(const QString& configPath = QString(), bool useSslOverride = true);
     void start();
 
     void loadSslConfig();
@@ -119,6 +119,8 @@ private:
 
     void switchToImageMode();
     bool switchToVideoMode();
+
+    void loadServerConfig(const QString& configPath);
 };
 
 #endif

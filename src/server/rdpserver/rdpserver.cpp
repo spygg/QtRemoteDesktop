@@ -11,6 +11,7 @@
 #endif
 
 #include <QBuffer>
+#include <QCoreApplication>
 #include <QCursor>
 #include <QFile>
 #include <QJsonArray>
@@ -19,13 +20,11 @@
 #include <QScreen>
 #include <QSslCertificate>
 
-RDPServer::RDPServer(bool useSsl, QObject* parent)
+RDPServer::RDPServer(QObject* parent)
     : QObject(parent)
-    , useSsl_(useSsl)
+    , useSsl_(true)
     , sslConfiguration_(nullptr)
 {
-    if (useSsl_)
-        loadSslConfig();
 }
 
 RDPServer::~RDPServer()
@@ -38,6 +37,35 @@ RDPServer::~RDPServer()
         delete sslConfiguration_;
         sslConfiguration_ = nullptr;
     }
+}
+
+void RDPServer::loadServerConfig(const QString& configPath)
+{
+    QString path = configPath.isEmpty()
+        ? QCoreApplication::applicationDirPath() + "/server_config.json"
+        : configPath;
+
+    QFile file(path);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+        qInfo() << "No server config found at" << path << "using defaults";
+        return;
+    }
+
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+
+    if (!doc.isObject())
+        return;
+
+    QJsonObject root = doc.object();
+
+    if (root.contains("ssl"))
+        useSsl_ = root["ssl"].toBool();
+
+    if (root.contains("httpPort"))
+        httpPort_ = static_cast<quint16>(root["httpPort"].toInt());
+
+    qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_;
 }
 
 void RDPServer::loadSslConfig()
@@ -102,10 +130,20 @@ void RDPServer::onModeChangeRequested(const QString& mode)
     }
 }
 
-bool RDPServer::initialize(quint16 port)
+bool RDPServer::initialize(const QString& configPath, bool useSslOverride)
 {
-    httpPort_ = port;
-    wsPort_ = port + 1;
+    // 加载配置文件
+    httpPort_ = 8080;
+    loadServerConfig(configPath);
+
+    // 命令行参数 --no-ssl 覆盖配置文件
+    if (!useSslOverride)
+        useSsl_ = false;
+
+    wsPort_ = httpPort_ + 1;
+
+    if (useSsl_)
+        loadSslConfig();
 
     // 初始化认证管理器
     authManager_ = new AuthManager(this);
@@ -230,6 +268,10 @@ bool RDPServer::initialize(quint16 port)
 
     // 获取屏幕几何信息
     QScreen* screen = QGuiApplication::primaryScreen();
+    if (!screen) {
+        qCritical() << "No primary screen available";
+        return false;
+    }
     screenGeometry_ = screen->geometry();
 
 #ifdef USE_FFMPEG
@@ -753,8 +795,9 @@ void RDPServer::onClientConnected(const QString& clientId)
 {
     // Validate auth token
     QString token = wsServer_->clientToken(clientId);
-    if (!authManager_->validateSession(token)) {
-        qWarning() << "Client rejected (invalid token):" << clientId;
+    qInfo() << "Client connecting, token present:" << !token.isEmpty() << "token:" << token.left(8) + "...";
+    if (token.isEmpty() || !authManager_->validateSession(token)) {
+        qWarning() << "Client rejected (invalid" << (token.isEmpty() ? "empty" : "bad") << "token):" << clientId;
         wsServer_->dropClient(clientId);
         return;
     }

@@ -358,6 +358,18 @@ static bool isFrameBlack(const QImage& frame)
     return sampleCount > 0 && (darkCount * 100 / sampleCount) > 90;
 }
 
+void ScreenCapturer::cleanupPlatform()
+{
+    delete gdiCapturer_;
+    gdiCapturer_ = nullptr;
+    useGDI_ = false;
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+    delete dxgiCapturer_;
+    dxgiCapturer_ = nullptr;
+    useDXGI_ = false;
+#endif
+}
+
 void ScreenCapturer::captureFrame()
 {
     QImage frame;

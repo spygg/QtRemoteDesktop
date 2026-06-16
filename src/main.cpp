@@ -1,5 +1,7 @@
 // main.cpp
-#include "server/rdpserver.h"
+#include "rdpserver.h"
+#include "singleapplication.h"
+
 #include <QApplication>
 #include <QCommandLineParser>
 
@@ -7,23 +9,26 @@ int main(int argc, char* argv[])
 {
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 
-    QApplication app(argc, argv);
+    SingleApplication a(argc, argv);
+    if (a.isRunning()) {
+        return 0;
+    }
 
     QCommandLineParser parser;
     parser.setApplicationDescription("Qt Remote Desktop Server");
     parser.addHelpOption();
     QCommandLineOption noSslOption("no-ssl", "Disable HTTPS/WSS (use plain HTTP/WS)");
     parser.addOption(noSslOption);
-    parser.process(app);
+    parser.process(a);
 
-    bool useSsl = !parser.isSet(noSslOption);
+    bool useSslOverride = !parser.isSet(noSslOption);
 
-    RDPServer server(useSsl);
-    if (!server.initialize(8084)) {
+    RDPServer server;
+    if (!server.initialize(QString(), useSslOverride)) {
         return 1;
     }
 
     server.start();
 
-    return app.exec();
+    return a.exec();
 }

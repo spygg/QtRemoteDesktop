@@ -1,0 +1,7 @@
+set(VIDEO_ENCODER VideoEncoder)
+set(HEADERS videoencoder.h)
+set(SOURCES videoencoder.cpp)
+add_library(${VIDEO_ENCODER} STATIC ${HEADERS} ${SOURCES})
+target_include_directories(${VIDEO_ENCODER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui)
+target_link_libraries(${VIDEO_ENCODER} PUBLIC Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui)
