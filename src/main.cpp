@@ -1,15 +1,24 @@
 // main.cpp
 #include "server/rdpserver.h"
 #include <QApplication>
+#include <QCommandLineParser>
 
 int main(int argc, char* argv[])
 {
-    // 设置高 DPI 支持（必须在 QApplication 创建之前）
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 
     QApplication app(argc, argv);
 
-    RDPServer server;
+    QCommandLineParser parser;
+    parser.setApplicationDescription("Qt Remote Desktop Server");
+    parser.addHelpOption();
+    QCommandLineOption noSslOption("no-ssl", "Disable HTTPS/WSS (use plain HTTP/WS)");
+    parser.addOption(noSslOption);
+    parser.process(app);
+
+    bool useSsl = !parser.isSet(noSslOption);
+
+    RDPServer server(useSsl);
     if (!server.initialize(8084)) {
         return 1;
     }

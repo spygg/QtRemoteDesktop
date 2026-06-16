@@ -28,7 +28,7 @@ class RDPServer : public QObject {
     Q_OBJECT
 
 public:
-    explicit RDPServer(QObject* parent = nullptr);
+    explicit RDPServer(bool useSsl = true, QObject* parent = nullptr);
     ~RDPServer();
 
     bool initialize(quint16 wsPort = 8080);
@@ -110,6 +110,7 @@ private:
     QRect screenGeometry_;
     QPoint lastCursorPos_{-1, -1};
 
+    bool useSsl_ = true;
     QSslConfiguration* sslConfiguration_;
 
     enum class ServerMode { Video,

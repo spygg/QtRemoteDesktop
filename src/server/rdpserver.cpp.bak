@@ -20,13 +20,11 @@
 #include <QSslCertificate>
 
 
-RDPServer::RDPServer(bool useSsl, QObject* parent)
+RDPServer::RDPServer(QObject* parent)
     : QObject(parent)
-    , useSsl_(useSsl)
     , sslConfiguration_(nullptr)
 {
-    if (useSsl_)
-        loadSslConfig();
+    loadSslConfig();
 }
 
 RDPServer::~RDPServer()
@@ -43,8 +41,6 @@ RDPServer::~RDPServer()
 
 void RDPServer::loadSslConfig()
 {
-    if (!useSsl_)
-        return;
     qDebug() << "SSL supported:" << QSslSocket::supportsSsl();
     qDebug() << "SSL library version:" << QSslSocket::sslLibraryVersionString();
     qDebug() << "SSL library build version:" << QSslSocket::sslLibraryBuildVersionString();
@@ -208,15 +204,11 @@ bool RDPServer::initialize(quint16 port)
             });
             if (locked) {
                 qInfo() << "Screen locked, connecting keyboard service...";
-#ifdef Q_OS_WIN
                 if (!inputManager_->connectKeyboardService())
                     qWarning() << "Keyboard service unavailable, input limited";
-#endif
             } else {
                 qInfo() << "Screen unlocked, disconnecting keyboard service";
-#ifdef Q_OS_WIN
                 inputManager_->disconnectKeyboardService();
-#endif
             }
         });
 
@@ -267,36 +259,44 @@ void RDPServer::setupHttpServer()
 
 void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
 {
-    if (useSsl_) {
-        QSslSocket* sslSocket = new QSslSocket(this);
-        if (!sslSocket->setSocketDescriptor(socketDescriptor)) {
-            qWarning() << "Failed to set socket descriptor to QSslSocket";
-            delete sslSocket;
-            return;
-        }
+    // 创建 QSslSocket 并设置描述符
+    QSslSocket* sslSocket = new QSslSocket(this);
+    if (!sslSocket->setSocketDescriptor(socketDescriptor)) {
+        qWarning() << "Failed to set socket descriptor to QSslSocket";
+        delete sslSocket;
+        return;
+    }
+
+    // 设置 SSL 配置（如果可用）
+    if (sslConfiguration_) {
         sslSocket->setSslConfiguration(*sslConfiguration_);
         sslSocket->startServerEncryption();
-        connect(sslSocket, &QSslSocket::readyRead, this, &RDPServer::onHttpRequest);
+    } else {
+        // 如果没有 SSL 配置，则直接作为普通 TCP 使用（但已创建 QSslSocket，可能不适合）
+        // 可以改为使用 QTcpSocket，但为简化，此处仍用 QSslSocket 但跳过加密
+        // 注意：QSslSocket 在未加密时也可作为普通 socket 使用
+    }
+
+    // 连接 readyRead 信号到 HTTP 请求处理
+    connect(sslSocket, &QSslSocket::readyRead, this, &RDPServer::onHttpRequest);
+
+    // 如果启用了加密，在加密完成后检查是否有数据
+    if (sslConfiguration_) {
         connect(sslSocket, &QSslSocket::encrypted, this, [this, sslSocket]() {
             if (sslSocket->bytesAvailable() > 0)
                 onHttpRequest();
         });
+
+        // 处理 SSL 错误（可根据需要忽略）
         connect(sslSocket, QOverload<const QList<QSslError>&>::of(&QSslSocket::sslErrors),
             [sslSocket](const QList<QSslError>& errors) {
                 qWarning() << "SSL errors:" << errors;
                 sslSocket->ignoreSslErrors();
             });
-        connect(sslSocket, &QSslSocket::disconnected, sslSocket, &QSslSocket::deleteLater);
-    } else {
-        QTcpSocket* tcpSocket = new QTcpSocket(this);
-        if (!tcpSocket->setSocketDescriptor(socketDescriptor)) {
-            qWarning() << "Failed to set socket descriptor to QTcpSocket";
-            delete tcpSocket;
-            return;
-        }
-        connect(tcpSocket, &QTcpSocket::readyRead, this, &RDPServer::onHttpRequest);
-        connect(tcpSocket, &QTcpSocket::disconnected, tcpSocket, &QTcpSocket::deleteLater);
     }
+
+    // 断开连接时清理
+    connect(sslSocket, &QSslSocket::disconnected, sslSocket, &QSslSocket::deleteLater);
 }
 
 void RDPServer::onHttpNewConnection()

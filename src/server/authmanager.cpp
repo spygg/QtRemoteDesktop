@@ -35,7 +35,7 @@ static QByteArray randomBytes(int count) {
 AuthManager::AuthManager(QObject* parent)
     : QObject(parent)
 {
-    configPath_ = QCoreApplication::applicationDirPath() + "/auth_config.json";
+    configPath_ = QCoreApplication::applicationDirPath() + "/server_config.json";
     loadConfig();
 }
 

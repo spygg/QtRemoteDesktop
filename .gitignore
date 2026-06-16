@@ -73,6 +73,7 @@ src/thridparty/ffmpeg/linux/presets/
 *.swp
 *.swo
 *~
+build*/
 
 # 日志文件
 *.log
