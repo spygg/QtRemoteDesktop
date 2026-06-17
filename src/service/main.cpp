@@ -1,8 +1,10 @@
 #include "service.h"
+
 #include <shellapi.h>
 #include <stdio.h>
 
-static void PrintHelp(const wchar_t* exeName) {
+static void PrintHelp(const wchar_t* exeName)
+{
     wprintf(L"QtRemoteDesktopKeyboardSvc - SYSTEM-level keyboard injector for secure desktop\n");
     wprintf(L"\n");
     wprintf(L"Installs/runs a Windows service that injects keyboard input via SendInput\n");
@@ -28,7 +30,8 @@ static void PrintHelp(const wchar_t* exeName) {
     wprintf(L"  %s --uninstall\n", exeName);
 }
 
-int main() {
+int main()
+{
     int argc;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) {

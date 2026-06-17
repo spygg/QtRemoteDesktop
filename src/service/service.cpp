@@ -1,6 +1,7 @@
 #include "service.h"
-#include <wtsapi32.h>
+
 #include <stdio.h>
+#include <wtsapi32.h>
 
 static SERVICE_STATUS_HANDLE g_statusHandle = NULL;
 static SERVICE_STATUS g_status = { 0 };
@@ -9,15 +10,18 @@ static HANDLE g_helperProcess = NULL;
 
 // ======================== Input Injection ========================
 
-static void InjectVk(UINT vk, BOOL isDown) {
+static void InjectVk(UINT vk, BOOL isDown)
+{
     INPUT in = {};
     in.type = INPUT_KEYBOARD;
     in.ki.wVk = vk;
-    if (!isDown) in.ki.dwFlags = KEYEVENTF_KEYUP;
+    if (!isDown)
+        in.ki.dwFlags = KEYEVENTF_KEYUP;
     SendInput(1, &in, sizeof(INPUT));
 }
 
-static void InjectChar(wchar_t ch) {
+static void InjectChar(wchar_t ch)
+{
     INPUT inputs[2] = {};
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
@@ -28,7 +32,8 @@ static void InjectChar(wchar_t ch) {
     SendInput(2, inputs, sizeof(INPUT));
 }
 
-static void InjectMouseMove(int x, int y) {
+static void InjectMouseMove(int x, int y)
+{
     INPUT in = {};
     in.type = INPUT_MOUSE;
     in.mi.dx = x * 65535 / GetSystemMetrics(SM_CXSCREEN);
@@ -37,14 +42,22 @@ static void InjectMouseMove(int x, int y) {
     SendInput(1, &in, sizeof(INPUT));
 }
 
-static void InjectMouseButton(int x, int y, int button, BOOL isDown) {
+static void InjectMouseButton(int x, int y, int button, BOOL isDown)
+{
     InjectMouseMove(x, y);
     DWORD flags = 0;
     switch (button) {
-        case 0: flags = isDown ? MOUSEEVENTF_LEFTDOWN   : MOUSEEVENTF_LEFTUP;   break;
-        case 1: flags = isDown ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP; break;
-        case 2: flags = isDown ? MOUSEEVENTF_RIGHTDOWN  : MOUSEEVENTF_RIGHTUP;  break;
-        default: return;
+    case 0:
+        flags = isDown ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+        break;
+    case 1:
+        flags = isDown ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+        break;
+    case 2:
+        flags = isDown ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+        break;
+    default:
+        return;
     }
     INPUT in = {};
     in.type = INPUT_MOUSE;
@@ -52,7 +65,8 @@ static void InjectMouseButton(int x, int y, int button, BOOL isDown) {
     SendInput(1, &in, sizeof(INPUT));
 }
 
-static void InjectWheel(int delta) {
+static void InjectWheel(int delta)
+{
     INPUT in = {};
     in.type = INPUT_MOUSE;
     in.mi.mouseData = delta * WHEEL_DELTA;
@@ -62,7 +76,8 @@ static void InjectWheel(int delta) {
 
 // ======================== Pipe Server (runs in helper) ========================
 
-static int RunPipeServer() {
+static int RunPipeServer()
+{
     SECURITY_DESCRIPTOR sd;
     InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
     SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
@@ -75,11 +90,15 @@ static int RunPipeServer() {
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             1, 0, 1024, 0, &sa);
 
-        if (pipe == INVALID_HANDLE_VALUE) return 1;
+        if (pipe == INVALID_HANDLE_VALUE)
+            return 1;
 
         OVERLAPPED connectOv = { 0 };
         connectOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-        if (!connectOv.hEvent) { CloseHandle(pipe); return 1; }
+        if (!connectOv.hEvent) {
+            CloseHandle(pipe);
+            return 1;
+        }
 
         BOOL ok = ConnectNamedPipe(pipe, &connectOv);
         if (!ok && GetLastError() != ERROR_IO_PENDING
@@ -112,7 +131,8 @@ static int RunPipeServer() {
         while (true) {
             ResetEvent(readOv.hEvent);
             BOOL readOk = ReadFile(pipe, buffer, sizeof(buffer), NULL, &readOv);
-            if (!readOk && GetLastError() != ERROR_IO_PENDING) break;
+            if (!readOk && GetLastError() != ERROR_IO_PENDING)
+                break;
 
             HANDLE readEvents[2] = { g_stopEvent, readOv.hEvent };
             DWORD rr = WaitForMultipleObjects(2, readEvents, FALSE, INFINITE);
@@ -125,22 +145,24 @@ static int RunPipeServer() {
             }
 
             DWORD transferred = 0;
-            if (!GetOverlappedResult(pipe, &readOv, &transferred, FALSE)) break;
-            if (transferred == 0) break;
+            if (!GetOverlappedResult(pipe, &readOv, &transferred, FALSE))
+                break;
+            if (transferred == 0)
+                break;
 
             switch (buffer[0]) {
-                case MSG_TYPE_VK:
-                    if (transferred >= 6) {
-                        UINT vk = *(UINT*)(buffer + 1);
-                        InjectVk(vk, buffer[5] != 0);
-                    }
-                    break;
-                case MSG_TYPE_UNICODE:
-                    if (transferred >= 3) {
-                        wchar_t ch = *(wchar_t*)(buffer + 1);
-                        InjectChar(ch);
-                    }
-                    break;
+            case MSG_TYPE_VK:
+                if (transferred >= 6) {
+                    UINT vk = *(UINT*)(buffer + 1);
+                    InjectVk(vk, buffer[5] != 0);
+                }
+                break;
+            case MSG_TYPE_UNICODE:
+                if (transferred >= 3) {
+                    wchar_t ch = *(wchar_t*)(buffer + 1);
+                    InjectChar(ch);
+                }
+                break;
             }
         }
 
@@ -153,9 +175,11 @@ static int RunPipeServer() {
 
 // ======================== Helper Process ========================
 
-int RunHelper(DWORD sessionId) {
+int RunHelper(DWORD sessionId)
+{
     g_stopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!g_stopEvent) return 1;
+    if (!g_stopEvent)
+        return 1;
 
     int result = RunPipeServer();
 
@@ -166,13 +190,14 @@ int RunHelper(DWORD sessionId) {
 
 // ======================== Service Process ========================
 
-static DWORD FindActiveSession() {
+static DWORD FindActiveSession()
+{
     WTS_SESSION_INFOW* sessions = NULL;
     DWORD count = 0;
     DWORD activeId = 0;
 
     if (WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1,
-                              &sessions, &count)) {
+            &sessions, &count)) {
         for (DWORD i = 0; i < count; i++) {
             if (sessions[i].State == WTSActive) {
                 activeId = sessions[i].SessionId;
@@ -184,7 +209,8 @@ static DWORD FindActiveSession() {
     return activeId;
 }
 
-static HANDLE CreateHelperInSession(DWORD sessionId) {
+static HANDLE CreateHelperInSession(DWORD sessionId)
+{
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(NULL, path, MAX_PATH);
 
@@ -235,9 +261,11 @@ static HANDLE CreateHelperInSession(DWORD sessionId) {
 
 // ======================== Service Control ========================
 
-void WINAPI ServiceMain(DWORD argc, LPWSTR* argv) {
+void WINAPI ServiceMain(DWORD argc, LPWSTR* argv)
+{
     g_statusHandle = RegisterServiceCtrlHandlerW(SERVICE_NAME, ServiceCtrlHandler);
-    if (!g_statusHandle) return;
+    if (!g_statusHandle)
+        return;
 
     g_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     g_status.dwCurrentState = SERVICE_START_PENDING;
@@ -283,20 +311,22 @@ void WINAPI ServiceMain(DWORD argc, LPWSTR* argv) {
     SetServiceStatus(g_statusHandle, &g_status);
 }
 
-void WINAPI ServiceCtrlHandler(DWORD ctrlCode) {
+void WINAPI ServiceCtrlHandler(DWORD ctrlCode)
+{
     switch (ctrlCode) {
-        case SERVICE_CONTROL_STOP:
-        case SERVICE_CONTROL_SHUTDOWN:
-            g_status.dwCurrentState = SERVICE_STOP_PENDING;
-            SetServiceStatus(g_statusHandle, &g_status);
-            SetEvent(g_stopEvent);
-            break;
+    case SERVICE_CONTROL_STOP:
+    case SERVICE_CONTROL_SHUTDOWN:
+        g_status.dwCurrentState = SERVICE_STOP_PENDING;
+        SetServiceStatus(g_statusHandle, &g_status);
+        SetEvent(g_stopEvent);
+        break;
     }
 }
 
 // ======================== Install / Uninstall ========================
 
-BOOL InstallService() {
+BOOL InstallService()
+{
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(NULL, path, MAX_PATH);
 
@@ -329,7 +359,8 @@ BOOL InstallService() {
     return FALSE;
 }
 
-BOOL UninstallService() {
+BOOL UninstallService()
+{
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (!scm) {
         wprintf(L"OpenSCManagerW failed: %lu\n", GetLastError());
@@ -337,7 +368,7 @@ BOOL UninstallService() {
     }
 
     SC_HANDLE svc = OpenServiceW(scm, SERVICE_NAME,
-                                 SERVICE_QUERY_STATUS | SERVICE_STOP | DELETE);
+        SERVICE_QUERY_STATUS | SERVICE_STOP | DELETE);
     if (!svc) {
         wprintf(L"Service not found: %lu\n", GetLastError());
         CloseServiceHandle(scm);

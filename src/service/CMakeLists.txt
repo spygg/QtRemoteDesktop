@@ -3,7 +3,7 @@ if(WIN32)
         main.cpp
         service.cpp
         service.h
-        main.rc
+        res/main.rc
     )
     target_link_libraries(QtRemoteDesktopKeyboardSvc PRIVATE user32 shell32 wtsapi32)
     set_target_properties(QtRemoteDesktopKeyboardSvc PROPERTIES
