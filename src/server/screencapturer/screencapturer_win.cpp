@@ -163,7 +163,13 @@ public:
         // 创建重复输出接口
 
         IDXGIOutput1* output1 = nullptr;
-        output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1);
+        hr = output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1);
+        if (FAILED(hr) || !output1) {
+            output->Release();
+            adapter->Release();
+            dxgiDevice->Release();
+            return false;
+        }
         hr = output1->DuplicateOutput(device_, &deskDupl_);
         output1->Release();
         output->Release();
@@ -193,7 +199,7 @@ public:
         DXGI_OUTDUPL_FRAME_INFO frameInfo;
 
         // 增加超时时间，Win11 可能需要更长时间
-        HRESULT hr = deskDupl_->AcquireNextFrame(0, &frameInfo, &desktopResource);
+        HRESULT hr = deskDupl_->AcquireNextFrame(100, &frameInfo, &desktopResource);
 
         if (FAILED(hr)) {
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {

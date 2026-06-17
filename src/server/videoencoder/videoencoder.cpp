@@ -192,54 +192,6 @@ void VideoEncoder::encodingLoop()
         av_packet_free(&packet);
     }
 }
-// void VideoEncoder::encodingLoop()
-// {
-//     while (!abort_) {
-//         QImage image;
-//         {
-//             QMutexLocker locker(&mutex_);
-//             while (frameQueue_.isEmpty() && !abort_) {
-//                 condition_.wait(&mutex_);
-//             }
-//             if (abort_)
-//                 break;
-//             image = frameQueue_.dequeue();
-//         }
-
-//         // 转换 RGB -> YUV
-//         const uint8_t* srcData[1] = { image.bits() };
-//         int srcLinesize[1] = { static_cast<int>(image.bytesPerLine()) };
-//         sws_scale(swsCtx_, srcData, srcLinesize, 0, image.height(),
-//             frame_->data, frame_->linesize);
-
-//         // 设置时间戳（毫秒）
-//         frame_->pts = frameCount_++;
-
-//         // 发送帧到编码器
-//         int ret = avcodec_send_frame(codecCtx_, frame_);
-//         if (ret < 0)
-//             continue;
-
-//         // 接收编码后的包
-//         AVPacket* packet = av_packet_alloc();
-//         while (ret >= 0) {
-//             ret = avcodec_receive_packet(codecCtx_, packet);
-//             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-//                 break;
-//             if (ret < 0)
-//                 break;
-
-//             bool isKeyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0;
-//             QByteArray data(reinterpret_cast<char*>(packet->data), packet->size);
-//             qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
-
-//             emit encodedFrame(data, isKeyframe, timestamp);
-
-//             av_packet_unref(packet);
-//         }
-//         av_packet_free(&packet);
-//     }
-// }
 
 void VideoEncoder::shutdown()
 {

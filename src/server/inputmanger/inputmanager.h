@@ -29,7 +29,9 @@ public:
     bool connectKeyboardService();
     void disconnectKeyboardService();
     bool isKeyboardServiceConnected() const { return servicePipe_ != INVALID_HANDLE_VALUE; }
-#elif defined(Q_OS_LINUX)
+#endif
+
+#ifdef Q_OS_LINUX
     // Switch to kernel-level uinput (works on lock screen / Wayland)
     bool initUinput();
     void destroyUinput();

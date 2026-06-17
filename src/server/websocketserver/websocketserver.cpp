@@ -123,34 +123,6 @@ void WebSocketServer::onTextMessageReceived(const QString& message)
         emit inputReceived(clientId, obj);
     }
 }
-// void WebSocketServer::onTextMessageReceived(const QString& message)
-// {
-//     QWebSocket* socket = qobject_cast<QWebSocket*>(sender());
-//     if (!socket)
-//         return;
-//     QString clientId = socketToId_[socket];
-
-//     QJsonParseError error;
-//     QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
-//     if (error.error != QJsonParseError::NoError) {
-//         qWarning() << "Invalid JSON from client:" << error.errorString();
-//         return;
-//     }
-//     if (!doc.isObject())
-//         return;
-
-//     QJsonObject obj = doc.object();
-//     QString type = obj["type"].toString();
-
-//     // 特殊处理编码器切换请求
-//     if (type == "change_codec") {
-//         QString codec = obj["codec"].toString();
-//         emit codecChangeRequested(codec);
-//     } else {
-//         // 其他输入事件转发给上层
-//         emit inputReceived(clientId, obj);
-//     }
-// }
 
 void WebSocketServer::onBinaryMessageReceived(const QByteArray& message)
 {

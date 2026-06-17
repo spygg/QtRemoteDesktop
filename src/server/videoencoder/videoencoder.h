@@ -8,6 +8,7 @@
 #include <QQueue>
 #include <QThread>
 #include <QWaitCondition>
+#include <atomic>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -48,7 +49,7 @@ private:
     QWaitCondition condition_;
     QQueue<QImage> frameQueue_;
     static constexpr int kMaxFrameQueueSize = 10; // 队列上限，防止 OOM
-    bool abort_ = false;
+    std::atomic<bool> abort_{false};
 
     AVCodecContext* codecCtx_ = nullptr;
     AVFrame* frame_ = nullptr;

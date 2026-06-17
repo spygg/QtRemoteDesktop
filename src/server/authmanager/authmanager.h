@@ -30,7 +30,8 @@ private:
     QMap<QString, Session> sessions_;
     QString configPath_;
 
-    static QString md5Hex(const QString& input);
+    static QString hashPassword(const QString& password, const QString& salt);
+    static QString generateSalt();
     void loadConfig();
     void saveConfig();
     QString generateToken();

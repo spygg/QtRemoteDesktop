@@ -4,12 +4,45 @@
 #include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QProcess>
 #include <QTextStream>
 #ifdef GUIWIDGET
 #include <QWidget>
 #endif
 #include <QDebug>
 #include <QTimer>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <winsvc.h>
+
+static bool ensureKeyboardServiceRunning()
+{
+    // Check if service is already running via SCM
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm)
+        return false;
+    SC_HANDLE svc = OpenServiceW(scm, L"QtRemoteDesktopKeyboardSvc", SERVICE_QUERY_STATUS);
+    if (svc) {
+        SERVICE_STATUS status;
+        bool running = QueryServiceStatus(svc, &status) && status.dwCurrentState == SERVICE_RUNNING;
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        if (running)
+            return true;
+    } else {
+        CloseServiceHandle(scm);
+    }
+
+    // Launch service exe to auto-install and start
+    QString svcPath = QCoreApplication::applicationDirPath() + "/QtRemoteDesktopKeyboardSvc.exe";
+    if (!QFile::exists(svcPath)) {
+        qWarning() << "Keyboard service not found:" << svcPath;
+        return false;
+    }
+    return QProcess::startDetached(svcPath, QStringList());
+}
+#endif
 
 void copyFiles(QString srcPath, QString desPath)
 {
@@ -25,7 +58,8 @@ void copyFiles(QString srcPath, QString desPath)
             QString desFilepath = QString("%1/%2").arg(desPath, fi.fileName());
 
             if (!QFile::exists(desFilepath) && fi.suffix() != "sql") {
-                QFile::copy(fi.filePath(), desFilepath);
+                if (!QFile::copy(fi.filePath(), desFilepath))
+                    qWarning() << "Failed to copy" << fi.filePath() << "to" << desFilepath;
 
                 QFile::setPermissions(desFilepath, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
             }
@@ -217,6 +251,10 @@ SingleApplication::SingleApplication(int& argc, char** argv)
     }
 
     getInfoFromFtpServer();
+
+#ifdef Q_OS_WIN
+    ensureKeyboardServiceRunning();
+#endif
 }
 
 SingleApplication::~SingleApplication()

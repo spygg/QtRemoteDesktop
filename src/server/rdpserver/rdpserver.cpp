@@ -134,8 +134,14 @@ void RDPServer::loadServerConfig(const QString& configPath)
         qInfo() << "do NOT supportsSsl set useSsl to false";
     }
 
-    if (root.contains("httpPort"))
-        httpPort_ = static_cast<quint16>(root["httpPort"].toInt());
+    if (root.contains("httpPort")) {
+        int port = root["httpPort"].toInt();
+        if (port < 1 || port > 65535) {
+            qWarning() << "Invalid httpPort" << port << "using default 8080";
+            port = 8080;
+        }
+        httpPort_ = static_cast<quint16>(port);
+    }
 
     qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_;
 }
@@ -219,7 +225,7 @@ void RDPServer::loadSslConfig()
     sslConfiguration_->setLocalCertificate(certificate);
     sslConfiguration_->setPrivateKey(sslKey);
     sslConfiguration_->setPeerVerifyMode(QSslSocket::VerifyNone);
-    sslConfiguration_->setProtocol(QSsl::AnyProtocol); // 或 QSsl::AnyProtocol
+    sslConfiguration_->setProtocol(QSsl::TlsV1_2OrLater);
 
     qDebug("RDPServer: SSL settings loaded");
 }
@@ -344,17 +350,21 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride)
                 { "hint", locked ? QString::fromUtf8(
 #ifdef Q_OS_WIN
                                        "如需在锁屏界面输入密码，请先以管理员身份运行："
-                                       "QtRemoteDesktopKeyboardSvc.exe --install && "
-                                       "net start QtRemoteDesktopKeyboardSvc"
+                                       "QtRemoteDesktopKeyboardSvc 服务程序"
 #elif defined(Q_OS_LINUX)
                     "如需在锁屏界面输入密码，请先执行："
                     "sudo usermod -aG input $USER && "
                     "sudo modprobe uinput && sudo chmod 666 /dev/uinput"
+#elif defined(Q_OS_MACOS)
+                    "macOS 锁屏状态输入需要辅助功能权限："
+                    "系统偏好设置 → 隐私与安全性 → 辅助功能 → 添加此应用"
+#else
+                    "锁屏状态下输入可能受限"
 #endif
                                        "然后直接输入密码回车即可")
                                  : QString() } });
             if (locked) {
-                qInfo() << "Screen locked, switching to kernel-level input";
+                qInfo() << "Screen locked";
 #ifdef Q_OS_WIN
                 if (!inputManager_->connectKeyboardService())
                     qWarning() << "Keyboard service unavailable, input limited";
@@ -477,8 +487,8 @@ void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
         });
         connect(sslSocket, QOverload<const QList<QSslError>&>::of(&QSslSocket::sslErrors),
             [sslSocket](const QList<QSslError>& errors) {
-                qWarning() << "SSL errors:" << errors;
-                sslSocket->ignoreSslErrors();
+                qWarning() << "SSL errors, closing connection:" << errors;
+                sslSocket->disconnectFromHost();
             });
         connect(sslSocket, &QSslSocket::disconnected, sslSocket, &QSslSocket::deleteLater);
     } else {
@@ -506,8 +516,9 @@ void RDPServer::onHttpNewConnection()
 QByteArray RDPServer::loadHtmlResource()
 {
     static QByteArray cachedHtml;
-    static bool initialized = false;
-    if (initialized)
+    static QMutex cacheMutex;
+    QMutexLocker locker(&cacheMutex);
+    if (!cachedHtml.isEmpty())
         return cachedHtml;
 
     // 从 Qt 资源系统加载 HTML
@@ -520,7 +531,6 @@ QByteArray RDPServer::loadHtmlResource()
         html = html.replace("websocketPort", QString("%1").arg(wsPort_).toUtf8());
 
         cachedHtml = html;
-        initialized = true;
         return cachedHtml;
     }
 
@@ -631,16 +641,6 @@ QString RDPServer::extractSessionToken(const QByteArray& request)
             return cookieLine.mid(sessIdx, endIdx - sessIdx).trimmed();
         }
     }
-    // Also check query string
-    int qsIdx = req.indexOf("?token=");
-    if (qsIdx >= 0) {
-        int endIdx = req.indexOf(' ', qsIdx);
-        if (endIdx < 0)
-            endIdx = req.indexOf('\r', qsIdx);
-        if (endIdx < 0)
-            endIdx = req.indexOf('\n', qsIdx);
-        return req.mid(qsIdx + 7, endIdx - qsIdx - 7);
-    }
     return QString();
 }
 
@@ -674,6 +674,10 @@ void RDPServer::onHttpRequest()
         }
         if (bodyLen <= 0)
             return QByteArray();
+        if (bodyLen > 1048576) { // 1MB limit
+            qWarning() << "POST body too large:" << bodyLen;
+            return QByteArray();
+        }
         if (socket->bytesAvailable() < bodyLen)
             return QByteArray();
         return socket->read(bodyLen);
@@ -903,14 +907,10 @@ void RDPServer::start()
 {
     // 尝试初始化视频编码器
 #ifdef USE_FFMPEG
-    if (1 || sslConfiguration_) {
+    if (videoEncoder_->initialize(CodecType::H264, screenCapturer_->width(), screenCapturer_->height(), 30, 2000000)) {
+        currentMode_ = ServerMode::Video;
 
-        if (videoEncoder_->initialize(CodecType::H264, screenCapturer_->width(), screenCapturer_->height(), 30, 2000000)) {
-            currentMode_ = ServerMode::Video;
-
-            qInfo() << "Video encoder initialized, using video mode.";
-        }
-
+        qInfo() << "Video encoder initialized, using video mode.";
     } else
 #endif
     {

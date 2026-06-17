@@ -46,20 +46,7 @@ add_subdirectory(server/screencapturer)
 add_subdirectory(server/websocketserver)
 add_subdirectory(server/singleapplication)
 
-if(WIN32)
-    add_executable(QtRemoteDesktopKeyboardSvc
-        service/main.cpp
-        service/service.cpp
-        service/service.h
-    )
-    target_link_libraries(QtRemoteDesktopKeyboardSvc PRIVATE user32 shell32 wtsapi32)
-    set_target_properties(QtRemoteDesktopKeyboardSvc PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
-        WIN32_EXECUTABLE FALSE
-        AUTOMOC OFF
-    )
-    target_link_options(QtRemoteDesktopKeyboardSvc PRIVATE -static-libgcc -static-libstdc++)
-endif()
+add_subdirectory(service)
 
 # ---- Video encoder (optional) ----
 if(USE_FFMPEG)
@@ -68,6 +55,9 @@ endif()
 
 # ---- Main executable ----
 set(SOURCES main.cpp)
+if(WIN32)
+    list(APPEND SOURCES res/main.rc)
+endif()
 
 add_executable(${PROJECT_NAME}
     ${SOURCES}
@@ -115,6 +105,10 @@ endif()
 if(WIN32)
     target_link_libraries(InputManager PUBLIC user32)
     target_link_libraries(ScreenCapturer PUBLIC d3d11 dxgi gdi32)
+elseif(APPLE)
+    find_library(COREGRAPHICS CoreGraphics)
+    target_link_libraries(InputManager PUBLIC ${COREGRAPHICS})
+    target_link_libraries(ScreenCapturer PUBLIC ${COREGRAPHICS})
 elseif(UNIX AND NOT APPLE)
     find_package(X11 REQUIRED)
     target_link_libraries(InputManager PUBLIC ${X11_LIBRARIES} Xtst)

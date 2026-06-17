@@ -379,7 +379,12 @@
             const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
             return match ? decodeURIComponent(match[2]) : '';
         }
-        const sessionToken = getCookie('session') || location.search.match(/[?&]token=([^&]+)/)?.[1] || '';
+        const sessionToken = getCookie('session') || '';
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
         const CONFIG = {
             wsUrl: `ws://${location.hostname}:websocketPort${sessionToken ? '?token=' + sessionToken : ''}`,
             targetFps: 30,
@@ -938,23 +943,33 @@
             // Parent dir
             if (currentRemotePath !== '/') {
                 const parentPath = parentDir(currentRemotePath);
-                container.innerHTML += `<div class="file-item" onclick="navigateTo('${parentPath}')">
-                    <span class="icon">📂</span><span class="name">..</span><span class="size"></span></div>`;
+                const item = document.createElement('div');
+                item.className = 'file-item';
+                item.onclick = () => navigateTo(parentPath);
+                item.innerHTML = '<span class="icon">📂</span><span class="name">..</span><span class="size"></span>';
+                container.appendChild(item);
             }
             // Dirs first, then files
             const dirs = items.filter(i => i.isDir).sort((a,b) => a.name.localeCompare(b.name));
             const files = items.filter(i => !i.isDir).sort((a,b) => a.name.localeCompare(b.name));
             for (const item of dirs) {
                 const fullPath = joinPath(currentRemotePath, item.name);
-                container.innerHTML += `<div class="file-item">
-                    <span class="icon">📁</span>
-                    <span class="name" ondblclick="navigateTo('${fullPath}')">${item.name}</span>
-                    <span class="size"><button class="file-action-btn" onclick="event.stopPropagation();downloadFile('${item.name}')">⬇</button></span>
-                </div>`;
+                const div = document.createElement('div');
+                div.className = 'file-item';
+                div.innerHTML = '<span class="icon">📁</span><span class="name"></span><span class="size"><button class="file-action-btn">⬇</button></span>';
+                div.querySelector('.name').textContent = item.name;
+                div.querySelector('.name').ondblclick = () => navigateTo(fullPath);
+                div.querySelector('.file-action-btn').onclick = (e) => { e.stopPropagation(); downloadFile(item.name); };
+                container.appendChild(div);
             }
             for (const item of files) {
-                container.innerHTML += `<div class="file-item" onclick="downloadFile('${item.name}')">
-                    <span class="icon">📄</span><span class="name">${item.name}</span><span class="size">${formatSize(item.size)}</span></div>`;
+                const div = document.createElement('div');
+                div.className = 'file-item';
+                div.onclick = () => downloadFile(item.name);
+                div.innerHTML = '<span class="icon">📄</span><span class="name"></span><span class="size"></span>';
+                div.querySelector('.name').textContent = item.name;
+                div.querySelector('.size').textContent = formatSize(item.size);
+                container.appendChild(div);
             }
         }
 

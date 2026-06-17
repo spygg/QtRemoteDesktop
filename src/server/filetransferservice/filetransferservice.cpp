@@ -39,7 +39,12 @@ void FileTransferService::writeTarHeader(QByteArray& data, const QString& name, 
     memcpy(header.data() + 116, "000000\0", 7);
 
     QByteArray sizeOct = QString::number(size, 8).toLatin1();
-    sizeOct = QByteArray(11 - sizeOct.size(), '0') + sizeOct;
+    if (sizeOct.size() > 11) {
+        qWarning() << "writeTarHeader: file size too large for tar format:" << size;
+        sizeOct = QByteArray(11, '7'); // 填满表示最大
+    } else {
+        sizeOct = QByteArray(11 - sizeOct.size(), '0') + sizeOct;
+    }
     memcpy(header.data() + 124, sizeOct.constData(), 11);
     header[135] = ' ';
 

@@ -14,6 +14,7 @@
 #include <QTcpSocket>
 #include <QThread>
 #include <QWaitCondition>
+#include <atomic>
 #include <memory>
 
 class WebSocketServer;
@@ -49,7 +50,7 @@ private:
     QMutex mutex_;
     QWaitCondition cond_;
     QQueue<QImage> queue_;
-    bool abort_ = false;
+    std::atomic<bool> abort_{false};
     enum { kMaxQueueSize = 5 };
 };
 

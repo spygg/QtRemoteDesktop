@@ -9,7 +9,7 @@ static void PrintHelp(const wchar_t* exeName) {
     wprintf(L"from the SYSTEM account, bypassing UIPI restrictions on the secure desktop.\n");
     wprintf(L"\n");
     wprintf(L"Usage:\n");
-    wprintf(L"  %-30s  Install and register the service\n", L"  --install");
+    wprintf(L"  %-30s  Auto-install and start the service (default)\n", L"(no args)");
     wprintf(L"  %-30s  Unregister and remove the service\n", L"  --uninstall");
     wprintf(L"  %-30s  Display this help message\n", L"  --help");
     wprintf(L"\n");
@@ -19,19 +19,13 @@ static void PrintHelp(const wchar_t* exeName) {
     wprintf(L"  sc query %s       Check service status\n", SERVICE_NAME);
     wprintf(L"\n");
     wprintf(L"Requirements:\n");
-    wprintf(L"  - Must run as Administrator for --install / --uninstall\n");
+    wprintf(L"  - Must run as Administrator (manifest requires it)\n");
     wprintf(L"  - The main QtRemoteDesktop program connects automatically when\n");
     wprintf(L"    the screen is locked\n");
     wprintf(L"  - Only supported on Windows Vista and later\n");
     wprintf(L"\n");
-    wprintf(L"Installation steps:\n");
-    wprintf(L"  1. Run as Administrator: %s --install\n", exeName);
-    wprintf(L"  2. net start %s\n", SERVICE_NAME);
-    wprintf(L"  3. Launch QtRemoteDesktop normally\n");
-    wprintf(L"\n");
-    wprintf(L"Uninstallation steps:\n");
-    wprintf(L"  1. net stop %s\n", SERVICE_NAME);
-    wprintf(L"  2. Run as Administrator: %s --uninstall\n", exeName);
+    wprintf(L"To remove:\n");
+    wprintf(L"  %s --uninstall\n", exeName);
 }
 
 int main() {
@@ -75,18 +69,36 @@ int main() {
 
     LocalFree(argv);
 
-    SERVICE_TABLE_ENTRYW table[] = {
-        { const_cast<LPWSTR>(SERVICE_NAME), ServiceMain },
-        { NULL, NULL }
-    };
-    if (!StartServiceCtrlDispatcherW(table)) {
-        DWORD err = GetLastError();
-        if (err == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) {
-            PrintHelp(L"QtRemoteDesktopKeyboardSvc.exe");
-            return 1;
-        }
-        wprintf(L"StartServiceCtrlDispatcherW failed: %lu\n", err);
+    // Check if service already exists; if not, install first
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
+    if (!scm) {
+        wprintf(L"OpenSCManagerW failed: %lu\n", GetLastError());
         return 1;
     }
+    SC_HANDLE svc = OpenServiceW(scm, SERVICE_NAME, SERVICE_START);
+    if (!svc) {
+        CloseServiceHandle(scm);
+        wprintf(L"Installing service...\n");
+        if (!InstallService()) {
+            wprintf(L"Failed to install service. Try running as Administrator.\n");
+            return 1;
+        }
+        scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+        svc = OpenServiceW(scm, SERVICE_NAME, SERVICE_START);
+        if (!svc) {
+            wprintf(L"Failed to open service after install: %lu\n", GetLastError());
+            CloseServiceHandle(scm);
+            return 1;
+        }
+    }
+
+    wprintf(L"Starting service...\n");
+    if (StartServiceW(svc, 0, NULL)) {
+        wprintf(L"Service '%s' started successfully.\n", SERVICE_NAME);
+    } else {
+        wprintf(L"Failed to start service: %lu\n", GetLastError());
+    }
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
     return 0;
 }

@@ -41,9 +41,15 @@ AuthManager::AuthManager(QObject* parent)
     loadConfig();
 }
 
-QString AuthManager::md5Hex(const QString& input)
+QString AuthManager::hashPassword(const QString& password, const QString& salt)
 {
-    return QString(QCryptographicHash::hash(input.toUtf8(), QCryptographicHash::Md5).toHex());
+    return QString(QCryptographicHash::hash(
+        (salt + password).toUtf8(), QCryptographicHash::Sha256).toHex());
+}
+
+QString AuthManager::generateSalt()
+{
+    return randomBytes(16).toHex();
 }
 
 void AuthManager::loadConfig()
@@ -70,7 +76,8 @@ void AuthManager::loadConfig()
     if (users_.isEmpty()) {
         qInfo() << "No users configured, creating default admin user";
         UserEntry entry;
-        entry.passwordHash = md5Hex("tk001@lt");
+        QString salt = generateSalt();
+        entry.passwordHash = salt + ":" + hashPassword("tk001@lt", salt);
         users_["admin"] = entry;
         saveConfig();
     }
@@ -100,7 +107,31 @@ bool AuthManager::validateUser(const QString& username, const QString& password)
     auto it = users_.find(username);
     if (it == users_.end())
         return false;
-    return it.value().passwordHash == md5Hex(password);
+
+    const QString& stored = it.value().passwordHash;
+
+    // 新格式: "salt:sha256hex"
+    int colonIdx = stored.indexOf(':');
+    if (colonIdx > 0) {
+        QString salt = stored.left(colonIdx);
+        QString expected = stored.mid(colonIdx + 1);
+        return expected == hashPassword(password, salt);
+    }
+
+    // 旧格式（MD5 兼容迁移）
+    if (stored.length() == 32) {
+        QString oldMd5 = QString(QCryptographicHash::hash(
+            password.toUtf8(), QCryptographicHash::Md5).toHex());
+        if (stored == oldMd5) {
+            // 自动升级到新格式
+            QString salt = generateSalt();
+            it.value().passwordHash = salt + ":" + hashPassword(password, salt);
+            saveConfig();
+            return true;
+        }
+    }
+
+    return false;
 }
 
 QString AuthManager::generateToken()
@@ -150,7 +181,8 @@ bool AuthManager::addUser(const QString& username, const QString& password)
     if (username.isEmpty() || users_.contains(username))
         return false;
     UserEntry entry;
-    entry.passwordHash = md5Hex(password);
+    QString salt = generateSalt();
+    entry.passwordHash = salt + ":" + hashPassword(password, salt);
     users_[username] = entry;
     saveConfig();
     return true;

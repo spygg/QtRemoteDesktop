@@ -6,13 +6,21 @@
 
 #define SERVICE_PIPE_NAME L"\\\\.\\pipe\\QtRemoteDesktopKeyboardSvc"
 
+static bool sendInputChecked(UINT count, LPINPUT inputs, int cbSize)
+{
+    UINT sent = SendInput(count, inputs, cbSize);
+    if (sent != count)
+        qWarning() << "SendInput: sent" << sent << "of" << count << "events, error:" << GetLastError();
+    return sent == count;
+}
+
 void InputManager::injectMouseMove(int x, int y) {
     INPUT input = {};
     input.type = INPUT_MOUSE;
     input.mi.dx = x * 65535 / GetSystemMetrics(SM_CXSCREEN);
     input.mi.dy = y * 65535 / GetSystemMetrics(SM_CYSCREEN);
     input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    SendInput(1, &input, sizeof(INPUT));
+    sendInputChecked(1, &input, sizeof(INPUT));
 }
 
 void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
@@ -28,7 +36,7 @@ void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
     INPUT input = {};
     input.type = INPUT_MOUSE;
     input.mi.dwFlags = flags;
-    SendInput(1, &input, sizeof(INPUT));
+    sendInputChecked(1, &input, sizeof(INPUT));
 }
 
 void InputManager::injectWheel(int delta) {
@@ -36,7 +44,7 @@ void InputManager::injectWheel(int delta) {
     input.type = INPUT_MOUSE;
     input.mi.mouseData = delta * WHEEL_DELTA;
     input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-    SendInput(1, &input, sizeof(INPUT));
+    sendInputChecked(1, &input, sizeof(INPUT));
 }
 
 void InputManager::sendModifierEvent(int vk, bool isDown) {
@@ -46,7 +54,7 @@ void InputManager::sendModifierEvent(int vk, bool isDown) {
     if (!isDown) {
         input.ki.dwFlags = KEYEVENTF_KEYUP;
     }
-    SendInput(1, &input, sizeof(INPUT));
+    sendInputChecked(1, &input, sizeof(INPUT));
 }
 
 bool InputManager::sendToService(BYTE type, const BYTE* data, DWORD dataLen) {
@@ -139,13 +147,13 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
             inpDown.type = INPUT_KEYBOARD;
             inpDown.ki.dwFlags = KEYEVENTF_UNICODE;
             inpDown.ki.wScan = chars[0];
-            SendInput(1, &inpDown, sizeof(INPUT));
+            sendInputChecked(1, &inpDown, sizeof(INPUT));
 
             INPUT inpUp = {};
             inpUp.type = INPUT_KEYBOARD;
             inpUp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
             inpUp.ki.wScan = chars[0];
-            SendInput(1, &inpUp, sizeof(INPUT));
+            sendInputChecked(1, &inpUp, sizeof(INPUT));
             return;
         }
     }
@@ -158,7 +166,7 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
     if (!isDown) {
         input.ki.dwFlags = KEYEVENTF_KEYUP;
     }
-    SendInput(1, &input, sizeof(INPUT));
+    sendInputChecked(1, &input, sizeof(INPUT));
 }
 
 void InputManager::updateModifiers(bool ctrl, bool alt, bool shift) {

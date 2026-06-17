@@ -4,6 +4,8 @@ set(SOURCES
     inputmanager.cpp
     $<$<PLATFORM_ID:Windows>:inputmanager_win.cpp>
     $<$<PLATFORM_ID:Linux>:inputmanager_linux.cpp>
+    $<$<PLATFORM_ID:Darwin>:inputmanager_mac.cpp>
+    $<$<PLATFORM_ID:Android>:inputmanager_android.cpp>
 )
 add_library(${INPUT_MANAGER} STATIC ${HEADERS} ${SOURCES})
 target_include_directories(${INPUT_MANAGER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

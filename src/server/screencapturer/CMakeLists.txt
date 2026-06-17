@@ -4,6 +4,8 @@ set(SOURCES
     screencapturer.cpp
     $<$<PLATFORM_ID:Windows>:screencapturer_win.cpp>
     $<$<PLATFORM_ID:Linux>:screencapturer_linux.cpp>
+    $<$<PLATFORM_ID:Darwin>:screencapturer_mac.cpp>
+    $<$<PLATFORM_ID:Android>:screencapturer_android.cpp>
 )
 add_library(${SCREEN_CAPTURER} STATIC ${HEADERS} ${SOURCES})
 target_include_directories(${SCREEN_CAPTURER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
