@@ -164,14 +164,14 @@ void InputManager::focusLockScreenWindow(void* dpy)
     // Debug: dump current focus and root properties
     Window curFocus = None; int revert = 0;
     XGetInputFocus(display, &curFocus, &revert);
-    qInfo() << "InputManager: current focus window" << curFocus;
+    //qInfo() << "InputManager: current focus window" << curFocus;
 
     Window found = findLockScreenWindow(display);
     if (found == None) {
         // Try a simpler approach: just try the current focus window
         if (curFocus != None && curFocus != DefaultRootWindow(display)) {
             found = curFocus;
-            qInfo() << "InputManager: using current focus window as fallback";
+            //qInfo() << "InputManager: using current focus window as fallback";
         }
     }
 
