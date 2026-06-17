@@ -3,6 +3,29 @@
 #include <stdio.h>
 #include <wtsapi32.h>
 
+typedef BOOL(WINAPI* PFN_CreateProcessAsUserW)(
+    HANDLE hToken,
+    LPCWSTR lpApplicationName,
+    LPWSTR lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    BOOL bInheritHandles,
+    DWORD dwCreationFlags,
+    LPVOID lpEnvironment,
+    LPCWSTR lpCurrentDirectory,
+    LPSTARTUPINFOW lpStartupInfo,
+    LPPROCESS_INFORMATION lpProcessInformation);
+
+static PFN_CreateProcessAsUserW pCreateProcessAsUserW = NULL;
+
+static void InitCreateProcessAsUser()
+{
+    HMODULE hAdvapi32 = LoadLibraryW(L"advapi32.dll");
+    if (hAdvapi32) {
+        pCreateProcessAsUserW = (PFN_CreateProcessAsUserW)GetProcAddress(hAdvapi32, "CreateProcessAsUserW");
+    }
+}
+
 static SERVICE_STATUS_HANDLE g_statusHandle = NULL;
 static SERVICE_STATUS g_status = { 0 };
 static HANDLE g_stopEvent = NULL;
@@ -244,7 +267,14 @@ static HANDLE CreateHelperInSession(DWORD sessionId)
     STARTUPINFOW si = { sizeof(si) };
     si.lpDesktop = const_cast<LPWSTR>(L"Winlogon");
     PROCESS_INFORMATION pi;
-    BOOL created = CreateProcessAsUserW(
+
+    if (!pCreateProcessAsUserW) {
+        wprintf(L"CreateProcessAsUserW not available\n");
+        CloseHandle(dupToken);
+        return NULL;
+    }
+
+    BOOL created = pCreateProcessAsUserW(
         dupToken, NULL, cmdLine, NULL, NULL, FALSE,
         CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
 
@@ -263,6 +293,8 @@ static HANDLE CreateHelperInSession(DWORD sessionId)
 
 void WINAPI ServiceMain(DWORD argc, LPWSTR* argv)
 {
+    InitCreateProcessAsUser();
+
     g_statusHandle = RegisterServiceCtrlHandlerW(SERVICE_NAME, ServiceCtrlHandler);
     if (!g_statusHandle)
         return;

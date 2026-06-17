@@ -1,6 +1,6 @@
 # Qt Remote Desktop
 
-基于 Qt 和 WebSocket 的远程桌面控制应用,支持屏幕捕获、视频编码和网络传输。
+基于 Qt 和 WebSocket 的远程桌面控制应用,支持屏幕捕获、视频编码、文件传输和网络通信。
 
 ## 功能特性
 
@@ -11,9 +11,13 @@
 - **WebSocket 通信**: 使用 WebSocket 进行实时双向通信
 - **SSL/TLS 加密**: 支持安全的 SSL/TLS 加密连接
 - **输入控制**: 支持鼠标和键盘输入的远程控制
+- **文件传输**: 支持客户端与服务端之间的文件上传和下载
+- **用户认证**: 支持用户名密码认证机制
 - **双模式支持**:
   - 视频模式: 使用 FFmpeg 编码视频流
   - 图片模式: 使用 JPEG 压缩单帧图像
+- **单实例运行**: 支持应用程序单实例运行
+- **Windows 服务**: 支持以 Windows 服务方式运行
 
 ## 项目结构
 
@@ -31,8 +35,17 @@ qtremotedesktop/
 │   │   ├── screencapturer.h/cpp     # 屏幕捕获器基类
 │   │   ├── screencapturer_win.cpp   # Windows 平台实现
 │   │   ├── screencapturer_linux.cpp # Linux 平台实现
-│   │   ├── inputmanager.h/cpp       # 输入管理器
-│   │   └── videoencoder.h/cpp       # 视频编码器(需要 FFmpeg)
+│   │   ├── inputmanager.h/cpp       # 输入管理器基类
+│   │   ├── inputmanager_win.cpp     # Windows 输入实现
+│   │   ├── inputmanager_linux.cpp   # Linux 输入实现
+│   │   ├── videoencoder.h/cpp       # 视频编码器(需要 FFmpeg)
+│   │   ├── authmanager.h/cpp        # 用户认证管理器
+│   │   ├── filetransferservice.h/cpp # 文件传输服务
+│   │   └── singleapplication.h/cpp  # 单实例应用
+│   ├── service/
+│   │   ├── main.cpp         # Windows 服务入口
+│   │   ├── service.h/cpp    # Windows 服务实现
+│   │   └── ServiceInstaller # Windows 服务安装脚本
 │   ├── sslperm/             # SSL 证书和密钥文件
 │   └── thridparty/
 │       └── ffmpeg/          # FFmpeg 第三方库(二进制文件已忽略)
@@ -136,7 +149,7 @@ src/thridparty/ffmpeg/
 
 编译完成后,可执行文件位于 `bin/` 目录。
 
-运行程序:
+### 正常运行
 
 ```bash
 # Windows
@@ -144,6 +157,22 @@ bin/qtremotedesktop.exe
 
 # Linux
 ./bin/qtremotedesktop
+```
+
+### Windows 服务模式
+
+```bash
+# 安装服务
+bin/qtremotedesktop.exe -install
+
+# 启动服务
+net start QtRemoteDesktop
+
+# 停止服务
+net stop QtRemoteDesktop
+
+# 卸载服务
+bin/qtremotedesktop.exe -uninstall
 ```
 
 默认端口:
@@ -155,7 +184,29 @@ bin/qtremotedesktop.exe
 1. 启动服务器程序
 2. 打开浏览器访问 HTTP 服务地址(控制台会显示)
 3. 或使用 WebSocket 客户端连接到 `wss://服务器地址:8084`
-4. 在网页或客户端中可以查看远程桌面并控制
+4. 输入用户名和密码进行认证(默认: admin/admin)
+5. 在网页或客户端中可以查看远程桌面并控制
+
+### 文件传输
+
+客户端可以通过发送 JSON 消息进行文件上传和下载:
+
+**上传文件**:
+```json
+{
+  "type": "file_upload",
+  "filename": "example.txt",
+  "size": 1024
+}
+```
+
+**下载文件**:
+```json
+{
+  "type": "file_download",
+  "filename": "/path/to/file.txt"
+}
+```
 
 ## 配置
 
@@ -166,6 +217,14 @@ bin/qtremotedesktop.exe
 - `privkey.pem` - 私钥文件
 
 如需使用自己的证书,替换这两个文件即可。
+
+### 用户认证
+
+默认用户名和密码:
+- 用户名: `admin`
+- 密码: `admin`
+
+如需修改认证凭据,请修改 `AuthManager` 类中的认证逻辑。
 
 ### 模式切换
 
@@ -188,6 +247,8 @@ bin/qtremotedesktop.exe
 - **FFmpeg**: 多媒体处理库(可选)
 - **DirectX 11**: Windows 平台屏幕捕获
 - **X11**: Linux 平台屏幕捕获
+- **Windows API**: Windows 平台输入模拟和服务管理
+- **QFile/QIODevice**: 文件传输功能
 
 ## 注意事项
 

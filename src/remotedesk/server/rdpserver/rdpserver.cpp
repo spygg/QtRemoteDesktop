@@ -188,7 +188,7 @@ void RDPServer::loadSslConfig()
     }
 
     // Load the SSL certificate
-    QFile certFile(":/sslperm/cacert.crt");
+    QFile certFile(":/res/sslperm/cacert.crt");
     if (!certFile.open(QIODevice::ReadOnly)) {
         qCritical("RDPServer: cannot open sslCertFile");
         return;
@@ -204,7 +204,7 @@ void RDPServer::loadSslConfig()
     }
 
     // Load the key file
-    QFile keyFile(":/sslperm/privkey.pem");
+    QFile keyFile(":/res/sslperm/privkey.pem");
     if (!keyFile.open(QIODevice::ReadOnly)) {
         qCritical("RDPServer: cannot open sslKeyFile");
         return;
@@ -522,7 +522,7 @@ QByteArray RDPServer::loadHtmlResource()
         return cachedHtml;
 
     // 从 Qt 资源系统加载 HTML
-    QFile file(":/html/index.html");
+    QFile file(":/res/html/index.html");
     if (file.open(QIODevice::ReadOnly)) {
         QByteArray html = file.readAll();
         file.close();
@@ -549,7 +549,7 @@ QByteArray RDPServer::loadHtmlResource()
 
 QByteArray RDPServer::loadLoginHtml()
 {
-    QFile file(":/html/login.html");
+    QFile file(":/res/html/login.html");
     if (file.open(QIODevice::ReadOnly)) {
         return file.readAll();
     }
@@ -804,7 +804,7 @@ void RDPServer::onHttpRequest()
 
     QByteArray html;
     if (path == "/admin/users" || path.startsWith("/admin/users?")) {
-        QFile file(":/html/user-management.html");
+        QFile file(":/res/html/user-management.html");
         if (file.open(QIODevice::ReadOnly))
             html = file.readAll();
         else

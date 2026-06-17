@@ -1,10 +1,10 @@
 <RCC>
     <qresource prefix="/">
-        <file>html/index.html</file>
-        <file>html/login.html</file>
-        <file>html/user-management.html</file>
-        <file>sslperm/cacert.crt</file>
-        <file>sslperm/privkey.pem</file>
+        <file>res/html/index.html</file>
+        <file>res/html/login.html</file>
+        <file>res/html/user-management.html</file>
+        <file>res/sslperm/cacert.crt</file>
+        <file>res/sslperm/privkey.pem</file>
         <file>res/main.png</file>
     </qresource>
 </RCC>

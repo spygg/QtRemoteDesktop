@@ -8,7 +8,7 @@ if(WIN32)
     target_link_libraries(QtRemoteDesktopKeyboardSvc PRIVATE user32 shell32 wtsapi32)
     set_target_properties(QtRemoteDesktopKeyboardSvc PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
-        WIN32_EXECUTABLE FALSE
+        WIN32_EXECUTABLE TRUE
         AUTOMOC OFF
     )
     if(MINGW)

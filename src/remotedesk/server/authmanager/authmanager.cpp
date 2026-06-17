@@ -77,7 +77,7 @@ void AuthManager::loadConfig()
         qInfo() << "No users configured, creating default admin user";
         UserEntry entry;
         QString salt = generateSalt();
-        entry.passwordHash = salt + ":" + hashPassword("tk001@lt", salt);
+        entry.passwordHash = salt + ":" + hashPassword("admin", salt);
         users_["admin"] = entry;
         saveConfig();
     }
