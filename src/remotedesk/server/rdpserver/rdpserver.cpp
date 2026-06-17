@@ -110,28 +110,38 @@ void RDPServer::loadServerConfig(const QString& configPath)
         ? QCoreApplication::applicationDirPath() + "/server_config.json"
         : configPath;
 
+    QJsonObject root;
+    bool exists = false;
+
     QFile file(path);
-    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
-        qInfo() << "No server config found at" << path << "using defaults";
-        return;
+    if (file.exists() && file.open(QIODevice::ReadOnly)) {
+        QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        file.close();
+        if (doc.isObject()) {
+            root = doc.object();
+            exists = true;
+        }
     }
 
-    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    file.close();
+    if (!exists) {
+        qInfo() << "No server config found at" << path << "creating with defaults";
+        root["ssl"] = true;
+        root["httpPort"] = 8080;
+        root["console"] = false;
 
-    if (!doc.isObject())
-        return;
-
-    QJsonObject root = doc.object();
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+            file.close();
+            qInfo() << "Default server config saved to" << path;
+        }
+    }
 
     if (root.contains("ssl"))
         useSsl_ = root["ssl"].toBool();
 
-    // 当不支持时候就算了
     if (useSsl_ && !QSslSocket::supportsSsl()) {
         useSsl_ = false;
-
-        qInfo() << "do NOT supportsSsl set useSsl to false";
+        qInfo() << "SSL not supported, disabling";
     }
 
     if (root.contains("httpPort")) {
@@ -349,8 +359,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride)
                 { "locked", locked },
                 { "hint", locked ? QString::fromUtf8(
 #ifdef Q_OS_WIN
-                                       "如需在锁屏界面输入密码，请先以管理员身份运行："
-                                       "QtRemoteDesktopKeyboardSvc 服务程序"
+                                        "锁屏界面可直接输入密码"
 #elif defined(Q_OS_LINUX)
                     "如需在锁屏界面输入密码，请先执行："
                     "sudo usermod -aG input $USER && "
@@ -365,18 +374,13 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride)
                                  : QString() } });
             if (locked) {
                 qInfo() << "Screen locked";
-#ifdef Q_OS_WIN
-                if (!inputManager_->connectKeyboardService())
-                    qWarning() << "Keyboard service unavailable, input limited";
-#elif defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX)
                 if (!inputManager_->initUinput())
                     qWarning() << "uinput unavailable, XTest fallback";
 #endif
             } else {
                 qInfo() << "Screen unlocked, restoring normal input";
-#ifdef Q_OS_WIN
-                inputManager_->disconnectKeyboardService();
-#elif defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX)
                 inputManager_->destroyUinput();
 #endif
             }

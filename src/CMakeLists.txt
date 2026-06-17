@@ -13,4 +13,3 @@ if(MSVC)
 endif()
 
 add_subdirectory(remotedesk)
-add_subdirectory(service)

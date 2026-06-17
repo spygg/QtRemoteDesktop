@@ -103,7 +103,6 @@ elseif(UNIX AND NOT APPLE)
     target_link_libraries(ScreenCapturer PUBLIC ${X11_LIBRARIES} Xtst Xdamage Xcomposite Xrender)
 endif()
 
-# ---- Windows: service target ----
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()

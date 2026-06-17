@@ -86,14 +86,22 @@ void AuthManager::loadConfig()
 void AuthManager::saveConfig()
 {
     QJsonObject root;
+    // 保留已有配置字段
+    QFile file(configPath_);
+    if (file.open(QIODevice::ReadOnly)) {
+        QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        if (doc.isObject())
+            root = doc.object();
+        file.close();
+    }
+
     QJsonObject users;
     for (auto it = users_.begin(); it != users_.end(); ++it) {
         users[it.key()] = it.value().passwordHash;
     }
     root["users"] = users;
 
-    QFile file(configPath_);
-    if (file.open(QIODevice::WriteOnly)) {
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
         file.close();
         qInfo() << "Auth config saved to:" << configPath_;

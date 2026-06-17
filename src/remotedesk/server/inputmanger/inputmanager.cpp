@@ -17,9 +17,6 @@ InputManager::InputManager(QObject *parent) : QObject(parent)
 
 InputManager::~InputManager()
 {
-#ifdef Q_OS_WIN
-    disconnectKeyboardService();
-#endif
 #ifdef Q_OS_LINUX
     destroyUinput();
     if (xDisplay_) {

@@ -24,12 +24,7 @@ public:
     void injectWheel(int delta);
     void injectKeyboard(int keycode, const QString &code, bool isDown, bool ctrl, bool alt, bool shift);
 
-#ifdef Q_OS_WIN
-    // Connect/disconnect to the SYSTEM-level keyboard service
-    bool connectKeyboardService();
-    void disconnectKeyboardService();
-    bool isKeyboardServiceConnected() const { return servicePipe_ != INVALID_HANDLE_VALUE; }
-#endif
+
 
 #ifdef Q_OS_LINUX
     // Switch to kernel-level uinput (works on lock screen / Wayland)
@@ -42,11 +37,7 @@ private:
     void updateModifiers(bool ctrl, bool alt, bool shift);
     void sendModifierEvent(int vk, bool isDown);
 
-#ifdef Q_OS_WIN
-    void sendInput(INPUT &input);
-    bool sendToService(BYTE type, const BYTE* data, DWORD dataLen);
-    HANDLE servicePipe_ = INVALID_HANDLE_VALUE;
-#endif
+
 
 #ifdef Q_OS_LINUX
     void* xDisplay_ = nullptr;
