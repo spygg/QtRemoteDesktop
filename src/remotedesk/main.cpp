@@ -8,6 +8,9 @@
 #include <QDir>
 #include <QMutexLocker>
 #include <QTextStream>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -92,7 +95,22 @@ int main(int argc, char* argv[])
     parser.process(a);
 
 #ifdef _WIN32
-    if (parser.isSet(consoleOption)) {
+    bool showConsole = parser.isSet(consoleOption);
+    if (!showConsole) {
+        QString configPath = a.applicationDirPath() + "/server_config.json";
+        QFile configFile(configPath);
+        if (configFile.exists() && configFile.open(QIODevice::ReadOnly)) {
+            QJsonDocument doc = QJsonDocument::fromJson(configFile.readAll());
+            configFile.close();
+            if (doc.isObject()) {
+                QJsonObject root = doc.object();
+                if (root.contains("console")) {
+                    showConsole = root["console"].toBool();
+                }
+            }
+        }
+    }
+    if (showConsole) {
         AllocConsole();
         freopen("CONOUT$", "w", stdout);
         freopen("CONOUT$", "w", stderr);
