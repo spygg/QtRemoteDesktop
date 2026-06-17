@@ -36,15 +36,17 @@ dist/
 *.app
 
 # FFmpeg 二进制文件(库文件和 DLL),但保留头文件(include)
-src/thridparty/ffmpeg/windows/bin/
-src/thridparty/ffmpeg/windows/lib/
-src/thridparty/ffmpeg/windows/doc/
-src/thridparty/ffmpeg/windows/presets/
-src/thridparty/ffmpeg/linux/bin/
-src/thridparty/ffmpeg/linux/lib/
-src/thridparty/ffmpeg/linux/doc/
-src/thridparty/ffmpeg/linux/man/
-src/thridparty/ffmpeg/linux/presets/
+src/remotedesk/thridparty/ffmpeg/
+src/remotedesk/thridparty/ffmpeg/windows/bin/
+src/remotedesk/thridparty/ffmpeg/windows/lib/
+src/remotedesk/thridparty/ffmpeg/windows/include/
+src/remotedesk/thridparty/ffmpeg/windows/doc/
+src/remotedesk/thridparty/ffmpeg/windows/presets/
+src/remotedesk/thridparty/ffmpeg/linux/bin/
+src/remotedesk/thridparty/ffmpeg/linux/lib/
+src/remotedesk/thridparty/ffmpeg/linux/doc/
+src/remotedesk/thridparty/ffmpeg/linux/man/
+src/remotedesk/thridparty/ffmpeg/linux/presets/
 
 # 文档文件
 *.txt
