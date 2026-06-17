@@ -12,4 +12,8 @@ if(MSVC)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 endif()
 
+if(WIN32)
+    add_definitions(-D_WIN32_WINNT=0x0601)
+endif()
+
 add_subdirectory(remotedesk)

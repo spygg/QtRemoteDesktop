@@ -22,6 +22,11 @@ WebSocketServer::~WebSocketServer()
     for (QWebSocket* socket : clients_.values()) {
         disconnect(socket, nullptr, this, nullptr);
     }
+    if (captureSource_) {
+        disconnect(captureSource_, nullptr, this, nullptr);
+        captureSource_->deleteLater();
+        captureSource_ = nullptr;
+    }
 
     server_->close();
     qDeleteAll(clients_);
@@ -57,10 +62,59 @@ void WebSocketServer::broadcastCodecConfig(const QByteArray& extra)
 void WebSocketServer::onNewConnection()
 {
     QWebSocket* socket = server_->nextPendingConnection();
+
+    QUrl url = socket->requestUrl();
+    qInfo() << "WS new connection, path:" << url.path() << "URL:" << url.toString();
+    if (url.path() == "/capture") {
+        qInfo() << "Helper connected to service WS via /capture";
+        if (captureSource_) {
+            qInfo() << "Replacing existing capture source";
+            captureSource_->deleteLater();
+        }
+        captureSource_ = socket;
+        connect(socket, &QWebSocket::disconnected, this, [this, socket]() {
+            qWarning() << "Helper disconnected from /capture";
+            if (captureSource_ == socket) {
+                captureSource_ = nullptr;
+            }
+            socket->deleteLater();
+        });
+        connect(socket, &QWebSocket::binaryMessageReceived, this, [this](const QByteArray& msg) {
+            if (msg.size() < 5) return;
+            QDataStream stream(msg);
+            stream.setByteOrder(QDataStream::BigEndian);
+            quint8 frameType;
+            quint32 dataLen;
+            stream >> frameType >> dataLen;
+            if (frameType != 0x03) return;
+            emit captureFrameReceived(msg.mid(5));
+        });
+        connect(socket, &QWebSocket::textMessageReceived, this, [this](const QString& text) {
+            QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
+            if (doc.isObject())
+                emit captureMessageReceived(doc.object());
+        });
+        return;
+    }
+
+    if (url.path() == "/secure-input") {
+        qInfo() << "Secure input helper connected";
+        if (secureInputSource_) {
+            secureInputSource_->deleteLater();
+        }
+        secureInputSource_ = socket;
+        connect(socket, &QWebSocket::disconnected, this, [this, socket]() {
+            qWarning() << "Secure input helper disconnected";
+            if (secureInputSource_ == socket)
+                secureInputSource_ = nullptr;
+            socket->deleteLater();
+        });
+        return;
+    }
+
+    // 普通远程客户端
     QString clientId = QUuid::createUuid().toString();
 
-    // Extract auth token from query string
-    QUrl url = socket->requestUrl();
     QString token;
     #if QT_VERSION >= QT_VERSION_CHECK(5, 12, 0)
         token = QUrlQuery(url).queryItemValue("token");
@@ -166,10 +220,36 @@ void WebSocketServer::dropClient(const QString& clientId)
     }
 }
 
+void WebSocketServer::closeSecureInput()
+{
+    if (secureInputSource_) {
+        secureInputSource_->close();
+        secureInputSource_ = nullptr;
+    }
+}
+
 void WebSocketServer::setSslConfiguration(const QSslConfiguration& config)
 {
     sslConfig_ = config;
     server_->setSslConfiguration(sslConfig_); // 设置 SSL 配置（仅当 mode 为 SecureMode 时有效）
+}
+
+void WebSocketServer::sendToCaptureSource(const QJsonObject& data)
+{
+    if (captureSource_ && captureSource_->state() == QAbstractSocket::ConnectedState) {
+        QJsonDocument doc(data);
+        captureSource_->sendTextMessage(QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+    } else {
+        qWarning() << "sendToCaptureSource: no connected helper";
+    }
+}
+
+void WebSocketServer::sendToSecureInput(const QJsonObject& data)
+{
+    if (secureInputSource_ && secureInputSource_->state() == QAbstractSocket::ConnectedState) {
+        QJsonDocument doc(data);
+        secureInputSource_->sendTextMessage(QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+    }
 }
 
 void WebSocketServer::broadcastFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp)

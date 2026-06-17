@@ -3,6 +3,7 @@
 
 #include <QHostAddress>
 #include <QMap>
+#include <QJsonObject>
 #include <QObject>
 #include <QUuid>
 #include <QWebSocket>
@@ -27,20 +28,34 @@ public:
 
     void broadcastCodecConfig(const QByteArray& extra);
     void broadcastJson(const QJsonObject& data);
-    void setSslConfiguration(const QSslConfiguration& config); // 新增
+    void setSslConfiguration(const QSslConfiguration& config);
 
     void broadcastBinary(const QByteArray& data);
 
     // 发送二进制数据给指定客户端
     void sendBinaryToClient(const QString& clientId, const QByteArray& data);
 
+    // 发送 JSON 给 capture helper 进程
+    void sendToCaptureSource(const QJsonObject& data);
+    bool isCaptureSourceConnected() const {
+        return captureSource_ && captureSource_->state() == QAbstractSocket::ConnectedState;
+    }
+
+    void sendToSecureInput(const QJsonObject& data);
+    bool isSecureInputConnected() const {
+        return secureInputSource_ && secureInputSource_->state() == QAbstractSocket::ConnectedState;
+    }
+    void closeSecureInput();
+
 signals:
     void clientConnected(const QString& clientId);
     void clientDisconnected(const QString& clientId);
     void inputReceived(const QString& clientId, const QJsonObject& data);
-    void codecChangeRequested(const QString& codec); // 客户端请求切换编码器
-    void modeChangeRequested(const QString& mode); // 新增
-    void fileChunkReceived(const QString& path, const QByteArray& data); // 文件上传数据块
+    void codecChangeRequested(const QString& codec);
+    void modeChangeRequested(const QString& mode);
+    void fileChunkReceived(const QString& path, const QByteArray& data);
+    void captureFrameReceived(const QByteArray& jpegData);
+    void captureMessageReceived(const QJsonObject& msg);
 
 private slots:
     void onNewConnection();
@@ -54,6 +69,8 @@ private:
     QMap<QWebSocket*, QString> socketToId_;
     QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;
+    QWebSocket* captureSource_ = nullptr;
+    QWebSocket* secureInputSource_ = nullptr;
 };
 
 #endif // WEBSOCKETSERVER_H

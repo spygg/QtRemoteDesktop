@@ -91,8 +91,13 @@ endif()
 
 # ---- Platform libraries for modules ----
 if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE wtsapi32)
     target_link_libraries(InputManager PUBLIC user32)
     target_link_libraries(ScreenCapturer PUBLIC d3d11 dxgi gdi32)
+    if(MSVC)
+        target_compile_definitions(ScreenCapturer PRIVATE _WIN32_WINNT=0x0A00)
+        target_link_options(${PROJECT_NAME} PRIVATE /DELAYLOAD:d3d11.dll /DELAYLOAD:dxgi.dll)
+    endif()
 elseif(APPLE)
     find_library(COREGRAPHICS CoreGraphics)
     target_link_libraries(InputManager PUBLIC ${COREGRAPHICS})

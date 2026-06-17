@@ -50,7 +50,7 @@ private:
     QMutex mutex_;
     QWaitCondition cond_;
     QQueue<QImage> queue_;
-    std::atomic<bool> abort_{false};
+    std::atomic<bool> abort_ { false };
     enum { kMaxQueueSize = 5 };
 };
 
@@ -61,8 +61,9 @@ public:
     explicit RDPServer(QObject* parent = nullptr);
     ~RDPServer();
 
-    bool initialize(const QString& configPath = QString(), bool useSslOverride = true);
+    bool initialize(const QString& configPath = QString(), bool useSslOverride = true, bool serviceMode = false);
     void start();
+    bool isCaptureSourceConnected() const;
 
     void loadSslConfig();
 private slots:
@@ -140,6 +141,12 @@ private:
     QPoint lastCursorPos_ { -1, -1 };
 
     bool useSsl_ = true;
+    bool serviceMode_ = false;
+    bool screenLocked_ = false;
+    bool secureInputRunning_ = false;
+#ifdef _WIN32
+    int secureInputPid_ = 0;
+#endif
     QSslConfiguration* sslConfiguration_;
 
     enum class ServerMode { Video,
@@ -151,6 +158,8 @@ private:
 
     void loadServerConfig(const QString& configPath);
     void saveServerConfig(const QString& configPath);
+    void startSecureInputProcess();
+    void stopSecureInputProcess();
 
 public:
     static QStringList getLocalIpAddr();

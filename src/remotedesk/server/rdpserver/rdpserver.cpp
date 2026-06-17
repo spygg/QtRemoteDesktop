@@ -12,6 +12,9 @@
 
 #include <QBuffer>
 #include <QCoreApplication>
+#include <QTimer>
+
+#include <string>
 #include <QCursor>
 #include <QFile>
 #include <QJsonArray>
@@ -20,6 +23,11 @@
 #include <QNetworkInterface>
 #include <QScreen>
 #include <QSslCertificate>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <wtsapi32.h>
+#endif
 
 // ==================== JpegCompressor ====================
 JpegCompressor::JpegCompressor(QObject* parent)
@@ -249,8 +257,10 @@ void RDPServer::onModeChangeRequested(const QString& mode)
     }
 }
 
-bool RDPServer::initialize(const QString& configPath, bool useSslOverride)
+bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool serviceMode)
 {
+    serviceMode_ = serviceMode;
+
     // 加载配置文件
     httpPort_ = 8080;
     loadServerConfig(configPath);
@@ -348,68 +358,95 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride)
         return false;
     }
 
-    // 初始化屏幕捕获
-    screenCapturer_ = std::unique_ptr<ScreenCapturer>(new ScreenCapturer(this));
-    connect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
-        this, &RDPServer::onFrameCaptured);
-    connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
-        this, [this](bool locked) {
-            wsServer_->broadcastJson(QJsonObject {
-                { "type", "screen_locked" },
-                { "locked", locked },
-                { "hint", locked ? QString::fromUtf8(
-#ifdef Q_OS_WIN
-                                        "锁屏界面可直接输入密码"
-#elif defined(Q_OS_LINUX)
-                    "如需在锁屏界面输入密码，请先执行："
-                    "sudo usermod -aG input $USER && "
-                    "sudo modprobe uinput && sudo chmod 666 /dev/uinput"
-#elif defined(Q_OS_MACOS)
-                    "macOS 锁屏状态输入需要辅助功能权限："
-                    "系统偏好设置 → 隐私与安全性 → 辅助功能 → 添加此应用"
-#else
-                    "锁屏状态下输入可能受限"
-#endif
-                                       "然后直接输入密码回车即可")
-                                 : QString() } });
-            if (locked) {
-                qInfo() << "Screen locked";
-#if defined(Q_OS_LINUX)
-                if (!inputManager_->initUinput())
-                    qWarning() << "uinput unavailable, XTest fallback";
-#endif
-            } else {
-                qInfo() << "Screen unlocked, restoring normal input";
-#if defined(Q_OS_LINUX)
-                inputManager_->destroyUinput();
-#endif
-            }
-        });
+    if (!serviceMode_) {
+        // 服务模式：捕获由 helper 进程完成
+        screenCapturer_ = std::unique_ptr<ScreenCapturer>(new ScreenCapturer(this));
+        connect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
+            this, &RDPServer::onFrameCaptured);
+        connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
+            this, [this](bool locked) {
+                screenLocked_ = locked;
+                wsServer_->broadcastJson(QJsonObject {
+                    { "type", "screen_locked" },
+                    { "locked", locked },
+                    { "hint", locked ? QString::fromUtf8(
+    #ifdef Q_OS_WIN
+                                            "锁屏界面可直接输入密码"
+    #elif defined(Q_OS_LINUX)
+                        "如需在锁屏界面输入密码，请先执行："
+                        "sudo usermod -aG input $USER && "
+                        "sudo modprobe uinput && sudo chmod 666 /dev/uinput"
+    #elif defined(Q_OS_MACOS)
+                        "macOS 锁屏状态输入需要辅助功能权限："
+                        "系统偏好设置 → 隐私与安全性 → 辅助功能 → 添加此应用"
+    #else
+                        "锁屏状态下输入可能受限"
+    #endif
+                                           "然后直接输入密码回车即可")
+                                     : QString() } });
+                if (locked) {
+                    qInfo() << "Screen locked";
+    #if defined(Q_OS_LINUX)
+                    if (!inputManager_->initUinput())
+                        qWarning() << "uinput unavailable, XTest fallback";
+    #endif
+                } else {
+                    qInfo() << "Screen unlocked, restoring normal input";
+    #if defined(Q_OS_LINUX)
+                    inputManager_->destroyUinput();
+    #endif
+                }
+            });
 
-    // 获取屏幕几何信息
-    QScreen* screen = QGuiApplication::primaryScreen();
-    if (!screen) {
-        qCritical() << "No primary screen available";
-        return false;
+        // 获取屏幕几何信息
+        QScreen* screen = QGuiApplication::primaryScreen();
+        if (!screen) {
+            qCritical() << "No primary screen available";
+            return false;
+        }
+        screenGeometry_ = screen->geometry();
+
+        // 初始化 JPEG 压缩器（独立线程）
+        jpegCompressor_ = std::unique_ptr<JpegCompressor>(new JpegCompressor(nullptr));
+        connect(jpegCompressor_.get(), &JpegCompressor::jpegCompressed,
+            this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
+        jpegCompressor_->start();
+
+    #ifdef USE_FFMPEG
+        videoEncoder_ = std::unique_ptr<VideoEncoder>(new VideoEncoder(this));
+        connect(videoEncoder_.get(), &VideoEncoder::encodedFrame,
+            this, &RDPServer::onEncodedFrame);
+
+        connect(videoEncoder_.get(), &VideoEncoder::codecConfigChanged,
+            this, &RDPServer::onCodecConfigChanged);
+    #endif
+    } else {
+        // 服务模式：helper 进程的截屏帧通过 WebSocket 传入
+        connect(wsServer_.get(), &WebSocketServer::captureFrameReceived,
+            this, [this](const QByteArray& jpegData) {
+                if (wsServer_->clients().isEmpty())
+                    return;
+                QByteArray packet;
+                QDataStream stream(&packet, QIODevice::WriteOnly);
+                stream.setByteOrder(QDataStream::BigEndian);
+                stream << quint8(0x03);
+                stream << quint32(jpegData.size());
+                packet.append(jpegData);
+                wsServer_->broadcastBinary(packet);
+            });
+        connect(wsServer_.get(), &WebSocketServer::captureMessageReceived,
+            this, [this](const QJsonObject& msg) {
+                qInfo() << "Service: capture msg =" << msg;
+                if (msg["type"].toString() == "screen_locked") {
+                    screenLocked_ = msg["locked"].toBool();
+                    if (screenLocked_)
+                        startSecureInputProcess();
+                    else
+                        stopSecureInputProcess();
+                }
+                wsServer_->broadcastJson(msg);
+            });
     }
-    screenGeometry_ = screen->geometry();
-
-    // 初始化 JPEG 压缩器（独立线程）
-    jpegCompressor_ = std::unique_ptr<JpegCompressor>(new JpegCompressor(nullptr));
-    connect(jpegCompressor_.get(), &JpegCompressor::jpegCompressed,
-        this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
-    jpegCompressor_->start();
-
-#ifdef USE_FFMPEG
-    // 初始化视频编码器 (使用 Qt5 的 QMediaRecorder 或自定义 FFmpeg)
-    // videoEncoder_ = std::make_unique<VideoEncoder>(this);
-    videoEncoder_ = std::unique_ptr<VideoEncoder>(new VideoEncoder(this));
-    connect(videoEncoder_.get(), &VideoEncoder::encodedFrame,
-        this, &RDPServer::onEncodedFrame);
-
-    connect(videoEncoder_.get(), &VideoEncoder::codecConfigChanged,
-        this, &RDPServer::onCodecConfigChanged);
-#endif
 
     // 初始化输入管理器
     inputManager_ = std::unique_ptr<InputManager>(new InputManager(this));
@@ -458,7 +495,6 @@ QStringList RDPServer::getLocalIpAddr()
 
 void RDPServer::setupHttpServer()
 {
-    // httpServer_ = std::make_unique<SslTcpServer>(this);
     httpServer_ = std::unique_ptr<SslTcpServer>(new SslTcpServer(this));
 
     const quint16 httpPort = httpPort_;
@@ -907,8 +943,89 @@ void RDPServer::handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body)
     socket->disconnectFromHost();
 }
 
+bool RDPServer::isCaptureSourceConnected() const
+{
+    return wsServer_ && wsServer_->isCaptureSourceConnected();
+}
+
+void RDPServer::startSecureInputProcess()
+{
+#ifdef _WIN32
+    if (secureInputRunning_) return;
+
+    DWORD sessionId = WTSGetActiveConsoleSessionId();
+    if (sessionId == 0xFFFFFFFF) return;
+
+    HANDLE hProcToken = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &hProcToken))
+        return;
+
+    HANDLE hDupToken = NULL;
+    if (!DuplicateTokenEx(hProcToken, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &hDupToken)) {
+        CloseHandle(hProcToken);
+        return;
+    }
+
+    SetTokenInformation(hDupToken, TokenSessionId, &sessionId, sizeof(sessionId));
+
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    std::wstring cmdLine = std::wstring(exePath) + L" --secure-input " + std::to_wstring(wsPort_);
+
+    STARTUPINFOW si = { sizeof(si) };
+    si.lpDesktop = const_cast<wchar_t*>(L"winsta0\\winlogon");
+    PROCESS_INFORMATION pi = {};
+    if (CreateProcessAsUserW(hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        qInfo() << "Secure input process started, PID:" << pi.dwProcessId;
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        secureInputPid_ = pi.dwProcessId;
+        secureInputRunning_ = true;
+        // Wait for the process to connect back via WebSocket
+        QTimer::singleShot(5000, this, [this, pi]() {
+            if (wsServer_ && !wsServer_->isSecureInputConnected()) {
+                qWarning() << "Secure input process didn't connect in time, terminating";
+                HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pi.dwProcessId);
+                if (hProc) { TerminateProcess(hProc, 1); CloseHandle(hProc); }
+            }
+        });
+    } else {
+        qWarning() << "CreateProcessAsUserW for secure input failed:" << GetLastError();
+    }
+
+    CloseHandle(hDupToken);
+    CloseHandle(hProcToken);
+#endif
+}
+
+void RDPServer::stopSecureInputProcess()
+{
+#ifdef _WIN32
+    if (!secureInputRunning_) return;
+    secureInputRunning_ = false;
+
+    if (wsServer_)
+        wsServer_->closeSecureInput();
+
+    if (secureInputPid_) {
+        HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, secureInputPid_);
+        if (hProc) {
+            TerminateProcess(hProc, 0);
+            CloseHandle(hProc);
+        }
+        secureInputPid_ = 0;
+    }
+#endif
+}
+
 void RDPServer::start()
 {
+    if (serviceMode_) {
+        isRunning_ = true;
+        qInfo() << "RDP Server started in service mode (waiting for helper connection)";
+        return;
+    }
+
     // 尝试初始化视频编码器
 #ifdef USE_FFMPEG
     if (videoEncoder_->initialize(CodecType::H264, screenCapturer_->width(), screenCapturer_->height(), 30, 2000000)) {
@@ -918,24 +1035,17 @@ void RDPServer::start()
     } else
 #endif
     {
-        qWarning() << "######################Video encoder initialization failed, falling back to image mode.";
-        // useVideoMode_ = false;
-        // // 断开原有的编码器连接，连接图片处理槽
-        // disconnect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
-        //     videoEncoder_.get(), &VideoEncoder::encode);
-        // connect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
-        //     this, &RDPServer::onJpegCompressed);
-
-        switchToImageMode(); // 切换到图片模式
+        qWarning() << "Video encoder initialization failed, falling back to image mode.";
+        switchToImageMode();
     }
 
-    // 启动屏幕捕获（无论哪种模式都需要）
+    // 启动屏幕捕获
     if (!screenCapturer_->start(30)) {
         qCritical() << "Failed to start screen capture";
         return;
     }
 
-    // 如果还没有客户端连接，立即暂停捕获以降低 CPU
+    // 如果没有客户端连接，暂停捕获以降低 CPU
     if (wsServer_->clients().isEmpty())
         screenCapturer_->suspend();
 
@@ -960,11 +1070,13 @@ void RDPServer::onClientConnected(const QString& clientId)
         screenCapturer_->resume();
 
     // 发送屏幕分辨率
-    QJsonObject info;
-    info["type"] = "screen_info";
-    info["width"] = screenCapturer_->width();
-    info["height"] = screenCapturer_->height();
-    wsServer_->sendJson(clientId, info);
+    if (screenCapturer_) {
+        QJsonObject info;
+        info["type"] = "screen_info";
+        info["width"] = screenCapturer_->width();
+        info["height"] = screenCapturer_->height();
+        wsServer_->sendJson(clientId, info);
+    }
 
     // 发送当前工作模式
     QJsonObject mode;
@@ -984,7 +1096,40 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 
 void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& input)
 {
+    if (serviceMode_) {
+        qInfo() << "Service: forwarding input to helper, type =" << input["type"].toString();
+        wsServer_->sendToCaptureSource(input);
+        if (screenLocked_ && secureInputRunning_)
+            wsServer_->sendToSecureInput(input);
+        return;
+    }
+
     QString type = input["type"].toString();
+
+    // 锁屏时仅处理 isChar 密码输入和 Enter 键，跳过其他输入注入
+    if (screenLocked_) {
+        if (input["isChar"].toBool() && input["keycode"].toInt() > 0) {
+            wchar_t ch = static_cast<wchar_t>(input["keycode"].toInt());
+            bool isDown = (type == "keydown");
+            INPUT in = {};
+            in.type = INPUT_KEYBOARD;
+            in.ki.dwFlags = KEYEVENTF_UNICODE;
+            in.ki.wScan = ch;
+            if (!isDown) in.ki.dwFlags |= KEYEVENTF_KEYUP;
+            SendInput(1, &in, sizeof(INPUT));
+            return;
+        }
+        // Enter 键 (keycode 13 = VK_RETURN)
+        if ((type == "keydown" || type == "keyup") && input["keycode"].toInt() == 13) {
+            INPUT in = {};
+            in.type = INPUT_KEYBOARD;
+            in.ki.wVk = VK_RETURN;
+            if (type == "keyup") in.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &in, sizeof(INPUT));
+            return;
+        }
+        return; // 跳过其他所有输入
+    }
 
     if (type == "mousemove") {
         int x = input["x"].toInt();

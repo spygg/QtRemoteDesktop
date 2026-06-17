@@ -226,10 +226,17 @@
         }
         #lock-overlay.active { display: flex; }
         #lock-overlay { pointer-events: none; }
-        #lock-overlay * { pointer-events: none; }
+        #lock-overlay .lock-input-area { pointer-events: auto; }
         #lock-overlay .lock-icon { font-size: 64px; margin-bottom: 16px; }
         #lock-overlay .lock-text { color: #fff; font-size: 24px; font-weight: 300; }
         #lock-overlay .lock-hint { color: #aaa; font-size: 14px; margin-top: 8px; }
+        #lock-overlay .lock-input-area { margin-top: 24px; display: flex; gap: 8px; align-items: center; }
+        #lock-overlay .lock-input-area input { padding: 10px 16px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.1); color: #fff; font-size: 16px; width: 240px; outline: none; }
+        #lock-overlay .lock-input-area input:focus { border-color: #4a9eff; }
+        #lock-overlay .lock-input-area input::placeholder { color: rgba(255,255,255,0.4); }
+        #lock-overlay .lock-input-area button { padding: 10px 20px; border-radius: 6px; border: none; background: #4a9eff; color: #fff; font-size: 16px; cursor: pointer; }
+        #lock-overlay .lock-input-area button:hover { background: #3a8eef; }
+        #lock-overlay .lock-input-area button:disabled { opacity: 0.5; cursor: default; }
         #transfer-status {
             position: fixed;
             bottom: 40px;
@@ -356,7 +363,11 @@
     <div id="lock-overlay">
         <div class="lock-icon">🔒</div>
         <div class="lock-text">屏幕已锁定</div>
-        <div class="lock-hint">键盘输入已传输，请输入密码后按 Enter 解锁</div>
+        <div class="lock-hint"></div>
+        <div class="lock-input-area">
+            <input type="password" id="lock-password" placeholder="输入密码解锁" autocomplete="off" />
+            <button id="lock-unlock-btn" onclick="unlockScreen()">解锁</button>
+        </div>
     </div>
 
     <!-- 传输监视器 -->
@@ -676,7 +687,11 @@
                     break;
                 case 'screen_locked':
                     document.getElementById('lock-overlay').classList.toggle('active', msg.locked);
-                    if (msg.hint) document.querySelector('#lock-overlay .lock-hint').textContent = msg.locked ? msg.hint : '';
+                    if (msg.locked) {
+                        document.getElementById('lock-password').focus();
+                    } else {
+                        document.getElementById('lock-password').value = '';
+                    }
                     break;
                 case 'file_upload_done':
                     refreshFileList();
@@ -692,6 +707,47 @@
                 state.ws.send(JSON.stringify(data));
             }
         }
+
+        // 锁定密码输入
+        function sendChar(char, isDown) {
+            send({ type: isDown ? 'keydown' : 'keyup', keycode: char.charCodeAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
+        }
+        function unlockScreen() {
+            const input = document.getElementById('lock-password');
+            const btn = document.getElementById('lock-unlock-btn');
+            const pwd = input.value;
+            if (!pwd) return;
+            btn.disabled = true;
+            btn.textContent = '发送中…';
+            let i = 0;
+            function sendNext() {
+                if (i < pwd.length) {
+                    sendChar(pwd[i], true);
+                    setTimeout(() => {
+                        sendChar(pwd[i], false);
+                        i++;
+                        setTimeout(sendNext, 20);
+                    }, 10);
+                } else {
+                    // Enter key
+                    send({ type: 'keydown', keycode: 13, code: 'Enter', ctrl: false, alt: false, shift: false });
+                    setTimeout(() => {
+                        send({ type: 'keyup', keycode: 13, code: 'Enter' });
+                        btn.disabled = false;
+                        btn.textContent = '解锁';
+                        input.value = '';
+                        input.focus();
+                    }, 10);
+                }
+            }
+            sendNext();
+        }
+        // Enter 键触发解锁
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && document.getElementById('lock-overlay').classList.contains('active') && document.activeElement === document.getElementById('lock-password')) {
+                unlockScreen();
+            }
+        });
 
         // ==================== 输入处理 ====================
         function setupInputs() {
@@ -747,7 +803,15 @@
             }, { passive: false });
 
             // 键盘
+            function isLockInputFocused() {
+                const overlay = document.getElementById('lock-overlay');
+                return overlay && overlay.classList.contains('active') &&
+                    document.activeElement === document.getElementById('lock-password');
+            }
             window.addEventListener('keydown', (e) => {
+                // 锁屏密码输入框获取焦点时，不拦截键盘事件（允许 Backspace 等原生行为）
+                if (isLockInputFocused()) return;
+
                 // ---- 工具栏快捷键（仅使用不冲突的键） ----
                 // F11: 全屏切换（浏览器标准快捷键）
                 // Ctrl+Shift+Q: 画质切换（罕见组合，不冲突）
@@ -779,6 +843,7 @@
             });
 
             window.addEventListener('keyup', (e) => {
+                if (isLockInputFocused()) return;
                 state.keysPressed.delete(e.code);
                 send({
                     type: 'keyup',

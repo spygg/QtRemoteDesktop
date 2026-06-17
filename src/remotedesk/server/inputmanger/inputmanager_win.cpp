@@ -65,38 +65,40 @@ void InputManager::sendModifierEvent(int vk, bool isDown)
     sendInputChecked(1, &input, sizeof(INPUT));
 }
 
-void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift)
+void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback)
 {
-    bool isCharKey = code.startsWith("Key") || code.startsWith("Digit")
-        || code == "Space" || code == "Enter" || code == "Tab"
-        || code == "Comma" || code == "Period" || code == "Semicolon" || code == "Quote"
-        || code == "BracketLeft" || code == "BracketRight" || code == "Backslash"
-        || code == "Minus" || code == "Equal" || code == "Backquote" || code == "Slash";
+    if (isDown && !useVkFallback) {
+        bool isCharKey = code.startsWith("Key") || code.startsWith("Digit")
+            || code == "Space" || code == "Enter" || code == "Tab"
+            || code == "Comma" || code == "Period" || code == "Semicolon" || code == "Quote"
+            || code == "BracketLeft" || code == "BracketRight" || code == "Backslash"
+            || code == "Minus" || code == "Equal" || code == "Backquote" || code == "Slash";
 
-    if (isDown && isCharKey) {
-        BYTE keyboardState[256] = { 0 };
-        if (shift)
-            keyboardState[VK_SHIFT] = 0x80;
-        if (ctrl)
-            keyboardState[VK_CONTROL] = 0x80;
-        if (alt)
-            keyboardState[VK_MENU] = 0x80;
+        if (isCharKey) {
+            BYTE keyboardState[256] = { 0 };
+            if (shift)
+                keyboardState[VK_SHIFT] = 0x80;
+            if (ctrl)
+                keyboardState[VK_CONTROL] = 0x80;
+            if (alt)
+                keyboardState[VK_MENU] = 0x80;
 
-        wchar_t chars[4] = { 0 };
-        int ret = ToUnicode(static_cast<UINT>(keycode), 0, keyboardState, chars, 4, 1);
-        if (ret >= 1 && chars[0] > 0x07) {
-            INPUT inpDown = {};
-            inpDown.type = INPUT_KEYBOARD;
-            inpDown.ki.dwFlags = KEYEVENTF_UNICODE;
-            inpDown.ki.wScan = chars[0];
-            sendInputChecked(1, &inpDown, sizeof(INPUT));
+            wchar_t chars[4] = { 0 };
+            int ret = ToUnicode(static_cast<UINT>(keycode), 0, keyboardState, chars, 4, 1);
+            if (ret >= 1 && chars[0] > 0x07) {
+                INPUT inpDown = {};
+                inpDown.type = INPUT_KEYBOARD;
+                inpDown.ki.dwFlags = KEYEVENTF_UNICODE;
+                inpDown.ki.wScan = chars[0];
+                sendInputChecked(1, &inpDown, sizeof(INPUT));
 
-            INPUT inpUp = {};
-            inpUp.type = INPUT_KEYBOARD;
-            inpUp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-            inpUp.ki.wScan = chars[0];
-            sendInputChecked(1, &inpUp, sizeof(INPUT));
-            return;
+                INPUT inpUp = {};
+                inpUp.type = INPUT_KEYBOARD;
+                inpUp.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+                inpUp.ki.wScan = chars[0];
+                sendInputChecked(1, &inpUp, sizeof(INPUT));
+                return;
+            }
         }
     }
 

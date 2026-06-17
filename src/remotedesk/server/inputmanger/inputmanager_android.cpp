@@ -16,7 +16,7 @@ void InputManager::injectWheel(int)
     qWarning() << "InputManager: scroll injection not supported on Android";
 }
 
-void InputManager::injectKeyboard(int, const QString&, bool, bool, bool, bool)
+void InputManager::injectKeyboard(int, const QString&, bool, bool, bool, bool, bool)
 {
     qWarning() << "InputManager: keyboard injection not supported on Android (requires root)";
 }

@@ -23,26 +23,25 @@ static void createWinNativeLink(QString exeFullPath, QString linkFull, QString w
     IPersistFile* ppf = nullptr;
     bool neededCoInit = false;
 
-    // --- 修改开始：将指针声明移到顶部，初始化为 nullptr ---
     wchar_t* wExePath = nullptr;
     wchar_t* wWorkDir = nullptr;
     wchar_t* wArgs = nullptr;
     wchar_t* wLinkPath = nullptr;
-    // --- 修改结束 ---
+
     hres = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl);
 
     if (FAILED(hres)) {
         if (hres == CO_E_NOTINITIALIZED) {
             neededCoInit = true;
             hres = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-            if (SUCCEEDED(hres)) {
+            if (SUCCEEDED(hres) || hres == RPC_E_CHANGED_MODE) {
                 hres = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl);
             }
         }
 
         if (FAILED(hres) || !psl) {
             qWarning("CoCreateInstance failed: %lx", hres);
-            goto cleanup; // 现在跳转是安全的，因为所有变量都已经声明了
+            goto cleanup;
         }
     }
 
