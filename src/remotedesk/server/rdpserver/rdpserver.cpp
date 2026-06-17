@@ -87,7 +87,7 @@ void JpegCompressor::processLoop()
 
 RDPServer::RDPServer(QObject* parent)
     : QObject(parent)
-    , useSsl_(true)
+    , useSsl_(false)
     , sslConfiguration_(nullptr)
 {
 }
@@ -136,7 +136,7 @@ void RDPServer::loadServerConfig(const QString& configPath)
 
     if (root.contains("httpPort")) {
         int port = root["httpPort"].toInt();
-        if (port < 1 || port > 65535) {
+        if ((port < 1) || (port > 65535)) {
             qWarning() << "Invalid httpPort" << port << "using default 8080";
             port = 8080;
         }
