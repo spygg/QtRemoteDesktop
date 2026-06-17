@@ -1,6 +1,7 @@
-// main.cpp
 #include "rdpserver.h"
 #include "singleapplication.h"
+#include "startup.h"
+#include "systemsleepblocker.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -14,6 +15,16 @@ int main(int argc, char* argv[])
     SingleApplication a(argc, argv);
     if (a.isRunning()) {
         return 0;
+    }
+
+    // 开机自启动
+    StartUp::setup(true, QString(), QString(), QString(), QString(), true);
+
+    SystemSleepBlocker blocker;
+    if (!blocker.start()) {
+        qCritical("Failed to prevent system sleep!");
+    } else {
+        qWarning("已经阻止系统休眠");
     }
 
     QCommandLineParser parser;

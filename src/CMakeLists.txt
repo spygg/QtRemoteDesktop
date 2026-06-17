@@ -45,7 +45,10 @@ add_subdirectory(server/rdpserver)
 add_subdirectory(server/screencapturer)
 add_subdirectory(server/websocketserver)
 add_subdirectory(server/singleapplication)
+add_subdirectory(thridparty/startup)
+add_subdirectory(thridparty/systemsleepblocker)
 
+# 服务
 add_subdirectory(service)
 
 # ---- Video encoder (optional) ----
@@ -72,6 +75,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ScreenCapturer
     WebsocketServer
     SingleApp
+    StartUp
+    SystemSleepBlocker
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
