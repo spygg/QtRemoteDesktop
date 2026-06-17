@@ -948,76 +948,6 @@ bool RDPServer::isCaptureSourceConnected() const
     return wsServer_ && wsServer_->isCaptureSourceConnected();
 }
 
-void RDPServer::startSecureInputProcess()
-{
-#ifdef _WIN32
-    if (secureInputRunning_) return;
-
-    DWORD sessionId = WTSGetActiveConsoleSessionId();
-    if (sessionId == 0xFFFFFFFF) return;
-
-    HANDLE hProcToken = NULL;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &hProcToken))
-        return;
-
-    HANDLE hDupToken = NULL;
-    if (!DuplicateTokenEx(hProcToken, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &hDupToken)) {
-        CloseHandle(hProcToken);
-        return;
-    }
-
-    SetTokenInformation(hDupToken, TokenSessionId, &sessionId, sizeof(sessionId));
-
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    std::wstring cmdLine = std::wstring(exePath) + L" --secure-input " + std::to_wstring(wsPort_);
-
-    STARTUPINFOW si = { sizeof(si) };
-    si.lpDesktop = const_cast<wchar_t*>(L"winsta0\\winlogon");
-    PROCESS_INFORMATION pi = {};
-    if (CreateProcessAsUserW(hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        qInfo() << "Secure input process started, PID:" << pi.dwProcessId;
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        secureInputPid_ = pi.dwProcessId;
-        secureInputRunning_ = true;
-        // Wait for the process to connect back via WebSocket
-        QTimer::singleShot(5000, this, [this, pi]() {
-            if (wsServer_ && !wsServer_->isSecureInputConnected()) {
-                qWarning() << "Secure input process didn't connect in time, terminating";
-                HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pi.dwProcessId);
-                if (hProc) { TerminateProcess(hProc, 1); CloseHandle(hProc); }
-            }
-        });
-    } else {
-        qWarning() << "CreateProcessAsUserW for secure input failed:" << GetLastError();
-    }
-
-    CloseHandle(hDupToken);
-    CloseHandle(hProcToken);
-#endif
-}
-
-void RDPServer::stopSecureInputProcess()
-{
-#ifdef _WIN32
-    if (!secureInputRunning_) return;
-    secureInputRunning_ = false;
-
-    if (wsServer_)
-        wsServer_->closeSecureInput();
-
-    if (secureInputPid_) {
-        HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, secureInputPid_);
-        if (hProc) {
-            TerminateProcess(hProc, 0);
-            CloseHandle(hProc);
-        }
-        secureInputPid_ = 0;
-    }
-#endif
-}
-
 void RDPServer::start()
 {
     if (serviceMode_) {
@@ -1106,8 +1036,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 
     QString type = input["type"].toString();
 
-    // 锁屏时仅处理 isChar 密码输入和 Enter 键，跳过其他输入注入
     if (screenLocked_) {
+#ifdef _WIN32
         if (input["isChar"].toBool() && input["keycode"].toInt() > 0) {
             wchar_t ch = static_cast<wchar_t>(input["keycode"].toInt());
             bool isDown = (type == "keydown");
@@ -1119,7 +1049,6 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             SendInput(1, &in, sizeof(INPUT));
             return;
         }
-        // Enter 键 (keycode 13 = VK_RETURN)
         if ((type == "keydown" || type == "keyup") && input["keycode"].toInt() == 13) {
             INPUT in = {};
             in.type = INPUT_KEYBOARD;
@@ -1128,7 +1057,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             SendInput(1, &in, sizeof(INPUT));
             return;
         }
-        return; // 跳过其他所有输入
+#endif
+        return;
     }
 
     if (type == "mousemove") {

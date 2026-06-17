@@ -31,6 +31,9 @@ add_subdirectory(server/rdpserver)
 add_subdirectory(server/screencapturer)
 add_subdirectory(server/websocketserver)
 add_subdirectory(server/singleapplication)
+add_subdirectory(server/helper_process)
+add_subdirectory(server/secure_input_process)
+add_subdirectory(server/service)
 add_subdirectory(thridparty/startup)
 add_subdirectory(thridparty/systemsleepblocker)
 
@@ -60,9 +63,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     SingleApp
     StartUp
     SystemSleepBlocker
+    Service
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/server
+)
 
 if(USE_FFMPEG)
     target_include_directories(${PROJECT_NAME} PRIVATE ${FFMPEG_INCLUDE_DIRS})
@@ -91,7 +98,6 @@ endif()
 
 # ---- Platform libraries for modules ----
 if(WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE wtsapi32)
     target_link_libraries(InputManager PUBLIC user32)
     target_link_libraries(ScreenCapturer PUBLIC d3d11 dxgi gdi32)
     if(MSVC)
