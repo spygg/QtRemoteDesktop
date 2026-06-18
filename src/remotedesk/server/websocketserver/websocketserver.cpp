@@ -72,6 +72,7 @@ void WebSocketServer::onNewConnection()
             captureSource_->deleteLater();
         }
         captureSource_ = socket;
+        emit captureSourceConnected();
         connect(socket, &QWebSocket::disconnected, this, [this, socket]() {
             qWarning() << "Helper disconnected from /capture";
             if (captureSource_ == socket) {

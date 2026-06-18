@@ -56,6 +56,7 @@ signals:
     void fileChunkReceived(const QString& path, const QByteArray& data);
     void captureFrameReceived(const QByteArray& jpegData);
     void captureMessageReceived(const QJsonObject& msg);
+    void captureSourceConnected();
 
 private slots:
     void onNewConnection();

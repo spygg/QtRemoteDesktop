@@ -98,6 +98,18 @@ int HelperProcess::run(int argc, char* argv[])
             QJsonObject obj = doc.object();
             QString type = obj["type"].toString();
 
+            if (type == "capture_control") {
+                QString action = obj["action"].toString();
+                if (action == "pause") {
+                    qInfo() << "Helper: capture pause requested";
+                    capturer.suspend();
+                } else if (action == "resume") {
+                    qInfo() << "Helper: capture resume requested";
+                    capturer.resume();
+                }
+                return;
+            }
+
             if (locked) return;
 
             if (type == "mousemove") {

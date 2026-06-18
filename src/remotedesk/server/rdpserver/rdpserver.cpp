@@ -446,6 +446,15 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 }
                 wsServer_->broadcastJson(msg);
             });
+        connect(wsServer_.get(), &WebSocketServer::captureSourceConnected,
+            this, [this]() {
+                bool hasClients = !wsServer_->clients().isEmpty();
+                qInfo() << "Service: capture source connected, hasClients =" << hasClients;
+                QJsonObject msg;
+                msg["type"] = "capture_control";
+                msg["action"] = hasClients ? "resume" : "pause";
+                wsServer_->sendToCaptureSource(msg);
+            });
     }
 
     // 初始化输入管理器
@@ -1069,6 +1078,12 @@ void RDPServer::onClientConnected(const QString& clientId)
     // 有客户端连接 → 恢复屏幕捕获
     if (screenCapturer_)
         screenCapturer_->resume();
+    if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
+        QJsonObject msg;
+        msg["type"] = "capture_control";
+        msg["action"] = "resume";
+        wsServer_->sendToCaptureSource(msg);
+    }
 
     // 发送屏幕分辨率
     if (screenCapturer_) {
@@ -1099,8 +1114,16 @@ void RDPServer::onClientDisconnected(const QString& clientId)
     qInfo() << "Client disconnected:" << clientId;
 
     // 没有客户端了 → 暂停屏幕捕获，降低 CPU
-    if (wsServer_->clients().isEmpty() && screenCapturer_)
-        screenCapturer_->suspend();
+    if (wsServer_->clients().isEmpty()) {
+        if (screenCapturer_)
+            screenCapturer_->suspend();
+        if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
+            QJsonObject msg;
+            msg["type"] = "capture_control";
+            msg["action"] = "pause";
+            wsServer_->sendToCaptureSource(msg);
+        }
+    }
 }
 
 void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& input)
