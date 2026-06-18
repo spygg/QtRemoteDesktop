@@ -1084,6 +1084,14 @@ void RDPServer::onClientConnected(const QString& clientId)
     mode["type"] = "mode_changed";
     mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
     wsServer_->sendJson(clientId, mode);
+
+    // 发送当前锁屏状态（客户端可能在屏幕已锁时连接/重连）
+    if (screenLocked_) {
+        QJsonObject lock;
+        lock["type"] = "screen_locked";
+        lock["locked"] = true;
+        wsServer_->sendJson(clientId, lock);
+    }
 }
 
 void RDPServer::onClientDisconnected(const QString& clientId)
