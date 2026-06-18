@@ -20,6 +20,8 @@ elseif(APPLE)
         COMPILE_FLAGS "-x objective-c++"
         LANGUAGE OBJCXX
     )
+elseif(ANDROID)
+    list(APPEND SOURCES systemsleepblocker_android.cpp)
 elseif(UNIX)
     list(APPEND SOURCES systemsleepblocker_linux.cpp)
 endif()
@@ -41,7 +43,7 @@ elseif(APPLE)
         "-framework IOKit"
         "-framework CoreFoundation"
     )
-elseif(UNIX)
+elseif(UNIX AND NOT ANDROID)
     find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS DBus)
     target_link_libraries(${MODULE} PRIVATE Qt${QT_VERSION_MAJOR}::DBus)
 endif()

@@ -6,7 +6,7 @@ set(CMAKE_AUTORCC ON)
 if(USE_FFMPEG)
     if(WIN32)
         set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thridparty/ffmpeg/windows")
-    elseif(UNIX AND NOT APPLE)
+    elseif(UNIX AND NOT APPLE AND NOT ANDROID)
         set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thridparty/ffmpeg/linux")
     endif()
     set(FFMPEG_INCLUDE_DIRS "${FFMPEG_ROOT}/include")
@@ -48,10 +48,18 @@ if(WIN32)
     list(APPEND SOURCES res/main.rc)
 endif()
 
-add_executable(${PROJECT_NAME}
-    ${SOURCES}
-    ${RESOURCES}
-)
+if(ANDROID AND QT_VERSION_MAJOR EQUAL 6)
+    qt_add_executable(${PROJECT_NAME}
+        MANUAL_FINALIZATION
+        ${SOURCES}
+        ${RESOURCES}
+    )
+else()
+    add_executable(${PROJECT_NAME}
+        ${SOURCES}
+        ${RESOURCES}
+    )
+endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     AuthManager
@@ -89,7 +97,7 @@ if(USE_FFMPEG)
                 ${FFMPEG_LIBRARIES}/libswscale.a
             )
         endif()
-    elseif(UNIX AND NOT APPLE)
+    elseif(UNIX AND NOT APPLE AND NOT ANDROID)
         target_link_libraries(${PROJECT_NAME} PRIVATE
             -L${FFMPEG_LIBRARIES} -lavcodec -lavutil -lswscale
         )
@@ -108,12 +116,16 @@ elseif(APPLE)
     find_library(COREGRAPHICS CoreGraphics)
     target_link_libraries(InputManager PUBLIC ${COREGRAPHICS})
     target_link_libraries(ScreenCapturer PUBLIC ${COREGRAPHICS})
-elseif(UNIX AND NOT APPLE)
-    find_package(X11 REQUIRED)
-    target_link_libraries(InputManager PUBLIC ${X11_LIBRARIES} Xtst)
-    target_link_libraries(ScreenCapturer PUBLIC ${X11_LIBRARIES} Xtst Xdamage Xcomposite Xrender)
+elseif(UNIX AND NOT APPLE AND NOT ANDROID)
+        find_package(X11 REQUIRED)
+        target_link_libraries(InputManager PUBLIC ${X11_LIBRARIES} Xtst)
+        target_link_libraries(ScreenCapturer PUBLIC ${X11_LIBRARIES} Xtst Xdamage Xcomposite Xrender)
 endif()
 
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
+if(ANDROID AND QT_VERSION_MAJOR EQUAL 6)
+    qt_finalize_executable(${PROJECT_NAME})
 endif()

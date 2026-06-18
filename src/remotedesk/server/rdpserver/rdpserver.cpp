@@ -14,7 +14,6 @@
 #include <QCoreApplication>
 #include <QTimer>
 
-#include <string>
 #include <QCursor>
 #include <QFile>
 #include <QJsonArray>
@@ -23,6 +22,7 @@
 #include <QNetworkInterface>
 #include <QScreen>
 #include <QSslCertificate>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -133,7 +133,7 @@ void RDPServer::loadServerConfig(const QString& configPath)
 
     if (!exists) {
         qInfo() << "No server config found at" << path << "creating with defaults";
-        root["ssl"] = true;
+        root["ssl"] = false;
         root["httpPort"] = 8080;
         root["console"] = false;
 
@@ -370,31 +370,33 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     { "type", "screen_locked" },
                     { "locked", locked },
                     { "hint", locked ? QString::fromUtf8(
-    #ifdef Q_OS_WIN
-                                            "锁屏界面可直接输入密码"
-    #elif defined(Q_OS_LINUX)
+#ifdef Q_OS_WIN
+                                           "锁屏界面可直接输入密码"
+#elif defined(Q_OS_ANDROID)
+                        "Android 锁屏输入暂不支持"
+#elif defined(Q_OS_LINUX)
                         "如需在锁屏界面输入密码，请先执行："
                         "sudo usermod -aG input $USER && "
                         "sudo modprobe uinput && sudo chmod 666 /dev/uinput"
-    #elif defined(Q_OS_MACOS)
+#elif defined(Q_OS_MACOS)
                         "macOS 锁屏状态输入需要辅助功能权限："
                         "系统偏好设置 → 隐私与安全性 → 辅助功能 → 添加此应用"
-    #else
+#else
                         "锁屏状态下输入可能受限"
-    #endif
+#endif
                                            "然后直接输入密码回车即可")
                                      : QString() } });
                 if (locked) {
                     qInfo() << "Screen locked";
-    #if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                     if (!inputManager_->initUinput())
                         qWarning() << "uinput unavailable, XTest fallback";
-    #endif
+#endif
                 } else {
                     qInfo() << "Screen unlocked, restoring normal input";
-    #if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                     inputManager_->destroyUinput();
-    #endif
+#endif
                 }
             });
 
@@ -412,14 +414,14 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
             this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
         jpegCompressor_->start();
 
-    #ifdef USE_FFMPEG
+#ifdef USE_FFMPEG
         videoEncoder_ = std::unique_ptr<VideoEncoder>(new VideoEncoder(this));
         connect(videoEncoder_.get(), &VideoEncoder::encodedFrame,
             this, &RDPServer::onEncodedFrame);
 
         connect(videoEncoder_.get(), &VideoEncoder::codecConfigChanged,
             this, &RDPServer::onCodecConfigChanged);
-    #endif
+#endif
     } else {
         // 服务模式：helper 进程的截屏帧通过 WebSocket 传入
         connect(wsServer_.get(), &WebSocketServer::captureFrameReceived,
@@ -997,7 +999,7 @@ void RDPServer::start()
 
 bool RDPServer::startCapture()
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // Linux: DISPLAY may not have been set at init, recreate input manager
     inputManager_ = std::unique_ptr<InputManager>(new InputManager(this));
 #endif
@@ -1013,31 +1015,33 @@ bool RDPServer::startCapture()
                     { "type", "screen_locked" },
                     { "locked", locked },
                     { "hint", locked ? QString::fromUtf8(
-    #ifdef Q_OS_WIN
-                                            "锁屏界面可直接输入密码"
-    #elif defined(Q_OS_LINUX)
+#ifdef Q_OS_WIN
+                                           "锁屏界面可直接输入密码"
+#elif defined(Q_OS_ANDROID)
+                        "Android 锁屏输入暂不支持"
+#elif defined(Q_OS_LINUX)
                         "如需在锁屏界面输入密码，请先执行："
                         "sudo usermod -aG input $USER && "
                         "sudo modprobe uinput && sudo chmod 666 /dev/uinput"
-    #elif defined(Q_OS_MACOS)
+#elif defined(Q_OS_MACOS)
                         "macOS 锁屏状态输入需要辅助功能权限："
                         "系统偏好设置 → 隐私与安全性 → 辅助功能 → 添加此应用"
-    #else
+#else
                         "锁屏状态下输入可能受限"
-    #endif
-                                        )
-                                  : QString() } });
+#endif
+                                           )
+                                     : QString() } });
                 if (locked) {
                     qInfo() << "Screen locked";
-    #if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                     if (!inputManager_->initUinput())
                         qWarning() << "uinput unavailable, XTest fallback";
-    #endif
+#endif
                 } else {
                     qInfo() << "Screen unlocked, restoring normal input";
-    #if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                     inputManager_->destroyUinput();
-    #endif
+#endif
                 }
             });
 
@@ -1150,7 +1154,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             in.type = INPUT_KEYBOARD;
             in.ki.dwFlags = KEYEVENTF_UNICODE;
             in.ki.wScan = ch;
-            if (!isDown) in.ki.dwFlags |= KEYEVENTF_KEYUP;
+            if (!isDown)
+                in.ki.dwFlags |= KEYEVENTF_KEYUP;
             SendInput(1, &in, sizeof(INPUT));
             return;
         }
@@ -1158,7 +1163,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             INPUT in = {};
             in.type = INPUT_KEYBOARD;
             in.ki.wVk = VK_RETURN;
-            if (type == "keyup") in.ki.dwFlags = KEYEVENTF_KEYUP;
+            if (type == "keyup")
+                in.ki.dwFlags = KEYEVENTF_KEYUP;
             SendInput(1, &in, sizeof(INPUT));
             return;
         }

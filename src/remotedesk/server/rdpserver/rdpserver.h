@@ -142,7 +142,7 @@ private:
     QRect screenGeometry_;
     QPoint lastCursorPos_ { -1, -1 };
 
-    bool useSsl_ = true;
+    bool useSsl_ = false;
     bool serviceMode_ = false;
     bool screenLocked_ = false;
     bool secureInputRunning_ = false;
