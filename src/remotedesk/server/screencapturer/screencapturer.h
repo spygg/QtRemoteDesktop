@@ -86,6 +86,8 @@ private:
     void captureDXGI();
 #endif
 
+    int idleCount_ = 0;
+
 #ifdef Q_OS_LINUX
     PlatformCapturer* x11Capturer_ = nullptr;
     bool useX11_ = false;

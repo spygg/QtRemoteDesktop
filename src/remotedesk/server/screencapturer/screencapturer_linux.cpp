@@ -8,14 +8,16 @@ static bool isFrameBlack(const QImage& frame)
 {
     if (frame.isNull() || frame.width() < 10 || frame.height() < 10)
         return true;
+    int pixelSize = frame.depth() / 8;
+    if (pixelSize < 3) return true;
     int sampleCount = 0;
     int darkCount = 0;
-    int step = qMax(1, qMin(frame.width(), frame.height()) / 20);
+    int step = qMax(1, qMin(frame.width(), frame.height()) / 10);
     for (int y = 0; y < frame.height(); y += step) {
         const uchar* line = frame.constScanLine(y);
         for (int x = 0; x < frame.width(); x += step) {
             sampleCount++;
-            if (line[x * 3] + line[x * 3 + 1] + line[x * 3 + 2] < 18)
+            if (line[x * pixelSize] + line[x * pixelSize + 1] + line[x * pixelSize + 2] < 18)
                 darkCount++;
         }
     }
@@ -84,25 +86,21 @@ public:
             return false;
         }
 
-        // 创建 RGB888 格式的 QImage
+        // ZPixmap returns 32-bit BGRA on little-endian x86.
+        // Convert BGRA→RGB manually, skipping alpha channel.
         outImage = QImage(width_, height_, QImage::Format_RGB888);
-
-        // 假设 XImage 是 BGRA 格式（常见的 X11 格式）
-        uchar* src = reinterpret_cast<uchar*>(ximage->data);
+        const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
         uchar* dst = outImage.bits();
-
-        int srcStep = ximage->bytes_per_line;
-        int dstStep = outImage.bytesPerLine();
+        int srcBytesPerLine = ximage->bytes_per_line;
+        int dstBytesPerLine = outImage.bytesPerLine();
 
         for (int y = 0; y < height_; y++) {
-            const uchar* srcLine = src + y * srcStep;
-            uchar* dstLine = dst + y * dstStep;
-
+            const uchar* s = src + y * srcBytesPerLine;
+            uchar* d = dst + y * dstBytesPerLine;
             for (int x = 0; x < width_; x++) {
-                // BGRA -> RGB
-                dstLine[x * 3 + 0] = srcLine[x * 4 + 2]; // R
-                dstLine[x * 3 + 1] = srcLine[x * 4 + 1]; // G
-                dstLine[x * 3 + 2] = srcLine[x * 4 + 0]; // B
+                d[x * 3 + 0] = s[x * 4 + 2]; // R
+                d[x * 3 + 1] = s[x * 4 + 1]; // G
+                d[x * 3 + 2] = s[x * 4 + 0]; // B
             }
         }
 
@@ -179,9 +177,15 @@ void ScreenCapturer::captureFrame()
         quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
 #endif
         if (checksum == lastFrameChecksum_) {
-            // 画面无变化，跳过
+            idleCount_++;
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+                captureTimer_->setInterval(1000);
             return;
         }
+        // 画面有变化，恢复全帧率
+        idleCount_ = 0;
+        if (captureTimer_->interval() != 1000 / fps_)
+            captureTimer_->setInterval(1000 / fps_);
         lastFrameChecksum_ = checksum;
 
         emit frameCaptured(frame);
@@ -191,7 +195,7 @@ void ScreenCapturer::captureFrame()
 
     // 回退到Qt抓屏
     QPixmap pixmap = screen_->grabWindow(0);
-    frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
+    frame = pixmap.toImage().convertToFormat(QImage::Format_RGB32);
 
     if (isFrameBlack(frame)) {
         if (!screenLocked_) {
@@ -211,9 +215,14 @@ void ScreenCapturer::captureFrame()
     quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
 #endif
     if (checksum == lastFrameChecksum_) {
-        // 画面无变化，跳过
+        idleCount_++;
+        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+            captureTimer_->setInterval(1000);
         return;
     }
+    idleCount_ = 0;
+    if (captureTimer_->interval() != 1000 / fps_)
+        captureTimer_->setInterval(1000 / fps_);
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);
