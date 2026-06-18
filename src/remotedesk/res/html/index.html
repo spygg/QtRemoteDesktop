@@ -316,7 +316,7 @@
     </style>
 </head>
 <body>
-    <div id="status">🔴 未连接</div>
+    <div id="status" style="display:none"></div>
     
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
@@ -503,6 +503,7 @@
             state.ws.onopen = () => {
                 state.connected = true;
                 if (state.showFps) updateStatus('🟢 已连接');
+                else updateStatus('');
                 overlay.classList.remove('active');
                 
                 // 初始化解码器
@@ -949,9 +950,7 @@
             const btn = document.getElementById('btn-fps');
             btn.textContent = 'FPS: ' + (state.showFps ? '开' : '关');
             if (state.showFps) {
-                fpsCount = 0;
-                lastFpsTime = performance.now();
-                updateStatus(`🟢 已连接 | 0 FPS`);
+                updateStatus(`🟢 已连接 | ${fpsCount} FPS`);
             } else {
                 updateStatus('');
             }
