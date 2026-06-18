@@ -652,7 +652,10 @@ void RDPServer::handleLoginPost(QTcpSocket* socket, const QByteArray& body)
         result["error"] = error;
 
     QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
-    QString extraHeaders = "Set-Cookie: session=" + token + "; path=/; max-age=86400; SameSite=Lax";
+    QString cookie = QString("session=%1; path=/; max-age=86400; HttpOnly; SameSite=Lax").arg(token);
+    if (useSsl_)
+        cookie += "; Secure";
+    QString extraHeaders = "Set-Cookie: " + cookie;
     QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp, extraHeaders);
     socket->write(resp);
     socket->flush();
