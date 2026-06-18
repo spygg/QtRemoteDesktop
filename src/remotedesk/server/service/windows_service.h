@@ -11,7 +11,7 @@ public:
 
 private:
     static bool isAdmin();
-    static bool launchHelperProcess();
+    static DWORD launchHelperProcess();
 
     static void WINAPI serviceCtrlHandler(DWORD ctrlCode);
     static void WINAPI serviceMain(DWORD argc, LPWSTR* argv);

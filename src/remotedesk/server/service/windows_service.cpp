@@ -30,32 +30,32 @@ void WINAPI WindowsService::serviceCtrlHandler(DWORD ctrlCode)
     }
 }
 
-bool WindowsService::launchHelperProcess()
+DWORD WindowsService::launchHelperProcess()
 {
     DWORD sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF) {
         qInfo() << "LaunchHelper: no active console session";
-        return false;
+        return 0;
     }
 
     HANDLE hProcToken = NULL;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &hProcToken)) {
         qWarning() << "LaunchHelper: OpenProcessToken failed, error:" << GetLastError();
-        return false;
+        return 0;
     }
 
     HANDLE hDupToken = NULL;
     if (!DuplicateTokenEx(hProcToken, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &hDupToken)) {
         qWarning() << "LaunchHelper: DuplicateTokenEx failed, error:" << GetLastError();
         CloseHandle(hProcToken);
-        return false;
+        return 0;
     }
     CloseHandle(hProcToken);
 
     if (!SetTokenInformation(hDupToken, TokenSessionId, &sessionId, sizeof(sessionId))) {
         qWarning() << "LaunchHelper: SetTokenInformation failed, error:" << GetLastError();
         CloseHandle(hDupToken);
-        return false;
+        return 0;
     }
 
     wchar_t exePath[MAX_PATH];
@@ -77,12 +77,12 @@ bool WindowsService::launchHelperProcess()
 
     if (ok) {
         qInfo() << "LaunchHelper: helper process started, PID:" << pi.dwProcessId;
-        CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        return true;
+        CloseHandle(pi.hProcess);
+        return pi.dwProcessId;
     }
     qWarning() << "LaunchHelper: CreateProcessAsUser failed, error:" << GetLastError();
-    return false;
+    return 0;
 }
 
 void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
@@ -135,15 +135,36 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
             tickTimer.start(1000);
 
             QTimer helperTimer;
+            DWORD helperPid = 0;
             QObject::connect(&helperTimer, &QTimer::timeout, [&]() {
                 if (server.isCaptureSourceConnected()) {
                     helperTimer.stop();
+                    return;
+                }
+                if (helperPid != 0) {
+                    HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, helperPid);
+                    if (hProc) {
+                        DWORD exitCode;
+                        if (GetExitCodeProcess(hProc, &exitCode) && exitCode == STILL_ACTIVE) {
+                            CloseHandle(hProc);
+                            return;
+                        }
+                        CloseHandle(hProc);
+                    }
+                    helperPid = 0;
+                }
+                DWORD pid = launchHelperProcess();
+                if (pid != 0) {
+                    helperPid = pid;
+                    helperTimer.setInterval(5000);
                 } else {
-                    launchHelperProcess();
+                    // 无用户会话时慢速轮询，有会话但启动失败时快速重试
+                    bool hasSession = (WTSGetActiveConsoleSessionId() != 0xFFFFFFFF);
+                    helperTimer.setInterval(hasSession ? 1000 : 5000);
                 }
             });
             helperTimer.start(5000);
-            launchHelperProcess();
+            helperPid = launchHelperProcess();
 
             app.exec();
             tickTimer.stop();
