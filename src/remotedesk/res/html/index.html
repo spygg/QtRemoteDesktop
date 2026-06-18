@@ -625,6 +625,8 @@
                 case 'screen_info':
                     state.screenWidth = msg.width;
                     state.screenHeight = msg.height;
+                    state.canvas.width = msg.width;
+                    state.canvas.height = msg.height;
                     updateScale();
                     console.log(`屏幕分辨率: ${msg.width}x${msg.height}`);
                     break;
