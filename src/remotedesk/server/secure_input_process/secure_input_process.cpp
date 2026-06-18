@@ -42,12 +42,37 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
         if (obj["isChar"].toBool() && obj["keycode"].toInt() > 0) {
             wchar_t ch = static_cast<wchar_t>(obj["keycode"].toInt());
             bool isDown = (type == "keydown");
-            INPUT in = {};
-            in.type = INPUT_KEYBOARD;
-            in.ki.dwFlags = KEYEVENTF_UNICODE;
-            in.ki.wScan = ch;
-            if (!isDown) in.ki.dwFlags |= KEYEVENTF_KEYUP;
-            SendInput(1, &in, sizeof(INPUT));
+
+            // VkKeyScanW 用当前键盘布局将字符映射为 VK 码（兼容 XP GINA）。
+            SHORT vkScan = VkKeyScanW(ch);
+            if (vkScan != -1) {
+                BYTE vk = vkScan & 0xFF;
+                BYTE state = (vkScan >> 8) & 0xFF;
+                int n = 0;
+                INPUT in[4] = {};
+                if (state & 1) { in[n].type = INPUT_KEYBOARD; in[n].ki.wVk = VK_SHIFT; n++; }
+                if (state & 2) { in[n].type = INPUT_KEYBOARD; in[n].ki.wVk = VK_CONTROL; n++; }
+                if (state & 4) { in[n].type = INPUT_KEYBOARD; in[n].ki.wVk = VK_MENU; n++; }
+                in[n].type = INPUT_KEYBOARD; in[n].ki.wVk = vk; n++;
+
+                if (isDown) {
+                    SendInput(n, in, sizeof(INPUT));
+                } else {
+                    for (int i = n - 1; i >= 0; i--) {
+                        INPUT up = in[i];
+                        up.ki.dwFlags = KEYEVENTF_KEYUP;
+                        SendInput(1, &up, sizeof(INPUT));
+                    }
+                }
+            } else {
+                // VkKeyScanW 失败（如 CJK），回退 Unicode 路径（Win7+）。
+                INPUT uni = {};
+                uni.type = INPUT_KEYBOARD;
+                uni.ki.dwFlags = KEYEVENTF_UNICODE;
+                uni.ki.wScan = ch;
+                if (!isDown) uni.ki.dwFlags |= KEYEVENTF_KEYUP;
+                SendInput(1, &uni, sizeof(INPUT));
+            }
             return;
         }
 

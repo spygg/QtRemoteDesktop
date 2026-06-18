@@ -172,7 +172,7 @@ bool WindowsService::install()
     GetModuleFileNameW(NULL, path, MAX_PATH);
 
     wchar_t cmdLine[MAX_PATH + 32];
-    swprintf(cmdLine, L"\"%ls\" --service", path);
+    swprintf(cmdLine, L"\"%S\" --service", path);
 
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
     if (!scm) {
@@ -189,7 +189,7 @@ bool WindowsService::install()
         cmdLine, NULL, NULL, NULL, NULL, NULL);
 
     if (svc) {
-        wprintf(L"Service '%ls' installed successfully.\n", SERVICE_NAME);
+        wprintf(L"Service '%S' installed successfully.\n", SERVICE_NAME);
         CloseServiceHandle(svc);
         CloseServiceHandle(scm);
         return TRUE;
@@ -222,7 +222,7 @@ bool WindowsService::uninstall()
 
     CloseServiceHandle(svc);
     CloseServiceHandle(scm);
-    wprintf(L"Service '%s' removed.\n", SERVICE_NAME);
+    wprintf(L"Service '%S' removed.\n", SERVICE_NAME);
     return TRUE;
 }
 
