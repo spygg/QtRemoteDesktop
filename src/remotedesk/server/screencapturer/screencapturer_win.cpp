@@ -409,19 +409,8 @@ void ScreenCapturer::captureFrame()
     }
 #endif
 
-    // GDI / 回退路径: 捕获安全桌面时可能返回黑帧, 抑制并保持 screenLocked
+    // GDI / 回退路径: 捕获安全桌面时可能返回黑帧, 但仍发到前端保持 canvas 尺寸正确
     if (useGDI_ && gdiCapturer_ && gdiCapturer_->captureFrame(frame)) {
-        if (isFrameBlack(frame)) {
-            if (!screenLocked_) {
-                screenLocked_ = true;
-                emit screenLocked(true);
-            }
-            return;
-        }
-        if (screenLocked_) {
-            screenLocked_ = false;
-            emit screenLocked(false);
-        }
         quint16 checksum;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
         checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
@@ -431,6 +420,20 @@ void ScreenCapturer::captureFrame()
         if (checksum == lastFrameChecksum_)
             return;
         lastFrameChecksum_ = checksum;
+
+        if (isFrameBlack(frame)) {
+            if (!screenLocked_) {
+                screenLocked_ = true;
+                emit screenLocked(true);
+            }
+            // 黑帧仍发给前端，确保 canvas 尺寸正确
+            emit frameCaptured(frame);
+            return;
+        }
+        if (screenLocked_) {
+            screenLocked_ = false;
+            emit screenLocked(false);
+        }
         emit frameCaptured(frame);
         return;
     }
@@ -443,6 +446,8 @@ void ScreenCapturer::captureFrame()
             screenLocked_ = true;
             emit screenLocked(true);
         }
+        // 黑帧仍发给前端
+        emit frameCaptured(frame);
         return;
     }
     if (screenLocked_) {
