@@ -63,6 +63,8 @@ public:
 
     bool initialize(const QString& configPath = QString(), bool useSslOverride = true, bool serviceMode = false);
     void start();
+    bool startCapture();
+    bool isCaptureConnected() const;
     bool isCaptureSourceConnected() const;
 
     void loadSslConfig();

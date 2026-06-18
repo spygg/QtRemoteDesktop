@@ -6,9 +6,9 @@
 #include <QMessageLogContext>
 #include <QTimer>
 
+#include <string>
 #include <winsvc.h>
 #include <wtsapi32.h>
-#include <string>
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
 
@@ -153,7 +153,7 @@ bool WindowsService::isAdmin()
     BOOL admin = FALSE;
     PSID adminGroup = NULL;
     SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
-    if (AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0,0,0,0,0,0, &adminGroup)) {
+    if (AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
         CheckTokenMembership(NULL, adminGroup, &admin);
         FreeSid(adminGroup);
     }
@@ -222,8 +222,12 @@ bool WindowsService::uninstall()
 
 int WindowsService::run(int argc, char* argv[])
 {
+    (void*)argc;
+    (void*)argv;
+
+    wchar_t serviceName[] = SERVICE_NAME;
     SERVICE_TABLE_ENTRYW table[] = {
-        { SERVICE_NAME, serviceMain },
+        { serviceName, serviceMain },
         { NULL, NULL }
     };
     if (!StartServiceCtrlDispatcherW(table)) {

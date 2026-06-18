@@ -983,6 +983,74 @@ void RDPServer::start()
     qInfo() << "RDP Server started, mode:" << (currentMode_ == ServerMode::Video ? "video" : "image");
 }
 
+bool RDPServer::startCapture()
+{
+#ifdef Q_OS_LINUX
+    // Linux: DISPLAY may not have been set at init, recreate input manager
+    inputManager_ = std::unique_ptr<InputManager>(new InputManager(this));
+#endif
+
+    if (!screenCapturer_) {
+        screenCapturer_ = std::unique_ptr<ScreenCapturer>(new ScreenCapturer(this));
+        connect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
+            this, &RDPServer::onFrameCaptured);
+        connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
+            this, [this](bool locked) {
+                screenLocked_ = locked;
+                wsServer_->broadcastJson(QJsonObject {
+                    { "type", "screen_locked" },
+                    { "locked", locked },
+                    { "hint", locked ? QString::fromUtf8(
+    #ifdef Q_OS_WIN
+                                            "锁屏界面可直接输入密码"
+    #elif defined(Q_OS_LINUX)
+                        "如需在锁屏界面输入密码，请先执行："
+                        "sudo usermod -aG input $USER && "
+                        "sudo modprobe uinput && sudo chmod 666 /dev/uinput"
+    #elif defined(Q_OS_MACOS)
+                        "macOS 锁屏状态输入需要辅助功能权限："
+                        "系统偏好设置 → 隐私与安全性 → 辅助功能 → 添加此应用"
+    #else
+                        "锁屏状态下输入可能受限"
+    #endif
+                                        )
+                                  : QString() } });
+                if (locked) {
+                    qInfo() << "Screen locked";
+    #if defined(Q_OS_LINUX)
+                    if (!inputManager_->initUinput())
+                        qWarning() << "uinput unavailable, XTest fallback";
+    #endif
+                } else {
+                    qInfo() << "Screen unlocked, restoring normal input";
+    #if defined(Q_OS_LINUX)
+                    inputManager_->destroyUinput();
+    #endif
+                }
+            });
+
+        jpegCompressor_ = std::unique_ptr<JpegCompressor>(new JpegCompressor(nullptr));
+        connect(jpegCompressor_.get(), &JpegCompressor::jpegCompressed,
+            this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
+        jpegCompressor_->start();
+    }
+
+    switchToImageMode();
+    if (!screenCapturer_->start(30)) {
+        qCritical() << "startCapture: failed to start screen capture";
+        return false;
+    }
+    if (wsServer_->clients().isEmpty())
+        screenCapturer_->suspend();
+    qInfo() << "startCapture: screen capturer started";
+    return true;
+}
+
+bool RDPServer::isCaptureConnected() const
+{
+    return screenCapturer_ != nullptr;
+}
+
 void RDPServer::onClientConnected(const QString& clientId)
 {
     // Validate auth token
@@ -1027,11 +1095,14 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& input)
 {
     if (serviceMode_) {
-        qInfo() << "Service: forwarding input to helper, type =" << input["type"].toString();
-        wsServer_->sendToCaptureSource(input);
-        if (screenLocked_ && secureInputRunning_)
-            wsServer_->sendToSecureInput(input);
-        return;
+        if (wsServer_->isCaptureSourceConnected()) {
+            qInfo() << "Service: forwarding input to helper, type =" << input["type"].toString();
+            wsServer_->sendToCaptureSource(input);
+            if (screenLocked_ && secureInputRunning_)
+                wsServer_->sendToSecureInput(input);
+            return;
+        }
+        qInfo() << "Service: no helper, handling input directly, type =" << input["type"].toString();
     }
 
     QString type = input["type"].toString();
@@ -1057,8 +1128,10 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             SendInput(1, &in, sizeof(INPUT));
             return;
         }
-#endif
         return;
+#else
+        qInfo() << "Screen locked, injecting input directly via InputManager";
+#endif
     }
 
     if (type == "mousemove") {

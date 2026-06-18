@@ -4,6 +4,6 @@ class LinuxService
 {
 public:
     static int run(int argc, char* argv[]);
-    static void printInstallInstructions();
-    static void printUninstallInstructions();
+    static int install(int argc, char* argv[]);
+    static int uninstall(int argc, char* argv[]);
 };

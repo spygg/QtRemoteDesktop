@@ -25,6 +25,8 @@ public:
     virtual bool initialize() = 0;
     virtual bool captureFrame(QImage& outImage, bool* updated = nullptr) = 0;
     virtual void resetDamage() {}
+    virtual int width() const { return 0; }
+    virtual int height() const { return 0; }
 };
 
 class ScreenCapturer : public QObject {
@@ -39,8 +41,20 @@ public:
     void suspend();  // 暂停捕获（不销毁平台捕获器）
     void resume();   // 恢复捕获
 
-    int width() const { return screen_->size().width(); }
-    int height() const { return screen_->size().height(); }
+    int width() const {
+#ifdef Q_OS_LINUX
+        if (useX11_ && x11Capturer_)
+            return x11Capturer_->width();
+#endif
+        return screen_ ? screen_->size().width() : 0;
+    }
+    int height() const {
+#ifdef Q_OS_LINUX
+        if (useX11_ && x11Capturer_)
+            return x11Capturer_->height();
+#endif
+        return screen_ ? screen_->size().height() : 0;
+    }
 
 signals:
     void frameCaptured(const QImage& frame);

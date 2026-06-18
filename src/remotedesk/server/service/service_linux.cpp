@@ -8,12 +8,10 @@ int platformMain(int argc, char* argv[])
 {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--install") == 0) {
-            LinuxService::printInstallInstructions();
-            return 0;
+            return LinuxService::install(argc, argv);
         }
         if (strcmp(argv[i], "--uninstall") == 0) {
-            LinuxService::printUninstallInstructions();
-            return 0;
+            return LinuxService::uninstall(argc, argv);
         }
         if (strcmp(argv[i], "--service") == 0) {
             return LinuxService::run(argc, argv);
