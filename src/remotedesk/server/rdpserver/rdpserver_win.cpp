@@ -32,7 +32,23 @@ void RDPServer::startSecureInputProcess()
     STARTUPINFOW si = { sizeof(si) };
     si.lpDesktop = const_cast<wchar_t*>(L"winsta0\\winlogon");
     PROCESS_INFORMATION pi = {};
-    if (CreateProcessAsUserW(hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+
+    // Load dynamically: MinGW 5.3.0 import lib may map to kernel32.dll
+    // (not available before Win7); the function lives in advapi32.dll on XP+.
+    typedef BOOL (WINAPI *CPAUserW_t)(HANDLE, LPCWSTR, LPWSTR,
+        LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
+        LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
+    CPAUserW_t pCreateProcessAsUserW = (CPAUserW_t)GetProcAddress(
+        GetModuleHandleA("advapi32"), "CreateProcessAsUserW");
+
+    if (!pCreateProcessAsUserW) {
+        qWarning() << "CreateProcessAsUserW not available";
+        CloseHandle(hDupToken);
+        CloseHandle(hProcToken);
+        return;
+    }
+
+    if (pCreateProcessAsUserW(hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         qInfo() << "Secure input process started, PID:" << pi.dwProcessId;
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);

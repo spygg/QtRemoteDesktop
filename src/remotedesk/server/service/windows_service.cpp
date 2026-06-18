@@ -65,7 +65,13 @@ bool WindowsService::launchHelperProcess()
     STARTUPINFOW si = { sizeof(si) };
     si.lpDesktop = const_cast<wchar_t*>(L"winsta0\\default");
     PROCESS_INFORMATION pi;
-    bool ok = CreateProcessAsUserW(hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    typedef BOOL (WINAPI *CPAUserW_t)(HANDLE, LPCWSTR, LPWSTR,
+        LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
+        LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
+    CPAUserW_t pCreateProcessAsUserW = (CPAUserW_t)GetProcAddress(
+        GetModuleHandleA("advapi32"), "CreateProcessAsUserW");
+
+    bool ok = pCreateProcessAsUserW && pCreateProcessAsUserW(hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
 
     CloseHandle(hDupToken);
 

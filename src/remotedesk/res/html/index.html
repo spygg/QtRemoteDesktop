@@ -886,8 +886,8 @@
         // ==================== UI 功能 ====================
         function updateScale() {
             const rect = state.canvas.getBoundingClientRect();
-            state.scaleX = state.screenWidth / rect.width;
-            state.scaleY = state.screenHeight / rect.height;
+            state.scaleX = state.canvas.width / rect.width;
+            state.scaleY = state.canvas.height / rect.height;
         }
 
         function updateStatus(text) {
