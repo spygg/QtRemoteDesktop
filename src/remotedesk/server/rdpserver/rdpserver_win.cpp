@@ -27,7 +27,8 @@ void RDPServer::startSecureInputProcess()
 
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    std::wstring cmdLine = std::wstring(exePath) + L" --secure-input " + std::to_wstring(wsPort_);
+    std::wstring cmdLine = std::wstring(exePath) + L" --secure-input " + std::to_wstring(wsPort_)
+        + (sslConfiguration_ ? L" --ssl" : L"");
 
     STARTUPINFOW si = { sizeof(si) };
     si.lpDesktop = const_cast<wchar_t*>(L"winsta0\\winlogon");

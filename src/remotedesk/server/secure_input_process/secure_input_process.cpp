@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <cstring>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageLogContext>
@@ -25,6 +26,12 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
     QDir().mkpath(logDir);
     qInstallMessageHandler(logToFile);
 
+    bool useSsl = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--ssl") == 0) { useSsl = true; break; }
+    }
+    QString wsScheme = useSsl ? "wss" : "ws";
+
     QWebSocket ws;
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "SecureInput: connected to service";
@@ -32,6 +39,11 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
     QObject::connect(&ws, &QWebSocket::disconnected, &app, [&]() {
         qWarning() << "SecureInput: disconnected, exiting";
         QCoreApplication::quit();
+    });
+    QObject::connect(&ws, &QWebSocket::sslErrors, &app, [&](const QList<QSslError>& errors) {
+        for (const auto& err : errors)
+            qWarning() << "SecureInput: SSL error" << err.errorString();
+        ws.ignoreSslErrors();
     });
     QObject::connect(&ws, &QWebSocket::textMessageReceived, &app, [&](const QString& msg) {
         QJsonDocument doc = QJsonDocument::fromJson(msg.toUtf8());
@@ -128,7 +140,7 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
             SendInput(1, &in, sizeof(INPUT));
         }
     });
-    ws.open(QUrl(QString("ws://127.0.0.1:%1/secure-input").arg(wsPort)));
+    ws.open(QUrl(QString("%1://127.0.0.1:%2/secure-input").arg(wsScheme).arg(wsPort)));
     return app.exec();
 #else
     (void)argc; (void)argv; (void)wsPort;

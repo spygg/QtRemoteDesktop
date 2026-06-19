@@ -35,6 +35,7 @@ int HelperProcess::run(int argc, char* argv[])
     qInstallMessageHandler(logToFile);
 
     int wsPort = 8081;
+    bool useSsl = false;
     QFile cfg(QGuiApplication::applicationDirPath() + "/server_config.json");
     if (cfg.open(QIODevice::ReadOnly)) {
         QJsonDocument doc = QJsonDocument::fromJson(cfg.readAll());
@@ -43,9 +44,11 @@ int HelperProcess::run(int argc, char* argv[])
             QJsonObject root = doc.object();
             int httpPort = root.value("httpPort").toInt(8080);
             wsPort = httpPort + 1;
+            useSsl = root.value("ssl").toBool(false);
         }
     }
 
+    QString wsScheme = useSsl ? "wss" : "ws";
     QWebSocket ws;
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
@@ -57,10 +60,15 @@ int HelperProcess::run(int argc, char* argv[])
     QObject::connect(&ws, &QWebSocket::disconnected, &app, [&]() {
         qWarning() << "Helper WS disconnected (helper may have crashed), retrying in 3s...";
         QTimer::singleShot(3000, [&]() {
-            ws.open(QUrl(QString("ws://127.0.0.1:%1/capture").arg(wsPort)));
+            ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
         });
     });
-    ws.open(QUrl(QString("ws://127.0.0.1:%1/capture").arg(wsPort)));
+    QObject::connect(&ws, &QWebSocket::sslErrors, &app, [&](const QList<QSslError>& errors) {
+        for (const auto& err : errors)
+            qWarning() << "Helper: SSL error" << err.errorString();
+        ws.ignoreSslErrors();
+    });
+    ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
 
     ScreenCapturer capturer(nullptr);
     JpegCompressor compressor(nullptr);
