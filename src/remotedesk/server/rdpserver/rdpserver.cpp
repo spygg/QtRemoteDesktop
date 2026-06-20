@@ -1147,7 +1147,6 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
     QProcess proc;
     proc.setWorkingDirectory(shellCurrentDir_);
 #ifdef _WIN32
-    proc.setNativeArguments(command);
     proc.start("cmd.exe", QStringList() << "/c" << command);
 #else
     proc.start("/bin/sh", QStringList() << "-c" << command);
@@ -1170,14 +1169,14 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
 
     result["success"] = finished;
     if (finished) {
-        result["stdout"] = QString::fromUtf8(proc.readAllStandardOutput());
-        result["stderr"] = QString::fromUtf8(proc.readAllStandardError());
+        result["stdout"] = QString::fromLocal8Bit(proc.readAllStandardOutput());
+        result["stderr"] = QString::fromLocal8Bit(proc.readAllStandardError());
         result["exitCode"] = proc.exitCode();
     } else {
         proc.kill();
         proc.waitForFinished(3000);
-        result["stdout"] = QString::fromUtf8(proc.readAllStandardOutput());
-        result["stderr"] = QString::fromUtf8(proc.readAllStandardError());
+        result["stdout"] = QString::fromLocal8Bit(proc.readAllStandardOutput());
+        result["stderr"] = QString::fromLocal8Bit(proc.readAllStandardError());
         result["error"] = "命令执行超时（30秒）";
     }
 
