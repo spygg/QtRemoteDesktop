@@ -124,6 +124,9 @@ endif()
 
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
+    if(MSVC)
+        target_link_options(${PROJECT_NAME} PRIVATE /MANIFEST:NO)
+    endif()
 endif()
 
 if(ANDROID AND QT_VERSION_MAJOR EQUAL 6)

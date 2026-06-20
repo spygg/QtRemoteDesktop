@@ -110,8 +110,8 @@
 
             const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
-            if (!username) {
-                err.textContent = '请输入用户名';
+            if (!username || !password) {
+                err.textContent = '请输入用户名和密码';
                 err.classList.add('visible');
                 return;
             }

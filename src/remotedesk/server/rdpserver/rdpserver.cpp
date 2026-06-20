@@ -19,6 +19,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QNetworkInterface>
 #include <QScreen>
 #include <QSslCertificate>
@@ -808,6 +809,30 @@ void RDPServer::onHttpRequest()
             return;
         }
 
+        if (path == "/api/shell/exec" || path.startsWith("/api/shell/exec?")) {
+            QString token = extractSessionToken(request);
+            if (!authManager_->validateSession(token)) {
+                QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", "未登录" } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
+                return;
+            }
+            int bodyLen = 0;
+            QByteArray body = readPostBody(bodyLen);
+            if (body.isEmpty()) {
+                QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", "Missing request body" } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
+                return;
+            }
+            handleShellExec(socket, body);
+            return;
+        }
+
         // Unknown POST
         QByteArray resp = buildHttpResponse(404, "Not Found", "text/plain; charset=utf-8", "Not Found");
         socket->write(resp);
@@ -851,6 +876,20 @@ void RDPServer::onHttpRequest()
     }
 
     // Serve API or page
+    if (path == "/shell" || path.startsWith("/shell?")) {
+        QFile shellFile(":/res/html/shell.html");
+        QByteArray shellHtml;
+        if (shellFile.open(QIODevice::ReadOnly))
+            shellHtml = shellFile.readAll();
+        else
+            shellHtml = loadHtmlResource();
+        QByteArray shellResp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", shellHtml);
+        socket->write(shellResp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
     if (path == "/api/users" || path.startsWith("/api/users?")) {
         handleApiUsers(socket);
         return;
@@ -948,6 +987,78 @@ void RDPServer::handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body)
     } else {
         result["success"] = false;
         result["error"] = "无效的请求数据";
+    }
+
+    QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+    QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+    socket->write(resp);
+    socket->flush();
+    socket->disconnectFromHost();
+}
+
+void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(body);
+    QJsonObject result;
+
+    if (!doc.isObject()) {
+        result["success"] = false;
+        result["error"] = "无效的请求数据";
+        QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    QJsonObject obj = doc.object();
+    QString command = obj["command"].toString();
+
+    if (command.isEmpty()) {
+        result["success"] = false;
+        result["error"] = "命令不能为空";
+        QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    QProcess proc;
+#ifdef _WIN32
+    proc.setNativeArguments(command);
+    proc.start("cmd.exe", QStringList() << "/c" << command);
+#else
+    proc.start("/bin/sh", QStringList() << "-c" << command);
+#endif
+
+    if (!proc.waitForStarted(5000)) {
+        result["success"] = false;
+        result["error"] = "启动命令失败: " + proc.errorString();
+        QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(500, "Internal Server Error", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    // Set a 30-second timeout
+    bool finished = proc.waitForFinished(30000);
+
+    result["success"] = finished;
+    if (finished) {
+        result["stdout"] = QString::fromUtf8(proc.readAllStandardOutput());
+        result["stderr"] = QString::fromUtf8(proc.readAllStandardError());
+        result["exitCode"] = proc.exitCode();
+    } else {
+        proc.kill();
+        proc.waitForFinished(3000);
+        result["stdout"] = QString::fromUtf8(proc.readAllStandardOutput());
+        result["stderr"] = QString::fromUtf8(proc.readAllStandardError());
+        result["error"] = "命令执行超时（30秒）";
     }
 
     QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
