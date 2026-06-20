@@ -658,8 +658,13 @@ void RDPServer::handleLoginPost(QTcpSocket* socket, const QByteArray& body)
 
     QJsonObject result;
     result["success"] = token.isEmpty() ? false : true;
-    if (!token.isEmpty())
+    if (!token.isEmpty()) {
         result["token"] = token;
+        // 无屏幕捕获 → 登录后直接跳转到 Shell 页面
+        if (!captureAvailable_) {
+            result["redirect"] = "/shell";
+        }
+    }
     if (!error.isEmpty())
         result["error"] = error;
 
@@ -902,6 +907,13 @@ void RDPServer::onHttpRequest()
             html = file.readAll();
         else
             html = loadHtmlResource();
+    } else if (!captureAvailable_ && (path == "/" || path.isEmpty())) {
+        // 无屏幕捕获时，默认跳转到 Shell 页面
+        QFile sf(":/res/html/shell.html");
+        if (sf.open(QIODevice::ReadOnly))
+            html = sf.readAll();
+        else
+            html = loadHtmlResource();
     } else {
         html = loadHtmlResource();
     }
@@ -1100,6 +1112,11 @@ void RDPServer::start()
         return;
     }
 
+    // 检测捕获是否可用（无 X 时 width/height 为 0）
+    captureAvailable_ = screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
+    if (!captureAvailable_)
+        qWarning() << "Screen capture unavailable (no display), serving shell-only mode";
+
     // 如果没有客户端连接，暂停捕获以降低 CPU
     if (wsServer_->clients().isEmpty())
         screenCapturer_->suspend();
@@ -1167,6 +1184,9 @@ bool RDPServer::startCapture()
         qCritical() << "startCapture: failed to start screen capture";
         return false;
     }
+    captureAvailable_ = screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
+    if (!captureAvailable_)
+        qWarning() << "startCapture: screen capture unavailable";
     if (wsServer_->clients().isEmpty())
         screenCapturer_->suspend();
     qInfo() << "startCapture: screen capturer started";

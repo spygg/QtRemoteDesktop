@@ -147,6 +147,7 @@ private:
     bool serviceMode_ = false;
     bool screenLocked_ = false;
     bool secureInputRunning_ = false;
+    bool captureAvailable_ = true;
 #ifdef _WIN32
     int secureInputPid_ = 0;
 #endif

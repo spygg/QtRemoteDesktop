@@ -39,6 +39,17 @@ void ScreenCapturer::cleanupPlatform()
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xrender.h>
 
+// 安装 X11 错误处理函数，阻止 BadMatch 等异步 X 错误导致 abort() 崩溃
+static int (*s_oldXErrorHandler)(Display*, XErrorEvent*) = nullptr;
+
+static int x11ErrorHandler(Display* d, XErrorEvent* e)
+{
+    Q_UNUSED(d)
+    Q_UNUSED(e)
+    // 忽略 X11 错误，捕获失败由返回值和 captureFailCount_ 检测
+    return 0;
+}
+
 class X11Capturer : public PlatformCapturer {
     Display* display_ = nullptr;
     Window rootWindow_;
@@ -51,6 +62,9 @@ class X11Capturer : public PlatformCapturer {
 public:
     bool initialize() override
     {
+        // 安装自定义错误处理，防止 XGetImage 等失败时崩溃
+        s_oldXErrorHandler = XSetErrorHandler(x11ErrorHandler);
+
         display_ = XOpenDisplay(nullptr);
         if (!display_) {
             return false;
