@@ -148,6 +148,7 @@ private:
     bool screenLocked_ = false;
     bool secureInputRunning_ = false;
     bool captureAvailable_ = true;
+    QString shellCurrentDir_;
 #ifdef _WIN32
     int secureInputPid_ = 0;
 #endif

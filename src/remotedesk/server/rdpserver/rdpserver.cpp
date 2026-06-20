@@ -12,6 +12,7 @@
 
 #include <QBuffer>
 #include <QCoreApplication>
+#include <QDir>
 #include <QTimer>
 
 #include <QCursor>
@@ -265,6 +266,8 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     // 加载配置文件
     httpPort_ = 8080;
     loadServerConfig(configPath);
+
+    shellCurrentDir_ = QDir::currentPath();
 
     // 命令行参数 --no-ssl 覆盖配置文件
     if (!useSslOverride)
@@ -895,6 +898,17 @@ void RDPServer::onHttpRequest()
         return;
     }
 
+    if (path == "/api/shell/cwd" || path.startsWith("/api/shell/cwd?")) {
+        QJsonObject cwdResp;
+        cwdResp["cwd"] = shellCurrentDir_;
+        QByteArray jsonResp = QJsonDocument(cwdResp).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
     if (path == "/api/users" || path.startsWith("/api/users?")) {
         handleApiUsers(socket);
         return;
@@ -1025,7 +1039,7 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
     }
 
     QJsonObject obj = doc.object();
-    QString command = obj["command"].toString();
+    QString command = obj["command"].toString().trimmed();
 
     if (command.isEmpty()) {
         result["success"] = false;
@@ -1038,7 +1052,100 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         return;
     }
 
+    // 处理 cd 命令：服务器端切换目录，确保 cd 跨命令持久
+    // 支持: cd, cd ~, cd path, cd "path", cd .., cd.., cd.
+    // 不认识的 cd 变体（如 c:\ 等）会通过 QProcess 由原生 shell 处理
+    if (command == "cd" || command == "cd.") {
+        // cd / cd. -> stay in current dir, just return cwd
+        result["success"] = true;
+        result["exitCode"] = 0;
+        result["cwd"] = shellCurrentDir_;
+        QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    if (command == "cd~") {
+        QDir::setCurrent(QDir::homePath());
+        shellCurrentDir_ = QDir::currentPath();
+        result["success"] = true;
+        result["exitCode"] = 0;
+        result["cwd"] = shellCurrentDir_;
+        QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    if (command.startsWith("cd..")) {
+        // cd.. -> cd ..
+        QDir::setCurrent("..");
+        shellCurrentDir_ = QDir::currentPath();
+        result["success"] = true;
+        result["exitCode"] = 0;
+        result["cwd"] = shellCurrentDir_;
+        QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    if (command.startsWith("cd ") || command.startsWith("cd\t") || command.startsWith("cd\"")) {
+        int split = command.indexOf(' ');
+        if (split < 0) split = command.indexOf('\t');
+        if (split < 0) split = 2; // cd"
+        QString arg = command.mid(split + 1).trimmed();
+
+        // Strip surrounding quotes
+        if ((arg.startsWith('"') && arg.endsWith('"')) || (arg.startsWith('\'') && arg.endsWith('\'')))
+            arg = arg.mid(1, arg.length() - 2);
+
+#ifdef _WIN32
+        // Windows cd /d D:\path
+        if (arg.startsWith("/d ", Qt::CaseInsensitive))
+            arg = arg.mid(3).trimmed();
+#endif
+        // ~ expansion
+        if (arg == "~")
+            arg = QDir::homePath();
+
+        bool ok = QDir::setCurrent(arg);
+#ifdef _WIN32
+        // Windows drive letter switch: "D:" -> switch to D:\ current dir
+        if (!ok && arg.length() == 2 && arg[1] == ':') {
+            QString orig = QDir::currentPath();
+            QDir::setCurrent(arg + "\\");
+            ok = QDir::currentPath() != orig;
+        }
+#endif
+        if (ok) {
+            shellCurrentDir_ = QDir::currentPath();
+            result["success"] = true;
+            result["stdout"] = "";
+            result["stderr"] = "";
+            result["exitCode"] = 0;
+        } else {
+            result["success"] = false;
+            result["error"] = "无法切换到目录: " + arg;
+        }
+        result["cwd"] = shellCurrentDir_;
+        QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
     QProcess proc;
+    proc.setWorkingDirectory(shellCurrentDir_);
 #ifdef _WIN32
     proc.setNativeArguments(command);
     proc.start("cmd.exe", QStringList() << "/c" << command);
@@ -1049,6 +1156,7 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
     if (!proc.waitForStarted(5000)) {
         result["success"] = false;
         result["error"] = "启动命令失败: " + proc.errorString();
+        result["cwd"] = shellCurrentDir_;
         QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
         QByteArray resp = buildHttpResponse(500, "Internal Server Error", "application/json; charset=utf-8", jsonResp);
         socket->write(resp);
@@ -1073,6 +1181,7 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         result["error"] = "命令执行超时（30秒）";
     }
 
+    result["cwd"] = shellCurrentDir_;
     QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
     QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
     socket->write(resp);

@@ -81,6 +81,12 @@ int main(int argc, char* argv[])
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 #endif
 
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+    // 无 X 环境时使用 offscreen 平台插件，让 QApplication 正常启动
+    if (qEnvironmentVariableIsEmpty("DISPLAY"))
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+#endif
+
     SingleApplication a(argc, argv);
     if (a.isRunning()) {
         return 0;

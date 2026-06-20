@@ -88,7 +88,7 @@
         <div class="info">输入命令后按 Enter 或点击"执行"。支持管道、重定向等 shell 特性。</div>
     </div>
     <div id="input-bar">
-        <span class="prompt-label">$</span>
+        <span class="prompt-label" id="prompt-label">$</span>
         <input type="text" id="cmd-input" placeholder="输入命令..." autocomplete="off" />
         <button id="btn-exec" onclick="execCmd()">执行</button>
         <button id="btn-clear" onclick="clearOutput()">清屏</button>
@@ -97,10 +97,12 @@
         let history = [];
         let historyIdx = -1;
         let running = false;
+        let cwd = '';
 
         const output = document.getElementById('output');
         const input = document.getElementById('cmd-input');
         const btnExec = document.getElementById('btn-exec');
+        const promptLabel = document.getElementById('prompt-label');
 
         function appendOutput(text, className) {
             const div = document.createElement('div');
@@ -114,6 +116,11 @@
             output.innerHTML = '';
         }
 
+        function updatePrompt(newCwd) {
+            if (newCwd) cwd = newCwd;
+            promptLabel.textContent = cwd ? cwd + ' $' : '$';
+        }
+
         async function execCmd() {
             const cmd = input.value.trim();
             if (!cmd || running) return;
@@ -122,7 +129,7 @@
             btnExec.disabled = true;
             btnExec.textContent = '执行中...';
 
-            appendOutput('$ ' + cmd, 'prompt');
+            appendOutput((cwd ? cwd + ' ' : '') + '$ ' + cmd, 'prompt');
             history.push(cmd);
             historyIdx = history.length;
             input.value = '';
@@ -134,13 +141,12 @@
                     body: JSON.stringify({ command: cmd })
                 });
                 const result = await resp.json();
+                if (result.cwd) updatePrompt(result.cwd);
                 if (result.success) {
                     if (result.stdout) appendOutput(result.stdout, 'stdout');
                     if (result.stderr) appendOutput(result.stderr, 'stderr');
                     if (result.stdout || result.stderr)
                         appendOutput('exit: ' + result.exitCode, 'info');
-                    else
-                        appendOutput('(命令完成，exit: ' + result.exitCode + ')', 'info');
                 } else {
                     appendOutput('错误: ' + (result.error || '执行失败'), 'error');
                 }
@@ -174,6 +180,11 @@
                 }
             }
         });
+
+        // 查询初始工作目录
+        fetch('/api/shell/cwd').then(r=>r.json()).then(d=>{
+            if (d.cwd) updatePrompt(d.cwd);
+        }).catch(()=>{});
 
         input.focus();
     </script>

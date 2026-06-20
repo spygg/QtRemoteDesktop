@@ -208,6 +208,7 @@ void ScreenCapturer::captureFrame()
     }
 
     // 回退到Qt抓屏
+    if (!screen_) return;
     QPixmap pixmap = screen_->grabWindow(0);
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB32);
 
