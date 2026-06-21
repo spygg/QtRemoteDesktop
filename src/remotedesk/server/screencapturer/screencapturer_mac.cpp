@@ -9,7 +9,7 @@ static bool isFrameBlack(const QImage& frame)
         return true;
     int sampleCount = 0;
     int darkCount = 0;
-    int step = qMax(1, qMin(frame.width(), frame.height()) / 20);
+    int step = qMax(1, qMin(frame.width(), frame.height()) / 10);
     for (int y = 0; y < frame.height(); y += step) {
         const uchar* line = frame.constScanLine(y);
         for (int x = 0; x < frame.width(); x += step) {
@@ -58,22 +58,12 @@ public:
 
         CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImage);
 
-        outImage = QImage(static_cast<int>(w), static_cast<int>(h), QImage::Format_RGB888);
-        uchar* src = static_cast<uchar*>(CGBitmapContextGetData(ctx));
-        uchar* dst = outImage.bits();
-        size_t srcRowBytes = CGBitmapContextGetBytesPerRow(ctx);
-        int dstRowBytes = outImage.bytesPerLine();
-
-        for (int y = 0; y < static_cast<int>(h); y++) {
-            const uchar* srcLine = src + y * srcRowBytes;
-            uchar* dstLine = dst + y * dstRowBytes;
-            for (int x = 0; x < static_cast<int>(w); x++) {
-                // BGRA -> RGB (little endian: byte0=B, byte1=G, byte2=R, byte3=A)
-                dstLine[x * 3 + 0] = srcLine[x * 4 + 2]; // R
-                dstLine[x * 3 + 1] = srcLine[x * 4 + 1]; // G
-                dstLine[x * 3 + 2] = srcLine[x * 4 + 0]; // B
-            }
-        }
+        // BGRA -> RGB888 (使用 Qt 内置 SIMD 优化转换)
+        QImage rawImg(static_cast<uchar*>(CGBitmapContextGetData(ctx)),
+                      static_cast<int>(w), static_cast<int>(h),
+                      static_cast<int>(CGBitmapContextGetBytesPerRow(ctx)),
+                      QImage::Format_RGB32);
+        outImage = rawImg.convertToFormat(QImage::Format_RGB888);
 
         CGContextRelease(ctx);
         CGColorSpaceRelease(colorSpace);
@@ -111,6 +101,9 @@ void ScreenCapturer::captureFrame()
     }
 
     if (isFrameBlack(frame)) {
+        idleCount_ = 0;
+        if (captureTimer_->interval() != 1000 / fps_)
+            captureTimer_->setInterval(1000 / fps_);
         if (!screenLocked_) {
             screenLocked_ = true;
             emit screenLocked(true);
@@ -122,13 +115,16 @@ void ScreenCapturer::captureFrame()
         emit screenLocked(false);
     }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    quint16 checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
-#else
-    quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
-#endif
-    if (checksum == lastFrameChecksum_)
+    quint16 checksum = quickFrameChecksum(frame);
+    if (checksum == lastFrameChecksum_) {
+        idleCount_++;
+        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+            captureTimer_->setInterval(1000);
         return;
+    }
+    idleCount_ = 0;
+    if (captureTimer_->interval() != 1000 / fps_)
+        captureTimer_->setInterval(1000 / fps_);
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);

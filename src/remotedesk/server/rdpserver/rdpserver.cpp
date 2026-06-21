@@ -1082,7 +1082,7 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         return;
     }
 
-    if (command.startsWith("cd..")) {
+    if (command == "cd.." || command.startsWith("cd.. ")) {
         // cd.. -> cd ..
         QDir::setCurrent("..");
         shellCurrentDir_ = QDir::currentPath();
@@ -1097,10 +1097,12 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         return;
     }
 
-    if (command.startsWith("cd ") || command.startsWith("cd\t") || command.startsWith("cd\"")) {
+    if (command.startsWith("cd ") || command.startsWith("cd\t") || command.startsWith("cd\"") || command.startsWith("cd'")) {
         int split = command.indexOf(' ');
         if (split < 0) split = command.indexOf('\t');
-        if (split < 0) split = 2; // cd"
+        if (split < 0) split = command.indexOf('"');
+        if (split < 0) split = command.indexOf('\'');
+        if (split < 0) split = 2; // fallback: "cd" length
         QString arg = command.mid(split + 1).trimmed();
 
         // Strip surrounding quotes
@@ -1217,6 +1219,7 @@ void RDPServer::start()
     // 启动屏幕捕获
     if (!screenCapturer_->start(30)) {
         qCritical() << "Failed to start screen capture";
+        captureAvailable_ = false;
         return;
     }
 
@@ -1290,6 +1293,7 @@ bool RDPServer::startCapture()
     switchToImageMode();
     if (!screenCapturer_->start(30)) {
         qCritical() << "startCapture: failed to start screen capture";
+        captureAvailable_ = false;
         return false;
     }
     captureAvailable_ = screenCapturer_->width() > 0 && screenCapturer_->height() > 0;

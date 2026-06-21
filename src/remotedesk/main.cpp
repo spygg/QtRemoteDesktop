@@ -1,10 +1,10 @@
-#include "rdpserver.h"
 #include "inputmanager.h"
+#include "rdpserver.h"
 #include "screencapturer.h"
+#include "service/service.h"
 #include "singleapplication.h"
 #include "startup.h"
 #include "systemsleepblocker.h"
-#include "service/service.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -57,7 +57,7 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
 
     QDateTime dt = QDateTime::currentDateTime();
 
-    QString logFile = QString("%1/logs/%2.txt").arg(QDir::currentPath()).arg(dt.toString("yyyyMMdd"));
+    QString logFile = QString("%1/logs/%2.txt").arg(QCoreApplication::applicationDirPath() /*QDir::currentPath()*/).arg(dt.toString("yyyyMMdd"));
 
     QFile log(logFile);
     if (log.open(QIODevice::WriteOnly | QIODevice::Append | QFile::Text)) {

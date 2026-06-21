@@ -8,7 +8,7 @@ static bool isFrameBlack(const QImage& frame)
         return true;
     int sampleCount = 0;
     int darkCount = 0;
-    int step = qMax(1, qMin(frame.width(), frame.height()) / 20);
+    int step = qMax(1, qMin(frame.width(), frame.height()) / 10);
     for (int y = 0; y < frame.height(); y += step) {
         const uchar* line = frame.constScanLine(y);
         for (int x = 0; x < frame.width(); x += step) {
@@ -46,11 +46,7 @@ void ScreenCapturer::captureFrame()
         emit screenLocked(false);
     }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    quint16 checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
-#else
-    quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
-#endif
+    quint16 checksum = quickFrameChecksum(frame);
     if (checksum == lastFrameChecksum_)
         return;
     lastFrameChecksum_ = checksum;

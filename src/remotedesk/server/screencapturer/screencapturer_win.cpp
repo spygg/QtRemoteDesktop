@@ -70,23 +70,9 @@ public:
             return false;
         }
 
-        // 创建 QImage (BGRA -> RGB888)
-        outImage = QImage(width_, height_, QImage::Format_RGB888);
-        const uchar* src = buffer_.data();
-        uchar* dst = outImage.bits();
-        int dstStep = outImage.bytesPerLine(); // 可能 = width_ * 3
-        int srcStep = width_ * 4; // BGRA 每行字节数
-
-        for (int y = 0; y < height_; ++y) {
-            const uchar* srcRow = src + y * srcStep;
-            uchar* dstRow = dst + y * dstStep;
-            for (int x = 0; x < width_; ++x) {
-                // BGRA -> RGB
-                dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // R
-                dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
-                dstRow[x * 3 + 2] = srcRow[x * 4 + 0]; // B
-            }
-        }
+        // BGRA -> RGB888 (使用 Qt 内置 SIMD 优化转换)
+        QImage rawImg(buffer_.data(), width_, height_, width_ * 4, QImage::Format_RGB32);
+        outImage = rawImg.convertToFormat(QImage::Format_RGB888);
         return true;
     }
 
@@ -272,23 +258,11 @@ public:
             return false;
         }
 
-        // 数据转换...
-        outImage = QImage(width_, height_, QImage::Format_RGB888);
-        uchar* dst = outImage.bits();
+        // DXGI 输出 BGRA -> RGB888 (使用 Qt 内置 SIMD 优化转换)
         const uchar* src = static_cast<const uchar*>(mapped.pData);
-        const int dstStep = outImage.bytesPerLine(); // 通常是 width_ * 3
-        const int srcStep = mapped.RowPitch; // 可能包含对齐填充
-        // 逐行转换 BGRA -> RGB
-        for (int y = 0; y < height_; ++y) {
-            const uchar* srcRow = src + y * srcStep;
-            uchar* dstRow = dst + y * dstStep;
-            for (int x = 0; x < width_; ++x) {
-                // BGRA: srcRow[0]=B, [1]=G, [2]=R, [3]=A
-                dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // R
-                dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
-                dstRow[x * 3 + 2] = srcRow[x * 4 + 0]; // B
-            }
-        }
+        const int srcStep = mapped.RowPitch;
+        QImage rawImg(src, width_, height_, srcStep, QImage::Format_RGB32);
+        outImage = rawImg.convertToFormat(QImage::Format_RGB888);
 
         context_->Unmap(stagingTexture_, 0);
         // stagingTexture_ 复用，不释放
@@ -352,7 +326,7 @@ static bool isFrameBlack(const QImage& frame)
         return true;
     int sampleCount = 0;
     int darkCount = 0;
-    int step = qMax(1, qMin(frame.width(), frame.height()) / 20);
+    int step = qMax(1, qMin(frame.width(), frame.height()) / 10);
     for (int y = 0; y < frame.height(); y += step) {
         const uchar* line = frame.constScanLine(y);
         for (int x = 0; x < frame.width(); x += step) {
@@ -396,7 +370,7 @@ void ScreenCapturer::captureFrame()
 
         dxgiRetryCount_++;
 
-        if (dxgiRetryCount_ >= 60) {
+        if (dxgiRetryCount_ >= 15) {
             qWarning() << "DXGI persistently failing, falling back to GDI";
             useDXGI_ = false;
         }
@@ -411,17 +385,10 @@ void ScreenCapturer::captureFrame()
 
     // GDI / 回退路径: 捕获安全桌面时可能返回黑帧, 但仍发到前端保持 canvas 尺寸正确
     if (useGDI_ && gdiCapturer_ && gdiCapturer_->captureFrame(frame)) {
-        quint16 checksum;
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
-#else
-        checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
-#endif
-        if (checksum == lastFrameChecksum_)
-            return;
-        lastFrameChecksum_ = checksum;
-
         if (isFrameBlack(frame)) {
+            idleCount_ = 0;
+            if (captureTimer_->interval() != 1000 / fps_)
+                captureTimer_->setInterval(1000 / fps_);
             if (!screenLocked_) {
                 screenLocked_ = true;
                 emit screenLocked(true);
@@ -434,6 +401,19 @@ void ScreenCapturer::captureFrame()
             screenLocked_ = false;
             emit screenLocked(false);
         }
+
+        quint16 checksum = quickFrameChecksum(frame);
+        if (checksum == lastFrameChecksum_) {
+            idleCount_++;
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+                captureTimer_->setInterval(1000);
+            return;
+        }
+        idleCount_ = 0;
+        if (captureTimer_->interval() != 1000 / fps_)
+            captureTimer_->setInterval(1000 / fps_);
+        lastFrameChecksum_ = checksum;
+
         emit frameCaptured(frame);
         return;
     }
@@ -442,6 +422,9 @@ void ScreenCapturer::captureFrame()
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
     if (isFrameBlack(frame)) {
+        idleCount_ = 0;
+        if (captureTimer_->interval() != 1000 / fps_)
+            captureTimer_->setInterval(1000 / fps_);
         if (!screenLocked_) {
             screenLocked_ = true;
             emit screenLocked(true);
@@ -455,13 +438,16 @@ void ScreenCapturer::captureFrame()
         emit screenLocked(false);
     }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    quint16 checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
-#else
-    quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
-#endif
-    if (checksum == lastFrameChecksum_)
+    quint16 checksum = quickFrameChecksum(frame);
+    if (checksum == lastFrameChecksum_) {
+        idleCount_++;
+        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+            captureTimer_->setInterval(1000);
         return;
+    }
+    idleCount_ = 0;
+    if (captureTimer_->interval() != 1000 / fps_)
+        captureTimer_->setInterval(1000 / fps_);
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);

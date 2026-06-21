@@ -101,22 +101,11 @@ public:
         }
 
         // ZPixmap returns 32-bit BGRA on little-endian x86.
-        // Convert BGRA→RGB manually, skipping alpha channel.
-        outImage = QImage(width_, height_, QImage::Format_RGB888);
-        const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
-        uchar* dst = outImage.bits();
-        int srcBytesPerLine = ximage->bytes_per_line;
-        int dstBytesPerLine = outImage.bytesPerLine();
-
-        for (int y = 0; y < height_; y++) {
-            const uchar* s = src + y * srcBytesPerLine;
-            uchar* d = dst + y * dstBytesPerLine;
-            for (int x = 0; x < width_; x++) {
-                d[x * 3 + 0] = s[x * 4 + 2]; // R
-                d[x * 3 + 1] = s[x * 4 + 1]; // G
-                d[x * 3 + 2] = s[x * 4 + 0]; // B
-            }
-        }
+        // BGRA → RGB888 (使用 Qt 内置 SIMD 优化转换)
+        QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
+                      width_, height_, ximage->bytes_per_line,
+                      QImage::Format_RGB32);
+        outImage = rawImg.convertToFormat(QImage::Format_RGB888);
 
         XDestroyImage(ximage);
         return true;
@@ -134,6 +123,8 @@ public:
 
     ~X11Capturer()
     {
+        if (s_oldXErrorHandler)
+            XSetErrorHandler(s_oldXErrorHandler);
         if (display_) {
             if (damageSupported_) {
                 XDamageDestroy(display_, damage_);
@@ -152,6 +143,14 @@ bool ScreenCapturer::start(int fps)
     useX11_ = x11Capturer_->initialize();
     if (useX11_) {
         qInfo() << "Using X11 optimized capture";
+    } else {
+        // X11 不可用且 DISPLAY 为空 → 无头模式，无法捕获
+        if (qEnvironmentVariableIsEmpty("DISPLAY")) {
+            qWarning() << "No X11 display, screen capture disabled (headless mode)";
+            delete x11Capturer_;
+            x11Capturer_ = nullptr;
+            return false;
+        }
     }
 
     captureTimer_->start(1000 / fps);
@@ -185,11 +184,7 @@ void ScreenCapturer::captureFrame()
             emit screenLocked(false);
         }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        quint16 checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
-#else
-        quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
-#endif
+        quint16 checksum = quickFrameChecksum(frame);
         if (checksum == lastFrameChecksum_) {
             idleCount_++;
             if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
@@ -224,11 +219,7 @@ void ScreenCapturer::captureFrame()
         emit screenLocked(false);
     }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    quint16 checksum = qChecksum(QByteArrayView(reinterpret_cast<const char*>(frame.bits()), frame.sizeInBytes()));
-#else
-    quint16 checksum = qChecksum(reinterpret_cast<const char*>(frame.bits()), static_cast<uint>(frame.byteCount()));
-#endif
+    quint16 checksum = quickFrameChecksum(frame);
     if (checksum == lastFrameChecksum_) {
         idleCount_++;
         if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)

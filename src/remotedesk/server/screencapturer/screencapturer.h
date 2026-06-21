@@ -8,6 +8,24 @@
 #include <QScreen>
 #include <QTimer>
 
+// 快速帧校验和：每隔 N 行采样一行做 CRC，大幅减少计算量
+inline quint16 quickFrameChecksum(const QImage& frame)
+{
+    const uchar* bits = frame.constBits();
+    int stride = frame.bytesPerLine();
+    int h = frame.height();
+    int step = qMax(1, h / 32);
+    quint16 result = 0;
+    for (int y = 0; y < h; y += step) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        result ^= qChecksum(QByteArrayView(bits + y * stride, stride));
+#else
+        result ^= qChecksum(reinterpret_cast<const char*>(bits + y * stride), static_cast<uint>(stride));
+#endif
+    }
+    return result;
+}
+
 #ifdef Q_OS_WIN
 // 前向声明 DXGICapturer 类（实际定义在 .cpp 中）
 
