@@ -14,6 +14,7 @@ target_link_libraries(${RDP_SERVER} PUBLIC
     WebsocketServer
     AuthManager
     InputManager
+    InteractiveShell
     ScreenCapturer
     FileTransferService
 )

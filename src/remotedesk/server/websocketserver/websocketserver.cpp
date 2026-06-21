@@ -98,6 +98,12 @@ void WebSocketServer::onNewConnection()
         return;
     }
 
+    if (url.path() == "/api/shell/ws") {
+        qInfo() << "Interactive shell connected via WS";
+        emit shellConnected(socket);
+        return;
+    }
+
     if (url.path() == "/secure-input") {
         qInfo() << "Secure input helper connected";
         if (secureInputSource_) {

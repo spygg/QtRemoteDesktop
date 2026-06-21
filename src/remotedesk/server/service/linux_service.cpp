@@ -244,23 +244,27 @@ int LinuxService::run(int argc, char* argv[])
     }
     server.start();
 
-    QTimer displayCheckTimer;
-    QObject::connect(&displayCheckTimer, &QTimer::timeout, [&]() {
-        if (server.isCaptureConnected()) {
-            displayCheckTimer.stop();
-            return;
-        }
-
-        if (detectUserX11Env()) {
-            qInfo() << "Linux service: display detected, starting capture";
-            {   const char* d = getenv("DISPLAY");
-                const char* a = getenv("XAUTHORITY");
-                qInfo() << "  DISPLAY =" << (d ? d : "(null)")
-                        << "XAUTHORITY =" << (a ? a : "(null)"); }
-            server.startCapture();
-        }
-    });
-    displayCheckTimer.start(2000);
+    // 立即启动捕获（无 X 时必然失败，但会设置 captureAvailable_ = false）
+    // 这样前端在无头环境下就会显示 shell 页面，而非远程桌面
+    if (!server.startCapture()) {
+        QTimer* checkTimer = new QTimer(&app);
+        QObject::connect(checkTimer, &QTimer::timeout, [checkTimer, &server]() {
+            if (server.isCaptureConnected()) {
+                checkTimer->stop();
+                return;
+            }
+            if (detectUserX11Env()) {
+                qInfo() << "Linux service: display detected, starting capture";
+                {   const char* d = getenv("DISPLAY");
+                    const char* a = getenv("XAUTHORITY");
+                    qInfo() << "  DISPLAY =" << (d ? d : "(null)")
+                            << "XAUTHORITY =" << (a ? a : "(null)"); }
+                server.startCapture();
+                checkTimer->stop();
+            }
+        });
+        checkTimer->start(2000);
+    }
 
     return app.exec();
 }

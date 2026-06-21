@@ -306,6 +306,9 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     connect(wsServer_.get(), &WebSocketServer::modeChangeRequested,
         this, &RDPServer::onModeChangeRequested);
 
+    connect(wsServer_.get(), &WebSocketServer::shellConnected,
+        this, &RDPServer::onShellConnected);
+
     // Initialize file transfer service on dedicated thread
     transferThread_ = new QThread(this);
     fileTransferService_ = new FileTransferService();
@@ -868,9 +871,12 @@ void RDPServer::onHttpRequest()
         return;
     }
 
+    // 无屏幕捕获（无头模式）→ 免登录，直接使用
+    bool skipAuth = !captureAvailable_ && (path == "/" || path == "/shell" || path.startsWith("/shell?") || path == "/api/shell/cwd" || path == "/api/shell/exec" || path.startsWith("/api/shell/exec?"));
+
     // Protected routes — require valid session
     QString token = extractSessionToken(request);
-    if (!authManager_->validateSession(token)) {
+    if (!skipAuth && !authManager_->validateSession(token)) {
         if (path.startsWith("/api/")) {
             QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
                 QJsonDocument(QJsonObject { { "success", false }, { "error", "未登录" } }).toJson(QJsonDocument::Compact));
@@ -1022,6 +1028,41 @@ void RDPServer::handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body)
     socket->disconnectFromHost();
 }
 
+void RDPServer::onShellConnected(QWebSocket* socket)
+{
+    InteractiveShell* shell = InteractiveShell::create(socket, this);
+    if (!shell) {
+        socket->close();
+        return;
+    }
+
+    // 发送配置：Windows 无远程回显，前端需做本地回显
+    bool localEcho = !shell->hasRemoteEcho();
+    socket->sendTextMessage(QStringLiteral("{\"type\":\"config\",\"localEcho\":%1}")
+        .arg(localEcho ? QStringLiteral("true") : QStringLiteral("false")));
+
+    connect(socket, &QWebSocket::textMessageReceived, this, [shell](const QString& msg) {
+        QJsonDocument doc = QJsonDocument::fromJson(msg.toUtf8());
+        if (doc.isObject()) {
+            QJsonObject obj = doc.object();
+            QString type = obj["type"].toString();
+            if (type == "resize")
+                shell->resize(obj["cols"].toInt(80), obj["rows"].toInt(24));
+            else if (type == "input")
+                shell->write(QByteArray::fromBase64(obj["data"].toString().toUtf8()));
+        }
+    });
+
+    connect(socket, &QWebSocket::disconnected, this, [shell, socket]() {
+        shell->stop();
+        InteractiveShell::sessions().remove(socket);
+        shell->deleteLater();
+        socket->deleteLater();
+    });
+
+    qInfo() << "Interactive shell session started";
+}
+
 void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
 {
     QJsonDocument doc = QJsonDocument::fromJson(body);
@@ -1166,8 +1207,8 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         return;
     }
 
-    // Set a 30-second timeout
-    bool finished = proc.waitForFinished(30000);
+    // 超时 5 分钟（交互式命令如 su/ssh 需要长时间等待）
+    bool finished = proc.waitForFinished(300000);
 
     result["success"] = finished;
     if (finished) {
@@ -1179,7 +1220,7 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         proc.waitForFinished(3000);
         result["stdout"] = QString::fromLocal8Bit(proc.readAllStandardOutput());
         result["stderr"] = QString::fromLocal8Bit(proc.readAllStandardError());
-        result["error"] = "命令执行超时（30秒）";
+        result["error"] = "命令执行超时（5分钟）—— 注意：交互式命令（如 su/ssh）需要输入，当前 Web Shell 不支持";
     }
 
     result["cwd"] = shellCurrentDir_;
@@ -1307,7 +1348,7 @@ bool RDPServer::startCapture()
 
 bool RDPServer::isCaptureConnected() const
 {
-    return screenCapturer_ != nullptr;
+    return screenCapturer_ != nullptr && captureAvailable_;
 }
 
 void RDPServer::onClientConnected(const QString& clientId)

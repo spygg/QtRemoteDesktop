@@ -39,12 +39,12 @@
             z-index: 1000;
             transition: opacity 0.3s;
         }
-        /* 工具栏：顶部居中，自动隐藏 */
+        /* 工具栏：顶部居中，默认显示 */
         #toolbar {
             position: fixed;
             top: 0;
             left: 50%;
-            transform: translateX(-50%) translateY(-100%);
+            transform: translateX(-50%) translateY(0);
             display: flex;
             gap: 2px;
             z-index: 1000;
@@ -55,8 +55,8 @@
             box-shadow: 0 2px 12px rgba(0,0,0,0.4);
             backdrop-filter: blur(8px);
         }
-        #toolbar.visible {
-            transform: translateX(-50%) translateY(0);
+        #toolbar.hidden {
+            transform: translateX(-50%) translateY(-100%);
         }
         /* 鼠标触发区域 */
         #toolbar-trigger {
@@ -67,6 +67,18 @@
             height: 6px;
             z-index: 999;
         }
+        #btn-pin {
+            background: none;
+            border: none;
+            color: #aaa;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: color 0.15s;
+        }
+        #btn-pin:hover { color: #fff; }
+        #btn-pin.pinned { color: #4a9eff; }
         .btn {
             background: rgba(255,255,255,0.08);
             border: 1px solid rgba(255,255,255,0.15);
@@ -320,6 +332,7 @@
     
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
+        <button id="btn-pin" title="固定工具栏">📌</button>
         <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 高<span class="shortcut">⌃⇧Q</span></button>
         <button class="btn" id="btn-fps" onclick="toggleFps()">FPS: 关</button>
         <button class="btn" id="btn-files" onclick="toggleFilePanel()">📁 文件</button>
@@ -1168,24 +1181,35 @@
             // 窗口大小改变时更新缩放
             window.addEventListener('resize', updateScale);
 
-            // ---- 工具栏自动隐藏 ----
+            // ---- 工具栏固定/自动隐藏（类似 mstsc） ----
             const toolbar = document.getElementById('toolbar');
             const trigger = document.getElementById('toolbar-trigger');
+            const pinBtn = document.getElementById('btn-pin');
             let toolbarTimer = null;
+            let toolbarPinned = true;
+            pinBtn.classList.add('pinned');
 
             function showToolbar() {
                 clearTimeout(toolbarTimer);
-                toolbar.classList.add('visible');
+                toolbar.classList.remove('hidden');
             }
             function hideToolbar() {
-                toolbarTimer = setTimeout(() => toolbar.classList.remove('visible'), 600);
+                if (!toolbarPinned)
+                    toolbarTimer = setTimeout(() => toolbar.classList.add('hidden'), 600);
+            }
+            function togglePin() {
+                toolbarPinned = !toolbarPinned;
+                pinBtn.classList.toggle('pinned', toolbarPinned);
+                pinBtn.title = toolbarPinned ? '固定工具栏' : '取消固定';
+                if (toolbarPinned) {
+                    clearTimeout(toolbarTimer);
+                    toolbar.classList.remove('hidden');
+                }
             }
 
-            // 鼠标移到顶部触发区 → 显示
+            pinBtn.addEventListener('click', togglePin);
             trigger.addEventListener('mouseenter', showToolbar);
-            // 鼠标进入工具栏 → 保持显示
             toolbar.addEventListener('mouseenter', () => clearTimeout(toolbarTimer));
-            // 鼠标离开工具栏 → 延迟隐藏
             toolbar.addEventListener('mouseleave', hideToolbar);
         };
 

@@ -57,6 +57,7 @@ signals:
     void captureFrameReceived(const QByteArray& jpegData);
     void captureMessageReceived(const QJsonObject& msg);
     void captureSourceConnected();
+    void shellConnected(QWebSocket* socket);
 
 private slots:
     void onNewConnection();

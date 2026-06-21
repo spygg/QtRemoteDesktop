@@ -29,6 +29,7 @@ add_subdirectory(server/filetransferservice)
 add_subdirectory(server/inputmanger)
 add_subdirectory(server/rdpserver)
 add_subdirectory(server/screencapturer)
+add_subdirectory(server/shell)
 add_subdirectory(server/websocketserver)
 add_subdirectory(server/singleapplication)
 add_subdirectory(server/helper_process)
@@ -65,6 +66,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     AuthManager
     FileTransferService
     InputManager
+    InteractiveShell
     Rdpserver
     ScreenCapturer
     WebsocketServer
@@ -116,6 +118,7 @@ elseif(APPLE)
     find_library(COREGRAPHICS CoreGraphics)
     target_link_libraries(InputManager PUBLIC ${COREGRAPHICS})
     target_link_libraries(ScreenCapturer PUBLIC ${COREGRAPHICS})
+    target_link_libraries(InteractiveShell PUBLIC util)
 elseif(UNIX AND NOT APPLE AND NOT ANDROID)
         find_package(X11 REQUIRED)
         target_link_libraries(InputManager PUBLIC ${X11_LIBRARIES} Xtst)

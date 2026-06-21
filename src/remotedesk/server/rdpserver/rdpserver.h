@@ -17,6 +17,8 @@
 #include <atomic>
 #include <memory>
 
+#include "shell.h"
+
 class WebSocketServer;
 class ScreenCapturer;
 class AuthManager;
@@ -81,6 +83,7 @@ private slots:
     void onJpegCompressed(const QByteArray& data);
 
     void onModeChangeRequested(const QString& mode);
+    void onShellConnected(QWebSocket* socket);
 
 signals:
     void requestFileList(const QString& clientId, const QString& path);
