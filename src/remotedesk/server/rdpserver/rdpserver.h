@@ -40,6 +40,7 @@ public:
     void start() { thread_.start(); }
     void enqueue(const QImage& frame);
     void shutdown();
+    void setQuality(int q) { quality_ = q; }
 
 signals:
     void jpegCompressed(const QByteArray& data);
@@ -53,6 +54,7 @@ private:
     QWaitCondition cond_;
     QQueue<QImage> queue_;
     std::atomic<bool> abort_ { false };
+    int quality_ = 60;
     enum { kMaxQueueSize = 5 };
 };
 
@@ -148,6 +150,8 @@ private:
 
     bool useSsl_ = false;
     bool serviceMode_ = false;
+    int configFps_ = 30;
+    int configQuality_ = 60;
     bool screenLocked_ = false;
     bool secureInputRunning_ = false;
     bool captureAvailable_ = true;

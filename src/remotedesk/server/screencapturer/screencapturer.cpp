@@ -33,3 +33,11 @@ void ScreenCapturer::resume()
     if (!captureTimer_->isActive())
         captureTimer_->start(1000 / fps_);
 }
+
+void ScreenCapturer::setFps(int fps)
+{
+    if (fps < 1) return;
+    fps_ = fps;
+    if (captureTimer_->isActive())
+        captureTimer_->setInterval(1000 / fps_);
+}

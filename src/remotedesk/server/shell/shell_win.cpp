@@ -68,8 +68,13 @@ void WinInteractiveShell::write(const QByteArray& data)
             lineBuf_.clear();
             return;
         }
-        // Ctrl+C/D/Z：清空行缓冲并转发
-        if (c == '\x03' || c == '\x04' || c == '\x1a') {
+        // Ctrl+C：加 \r\n 冲刷缓冲区，确保 cmd.exe 立即处理中断
+        if (c == '\x03') {
+            lineBuf_.clear();
+            proc_->write(QByteArray("\x03\r\n"));
+            return;
+        }
+        if (c == '\x04' || c == '\x1a') {
             lineBuf_.clear();
             proc_->write(data);
             return;

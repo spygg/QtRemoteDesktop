@@ -2,9 +2,11 @@
 #ifndef SCREEN_CAPTURER_H
 #define SCREEN_CAPTURER_H
 
+#include <QCursor>
 #include <QGuiApplication>
 #include <QImage>
 #include <QObject>
+#include <QPoint>
 #include <QScreen>
 #include <QTimer>
 
@@ -13,16 +15,38 @@ inline quint16 quickFrameChecksum(const QImage& frame)
 {
     const uchar* bits = frame.constBits();
     int stride = frame.bytesPerLine();
+    int w = frame.width();
     int h = frame.height();
     int step = qMax(1, h / 32);
     quint16 result = 0;
-    for (int y = 0; y < h; y += step) {
+
+    auto checksumRow = [&](int y) {
+        if (y < 0 || y >= h) return;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
         result ^= qChecksum(QByteArrayView(bits + y * stride, stride));
 #else
         result ^= qChecksum(reinterpret_cast<const char*>(bits + y * stride), static_cast<uint>(stride));
 #endif
+    };
+
+    // 1. 均匀行采样（原逻辑）
+    for (int y = 0; y < h; y += step)
+        checksumRow(y);
+
+    // 2. 鼠标光标附近 ±3 行密集采样
+    QPoint cursor = QCursor::pos();
+    if (cursor.x() >= 0 && cursor.x() < w && cursor.y() >= 0 && cursor.y() < h) {
+        for (int dy = -3; dy <= 3; dy++)
+            checksumRow(cursor.y() + dy);
     }
+
+    // 3. 伪随机 4 行补充采样（基于当前校验和做种子，无状态依赖）
+    unsigned seed = static_cast<unsigned>(result);
+    for (int i = 0; i < 4; i++) {
+        seed = seed * 1103515245u + 12345u;
+        checksumRow(static_cast<int>(seed % static_cast<unsigned>(h)));
+    }
+
     return result;
 }
 
@@ -56,8 +80,9 @@ public:
 
     bool start(int fps);
     void stop();
-    void suspend();  // 暂停捕获（不销毁平台捕获器）
-    void resume();   // 恢复捕获
+    void suspend();
+    void resume();
+    void setFps(int fps);
 
     int width() const {
 #ifdef Q_OS_LINUX

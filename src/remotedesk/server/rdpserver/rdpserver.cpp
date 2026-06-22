@@ -84,7 +84,7 @@ void JpegCompressor::processLoop()
         QByteArray jpegData;
         QBuffer buffer(&jpegData);
         buffer.open(QIODevice::WriteOnly);
-        if (!image.save(&buffer, "JPEG", 80)) {
+        if (!image.save(&buffer, "JPEG", quality_)) {
             qWarning() << "JpegCompressor: failed to compress frame";
             continue;
         }
@@ -138,6 +138,8 @@ void RDPServer::loadServerConfig(const QString& configPath)
         root["ssl"] = false;
         root["httpPort"] = 8080;
         root["console"] = false;
+        root["fps"] = 30;
+        root["quality"] = 60;
 
         if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -163,7 +165,13 @@ void RDPServer::loadServerConfig(const QString& configPath)
         httpPort_ = static_cast<quint16>(port);
     }
 
-    qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_;
+    if (root.contains("fps"))
+        configFps_ = qBound(1, root["fps"].toInt(), 60);
+    if (root.contains("quality"))
+        configQuality_ = qBound(10, root["quality"].toInt(), 100);
+
+    qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_
+            << "fps =" << configFps_ << "quality =" << configQuality_;
 }
 
 void RDPServer::saveServerConfig(const QString& configPath)
@@ -183,9 +191,11 @@ void RDPServer::saveServerConfig(const QString& configPath)
         file.close();
     }
 
-    // 更新 ssl 和 httpPort 为当前运行值
+    // 更新 ssl、httpPort、fps、quality 为当前运行值
     root["ssl"] = useSsl_;
     root["httpPort"] = httpPort_;
+    root["fps"] = configFps_;
+    root["quality"] = configQuality_;
 
     if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         QJsonDocument doc(root);
@@ -417,6 +427,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
 
         // 初始化 JPEG 压缩器（独立线程）
         jpegCompressor_ = std::unique_ptr<JpegCompressor>(new JpegCompressor(nullptr));
+        jpegCompressor_->setQuality(configQuality_);
         connect(jpegCompressor_.get(), &JpegCompressor::jpegCompressed,
             this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
         jpegCompressor_->start();
@@ -1257,8 +1268,8 @@ void RDPServer::start()
         switchToImageMode();
     }
 
-    // 启动屏幕捕获
-    if (!screenCapturer_->start(30)) {
+    // 启动屏幕捕获（使用配置文件中的 fps）
+    if (!screenCapturer_->start(configFps_)) {
         qCritical() << "Failed to start screen capture";
         captureAvailable_ = false;
         return;
@@ -1326,13 +1337,14 @@ bool RDPServer::startCapture()
             });
 
         jpegCompressor_ = std::unique_ptr<JpegCompressor>(new JpegCompressor(nullptr));
+        jpegCompressor_->setQuality(configQuality_);
         connect(jpegCompressor_.get(), &JpegCompressor::jpegCompressed,
             this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
         jpegCompressor_->start();
     }
 
     switchToImageMode();
-    if (!screenCapturer_->start(30)) {
+    if (!screenCapturer_->start(configFps_)) {
         qCritical() << "startCapture: failed to start screen capture";
         captureAvailable_ = false;
         return false;
@@ -1380,6 +1392,15 @@ void RDPServer::onClientConnected(const QString& clientId)
         info["width"] = screenCapturer_->width();
         info["height"] = screenCapturer_->height();
         wsServer_->sendJson(clientId, info);
+    }
+
+    // 发送当前画质/帧率配置（前端据此显示正确的标签）
+    {
+        QJsonObject cfg;
+        cfg["type"] = "server_config";
+        cfg["fps"] = configFps_;
+        cfg["quality"] = configQuality_;
+        wsServer_->sendJson(clientId, cfg);
     }
 
     // 发送当前工作模式
@@ -1479,6 +1500,24 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     } else if (type == "wheel") {
         int delta = input["delta"].toInt();
         inputManager_->injectWheel(delta);
+    } else if (type == "config") {
+        // 画质/帧率配置
+        QString qname = input["quality"].toString();
+        int jpegQ = -1;
+        if (qname == "high")        jpegQ = 80;
+        else if (qname == "medium") jpegQ = 60;
+        else if (qname == "low" || qname == "verylow") jpegQ = 35;
+        if (jpegQ > 0 && jpegCompressor_) {
+            configQuality_ = jpegQ;
+            jpegCompressor_->setQuality(jpegQ);
+        }
+        int newFps = input["fps"].toInt();
+        if (newFps >= 1) {
+            configFps_ = newFps;
+            if (screenCapturer_)
+                screenCapturer_->setFps(newFps);
+            saveServerConfig(QString());
+        }
     } else if (type == "file_list") {
         emit requestFileList(clientId, input["path"].toString());
     } else if (type == "file_download") {

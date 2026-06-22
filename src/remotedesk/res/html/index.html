@@ -342,7 +342,7 @@
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
         <button id="btn-pin" title="固定工具栏">📌</button>
-        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 低<span class="shortcut">⌃⇧Q</span></button>
+        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 高<span class="shortcut">⌃⇧Q</span></button>
         <button class="btn" id="btn-fps" onclick="toggleFps()">FPS: 关</button>
         <button class="btn" id="btn-files" onclick="toggleFilePanel()">📁 文件</button>
         <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')">👤 用户</button>
@@ -436,7 +436,7 @@
             screenHeight: 0,
             scaleX: 1,
             scaleY: 1,
-            highQuality: false,
+            qualityLevel: 0, // 0=高 1=中 2=低 3=极低
             showFps: false,
             mouseX: 0,
             mouseY: 0,
@@ -534,8 +534,6 @@
                 
                 // 发送认证
                 send({ type: 'auth', version: '1.0' });
-                // 发送初始画质配置（默认低画质低CPU）
-                send({ type: 'config', quality: 'low', fps: 15 });
             };
 
             state.ws.onclose = () => {
@@ -725,6 +723,16 @@
                     refreshFileList();
                     if (currentTransferPath === msg.path) {
                         setTimeout(hideTransferMonitor, 500);
+                    }
+                    break;
+                case 'server_config':
+                    for (let i = 0; i < QUALITY_LEVELS.length; i++) {
+                        const ql = QUALITY_LEVELS[i];
+                        if (ql.fps === msg.fps && ql.jpegQ === msg.quality) {
+                            state.qualityLevel = i;
+                            document.getElementById('btn-quality').innerHTML = '画质: ' + ql.label + '<span class="shortcut">⌃⇧Q</span>';
+                            break;
+                        }
                     }
                     break;
             }
@@ -951,15 +959,18 @@
             }
         }
 
+        const QUALITY_LEVELS = [
+            { label: '高',   quality: 'high',    fps: 30, jpegQ: 80 },
+            { label: '中',   quality: 'medium',  fps: 30, jpegQ: 60 },
+            { label: '低',   quality: 'low',     fps: 30, jpegQ: 35 },
+            { label: '极低', quality: 'verylow', fps: 15, jpegQ: 35 },
+        ];
         function toggleQuality() {
-            state.highQuality = !state.highQuality;
+            state.qualityLevel = (state.qualityLevel + 1) % QUALITY_LEVELS.length;
+            const ql = QUALITY_LEVELS[state.qualityLevel];
             const btn = document.getElementById('btn-quality');
-            btn.innerHTML = '画质: ' + (state.highQuality ? '高' : '低') + '<span class="shortcut">⌃⇧Q</span>';
-            send({ 
-                type: 'config', 
-                quality: state.highQuality ? 'high' : 'low',
-                fps: state.highQuality ? 30 : 15 
-            });
+            btn.innerHTML = '画质: ' + ql.label + '<span class="shortcut">⌃⇧Q</span>';
+            send({ type: 'config', quality: ql.quality, fps: ql.fps });
         }
 
         function toggleFullscreen() {
