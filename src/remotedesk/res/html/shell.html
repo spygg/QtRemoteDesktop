@@ -166,6 +166,17 @@
             output.scrollTop = output.scrollHeight;
         }
 
+        function safeBackspace() {
+            const n = termBuf.lastIndexOf('\n');
+            if (n >= 0 && termBuf.length <= n + 1)
+                return false;
+            if (termBuf.length > 0) {
+                termBuf = termBuf.slice(0, -1);
+                return true;
+            }
+            return false;
+        }
+
         function clearOutput() {
             output.innerHTML = '';
             termBuf = '';
@@ -228,10 +239,8 @@
             if (e.key === 'Backspace') {
                 e.preventDefault();
                 wsSend('\x7f');
-                if (localEchoEnabled && termBuf.length > 0) {
-                    termBuf = termBuf.slice(0, -1);
+                if (localEchoEnabled && safeBackspace())
                     output.textContent = termBuf;
-                }
                 return;
             }
 
@@ -333,8 +342,7 @@
                     const text = stripAnsi(e.data);
                     for (const ch of text) {
                         if (ch === '\b') {
-                            if (termBuf.length > 0)
-                                termBuf = termBuf.slice(0, -1);
+                            safeBackspace();
                         } else if (ch === '\r') {
                             // ignore CR (part of CRLF)
                         } else if (ch === '\n') {
