@@ -46,7 +46,7 @@
             left: 50%;
             transform: translateX(-50%) translateY(0);
             display: flex;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
             justify-content: center;
             gap: 2px;
             z-index: 1000;
@@ -57,6 +57,8 @@
             box-shadow: 0 2px 12px rgba(0,0,0,0.4);
             backdrop-filter: blur(8px);
             max-width: 100vw;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
         }
         #toolbar.hidden {
             transform: translateX(-50%) translateY(-100%);
@@ -398,7 +400,7 @@
     <div id="lock-overlay">
         <div class="lock-icon">🔒</div>
         <div class="lock-text">屏幕已锁定</div>
-        <div class="lock-hint"></div>
+        <div class="lock-hint" id="lock-hint"></div>
         <div class="lock-input-area">
             <input type="password" id="lock-password" placeholder="输入密码解锁" autocomplete="off" />
             <button id="lock-unlock-btn" onclick="unlockScreen()">解锁</button>
@@ -727,8 +729,12 @@
                     document.getElementById('lock-overlay').classList.toggle('active', msg.locked);
                     if (msg.locked) {
                         document.getElementById('lock-password').focus();
+                        const hintEl = document.getElementById('lock-hint');
+                        const isXP = msg.isXP;
+                        hintEl.textContent = isXP ? 'XP 锁屏：请点击中心靠右部分多试几次' : (msg.hint || '');
                     } else {
                         document.getElementById('lock-password').value = '';
+                        document.getElementById('lock-hint').textContent = '';
                     }
                     break;
                 case 'file_upload_done':

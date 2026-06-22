@@ -382,10 +382,25 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
             this, &RDPServer::onFrameCaptured);
         connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
             this, [this](bool locked) {
+#ifdef _WIN32
+                static bool isWinXP = false;
+                static bool xpChecked = false;
+                if (!xpChecked) {
+                    struct { ULONG s; ULONG maj; ULONG min; ULONG bld; ULONG pid; WCHAR csd[128]; } osv = { sizeof(osv) };
+                    typedef LONG (WINAPI *R)(PVOID);
+                    HMODULE hNt = GetModuleHandleW(L"ntdll.dll");
+                    if (hNt) { R r = (R)GetProcAddress(hNt, "RtlGetVersion");
+                        if (r && r(&osv) == 0 && osv.maj == 5 && (osv.min == 1 || osv.min == 2)) isWinXP = true; }
+                    xpChecked = true;
+                }
+#endif
                 screenLocked_ = locked;
                 wsServer_->broadcastJson(QJsonObject {
                     { "type", "screen_locked" },
                     { "locked", locked },
+#ifdef _WIN32
+                    { "isXP", isWinXP },
+#endif
                     { "hint", locked ? QString::fromUtf8(
 #ifdef Q_OS_WIN
                                            "锁屏界面可直接输入密码"

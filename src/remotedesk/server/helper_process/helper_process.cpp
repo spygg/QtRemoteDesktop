@@ -88,13 +88,16 @@ int HelperProcess::run(int argc, char* argv[])
         }, Qt::QueuedConnection);
 
     bool locked = false;
-    bool isWin7 = false;
+    bool isWin7 = false, isWinXP = false;
     { struct { ULONG s; ULONG maj; ULONG min; ULONG bld; ULONG pid; WCHAR csd[128]; } osv = { sizeof(osv) };
       typedef LONG (WINAPI *R)(PVOID);
       HMODULE hNt = GetModuleHandleW(L"ntdll.dll");
       if (hNt) { R r = (R)GetProcAddress(hNt, "RtlGetVersion");
-        if (r && r(&osv) == 0 && osv.maj == 6 && osv.min == 1) isWin7 = true; } }
-    qInfo() << "Helper: starting desktop polling, isWin7 =" << isWin7;
+        if (r && r(&osv) == 0) {
+          if (osv.maj == 6 && osv.min == 1) isWin7 = true;
+          if (osv.maj == 5 && (osv.min == 1 || osv.min == 2)) isWinXP = true;
+        } } }
+    qInfo() << "Helper: starting desktop polling, isWin7 =" << isWin7 << "isWinXP =" << isWinXP;
 
     InputManager inputMgr;
     QObject::connect(&ws, &QWebSocket::textMessageReceived, &app,
@@ -143,6 +146,7 @@ int HelperProcess::run(int argc, char* argv[])
             QJsonObject msg;
             msg["type"] = "screen_locked";
             msg["locked"] = locked;
+            msg["isXP"] = isWinXP;
             msg["hint"] = locked ? QString::fromUtf8("锁屏界面可直接输入密码") : QString();
             ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
         });
