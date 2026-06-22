@@ -99,7 +99,8 @@
         @media (max-width: 600px) {
             #toolbar { padding: 4px 6px; gap: 1px; }
             .btn { padding: 4px 8px; font-size: 11px; }
-            .btn .shortcut { display: none; }
+            .btn .shortcut,
+            .btn .btn-text { display: none; }
             #btn-pin { font-size: 12px; padding: 1px 4px; }
         }
         .btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
@@ -342,12 +343,23 @@
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
         <button id="btn-pin" title="固定工具栏">📌</button>
-        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 低<span class="shortcut">⌃⇧Q</span></button>
-        <button class="btn" id="btn-fps" onclick="toggleFps()">FPS: 关</button>
-        <button class="btn" id="btn-files" onclick="toggleFilePanel()">📁 文件</button>
-        <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')">👤 用户</button>
-        <button class="btn" id="btn-shell" onclick="window.open('/shell','_blank')">🔧 Shell</button>
-        <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">全屏<span class="shortcut">F11</span></button>
+        <button class="btn" id="btn-quality" onclick="toggleQuality()">
+            <span class="btn-icon">🎨</span>
+            <span class="btn-text">画质: 低</span>
+            <span class="shortcut">⌃⇧Q</span>
+        </button>
+        <button class="btn" id="btn-fps" onclick="toggleFps()">
+            <span class="btn-icon">⚡</span>
+            <span class="btn-text">FPS: 关</span>
+        </button>
+        <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span class="btn-text">文件</span></button>
+        <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span class="btn-icon">👤</span><span class="btn-text">用户</span></button>
+        <button class="btn" id="btn-shell" onclick="window.open('/shell','_blank')"><span class="btn-icon">🔧</span><span class="btn-text">Shell</span></button>
+        <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">
+            <span class="btn-icon">⛶</span>
+            <span class="btn-text">全屏</span>
+            <span class="shortcut">F11</span>
+        </button>
     </div>
     
     <div id="container">
@@ -730,7 +742,7 @@
                         const ql = QUALITY_LEVELS[i];
                         if (ql.fps === msg.fps && ql.jpegQ === msg.quality) {
                             state.qualityLevel = i;
-                            document.getElementById('btn-quality').innerHTML = '画质: ' + ql.label + '<span class="shortcut">⌃⇧Q</span>';
+                            document.getElementById('btn-quality').querySelector('.btn-text').textContent = '画质: ' + ql.label;
                             break;
                         }
                     }
@@ -979,7 +991,7 @@
             state.qualityLevel = (state.qualityLevel + 1) % QUALITY_LEVELS.length;
             const ql = QUALITY_LEVELS[state.qualityLevel];
             const btn = document.getElementById('btn-quality');
-            btn.innerHTML = '画质: ' + ql.label + '<span class="shortcut">⌃⇧Q</span>';
+            btn.querySelector('.btn-text').textContent = '画质: ' + ql.label;
             send({ type: 'config', quality: ql.quality, fps: ql.fps });
         }
 
@@ -994,7 +1006,7 @@
         function toggleFps() {
             state.showFps = !state.showFps;
             const btn = document.getElementById('btn-fps');
-            btn.textContent = 'FPS: ' + (state.showFps ? '开' : '关');
+            btn.querySelector('.btn-text').textContent = 'FPS: ' + (state.showFps ? '开' : '关');
             if (state.showFps) {
                 updateStatus(`🟢 已连接 | ${fpsCount} FPS`);
             } else {
