@@ -54,7 +54,7 @@ private:
     QWaitCondition cond_;
     QQueue<QImage> queue_;
     std::atomic<bool> abort_ { false };
-    int quality_ = 60;
+    int quality_ = 35;
     enum { kMaxQueueSize = 5 };
 };
 

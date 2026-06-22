@@ -401,8 +401,9 @@ unsigned short InputManager::keysymToLinuxKeycode(unsigned long ks)
     }
 }
 
-void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback) {
+void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar) {
     Q_UNUSED(useVkFallback);
+    Q_UNUSED(isChar);
     if (!xDisplay_) return;
 
     KeySym keySym = NoSymbol;

@@ -129,7 +129,8 @@ int HelperProcess::run(int argc, char* argv[])
                 inputMgr.injectKeyboard(obj["keycode"].toInt(), obj["code"].toString(),
                     type == "keydown", obj["ctrl"].toBool(),
                     obj["alt"].toBool(), obj["shift"].toBool(),
-                    isWin7 && locked);
+                    isWin7 && locked,
+                    obj["isChar"].toBool());
             } else if (type == "wheel") {
                 inputMgr.injectWheel(obj["delta"].toInt());
             }

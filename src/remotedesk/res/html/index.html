@@ -342,7 +342,7 @@
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
         <button id="btn-pin" title="固定工具栏">📌</button>
-        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 高<span class="shortcut">⌃⇧Q</span></button>
+        <button class="btn" id="btn-quality" onclick="toggleQuality()">画质: 低<span class="shortcut">⌃⇧Q</span></button>
         <button class="btn" id="btn-fps" onclick="toggleFps()">FPS: 关</button>
         <button class="btn" id="btn-files" onclick="toggleFilePanel()">📁 文件</button>
         <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')">👤 用户</button>
@@ -436,7 +436,7 @@
             screenHeight: 0,
             scaleX: 1,
             scaleY: 1,
-            qualityLevel: 0, // 0=高 1=中 2=低 3=极低
+            qualityLevel: 2, // 0=高 1=中 2=低 3=极低
             showFps: false,
             mouseX: 0,
             mouseY: 0,

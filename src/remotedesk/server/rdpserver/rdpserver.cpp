@@ -1498,7 +1498,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         bool ctrl = input["ctrl"].toBool();
         bool alt = input["alt"].toBool();
         bool shift = input["shift"].toBool();
-        inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift);
+        bool isChar = input["isChar"].toBool();
+        inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar);
     } else if (type == "wheel") {
         int delta = input["delta"].toInt();
         inputManager_->injectWheel(delta);
