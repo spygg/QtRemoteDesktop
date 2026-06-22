@@ -51,7 +51,7 @@ void WinInteractiveShell::start()
 
 void WinInteractiveShell::write(const QByteArray& data)
 {
-    if (!proc_ || proc_->state() != QProcess::Running)
+    if (data.isEmpty() || !proc_ || proc_->state() != QProcess::Running)
         return;
 
     if (data.size() == 1) {
@@ -79,14 +79,25 @@ void WinInteractiveShell::write(const QByteArray& data)
             proc_->write(data);
             return;
         }
-        // 可打印字符：加入行缓冲
-        if (c >= 32 && c <= 126) {
+        // 可打印字符（含扩展 ASCII 0x80-0xFF）：加入行缓冲
+        if (c >= 32) {
             lineBuf_ += QChar::fromLatin1(c);
             return;
         }
+        // 其余控制字符直写
+        proc_->write(data);
+        return;
     }
-    // 多字节序列（箭头/方向键）直接转发
-    proc_->write(data);
+
+    // 转义序列（方向键等）：直写管道
+    if (data[0] == '\x1b') {
+        proc_->write(data);
+        return;
+    }
+
+    // 多字节文本（如中文，已由服务端转为本地编码）：写入行缓冲
+    QString text = QString::fromLocal8Bit(data);
+    lineBuf_ += text;
 }
 
 void WinInteractiveShell::stop()

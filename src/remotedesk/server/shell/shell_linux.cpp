@@ -86,7 +86,7 @@ void LinuxInteractiveShell::start()
 
 void LinuxInteractiveShell::write(const QByteArray& data)
 {
-    if (masterFd_ >= 0)
+    if (!data.isEmpty() && masterFd_ >= 0)
         ::write(masterFd_, data.data(), data.size());
 }
 

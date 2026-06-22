@@ -1059,8 +1059,10 @@ void RDPServer::onShellConnected(QWebSocket* socket)
             QString type = obj["type"].toString();
             if (type == "resize")
                 shell->resize(obj["cols"].toInt(80), obj["rows"].toInt(24));
-            else if (type == "input")
-                shell->write(QByteArray::fromBase64(obj["data"].toString().toUtf8()));
+            else if (type == "input") {
+                QByteArray raw = QByteArray::fromBase64(obj["data"].toString().toUtf8());
+                shell->write(QString::fromUtf8(raw).toLocal8Bit());
+            }
         }
     });
 

@@ -368,7 +368,7 @@
             <button class="close-btn" onclick="toggleFilePanel()">✕</button>
         </div>
         <div id="file-path-bar">
-            <input type="text" id="file-path-input" value="/" onkeydown="if(event.key==='Enter')navigateTo(this.value)">
+            <input type="text" id="file-path-input" value="/" onkeydown="if(event.isComposing||event.key!=='Enter')return;navigateTo(this.value)">
             <button class="file-action-btn" onclick="navigateTo(document.getElementById('file-path-input').value)">跳转</button>
             <button class="file-action-btn" onclick="refreshFileList()">刷新</button>
         </div>
@@ -780,6 +780,7 @@
         }
         // Enter 键触发解锁
         document.addEventListener('keydown', (e) => {
+            if (e.isComposing) return;
             if (e.key === 'Enter' && document.getElementById('lock-overlay').classList.contains('active') && document.activeElement === document.getElementById('lock-password')) {
                 unlockScreen();
             }
@@ -839,12 +840,21 @@
             }, { passive: false });
 
             // 键盘
+            window.addEventListener('compositionend', (e) => {
+                if (e.data) {
+                    for (const ch of e.data) {
+                        send({ type: 'keydown', keycode: ch.charCodeAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
+                        send({ type: 'keyup', keycode: ch.charCodeAt(0), code: '' });
+                    }
+                }
+            });
             function isLockInputFocused() {
                 const overlay = document.getElementById('lock-overlay');
                 return overlay && overlay.classList.contains('active') &&
                     document.activeElement === document.getElementById('lock-password');
             }
             window.addEventListener('keydown', (e) => {
+                if (e.isComposing) return;
                 // 锁屏密码输入框获取焦点时，不拦截键盘事件（允许 Backspace 等原生行为）
                 if (isLockInputFocused()) return;
 
