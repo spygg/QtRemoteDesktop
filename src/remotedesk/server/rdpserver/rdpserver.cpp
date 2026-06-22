@@ -1475,7 +1475,9 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             SendInput(1, &in, sizeof(INPUT));
             return;
         }
-        return;
+        // 其他键盘事件在锁屏时忽略，但鼠标/滚轮落到正常输入路径
+        if (type == "keydown" || type == "keyup")
+            return;
 #else
         qInfo() << "Screen locked, injecting input directly via InputManager";
 #endif
