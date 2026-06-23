@@ -137,6 +137,7 @@
         #config-dropdown.open { display: flex; }
         .dropdown-section { display: flex; flex-direction: column; gap: 6px; }
         .dropdown-title { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .dropdown-note { color: #666; font-size: 10px; margin-top: -4px; }
         .dropdown-options { display: flex; gap: 4px; flex-wrap: wrap; }
         .dropdown-options button {
             background: rgba(255,255,255,0.06);
@@ -432,7 +433,8 @@
             </div>
         </div>
         <div class="dropdown-section">
-            <div class="dropdown-title">目标分辨率</div>
+            <div class="dropdown-title">远端缩放</div>
+            <div class="dropdown-note">按物理分辨率等比例缩放，非实际改变设备分辨率</div>
             <div class="dropdown-options" id="resolution-options" data-key="resolution"></div>
         </div>
     </div>
