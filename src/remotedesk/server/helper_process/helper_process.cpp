@@ -16,6 +16,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <tlhelp32.h>
 #endif
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
@@ -155,18 +156,6 @@ int HelperProcess::run(int argc, char* argv[])
 
             if (locked) return;
 
-            // 屏保活跃时先发 ESC 退出，再投递用户实际输入
-#ifdef _WIN32
-            { BOOL ssRunning = FALSE;
-              SystemParametersInfo(0x0072, 0, &ssRunning, 0); // SPI_GETSCREENSAVERRUNNING
-              if (ssRunning) {
-                  INPUT esc[2] = {};
-                  esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
-                  esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
-                  SendInput(2, esc, sizeof(INPUT));
-              } }
-#endif
-
             if (type == "mousemove") {
                 inputMgr.injectMouseMove(obj["x"].toInt(), obj["y"].toInt());
             } else if (type == "mousedown" || type == "mouseup") {
@@ -218,6 +207,64 @@ int HelperProcess::run(int argc, char* argv[])
             isLocked = (deskName.toLower() != QStringLiteral("default"));
         }
         CloseDesktop(hDesk);
+#ifdef _WIN32
+        // XP 屏保：分级尝试退出，最后再枚举进程杀
+        if (isWinXP) {
+            BOOL ssRunning = FALSE;
+            SystemParametersInfo(0x0072, 0, &ssRunning, 0);
+            static int xpSsStage = 0;
+            if (ssRunning) {
+                if (xpSsStage == 0) {
+                    xpSsStage = 1;
+                    qInfo() << "XP screen saver: stage 1 - LockWorkStation";
+                    LockWorkStation();
+                    return;
+                }
+                if (xpSsStage == 1) {
+                    xpSsStage = 2;
+                    qInfo() << "XP screen saver: stage 2 - SendInput mouse + ESC";
+                    POINT pt; GetCursorPos(&pt);
+                    INPUT mi = {};
+                    mi.type = INPUT_MOUSE;
+                    mi.mi.dx = (pt.x * 65535) / GetSystemMetrics(SM_CXSCREEN);
+                    mi.mi.dy = (pt.y * 65535) / GetSystemMetrics(SM_CYSCREEN);
+                    mi.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+                    SendInput(1, &mi, sizeof(INPUT));
+                    INPUT esc[2] = {};
+                    esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
+                    esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                    SendInput(2, esc, sizeof(INPUT));
+                    return;
+                }
+                if (xpSsStage >= 2) {
+                    qInfo() << "XP screen saver: stage 3 - killing .scr processes";
+                    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                    if (hSnap != INVALID_HANDLE_VALUE) {
+                        PROCESSENTRY32W pe = { sizeof(pe) };
+                        if (Process32FirstW(hSnap, &pe)) {
+                            do {
+                                QString name = QString::fromWCharArray(pe.szExeFile);
+                                if (name.endsWith(".scr", Qt::CaseInsensitive)) {
+                                    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                                    if (hProc) {
+                                        TerminateProcess(hProc, 0);
+                                        CloseHandle(hProc);
+                                        qInfo() << "Terminated:" << name;
+                                    }
+                                }
+                            } while (Process32NextW(hSnap, &pe));
+                        }
+                        CloseHandle(hSnap);
+                    }
+                    LockWorkStation();
+                    xpSsStage = 3;
+                    return;
+                }
+            } else {
+                xpSsStage = 0;
+            }
+        }
+#endif
         if (isLocked != locked) {
             locked = isLocked;
             qInfo() << "Helper: screen locked =" << locked;
