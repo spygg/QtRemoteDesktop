@@ -115,6 +115,48 @@
             border-radius: 3px;
             font-family: monospace;
         }
+
+        /* 配置下拉菜单 */
+        #config-dropdown {
+            display: none;
+            position: fixed;
+            top: 44px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(30,30,30,0.97);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 10px;
+            padding: 14px 18px;
+            z-index: 1001;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+            backdrop-filter: blur(12px);
+            gap: 12px;
+            flex-direction: column;
+            min-width: 320px;
+        }
+        #config-dropdown.open { display: flex; }
+        .dropdown-section { display: flex; flex-direction: column; gap: 6px; }
+        .dropdown-title { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .dropdown-options { display: flex; gap: 4px; flex-wrap: wrap; }
+        .dropdown-options button {
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: #ccc;
+            padding: 5px 12px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.12s;
+        }
+        .dropdown-options button:hover { background: rgba(255,255,255,0.14); color: #fff; }
+        .dropdown-options button.active { background: rgba(0,102,204,0.5); border-color: #4a9eff; color: #fff; }
+        .dropdown-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 1000;
+        }
+        .dropdown-overlay.open { display: block; top: 44px; }
         
         /* 远程光标 */
         #remote-cursor {
@@ -345,14 +387,9 @@
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
         <button id="btn-pin" title="固定工具栏">📌</button>
-        <button class="btn" id="btn-quality" onclick="toggleQuality()">
+        <button class="btn" id="btn-quality" onclick="toggleConfigDropdown()">
             <span class="btn-icon">🎨</span>
-            <span class="btn-text">画质: 低</span>
-            <span class="shortcut">⌃⇧Q</span>
-        </button>
-        <button class="btn" id="btn-fps" onclick="toggleFps()">
-            <span class="btn-icon">⚡</span>
-            <span class="btn-text">FPS: 关</span>
+            <span class="btn-text">画质: 中</span>
         </button>
         <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span class="btn-text">文件</span></button>
         <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span class="btn-icon">👤</span><span class="btn-text">用户</span></button>
@@ -364,6 +401,42 @@
         </button>
     </div>
     
+    <!-- 配置下拉菜单遮罩 -->
+    <div id="config-overlay" class="dropdown-overlay" onclick="toggleConfigDropdown()"></div>
+    <!-- 配置下拉菜单 -->
+    <div id="config-dropdown">
+        <div class="dropdown-section">
+            <div class="dropdown-title">画质</div>
+            <div class="dropdown-options" data-key="quality">
+                <button data-value="high">高</button>
+                <button data-value="medium">中</button>
+                <button data-value="low">低</button>
+                <button data-value="verylow">极低</button>
+            </div>
+        </div>
+        <div class="dropdown-section">
+            <div class="dropdown-title">帧率 (FPS)</div>
+            <div class="dropdown-options" data-key="fps">
+                <button data-value="60">60</button>
+                <button data-value="30">30</button>
+                <button data-value="15">15</button>
+            </div>
+        </div>
+        <div class="dropdown-section">
+            <div class="dropdown-title">缩放</div>
+            <div class="dropdown-options" data-key="scale">
+                <button data-value="100">100%</button>
+                <button data-value="75">75%</button>
+                <button data-value="50">50%</button>
+                <button data-value="25">25%</button>
+            </div>
+        </div>
+        <div class="dropdown-section">
+            <div class="dropdown-title">目标分辨率</div>
+            <div class="dropdown-options" id="resolution-options" data-key="resolution"></div>
+        </div>
+    </div>
+
     <div id="container">
         <canvas id="screen"></canvas>
     </div>
@@ -450,7 +523,7 @@
             screenHeight: 0,
             scaleX: 1,
             scaleY: 1,
-            qualityLevel: 2, // 0=高 1=中 2=低 3=极低
+            currentConfig: { quality: 'medium', fps: 30, scale: 75 },
             showFps: false,
             mouseX: 0,
             mouseY: 0,
@@ -664,6 +737,7 @@
                     state.canvas.height = msg.height;
                     updateScale();
                     console.log(`屏幕分辨率: ${msg.width}x${msg.height}`);
+                    buildResolutionOptions();
                     break;
                 case 'cursor_pos':
                     updateRemoteCursor(msg.x, msg.y);
@@ -741,14 +815,12 @@
                     }
                     break;
                 case 'server_config':
-                    for (let i = 0; i < QUALITY_LEVELS.length; i++) {
-                        const ql = QUALITY_LEVELS[i];
-                        if (ql.fps === msg.fps && ql.jpegQ === msg.quality) {
-                            state.qualityLevel = i;
-                            document.getElementById('btn-quality').querySelector('.btn-text').textContent = '画质: ' + ql.label;
-                            break;
-                        }
-                    }
+                    state.currentConfig.quality = msg.quality === 80 ? 'high' : msg.quality === 60 ? 'medium' : msg.quality === 35 ? (msg.fps >= 30 ? 'low' : 'verylow') : 'medium';
+                    state.currentConfig.fps = msg.fps;
+                    state.currentConfig.scale = msg.scale || 100;
+                    updateDropdownActive();
+                    updateQualityLabel();
+                    buildResolutionOptions();
                     break;
             }
         }
@@ -882,7 +954,7 @@
                     return;
                 }
                 if (e.ctrlKey && e.shiftKey && e.code === 'KeyQ') {
-                    toggleQuality();
+                    toggleConfigDropdown();
                     e.preventDefault();
                     return;
                 }
@@ -984,36 +1056,108 @@
             }
         }
 
-        const QUALITY_LEVELS = [
-            { label: '高',   quality: 'high',    fps: 30, jpegQ: 80 },
-            { label: '中',   quality: 'medium',  fps: 30, jpegQ: 60 },
-            { label: '低',   quality: 'low',     fps: 30, jpegQ: 35 },
-            { label: '极低', quality: 'verylow', fps: 15, jpegQ: 35 },
-        ];
-        function toggleQuality() {
-            state.qualityLevel = (state.qualityLevel + 1) % QUALITY_LEVELS.length;
-            const ql = QUALITY_LEVELS[state.qualityLevel];
-            const btn = document.getElementById('btn-quality');
-            btn.querySelector('.btn-text').textContent = '画质: ' + ql.label;
-            send({ type: 'config', quality: ql.quality, fps: ql.fps });
+        const QUALITY_MAP = { high: '高', medium: '中', low: '低', verylow: '极低' };
+        const FPS_VALUES = [60, 30, 15];
+        const SCALE_VALUES = [100, 75, 50, 25];
+
+        function toggleConfigDropdown() {
+            const dd = document.getElementById('config-dropdown');
+            const ov = document.getElementById('config-overlay');
+            const open = !dd.classList.contains('open');
+            dd.classList.toggle('open', open);
+            ov.classList.toggle('open', open);
         }
+
+        function updateDropdownActive() {
+            const cfg = state.currentConfig;
+            document.querySelectorAll('#config-dropdown .dropdown-options').forEach(group => {
+                const key = group.dataset.key;
+                if (!key) return;
+                const val = String(cfg[key]);
+                group.querySelectorAll('button').forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.value === val);
+                });
+            });
+        }
+
+        function updateQualityLabel() {
+            const label = QUALITY_MAP[state.currentConfig.quality] || '中';
+            document.getElementById('btn-quality').querySelector('.btn-text').textContent = '画质: ' + label;
+        }
+
+        function onDropdownClick(e) {
+            const btn = e.target.closest('button');
+            if (!btn) return;
+            const group = btn.closest('.dropdown-options');
+            if (!group) return;
+            const key = group.dataset.key;
+            const val = btn.dataset.value;
+
+            if (key === 'quality') {
+                const fps = state.currentConfig.fps;
+                const jpegQ = val === 'high' ? 80 : val === 'medium' ? 60 : 35;
+                state.currentConfig.quality = val;
+                send({ type: 'config', quality: val, fps: fps });
+            } else if (key === 'fps') {
+                const newFps = parseInt(val);
+                const quality = state.currentConfig.quality;
+                state.currentConfig.fps = newFps;
+                send({ type: 'config', quality: quality, fps: newFps });
+            } else if (key === 'scale') {
+                const newScale = parseInt(val);
+                state.currentConfig.scale = newScale;
+                send({ type: 'config', scale: newScale });
+                buildResolutionOptions();
+            } else if (key === 'resolution') {
+                const parts = val.split('x');
+                const resW = parseInt(parts[0]);
+                if (state.screenWidth > 0 && resW <= state.screenWidth) {
+                    const newScale = Math.round(resW / state.screenWidth * 100);
+                    state.currentConfig.scale = newScale;
+                    send({ type: 'config', scale: newScale });
+                }
+                buildResolutionOptions();
+            }
+            updateDropdownActive();
+            updateQualityLabel();
+        }
+
+        function buildResolutionOptions() {
+            const container = document.getElementById('resolution-options');
+            const sw = state.screenWidth, sh = state.screenHeight;
+            if (!sw || !sh) return;
+            const common = [
+                { w: sw, h: sh, label: '原始 ' + sw + '×' + sh },
+                { w: 1920, h: 1080 },
+                { w: 1680, h: 1050 },
+                { w: 1600, h: 900 },
+                { w: 1440, h: 900 },
+                { w: 1366, h: 768 },
+                { w: 1280, h: 720 },
+                { w: 1024, h: 768 },
+            ];
+            container.innerHTML = '';
+            for (const res of common) {
+                const w = res.w, h = res.h;
+                if (w > sw || h > sh) continue;
+                const label = res.label || (w + '×' + h);
+                const btn = document.createElement('button');
+                btn.dataset.value = w + 'x' + h;
+                const scalePct = Math.round(w / sw * 100);
+                const isActive = scalePct === state.currentConfig.scale;
+                btn.textContent = label + ' (' + scalePct + '%)';
+                btn.classList.toggle('active', isActive);
+                container.appendChild(btn);
+            }
+        }
+
+        document.getElementById('config-dropdown').addEventListener('click', onDropdownClick);
 
         function toggleFullscreen() {
             if (!document.fullscreenElement) {
                 document.documentElement.requestFullscreen();
             } else {
                 document.exitFullscreen();
-            }
-        }
-
-        function toggleFps() {
-            state.showFps = !state.showFps;
-            const btn = document.getElementById('btn-fps');
-            btn.querySelector('.btn-text').textContent = 'FPS: ' + (state.showFps ? '开' : '关');
-            if (state.showFps) {
-                updateStatus(`🟢 已连接 | ${fpsCount} FPS`);
-            } else {
-                updateStatus('');
             }
         }
 
@@ -1224,7 +1368,8 @@
         window.onload = () => {
             setupInputs();
             connect();
-            
+            updateQualityLabel();
+
             // 窗口大小改变时更新缩放
             window.addEventListener('resize', updateScale);
 
