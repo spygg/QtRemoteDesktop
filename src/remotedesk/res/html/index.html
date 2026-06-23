@@ -740,7 +740,6 @@
                     state.canvas.height = msg.height;
                     state.currentConfig.resolution = msg.width + 'x' + msg.height;
                     updateScale();
-                    console.log(`屏幕分辨率: ${msg.width}x${msg.height}, resolution="${state.currentConfig.resolution}"`);
                     buildResolutionOptions();
                     updateDropdownActive();
                     break;

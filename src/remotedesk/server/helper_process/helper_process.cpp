@@ -142,8 +142,8 @@ int HelperProcess::run(int argc, char* argv[])
                     capturer.start(30);
                     QJsonObject info;
                     info["type"] = "screen_info";
-                    info["width"] = capturer.width();
-                    info["height"] = capturer.height();
+                    info["width"] = w;
+                    info["height"] = h;
                     ws.sendTextMessage(QString::fromUtf8(QJsonDocument(info).toJson(QJsonDocument::Compact)));
                 } else {
                     QJsonObject err;

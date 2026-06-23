@@ -16,13 +16,21 @@ class GdiCapturer : public PlatformCapturer {
 public:
     bool initialize() override
     {
-        // 获取屏幕尺寸
+        // 获取屏幕尺寸（使用 EnumDisplaySettings 查询当前活动模式，比 GetSystemMetrics 更可靠）
         hdcScreen_ = GetDC(nullptr);
         if (!hdcScreen_)
             return false;
 
-        width_ = GetSystemMetrics(SM_CXSCREEN);
-        height_ = GetSystemMetrics(SM_CYSCREEN);
+        DEVMODE dm;
+        ZeroMemory(&dm, sizeof(dm));
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
+            width_ = dm.dmPelsWidth;
+            height_ = dm.dmPelsHeight;
+        } else {
+            width_ = GetSystemMetrics(SM_CXSCREEN);
+            height_ = GetSystemMetrics(SM_CYSCREEN);
+        }
 
         // 创建兼容 DC
         hdcMem_ = CreateCompatibleDC(hdcScreen_);
