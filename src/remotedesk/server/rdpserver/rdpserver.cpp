@@ -477,8 +477,11 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
             });
         connect(wsServer_.get(), &WebSocketServer::captureMessageReceived,
             this, [this](const QJsonObject& msg) {
-                qInfo() << "Service: capture msg =" << msg;
-                if (msg["type"].toString() == "screen_locked") {
+                if (msg["type"].toString() != "cursor_pos")
+                    qInfo() << "Service: capture msg =" << msg;
+                if (msg["type"].toString() == "screen_info") {
+                    lastScreenInfo_ = msg;
+                } else if (msg["type"].toString() == "screen_locked") {
                     screenLocked_ = msg["locked"].toBool();
                     if (screenLocked_)
                         startSecureInputProcess();
@@ -1415,6 +1418,8 @@ void RDPServer::onClientConnected(const QString& clientId)
         info["width"] = screenCapturer_->width();
         info["height"] = screenCapturer_->height();
         wsServer_->sendJson(clientId, info);
+    } else if (serviceMode_ && !lastScreenInfo_.isEmpty()) {
+        wsServer_->sendJson(clientId, lastScreenInfo_);
     }
 
     // 发送当前画质/帧率配置（前端据此显示正确的标签）
@@ -1461,20 +1466,24 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 
 void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& input)
 {
-    if (serviceMode_) {
-        if (wsServer_->isCaptureSourceConnected()) {
-            qInfo() << "Service: forwarding input to helper, type =" << input["type"].toString();
-            wsServer_->sendToCaptureSource(input);
-            if (screenLocked_ && secureInputRunning_)
-                wsServer_->sendToSecureInput(input);
-            return;
-        }
-        qInfo() << "Service: no helper, handling input directly, type =" << input["type"].toString();
-    }
-
+    // config 和 set_resolution 需要在 service mode 转发前先本地处理
     QString type = input["type"].toString();
 
-    if (screenLocked_) {
+    if (serviceMode_) {
+        if (wsServer_->isCaptureSourceConnected()) {
+            if (type != "mousemove")
+                qInfo() << "Service: forwarding input to helper, type =" << type;
+            if (type != "config")
+                wsServer_->sendToCaptureSource(input);
+            if (screenLocked_ && secureInputRunning_)
+                wsServer_->sendToSecureInput(input);
+            // config/set_resolution 跳过转发，由下面的本地逻辑处理
+        } else {
+            qInfo() << "Service: no helper, handling input directly, type =" << type;
+        }
+    }
+
+    if (screenLocked_ && !serviceMode_) {
 #ifdef _WIN32
         if (input["isChar"].toBool() && input["keycode"].toInt() > 0) {
             wchar_t ch = static_cast<wchar_t>(input["keycode"].toInt());
@@ -1505,41 +1514,48 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 #endif
     }
 
-    // 屏保活跃时先发 ESC 退出，再投递用户实际输入
-#ifdef _WIN32
-    { BOOL ssRunning = FALSE;
-      SystemParametersInfo(0x0072, 0, &ssRunning, 0);
-      if (ssRunning) {
-          INPUT esc[2] = {};
-          esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
-          esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
-          SendInput(2, esc, sizeof(INPUT));
-      } }
+    // 屏保活跃时先发 ESC 退出，再投递用户实际输入（service 模式下 helper 处理）
+#ifndef _WIN32
+    (void)input;
+#else
+    if (!serviceMode_) {
+        BOOL ssRunning = FALSE;
+        SystemParametersInfo(0x0072, 0, &ssRunning, 0);
+        if (ssRunning) {
+            INPUT esc[2] = {};
+            esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
+            esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(2, esc, sizeof(INPUT));
+        }
+    }
 #endif
 
-    if (type == "mousemove") {
-        int x = input["x"].toInt();
-        int y = input["y"].toInt();
-        inputManager_->injectMouseMove(x, y);
-    } else if (type == "mousedown" || type == "mouseup") {
-        int x = input["x"].toInt();
-        int y = input["y"].toInt();
-        int button = input["button"].toInt();
-        bool isDown = (type == "mousedown");
-        inputManager_->injectMouseButton(x, y, button, isDown);
-    } else if (type == "keydown" || type == "keyup") {
-        int keycode = input["keycode"].toInt();
-        QString code = input["code"].toString();
-        bool isDown = (type == "keydown");
-        bool ctrl = input["ctrl"].toBool();
-        bool alt = input["alt"].toBool();
-        bool shift = input["shift"].toBool();
-        bool isChar = input["isChar"].toBool();
-        inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar);
-    } else if (type == "wheel") {
-        int delta = input["delta"].toInt();
-        inputManager_->injectWheel(delta);
-    } else if (type == "config") {
+    if (!serviceMode_) {
+        if (type == "mousemove") {
+            int x = input["x"].toInt();
+            int y = input["y"].toInt();
+            inputManager_->injectMouseMove(x, y);
+        } else if (type == "mousedown" || type == "mouseup") {
+            int x = input["x"].toInt();
+            int y = input["y"].toInt();
+            int button = input["button"].toInt();
+            bool isDown = (type == "mousedown");
+            inputManager_->injectMouseButton(x, y, button, isDown);
+        } else if (type == "keydown" || type == "keyup") {
+            int keycode = input["keycode"].toInt();
+            QString code = input["code"].toString();
+            bool isDown = (type == "keydown");
+            bool ctrl = input["ctrl"].toBool();
+            bool alt = input["alt"].toBool();
+            bool shift = input["shift"].toBool();
+            bool isChar = input["isChar"].toBool();
+            inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar);
+        } else if (type == "wheel") {
+            int delta = input["delta"].toInt();
+            inputManager_->injectWheel(delta);
+        }
+    }
+    if (type == "config") {
         // 画质/帧率/缩放配置
         QString qname = input["quality"].toString();
         int jpegQ = -1;
@@ -1579,7 +1595,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             input["size"].toVariant().toLongLong());
     } else if (type == "file_upload_done") {
         emit requestUploadDone(clientId, input["path"].toString());
-    } else if (type == "set_resolution") {
+    } else if (type == "set_resolution" && !serviceMode_) {
         int w = input["width"].toInt();
         int h = input["height"].toInt();
         if (ScreenCapturer::changeDisplayResolution(w, h)) {

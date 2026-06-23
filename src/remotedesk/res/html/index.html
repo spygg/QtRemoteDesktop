@@ -525,7 +525,7 @@
             screenHeight: 0,
             scaleX: 1,
             scaleY: 1,
-            currentConfig: { quality: 'medium', fps: 30, scale: 75 },
+            currentConfig: { quality: 'medium', fps: 30, scale: 75, resolution: '' },
             showFps: false,
             mouseX: 0,
             mouseY: 0,
@@ -722,6 +722,7 @@
                 if (state.screenWidth === 0) {
                     state.canvas.width = 1920;
                     state.canvas.height = 1080;
+                    updateScale();
                 }
                 state.ctx.drawImage(img, 0, 0, state.canvas.width, state.canvas.height);
                 URL.revokeObjectURL(url);
@@ -737,9 +738,11 @@
                     state.screenHeight = msg.height;
                     state.canvas.width = msg.width;
                     state.canvas.height = msg.height;
+                    state.currentConfig.resolution = msg.width + 'x' + msg.height;
                     updateScale();
-                    console.log(`屏幕分辨率: ${msg.width}x${msg.height}`);
+                    console.log(`屏幕分辨率: ${msg.width}x${msg.height}, resolution="${state.currentConfig.resolution}"`);
                     buildResolutionOptions();
+                    updateDropdownActive();
                     break;
                 case 'cursor_pos':
                     updateRemoteCursor(msg.x, msg.y);
@@ -820,9 +823,11 @@
                     state.currentConfig.quality = msg.quality === 80 ? 'high' : msg.quality === 60 ? 'medium' : msg.quality === 35 ? (msg.fps >= 30 ? 'low' : 'verylow') : 'medium';
                     state.currentConfig.fps = msg.fps;
                     state.currentConfig.scale = msg.scale || 100;
+                    if (state.screenWidth > 0)
+                        state.currentConfig.resolution = state.screenWidth + 'x' + state.screenHeight;
+                    buildResolutionOptions();
                     updateDropdownActive();
                     updateQualityLabel();
-                    buildResolutionOptions();
                     break;
                 case 'error':
                     alert('错误: ' + (msg.message || '未知错误'));
@@ -1116,6 +1121,7 @@
             } else if (key === 'resolution') {
                 const parts = val.split('x');
                 const resW = parseInt(parts[0]), resH = parseInt(parts[1]);
+                state.currentConfig.resolution = val;
                 if (state.screenWidth > 0 && resW <= state.screenWidth) {
                     state.currentConfig.scale = 100;
                     send({ type: 'set_resolution', width: resW, height: resH });
@@ -1146,11 +1152,10 @@
                 if (w > sw || h > sh) continue;
                 const label = res.label || (w + '×' + h);
                 const btn = document.createElement('button');
-                btn.dataset.value = w + 'x' + h;
+                const resolutionStr = w + 'x' + h;
+                btn.dataset.value = resolutionStr;
                 const scalePct = Math.round(w / sw * 100);
-                const isActive = scalePct === state.currentConfig.scale;
                 btn.textContent = label + ' (' + scalePct + '%)';
-                btn.classList.toggle('active', isActive);
                 container.appendChild(btn);
             }
         }

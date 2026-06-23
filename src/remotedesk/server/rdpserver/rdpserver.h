@@ -147,6 +147,7 @@ private:
 
     QRect screenGeometry_;
     QPoint lastCursorPos_ { -1, -1 };
+    QJsonObject lastScreenInfo_;
 
     bool useSsl_ = false;
     bool serviceMode_ = false;
