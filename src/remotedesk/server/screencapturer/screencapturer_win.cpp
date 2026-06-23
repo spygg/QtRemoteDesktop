@@ -2,6 +2,9 @@
 #include "screencapturer.h"
 #include <QColor>
 #include <QDebug>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QList>
 #include <QPixmap>
 
 // Windows 平台使用 DXGI 高性能捕获
@@ -510,4 +513,45 @@ bool ScreenCapturer::changeDisplayResolution(int w, int h)
     }
     qWarning() << "ChangeDisplaySettings failed:" << result;
     return false;
+}
+
+QJsonArray ScreenCapturer::enumerateSupportedResolutions()
+{
+    QList<QJsonObject> list;
+    DEVMODE dm;
+    ZeroMemory(&dm, sizeof(dm));
+    dm.dmSize = sizeof(dm);
+    int modeNum = 0;
+    while (EnumDisplaySettings(NULL, modeNum, &dm)) {
+        int w = static_cast<int>(dm.dmPelsWidth);
+        int h = static_cast<int>(dm.dmPelsHeight);
+        if (w < 800 || h < 600) {
+            modeNum++;
+            continue;
+        }
+        bool dup = false;
+        for (const auto& obj : list) {
+            if (obj["width"].toInt() == w && obj["height"].toInt() == h) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            QJsonObject res;
+            res["width"] = w;
+            res["height"] = h;
+            list.append(res);
+        }
+        modeNum++;
+    }
+    std::sort(list.begin(), list.end(), [](const QJsonObject& a, const QJsonObject& b) {
+        int areaA = a["width"].toInt() * a["height"].toInt();
+        int areaB = b["width"].toInt() * b["height"].toInt();
+        return areaA > areaB;
+    });
+    QJsonArray arr;
+    for (const auto& obj : list)
+        arr.append(obj);
+    qInfo() << "Enumerated" << arr.size() << "supported resolutions";
+    return arr;
 }

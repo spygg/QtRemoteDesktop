@@ -281,3 +281,9 @@ bool ScreenCapturer::changeDisplayResolution(int w, int h)
     qInfo() << "Display resolution changed to" << w << "x" << h << "on output" << primaryOutput;
     return true;
 }
+
+QJsonArray ScreenCapturer::enumerateSupportedResolutions()
+{
+    // Linux: 可通过 xrandr 枚举，暂未实现
+    return QJsonArray();
+}

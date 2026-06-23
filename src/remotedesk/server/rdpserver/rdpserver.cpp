@@ -1422,13 +1422,37 @@ void RDPServer::onClientConnected(const QString& clientId)
         wsServer_->sendJson(clientId, lastScreenInfo_);
     }
 
-    // 发送当前画质/帧率配置（前端据此显示正确的标签）
+    // 发送当前画质/帧率/分辨率配置（前端据此显示正确的标签）
     {
         QJsonObject cfg;
         cfg["type"] = "server_config";
         cfg["fps"] = configFps_;
         cfg["quality"] = configQuality_;
         cfg["scale"] = configScale_;
+
+        // 获取支持的分辨率列表和当前分辨率
+        if (screenCapturer_) {
+            // 非服务模式：直接枚举
+            cfg["resolutions"] = ScreenCapturer::enumerateSupportedResolutions();
+            cfg["currentResolution"] = QString("%1x%2")
+                .arg(screenCapturer_->width())
+                .arg(screenCapturer_->height());
+        } else {
+            // 服务模式：从配置文件读取（由 helper 写入）
+            QFile file(QCoreApplication::applicationDirPath() + "/server_config.json");
+            if (file.open(QIODevice::ReadOnly)) {
+                QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+                if (doc.isObject()) {
+                    QJsonObject root = doc.object();
+                    if (root.contains("resolutions"))
+                        cfg["resolutions"] = root["resolutions"].toArray();
+                    if (root.contains("currentResolution"))
+                        cfg["currentResolution"] = root["currentResolution"].toString();
+                }
+                file.close();
+            }
+        }
+
         wsServer_->sendJson(clientId, cfg);
     }
 
@@ -1480,6 +1504,30 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             // config/set_resolution 跳过转发，由下面的本地逻辑处理
         } else {
             qInfo() << "Service: no helper, handling input directly, type =" << type;
+            // 没有 helper（如 Linux 无头模式），直接在本地注入输入
+            if (type == "mousemove") {
+                int x = input["x"].toInt();
+                int y = input["y"].toInt();
+                inputManager_->injectMouseMove(x, y);
+            } else if (type == "mousedown" || type == "mouseup") {
+                int x = input["x"].toInt();
+                int y = input["y"].toInt();
+                int button = input["button"].toInt();
+                bool isDown = (type == "mousedown");
+                inputManager_->injectMouseButton(x, y, button, isDown);
+            } else if (type == "keydown" || type == "keyup") {
+                int keycode = input["keycode"].toInt();
+                QString code = input["code"].toString();
+                bool isDown = (type == "keydown");
+                bool ctrl = input["ctrl"].toBool();
+                bool alt = input["alt"].toBool();
+                bool shift = input["shift"].toBool();
+                bool isChar = input["isChar"].toBool();
+                inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar);
+            } else if (type == "wheel") {
+                int delta = input["delta"].toInt();
+                inputManager_->injectWheel(delta);
+            }
         }
     }
 
@@ -1605,8 +1653,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 qWarning() << "Failed to restart capturer after resolution change";
             QJsonObject info;
             info["type"] = "screen_info";
-            info["width"] = screenCapturer_ ? screenCapturer_->width() : 0;
-            info["height"] = screenCapturer_ ? screenCapturer_->height() : 0;
+            info["width"] = w;
+            info["height"] = h;
             wsServer_->broadcastJson(info);
         } else {
             QJsonObject err;

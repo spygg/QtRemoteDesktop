@@ -140,6 +140,20 @@ int HelperProcess::run(int argc, char* argv[])
                 if (ScreenCapturer::changeDisplayResolution(w, h)) {
                     capturer.stop();
                     capturer.start(30);
+                    // 更新配置文件中的当前分辨率
+                    {
+                        QFile cfgFile(QGuiApplication::applicationDirPath() + "/server_config.json");
+                        if (cfgFile.open(QIODevice::ReadWrite)) {
+                            QJsonDocument doc = QJsonDocument::fromJson(cfgFile.readAll());
+                            if (doc.isObject()) {
+                                QJsonObject root = doc.object();
+                                root["currentResolution"] = QString("%1x%2").arg(w).arg(h);
+                                cfgFile.resize(0);
+                                cfgFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+                            }
+                            cfgFile.close();
+                        }
+                    }
                     QJsonObject info;
                     info["type"] = "screen_info";
                     info["width"] = w;
@@ -281,6 +295,23 @@ int HelperProcess::run(int argc, char* argv[])
     if (!capturer.start(30)) {
         qCritical("Helper: failed to start screen capturer");
         return 1;
+    }
+
+    // 枚举支持的分辨率并写入配置文件
+    {
+        QJsonArray resolutions = ScreenCapturer::enumerateSupportedResolutions();
+        QFile cfgFile(QGuiApplication::applicationDirPath() + "/server_config.json");
+        if (cfgFile.open(QIODevice::ReadWrite)) {
+            QJsonDocument doc = QJsonDocument::fromJson(cfgFile.readAll());
+            QJsonObject root = doc.isObject() ? doc.object() : QJsonObject();
+            root["resolutions"] = resolutions;
+            root["currentResolution"] = QString("%1x%2").arg(capturer.width()).arg(capturer.height());
+            cfgFile.resize(0);
+            cfgFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+            cfgFile.close();
+            qInfo() << "Helper: wrote" << resolutions.size() << "supported resolutions to config, current ="
+                    << root["currentResolution"].toString();
+        }
     }
 
     return app.exec();

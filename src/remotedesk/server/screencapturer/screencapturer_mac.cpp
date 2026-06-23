@@ -174,3 +174,9 @@ bool ScreenCapturer::changeDisplayResolution(int w, int h)
     qWarning() << "Mac: failed to change resolution, error" << err;
     return false;
 }
+
+QJsonArray ScreenCapturer::enumerateSupportedResolutions()
+{
+    // macOS: 可通过 CGDisplayCopyAllDisplayModes 枚举，暂未实现
+    return QJsonArray();
+}

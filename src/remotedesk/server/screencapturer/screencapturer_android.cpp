@@ -63,3 +63,8 @@ bool ScreenCapturer::changeDisplayResolution(int, int)
     qWarning() << "Resolution change not supported on Android";
     return false;
 }
+
+QJsonArray ScreenCapturer::enumerateSupportedResolutions()
+{
+    return QJsonArray();
+}

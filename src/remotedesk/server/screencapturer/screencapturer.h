@@ -4,6 +4,7 @@
 
 #include <QGuiApplication>
 #include <QImage>
+#include <QJsonArray>
 #include <QObject>
 #include <QPoint>
 #include <QScreen>
@@ -92,6 +93,7 @@ public:
     }
 
     static bool changeDisplayResolution(int w, int h);
+    static QJsonArray enumerateSupportedResolutions();
 
 signals:
     void frameCaptured(const QImage& frame);

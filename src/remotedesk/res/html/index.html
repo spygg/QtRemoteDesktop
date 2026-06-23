@@ -525,6 +525,7 @@
             screenHeight: 0,
             scaleX: 1,
             scaleY: 1,
+            resolutions: [],
             currentConfig: { quality: 'medium', fps: 30, scale: 75, resolution: '' },
             showFps: false,
             mouseX: 0,
@@ -822,8 +823,15 @@
                     state.currentConfig.quality = msg.quality === 80 ? 'high' : msg.quality === 60 ? 'medium' : msg.quality === 35 ? (msg.fps >= 30 ? 'low' : 'verylow') : 'medium';
                     state.currentConfig.fps = msg.fps;
                     state.currentConfig.scale = msg.scale || 100;
-                    if (state.screenWidth > 0)
+                    if (msg.resolutions)
+                        state.resolutions = msg.resolutions;
+
+                    // 当前分辨率优先从消息中读取，其次从 screen_info
+                    if (msg.currentResolution) {
+                        state.currentConfig.resolution = msg.currentResolution;
+                    } else if (state.screenWidth > 0) {
                         state.currentConfig.resolution = state.screenWidth + 'x' + state.screenHeight;
+                    }
                     buildResolutionOptions();
                     updateDropdownActive();
                     updateQualityLabel();
@@ -1133,28 +1141,34 @@
 
         function buildResolutionOptions() {
             const container = document.getElementById('resolution-options');
-            const sw = state.screenWidth, sh = state.screenHeight;
-            if (!sw || !sh) return;
-            const common = [
-                { w: sw, h: sh, label: '原始 ' + sw + '×' + sh },
-                { w: 1920, h: 1080 },
-                { w: 1680, h: 1050 },
-                { w: 1600, h: 900 },
-                { w: 1440, h: 900 },
-                { w: 1366, h: 768 },
-                { w: 1280, h: 720 },
-                { w: 1024, h: 768 },
-            ];
             container.innerHTML = '';
-            for (const res of common) {
-                const w = res.w, h = res.h;
-                if (w > sw || h > sh) continue;
-                const label = res.label || (w + '×' + h);
-                const btn = document.createElement('button');
+            let resolutions = state.resolutions;
+            // 没有从后端获取支持列表时，使用当前屏幕尺寸 + 常用分辨率作为 Fallback
+            if (!resolutions || resolutions.length === 0) {
+                const sw = state.screenWidth, sh = state.screenHeight;
+                if (!sw || !sh) return;
+                resolutions = [
+                    { width: sw, height: sh },
+                    { width: 1920, height: 1080 },
+                    { width: 1680, height: 1050 },
+                    { width: 1600, height: 900 },
+                    { width: 1440, height: 900 },
+                    { width: 1366, height: 768 },
+                    { width: 1280, height: 720 },
+                    { width: 1024, height: 768 },
+                ];
+            }
+            const nativeRes = (state.screenWidth > 0)
+                ? state.screenWidth + 'x' + state.screenHeight : '';
+            for (const res of resolutions) {
+                const w = res.width || res.w;
+                const h = res.height || res.h;
                 const resolutionStr = w + 'x' + h;
+                const btn = document.createElement('button');
                 btn.dataset.value = resolutionStr;
-                const scalePct = Math.round(w / sw * 100);
-                btn.textContent = label + ' (' + scalePct + '%)';
+                const isNative = (resolutionStr === nativeRes);
+                const scalePct = nativeRes ? Math.round(w / state.screenWidth * 100) : 100;
+                btn.textContent = (isNative ? '原始 ' : '') + w + '×' + h + ' (' + scalePct + '%)';
                 container.appendChild(btn);
             }
         }
