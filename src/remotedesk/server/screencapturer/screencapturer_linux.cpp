@@ -2,7 +2,10 @@
 #include "screencapturer.h"
 #include <QColor>
 #include <QDebug>
+#include <QProcess>
 #include <QPixmap>
+#include <QSet>
+#include <QProcess>
 
 static bool isFrameBlack(const QImage& frame)
 {
@@ -237,4 +240,44 @@ void ScreenCapturer::captureFrame()
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);
+}
+
+bool ScreenCapturer::changeDisplayResolution(int w, int h)
+{
+    QProcess xrandr;
+    xrandr.start("xrandr", QStringList() << "--query");
+    if (!xrandr.waitForFinished(3000)) {
+        qWarning() << "xrandr --query failed";
+        return false;
+    }
+    QString output = QString::fromUtf8(xrandr.readAllStandardOutput());
+    QString primaryOutput;
+    QSet<QString> connectedOutputs;
+    for (const QString& line : output.split('\n')) {
+        if (line.contains("connected primary")) {
+            primaryOutput = line.section(' ', 0, 0);
+        } else if (line.contains(" connected") && primaryOutput.isEmpty()) {
+            QString name = line.section(' ', 0, 0);
+            connectedOutputs.insert(name);
+        }
+    }
+    if (primaryOutput.isEmpty() && !connectedOutputs.isEmpty())
+        primaryOutput = *connectedOutputs.begin();
+    if (primaryOutput.isEmpty()) {
+        qWarning() << "xrandr: no connected output found";
+        return false;
+    }
+    QString mode = QString("%1x%2").arg(w).arg(h);
+    QProcess xrandrSet;
+    xrandrSet.start("xrandr", QStringList() << "--output" << primaryOutput << "--mode" << mode);
+    if (!xrandrSet.waitForFinished(3000)) {
+        qWarning() << "xrandr --mode failed";
+        return false;
+    }
+    if (xrandrSet.exitCode() != 0) {
+        qWarning() << "xrandr --mode failed:" << xrandrSet.readAllStandardError();
+        return false;
+    }
+    qInfo() << "Display resolution changed to" << w << "x" << h << "on output" << primaryOutput;
+    return true;
 }

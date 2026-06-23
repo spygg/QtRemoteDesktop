@@ -135,3 +135,42 @@ void ScreenCapturer::cleanupPlatform()
     delete g_macCapturer;
     g_macCapturer = nullptr;
 }
+
+bool ScreenCapturer::changeDisplayResolution(int w, int h)
+{
+    CGDirectDisplayID display = CGMainDisplayID();
+    CGDisplayModeRef currentMode = CGDisplayCopyDisplayMode(display);
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(display, nullptr);
+    if (!modes) {
+        if (currentMode) CGDisplayModeRelease(currentMode);
+        return false;
+    }
+    CFIndex count = CFArrayGetCount(modes);
+    CGDisplayModeRef targetMode = nullptr;
+    for (CFIndex i = 0; i < count; i++) {
+        CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        if (CGDisplayModeGetWidth(mode) == static_cast<size_t>(w) &&
+            CGDisplayModeGetHeight(mode) == static_cast<size_t>(h)) {
+            targetMode = mode;
+            break;
+        }
+    }
+    if (!targetMode) {
+        CFRelease(modes);
+        if (currentMode) CGDisplayModeRelease(currentMode);
+        qWarning() << "Mac: resolution" << w << "x" << h << "not supported";
+        return false;
+    }
+    CGDisplayConfigRef config;
+    CGBeginDisplayConfiguration(&config);
+    CGConfigureDisplayWithDisplayMode(config, display, targetMode, nullptr);
+    CGError err = CGCompleteDisplayConfiguration(config, kCGConfigureForSession);
+    CFRelease(modes);
+    if (currentMode) CGDisplayModeRelease(currentMode);
+    if (err == kCGErrorSuccess) {
+        qInfo() << "Mac display resolution changed to" << w << "x" << h;
+        return true;
+    }
+    qWarning() << "Mac: failed to change resolution, error" << err;
+    return false;
+}

@@ -91,6 +91,8 @@ public:
         return screen_ ? screen_->size().height() : 0;
     }
 
+    static bool changeDisplayResolution(int w, int h);
+
 signals:
     void frameCaptured(const QImage& frame);
     void screenLocked(bool locked);

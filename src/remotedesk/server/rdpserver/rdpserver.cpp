@@ -1505,6 +1505,18 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 #endif
     }
 
+    // 屏保活跃时先发 ESC 退出，再投递用户实际输入
+#ifdef _WIN32
+    { BOOL ssRunning = FALSE;
+      SystemParametersInfo(0x0072, 0, &ssRunning, 0);
+      if (ssRunning) {
+          INPUT esc[2] = {};
+          esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
+          esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
+          SendInput(2, esc, sizeof(INPUT));
+      } }
+#endif
+
     if (type == "mousemove") {
         int x = input["x"].toInt();
         int y = input["y"].toInt();
@@ -1567,6 +1579,25 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             input["size"].toVariant().toLongLong());
     } else if (type == "file_upload_done") {
         emit requestUploadDone(clientId, input["path"].toString());
+    } else if (type == "set_resolution") {
+        int w = input["width"].toInt();
+        int h = input["height"].toInt();
+        if (ScreenCapturer::changeDisplayResolution(w, h)) {
+            if (screenCapturer_)
+                screenCapturer_->stop();
+            if (screenCapturer_ && !screenCapturer_->start(configFps_))
+                qWarning() << "Failed to restart capturer after resolution change";
+            QJsonObject info;
+            info["type"] = "screen_info";
+            info["width"] = screenCapturer_ ? screenCapturer_->width() : 0;
+            info["height"] = screenCapturer_ ? screenCapturer_->height() : 0;
+            wsServer_->broadcastJson(info);
+        } else {
+            QJsonObject err;
+            err["type"] = "error";
+            err["message"] = QString("分辨率 %1x%2 切换失败").arg(w).arg(h);
+            wsServer_->sendJson(clientId, err);
+        }
     }
 }
 

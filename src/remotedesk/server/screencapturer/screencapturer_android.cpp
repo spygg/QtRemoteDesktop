@@ -57,3 +57,9 @@ void ScreenCapturer::captureFrame()
 void ScreenCapturer::cleanupPlatform()
 {
 }
+
+bool ScreenCapturer::changeDisplayResolution(int, int)
+{
+    qWarning() << "Resolution change not supported on Android";
+    return false;
+}

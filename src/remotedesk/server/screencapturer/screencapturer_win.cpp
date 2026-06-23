@@ -486,3 +486,20 @@ bool ScreenCapturer::start(int fps)
     qInfo() << "Screen capture started:" << width() << "x" << height() << "@" << fps << "fps";
     return true;
 }
+
+bool ScreenCapturer::changeDisplayResolution(int w, int h)
+{
+    DEVMODE dm;
+    ZeroMemory(&dm, sizeof(dm));
+    dm.dmSize = sizeof(dm);
+    dm.dmPelsWidth = static_cast<DWORD>(w);
+    dm.dmPelsHeight = static_cast<DWORD>(h);
+    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
+    LONG result = ChangeDisplaySettings(&dm, CDS_FULLSCREEN);
+    if (result == DISP_CHANGE_SUCCESSFUL) {
+        qInfo() << "Display resolution changed to" << w << "x" << h;
+        return true;
+    }
+    qWarning() << "ChangeDisplaySettings failed:" << result;
+    return false;
+}

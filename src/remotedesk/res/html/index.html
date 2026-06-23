@@ -824,6 +824,9 @@
                     updateQualityLabel();
                     buildResolutionOptions();
                     break;
+                case 'error':
+                    alert('错误: ' + (msg.message || '未知错误'));
+                    break;
             }
         }
 
@@ -1112,11 +1115,10 @@
                 buildResolutionOptions();
             } else if (key === 'resolution') {
                 const parts = val.split('x');
-                const resW = parseInt(parts[0]);
+                const resW = parseInt(parts[0]), resH = parseInt(parts[1]);
                 if (state.screenWidth > 0 && resW <= state.screenWidth) {
-                    const newScale = Math.round(resW / state.screenWidth * 100);
-                    state.currentConfig.scale = newScale;
-                    send({ type: 'config', scale: newScale });
+                    state.currentConfig.scale = 100;
+                    send({ type: 'set_resolution', width: resW, height: resH });
                 }
                 buildResolutionOptions();
             }

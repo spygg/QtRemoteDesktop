@@ -132,7 +132,40 @@ int HelperProcess::run(int argc, char* argv[])
                 return;
             }
 
+            if (type == "set_resolution") {
+                int w = obj["width"].toInt();
+                int h = obj["height"].toInt();
+                qInfo() << "Helper: changing resolution to" << w << "x" << h;
+                if (ScreenCapturer::changeDisplayResolution(w, h)) {
+                    capturer.stop();
+                    capturer.start(30);
+                    QJsonObject info;
+                    info["type"] = "screen_info";
+                    info["width"] = capturer.width();
+                    info["height"] = capturer.height();
+                    ws.sendTextMessage(QString::fromUtf8(QJsonDocument(info).toJson(QJsonDocument::Compact)));
+                } else {
+                    QJsonObject err;
+                    err["type"] = "error";
+                    err["message"] = QString("分辨率 %1x%2 切换失败").arg(w).arg(h);
+                    ws.sendTextMessage(QString::fromUtf8(QJsonDocument(err).toJson(QJsonDocument::Compact)));
+                }
+                return;
+            }
+
             if (locked) return;
+
+            // 屏保活跃时先发 ESC 退出，再投递用户实际输入
+#ifdef _WIN32
+            { BOOL ssRunning = FALSE;
+              SystemParametersInfo(0x0072, 0, &ssRunning, 0); // SPI_GETSCREENSAVERRUNNING
+              if (ssRunning) {
+                  INPUT esc[2] = {};
+                  esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
+                  esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                  SendInput(2, esc, sizeof(INPUT));
+              } }
+#endif
 
             if (type == "mousemove") {
                 inputMgr.injectMouseMove(obj["x"].toInt(), obj["y"].toInt());
