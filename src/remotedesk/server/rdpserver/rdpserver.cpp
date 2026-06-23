@@ -140,6 +140,7 @@ void RDPServer::loadServerConfig(const QString& configPath)
         root["console"] = false;
         root["fps"] = 30;
         root["quality"] = 60;
+        root["scale"] = 75;
 
         if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -169,9 +170,13 @@ void RDPServer::loadServerConfig(const QString& configPath)
         configFps_ = qBound(1, root["fps"].toInt(), 60);
     if (root.contains("quality"))
         configQuality_ = qBound(10, root["quality"].toInt(), 100);
+    if (root.contains("scale")) {
+        configScale_ = qBound(10, root["scale"].toInt(), 100);
+        userScale_ = configScale_;
+    }
 
     qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_
-            << "fps =" << configFps_ << "quality =" << configQuality_;
+            << "fps =" << configFps_ << "quality =" << configQuality_ << "scale =" << configScale_;
 }
 
 void RDPServer::saveServerConfig(const QString& configPath)
@@ -196,6 +201,7 @@ void RDPServer::saveServerConfig(const QString& configPath)
     root["httpPort"] = httpPort_;
     root["fps"] = configFps_;
     root["quality"] = configQuality_;
+    root["scale"] = configScale_;
 
     if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         QJsonDocument doc(root);
@@ -1417,6 +1423,7 @@ void RDPServer::onClientConnected(const QString& clientId)
         cfg["type"] = "server_config";
         cfg["fps"] = configFps_;
         cfg["quality"] = configQuality_;
+        cfg["scale"] = configScale_;
         wsServer_->sendJson(clientId, cfg);
     }
 
@@ -1521,12 +1528,19 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         int delta = input["delta"].toInt();
         inputManager_->injectWheel(delta);
     } else if (type == "config") {
-        // 画质/帧率配置
+        // 画质/帧率/缩放配置
         QString qname = input["quality"].toString();
         int jpegQ = -1;
-        if (qname == "high")        jpegQ = 80;
-        else if (qname == "medium") jpegQ = 60;
-        else if (qname == "low" || qname == "verylow") jpegQ = 35;
+        if (qname == "high") {
+            jpegQ = 80;
+            configScale_ = 100;
+        } else if (qname == "medium") {
+            jpegQ = 60;
+            configScale_ = userScale_;
+        } else if (qname == "low" || qname == "verylow") {
+            jpegQ = 35;
+            configScale_ = userScale_;
+        }
         if (jpegQ > 0 && jpegCompressor_) {
             configQuality_ = jpegQ;
             jpegCompressor_->setQuality(jpegQ);
@@ -1536,6 +1550,12 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             configFps_ = newFps;
             if (screenCapturer_)
                 screenCapturer_->setFps(newFps);
+            saveServerConfig(QString());
+        }
+        int newScale = input["scale"].toInt();
+        if (newScale >= 10 && newScale <= 100) {
+            userScale_ = newScale;
+            configScale_ = newScale;
             saveServerConfig(QString());
         }
     } else if (type == "file_list") {
@@ -1555,15 +1575,23 @@ void RDPServer::onFrameCaptured(const QImage& frame)
     if (wsServer_->clients().isEmpty())
         return;
 
+    QImage encodeFrame = frame;
+    if (configScale_ < 100) {
+        int newW = frame.width() * configScale_ / 100;
+        int newH = frame.height() * configScale_ / 100;
+        if (newW > 0 && newH > 0)
+            encodeFrame = frame.scaled(newW, newH, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }
+
 #ifdef USE_FFMPEG
     if (currentMode_ == ServerMode::Video) {
-        videoEncoder_->encode(frame);
+        videoEncoder_->encode(encodeFrame);
     } else
 #endif
     {
         // 将帧交给独立线程进行 JPEG 压缩，不阻塞主线程
         if (jpegCompressor_)
-            jpegCompressor_->enqueue(frame);
+            jpegCompressor_->enqueue(encodeFrame);
     }
 
     // 鼠标光标位置广播（仅在位置变化时发送，避免每帧无意义传输）

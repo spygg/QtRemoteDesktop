@@ -640,20 +640,17 @@
 
 
         function displayJpegFrame(jpegData) {
-            // 将 JPEG 数据转为 Blob URL
             const blob = new Blob([jpegData], { type: 'image/jpeg' });
             const url = URL.createObjectURL(blob);
             const img = new Image();
             img.onload = () => {
-                // 绘制到 canvas
-                if (state.canvas.width !== img.width || state.canvas.height !== img.height) {
-                    state.canvas.width = img.width;
-                    state.canvas.height = img.height;
-                    updateScale();
+                if (state.screenWidth === 0) {
+                    state.canvas.width = 1920;
+                    state.canvas.height = 1080;
                 }
-                state.ctx.drawImage(img, 0, 0);
+                state.ctx.drawImage(img, 0, 0, state.canvas.width, state.canvas.height);
                 URL.revokeObjectURL(url);
-                updateFps();  // 同样可以统计 FPS
+                updateFps();
             };
             img.src = url;
         }

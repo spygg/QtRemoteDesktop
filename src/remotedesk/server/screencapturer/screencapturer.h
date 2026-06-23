@@ -2,7 +2,6 @@
 #ifndef SCREEN_CAPTURER_H
 #define SCREEN_CAPTURER_H
 
-#include <QCursor>
 #include <QGuiApplication>
 #include <QImage>
 #include <QObject>
@@ -29,18 +28,11 @@ inline quint16 quickFrameChecksum(const QImage& frame)
 #endif
     };
 
-    // 1. 均匀行采样（原逻辑）
+    // 1. 均匀行采样
     for (int y = 0; y < h; y += step)
         checksumRow(y);
 
-    // 2. 鼠标光标附近 ±3 行密集采样
-    QPoint cursor = QCursor::pos();
-    if (cursor.x() >= 0 && cursor.x() < w && cursor.y() >= 0 && cursor.y() < h) {
-        for (int dy = -3; dy <= 3; dy++)
-            checksumRow(cursor.y() + dy);
-    }
-
-    // 3. 伪随机 4 行补充采样（基于当前校验和做种子，无状态依赖）
+    // 2. 伪随机 4 行补充采样（基于当前校验和做种子，无状态依赖）
     unsigned seed = static_cast<unsigned>(result);
     for (int i = 0; i < 4; i++) {
         seed = seed * 1103515245u + 12345u;

@@ -100,12 +100,17 @@ public:
             return false;
         }
 
-        // ZPixmap returns 32-bit BGRA on little-endian x86.
-        // BGRA → RGB888 (使用 Qt 内置 SIMD 优化转换)
-        QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
-                      width_, height_, ximage->bytes_per_line,
-                      QImage::Format_RGB32);
-        outImage = rawImg.convertToFormat(QImage::Format_RGB888);
+        if (ximage->bits_per_pixel == 32) {
+            QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
+                          width_, height_, ximage->bytes_per_line,
+                          QImage::Format_RGB32);
+            outImage = rawImg.convertToFormat(QImage::Format_RGB888);
+        } else {
+            QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
+                          width_, height_, ximage->bytes_per_line,
+                          QImage::Format_RGB888);
+            outImage = rawImg.rgbSwapped();
+        }
 
         XDestroyImage(ximage);
         return true;
@@ -205,7 +210,7 @@ void ScreenCapturer::captureFrame()
     // 回退到Qt抓屏
     if (!screen_) return;
     QPixmap pixmap = screen_->grabWindow(0);
-    frame = pixmap.toImage().convertToFormat(QImage::Format_RGB32);
+    frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
     if (isFrameBlack(frame)) {
         if (!screenLocked_) {

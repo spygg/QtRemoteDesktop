@@ -49,9 +49,22 @@ int HelperProcess::run(int argc, char* argv[])
     }
 
     QString wsScheme = useSsl ? "wss" : "ws";
+
+    ScreenCapturer capturer(nullptr);
+    JpegCompressor compressor(nullptr);
+
     QWebSocket ws;
+    bool screenInfoSent = false;
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
+        if (!screenInfoSent) {
+            screenInfoSent = true;
+            QJsonObject info;
+            info["type"] = "screen_info";
+            info["width"] = capturer.width();
+            info["height"] = capturer.height();
+            ws.sendTextMessage(QString::fromUtf8(QJsonDocument(info).toJson(QJsonDocument::Compact)));
+        }
     });
     QObject::connect(&ws, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
         &app, [&](QAbstractSocket::SocketError err) {
@@ -70,8 +83,6 @@ int HelperProcess::run(int argc, char* argv[])
     });
     ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
 
-    ScreenCapturer capturer(nullptr);
-    JpegCompressor compressor(nullptr);
     QObject::connect(&capturer, &ScreenCapturer::frameCaptured,
         &app, [&](const QImage& frame) { compressor.enqueue(frame); });
     QObject::connect(&compressor, &JpegCompressor::jpegCompressed,

@@ -58,10 +58,13 @@ public:
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
         if (updated) *updated = true;
+        ShowCursor(FALSE);
         // 复制屏幕到内存 DC
         if (!BitBlt(hdcMem_, 0, 0, width_, height_, hdcScreen_, 0, 0, SRCCOPY)) {
+            ShowCursor(TRUE);
             return false;
         }
+        ShowCursor(TRUE);
 
         // 获取位图数据（复用预分配缓冲区）
         buffer_.resize(width_ * height_ * 4);

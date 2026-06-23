@@ -152,6 +152,8 @@ private:
     bool serviceMode_ = false;
     int configFps_ = 30;
     int configQuality_ = 60;
+    int configScale_ = 75;
+    int userScale_ = 75;
     bool screenLocked_ = false;
     bool secureInputRunning_ = false;
     bool captureAvailable_ = true;
