@@ -202,6 +202,11 @@
             input.style.display = 'none';
             btnExec.style.display = 'none';
 
+            // 让输出区域可聚焦，确保键盘事件送达
+            output.setAttribute('tabindex', '-1');
+            output.focus();
+
+            document.removeEventListener('keydown', onKeyDown);
             document.addEventListener('keydown', onKeyDown);
             document.addEventListener('compositionend', (e) => {
                 if (e.data && e.data.length > 0) {
@@ -218,8 +223,10 @@
         function onKeyDown(e) {
             if (e.isComposing) return;
             if (e.ctrlKey || e.altKey || e.metaKey) {
-                if (e.ctrlKey && e.key === 'c') {
+                if (e.ctrlKey && (e.key === 'c' || e.key === 'C' || e.code === 'KeyC')) {
                     e.preventDefault();
+                    e.stopPropagation();
+                    appendOutput('^C', 'stdout');
                     wsSend('\x03');
                     return;
                 }

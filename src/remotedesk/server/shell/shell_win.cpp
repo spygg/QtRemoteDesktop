@@ -3,6 +3,7 @@
 #include <QWebSocket>
 #include <QDebug>
 #include <QTimer>
+#include <windows.h>
 
 class WinInteractiveShell : public InteractiveShell {
 public:
@@ -68,10 +69,22 @@ void WinInteractiveShell::write(const QByteArray& data)
             lineBuf_.clear();
             return;
         }
-        // Ctrl+C：加 \r\n 冲刷缓冲区，确保 cmd.exe 立即处理中断
+        // Ctrl+C：通过 GenerateConsoleCtrlEvent 发送中断信号
+        // （管道写入 \x03 不会被 cmd.exe 解释为 Ctrl+C）
         if (c == '\x03') {
             lineBuf_.clear();
-            proc_->write(QByteArray("\x03\r\n"));
+            DWORD pid = proc_->processId();
+            BOOL hadConsole = GetConsoleWindow() != NULL;
+            FreeConsole();
+            if (AttachConsole(pid)) {
+                SetConsoleCtrlHandler(NULL, TRUE);
+                GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
+                Sleep(50);
+                FreeConsole();
+                SetConsoleCtrlHandler(NULL, FALSE);
+            }
+            if (hadConsole)
+                AttachConsole(ATTACH_PARENT_PROCESS);
             return;
         }
         if (c == '\x04' || c == '\x1a') {
