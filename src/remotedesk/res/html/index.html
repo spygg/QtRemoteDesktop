@@ -49,7 +49,7 @@
             flex-wrap: nowrap;
             justify-content: center;
             gap: 2px;
-            z-index: 1000;
+            z-index: 4000;
             background: rgba(30,30,30,0.92);
             border-radius: 0 0 10px 10px;
             padding: 6px 10px;
@@ -70,7 +70,7 @@
             left: 0;
             right: 0;
             height: 6px;
-            z-index: 999;
+            z-index: 3999;
         }
         #btn-pin {
             background: none;
@@ -317,6 +317,22 @@
             z-index: 2000;
             display: none;
         }
+        #shell-container {
+            position: fixed;
+            top: 50px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 3500;
+            display: none;
+            background: #1a1a1a;
+        }
+        #shell-container.active { display: block; }
+        #shell-container iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
 
         /* 传输监视器 */
         #transfer-monitor {
@@ -394,7 +410,7 @@
         </button>
         <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span class="btn-text">文件</span></button>
         <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span class="btn-icon">👤</span><span class="btn-text">用户</span></button>
-        <button class="btn" id="btn-shell" onclick="window.open('/shell','_blank')"><span class="btn-icon">🔧</span><span class="btn-text">Shell</span></button>
+        <button class="btn" id="btn-shell" onclick="toggleShell()"><span class="btn-icon">🔧</span><span class="btn-text">Shell</span></button>
         <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">
             <span class="btn-icon">⛶</span>
             <span class="btn-text">全屏</span>
@@ -470,6 +486,11 @@
         </div>
     </div>
     <div id="transfer-status"></div>
+
+    <!-- Shell 内嵌容器 -->
+    <div id="shell-container">
+        <iframe src="/shell" title="Shell"></iframe>
+    </div>
 
     <!-- 锁屏遮罩 -->
     <div id="lock-overlay">
@@ -1174,6 +1195,21 @@
         }
 
         document.getElementById('config-dropdown').addEventListener('click', onDropdownClick);
+
+        // Shell 内嵌切换
+        function toggleShell() {
+            const shell = document.getElementById('shell-container');
+            const canvas = document.getElementById('screen');
+            const overlay = document.getElementById('overlay');
+            const btn = document.getElementById('btn-shell');
+            const isActive = shell.classList.toggle('active');
+            canvas.style.display = isActive ? 'none' : '';
+            overlay.style.display = isActive ? 'none' : '';
+            btn.querySelector('.btn-text').textContent = isActive ? '桌面' : 'Shell';
+            // 暂停/恢复捕获节省资源
+            if (state.ws?.readyState === WebSocket.OPEN)
+                state.ws.send(JSON.stringify({type: 'capture_control', action: isActive ? 'pause' : 'resume'}));
+        }
 
         function toggleFullscreen() {
             if (!document.fullscreenElement) {

@@ -134,6 +134,7 @@
         let ws = null;
         let inputBuffer = '';
         let termBuf = '';
+        let interactiveCmdBuf = '';
         let localEchoEnabled = false;
 
         const output = document.getElementById('output');
@@ -195,6 +196,7 @@
             modeBadge.textContent = 'interactive';
             modeBadge.className = 'badge interactive';
             output.innerHTML = '';
+            interactiveCmdBuf = '';
             appendOutput('交互式 Shell (PTY) — 支持 su/ssh/top 等命令\r\n', 'info');
 
             input.style.display = 'none';
@@ -229,6 +231,7 @@
                 if (e.ctrlKey && e.key === 'l') {
                     e.preventDefault();
                     wsSend('\x0c');
+                    clearOutput();
                     return;
                 }
                 if (e.ctrlKey && e.key === 'z') {
@@ -244,11 +247,17 @@
                 wsSend('\n');
                 if (localEchoEnabled)
                     termBuf += '\n';
+                // 输入 cls/clear 时同时清屏
+                const cmd = interactiveCmdBuf.trim().toLowerCase();
+                if (cmd === 'cls' || cmd === 'clear')
+                    setTimeout(clearOutput, 50);
+                interactiveCmdBuf = '';
                 return;
             }
 
             if (e.key === 'Backspace') {
                 e.preventDefault();
+                interactiveCmdBuf = interactiveCmdBuf.slice(0, -1);
                 wsSend('\x7f');
                 if (localEchoEnabled && safeBackspace())
                     output.textContent = termBuf;
@@ -289,6 +298,7 @@
 
             if (e.key.length === 1) {
                 e.preventDefault();
+                interactiveCmdBuf += e.key;
                 wsSend(e.key);
                 if (localEchoEnabled) {
                     termBuf += e.key;
@@ -433,6 +443,11 @@
         async function execCmd() {
             const cmd = input.value.trim();
             if (!cmd || running) return;
+
+            // cls/clear 时同时清屏
+            const lower = cmd.toLowerCase();
+            if (lower === 'cls' || lower === 'clear')
+                clearOutput();
 
             running = true;
             btnExec.disabled = true;
