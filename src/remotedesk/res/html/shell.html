@@ -247,10 +247,16 @@
                 wsSend('\n');
                 if (localEchoEnabled)
                     termBuf += '\n';
-                // 输入 cls/clear 时同时清屏
-                const cmd = interactiveCmdBuf.trim().toLowerCase();
-                if (cmd === 'cls' || cmd === 'clear')
-                    setTimeout(clearOutput, 50);
+                // 输入 cls/clear 时同时清屏（从缓冲区或 termBuf 最后一行检测）
+                const cmd1 = interactiveCmdBuf.trim().toLowerCase();
+                let cmd2 = '';
+                if (localEchoEnabled) {
+                    const lines = termBuf.split('\n');
+                    if (lines.length >= 2)
+                        cmd2 = lines[lines.length - 2].trim().toLowerCase();
+                }
+                if (cmd1 === 'cls' || cmd1 === 'clear' || cmd2 === 'cls' || cmd2 === 'clear')
+                    clearOutput();
                 interactiveCmdBuf = '';
                 return;
             }
@@ -447,7 +453,7 @@
             // cls/clear 时同时清屏
             const lower = cmd.toLowerCase();
             if (lower === 'cls' || lower === 'clear')
-                clearOutput();
+                return clearOutput();
 
             running = true;
             btnExec.disabled = true;
