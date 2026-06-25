@@ -319,7 +319,7 @@
         const modeBadge = document.getElementById('mode-badge');
 
         function stripAnsi(str) {
-            return str.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '')
+            return str.replace(/\x1B\[[?0-9;]*[a-zA-Z]/g, '')
                       .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, '')
                       .replace(/\x1B./g, '');
         }
