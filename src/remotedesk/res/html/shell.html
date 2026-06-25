@@ -62,6 +62,36 @@
         #btn-exec:disabled { opacity: 0.5; cursor: default; }
         #cursor { display: inline; animation: blink 1s step-end infinite; }
         @keyframes blink { 50% { opacity: 0; } }
+
+        /* 右键菜单 */
+        #context-menu {
+            display: none;
+            position: fixed;
+            background: #2a2a2a;
+            border: 1px solid #444;
+            border-radius: 6px;
+            padding: 4px 0;
+            min-width: 140px;
+            z-index: 9999;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 13px;
+        }
+        #context-menu.open { display: block; }
+        #context-menu .item {
+            padding: 6px 16px;
+            cursor: pointer;
+            color: #ccc;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #context-menu .item:hover { background: #4a9eff; color: #fff; }
+        #context-menu .separator {
+            height: 1px;
+            background: #444;
+            margin: 4px 8px;
+        }
     </style>
 </head>
 <body>
@@ -128,6 +158,14 @@
         <input type="text" id="cmd-input" placeholder="输入命令..." autocomplete="off" />
         <button id="btn-exec" onclick="execCmd()">执行</button>
         <button id="btn-clear" onclick="clearOutput()">清屏</button>
+    </div>
+
+    <div id="context-menu">
+        <div class="item" data-action="copy">📋 复制</div>
+        <div class="item" data-action="paste">📝 粘贴</div>
+        <div class="separator"></div>
+        <div class="item" data-action="selectAll">📑 全选</div>
+        <div class="item" data-action="clear">🗑️ 清屏</div>
     </div>
 
     <script>
@@ -338,6 +376,7 @@
 
             document.removeEventListener('keydown', onKeyDown);
             document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('paste', onPaste);
             document.addEventListener('compositionend', function(e) {
                 if (e.data && e.data.length > 0) {
                     for (const ch of e.data)
@@ -348,6 +387,19 @@
                     }
                 }
             });
+        }
+
+        function onPaste(e) {
+            e.preventDefault();
+            const text = e.clipboardData.getData('text/plain');
+            if (text) {
+                wsSend(text);
+                if (localEchoEnabled) {
+                    termBuf += text;
+                    output.textContent = termBuf;
+                    output.scrollTop = output.scrollHeight;
+                }
+            }
         }
 
         function onKeyDown(e) {
@@ -374,6 +426,9 @@
                 if (e.ctrlKey && e.key === 'z') {
                     e.preventDefault();
                     wsSend('\x1a');
+                    return;
+                }
+                if (e.ctrlKey && (e.key === 'v' || e.key === 'V' || e.code === 'KeyV')) {
                     return;
                 }
                 return;
@@ -657,6 +712,42 @@
 
         tryConnectWS();
         input.focus();
+
+        // ---- 右键菜单 ----
+        const ctxMenu = document.getElementById('context-menu');
+
+        output.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            ctxMenu.style.left = e.clientX + 'px';
+            ctxMenu.style.top = e.clientY + 'px';
+            ctxMenu.classList.add('open');
+        });
+
+        document.addEventListener('click', function() {
+            ctxMenu.classList.remove('open');
+        });
+
+        ctxMenu.addEventListener('click', function(e) {
+            const item = e.target.closest('.item');
+            if (!item) return;
+            const action = item.dataset.action;
+            ctxMenu.classList.remove('open');
+            if (action === 'copy') {
+                const sel = window.getSelection().toString();
+                if (sel) navigator.clipboard.writeText(sel);
+            } else if (action === 'paste') {
+                navigator.clipboard.readText().then(function(text) {
+                    if (text) wsSend(text);
+                }).catch(function(){});
+            } else if (action === 'selectAll') {
+                const range = document.createRange();
+                range.selectNodeContents(output);
+                window.getSelection().removeAllRanges();
+                window.getSelection().addRange(range);
+            } else if (action === 'clear') {
+                clearOutput();
+            }
+        });
 
         // ---- 工具栏固定/自动隐藏 ----
         const toolbar = document.getElementById('toolbar');
