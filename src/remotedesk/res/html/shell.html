@@ -92,6 +92,8 @@
             background: #444;
             margin: 4px 8px;
         }
+
+
     </style>
 </head>
 <body>
@@ -307,6 +309,7 @@
         let termBuf = '';
         let interactiveCmdBuf = '';
         let localEchoEnabled = false;
+        let cursorPos = 0;
 
         const output = document.getElementById('output');
         const input = document.getElementById('cmd-input');
@@ -348,9 +351,31 @@
             return false;
         }
 
+        function navigateHistory(dir) {
+            if (history.length === 0) return;
+            var newIdx = historyIdx + dir;
+            if (newIdx < 0) return;
+            if (newIdx > history.length) return;
+            var inputStart = termBuf.lastIndexOf('\n') + 1;
+            if (newIdx === history.length) {
+                historyIdx = history.length;
+                var newInput = '';
+            } else {
+                historyIdx = newIdx;
+                var newInput = history[historyIdx];
+            }
+            for (var i = 0; i < interactiveCmdBuf.length; i++) wsSend('\x7f');
+            for (var j = 0; j < newInput.length; j++) wsSend(newInput[j]);
+            termBuf = termBuf.slice(0, inputStart) + newInput;
+            cursorPos = termBuf.length;
+            interactiveCmdBuf = newInput;
+            renderOutput();
+        }
+
         function clearOutput() {
             output.innerHTML = '';
             termBuf = '';
+            cursorPos = 0;
             if (mode === 'interactive' && ws && ws.readyState === WebSocket.OPEN)
                 wsSend('\n');
         }
@@ -360,12 +385,32 @@
             promptLabel.textContent = cwd ? cwd + ' $' : '$';
         }
 
+        function renderOutput() {
+            if (mode === 'interactive') {
+                var html = '';
+                for (var i = 0; i < termBuf.length; i++) {
+                    if (i === cursorPos) html += '<span id="cursor">|</span>';
+                    var ch = termBuf[i];
+                    if (ch === '&') html += '&amp;';
+                    else if (ch === '<') html += '&lt;';
+                    else if (ch === '>') html += '&gt;';
+                    else html += ch;
+                }
+                if (cursorPos >= termBuf.length) html += '<span id="cursor">|</span>';
+                output.innerHTML = html;
+            } else {
+                output.innerHTML = termBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            }
+            output.scrollTop = output.scrollHeight;
+        }
+
         function startInteractive() {
             mode = 'interactive';
             modeBadge.textContent = 'interactive';
             modeBadge.className = 'badge interactive';
             output.innerHTML = '';
             interactiveCmdBuf = '';
+            cursorPos = 0;
             appendOutput('交互式 Shell (PTY) — 支持 su/ssh/top 等命令\r\n', 'info');
 
             input.style.display = 'none';
@@ -382,8 +427,10 @@
                     for (const ch of e.data)
                         wsSend(ch);
                     if (localEchoEnabled) {
-                        termBuf += e.data;
-                        output.textContent = termBuf;
+                        termBuf = termBuf.slice(0, cursorPos) + e.data + termBuf.slice(cursorPos);
+                        cursorPos += e.data.length;
+                        interactiveCmdBuf += e.data;
+                        renderOutput();
                     }
                 }
             });
@@ -395,9 +442,10 @@
             if (text) {
                 wsSend(text);
                 if (localEchoEnabled) {
-                    termBuf += text;
-                    output.textContent = termBuf;
-                    output.scrollTop = output.scrollHeight;
+                    termBuf = termBuf.slice(0, cursorPos) + text + termBuf.slice(cursorPos);
+                    cursorPos += text.length;
+                    interactiveCmdBuf += text;
+                    renderOutput();
                 }
             }
         }
@@ -437,8 +485,14 @@
             if (e.key === 'Enter') {
                 e.preventDefault();
                 wsSend('\n');
-                if (localEchoEnabled)
+                if (localEchoEnabled) {
+                    if (interactiveCmdBuf.trim()) {
+                        history.push(interactiveCmdBuf);
+                        historyIdx = history.length;
+                    }
                     termBuf += '\n';
+                    cursorPos = termBuf.length;
+                }
                 const cmd1 = interactiveCmdBuf.trim().toLowerCase();
                 let cmd2 = '';
                 if (localEchoEnabled) {
@@ -454,53 +508,83 @@
 
             if (e.key === 'Backspace') {
                 e.preventDefault();
-                interactiveCmdBuf = interactiveCmdBuf.slice(0, -1);
-                wsSend('\x7f');
-                if (localEchoEnabled && safeBackspace())
-                    output.textContent = termBuf;
+                if (localEchoEnabled) {
+                    if (interactiveCmdBuf.length === 0 || cursorPos === 0) return;
+                    termBuf = termBuf.slice(0, cursorPos - 1) + termBuf.slice(cursorPos);
+                    cursorPos--;
+                    interactiveCmdBuf = interactiveCmdBuf.slice(0, -1);
+                    wsSend('\x7f');
+                    renderOutput();
+                } else {
+                    wsSend('\x7f');
+                }
                 return;
             }
 
             if (e.key === 'Tab') {
                 e.preventDefault();
                 wsSend('\t');
-                if (localEchoEnabled)
-                    termBuf += '\t';
+                if (localEchoEnabled) {
+                    termBuf = termBuf.slice(0, cursorPos) + '\t' + termBuf.slice(cursorPos);
+                    cursorPos++;
+                }
                 return;
             }
 
             if (e.key === 'ArrowUp') {
                 e.preventDefault();
-                wsSend('\x1b[A');
+                if (localEchoEnabled) {
+                    navigateHistory(-1);
+                } else {
+                    wsSend('\x1b[A');
+                }
                 return;
             }
 
             if (e.key === 'ArrowDown') {
                 e.preventDefault();
-                wsSend('\x1b[B');
+                if (localEchoEnabled) {
+                    navigateHistory(1);
+                } else {
+                    wsSend('\x1b[B');
+                }
                 return;
             }
 
             if (e.key === 'ArrowRight') {
                 e.preventDefault();
-                wsSend('\x1b[C');
+                if (localEchoEnabled) {
+                    if (cursorPos < termBuf.length) cursorPos++;
+                } else {
+                    wsSend('\x1b[C');
+                }
                 return;
             }
 
             if (e.key === 'ArrowLeft') {
                 e.preventDefault();
-                wsSend('\x1b[D');
+                if (localEchoEnabled) {
+                    if (cursorPos > 0) cursorPos--;
+                } else {
+                    wsSend('\x1b[D');
+                }
+                return;
+            }
+
+            if (localEchoEnabled && (e.key === 'Home' || e.key === 'End')) {
+                e.preventDefault();
+                cursorPos = e.key === 'Home' ? (termBuf.lastIndexOf('\n') + 1 || 0) : termBuf.length;
                 return;
             }
 
             if (e.key.length === 1) {
                 e.preventDefault();
-                interactiveCmdBuf += e.key;
                 wsSend(e.key);
                 if (localEchoEnabled) {
-                    termBuf += e.key;
-                    output.textContent = termBuf;
-                    output.scrollTop = output.scrollHeight;
+                    termBuf = termBuf.slice(0, cursorPos) + e.key + termBuf.slice(cursorPos);
+                    cursorPos++;
+                    interactiveCmdBuf += e.key;
+                    renderOutput();
                 }
             }
         }
@@ -585,16 +669,25 @@
                     const text = stripAnsi(e.data);
                     for (const ch of text) {
                         if (ch === '\b') {
-                            safeBackspace();
+                            if (localEchoEnabled) {
+                                if (cursorPos > 0) cursorPos--;
+                            } else {
+                                safeBackspace();
+                            }
+                            cursorPos = termBuf.length;
                         } else if (ch === '\r') {
                         } else if (ch === '\n') {
                             termBuf += '\n';
+                            cursorPos = termBuf.length;
+                            if (localEchoEnabled) {
+                                interactiveCmdBuf = '';
+                            }
                         } else if (ch >= ' ') {
                             termBuf += ch;
+                            cursorPos = termBuf.length;
                         }
                     }
-                    output.textContent = termBuf;
-                    output.scrollTop = output.scrollHeight;
+                    renderOutput();
                 }
             };
 
@@ -715,11 +808,15 @@
 
         // ---- 右键菜单 ----
         const ctxMenu = document.getElementById('context-menu');
+        let ctxSel = '';
 
         output.addEventListener('contextmenu', function(e) {
             e.preventDefault();
+            ctxSel = window.getSelection().toString();
             ctxMenu.style.left = e.clientX + 'px';
             ctxMenu.style.top = e.clientY + 'px';
+            ctxMenu._x = e.clientX;
+            ctxMenu._y = e.clientY;
             ctxMenu.classList.add('open');
         });
 
@@ -733,12 +830,21 @@
             const action = item.dataset.action;
             ctxMenu.classList.remove('open');
             if (action === 'copy') {
-                const sel = window.getSelection().toString();
-                if (sel) navigator.clipboard.writeText(sel);
+                if (!ctxSel) return;
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(ctxSel).catch(function(){});
+                } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = ctxSel;
+                    ta.style.position = 'fixed';
+                    ta.style.left = '-9999px';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
             } else if (action === 'paste') {
-                navigator.clipboard.readText().then(function(text) {
-                    if (text) wsSend(text);
-                }).catch(function(){});
+                doPaste();
             } else if (action === 'selectAll') {
                 const range = document.createRange();
                 range.selectNodeContents(output);
@@ -748,6 +854,57 @@
                 clearOutput();
             }
         });
+
+        function doPaste() {
+            if (navigator.clipboard && navigator.clipboard.readText) {
+                navigator.clipboard.readText().then(function(text) {
+                    if (text) {
+                        wsSend(text);
+                        if (localEchoEnabled) {
+                            termBuf = termBuf.slice(0, cursorPos) + text + termBuf.slice(cursorPos);
+                            cursorPos += text.length;
+                            renderOutput();
+                        }
+                    }
+                }).catch(function() {
+                    simulateCtrlV();
+                });
+            } else {
+                simulateCtrlV();
+            }
+        }
+
+        function simulateCtrlV() {
+            const ta = document.createElement('textarea');
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.addEventListener('paste', function handler(ev) {
+                ev.preventDefault();
+                document.removeEventListener('paste', handler, true);
+                const text = ev.clipboardData.getData('text/plain');
+                document.body.removeChild(ta);
+                if (text) {
+                    wsSend(text);
+                    if (localEchoEnabled) {
+                        termBuf = termBuf.slice(0, cursorPos) + text + termBuf.slice(cursorPos);
+                        cursorPos += text.length;
+                        renderOutput();
+                    }
+                }
+            }, true);
+            ta.addEventListener('blur', function() {
+                document.body.removeChild(ta);
+            }, { once: true });
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true
+            }));
+            setTimeout(function() {
+                if (document.body.contains(ta))
+                    document.body.removeChild(ta);
+            }, 500);
+        }
 
         // ---- 工具栏固定/自动隐藏 ----
         const toolbar = document.getElementById('toolbar');
