@@ -1,434 +1,71 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>远程桌面 - Shell</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            background: #1a1a1a;
-            color: #eee;
-            font-family: 'Consolas', 'Courier New', monospace;
-            min-height: 100vh;
-            position: relative;
-        }
-
-        /* 工具栏 */
-        #toolbar {
-            position: fixed;
-            top: 0;
-            left: 50%;
-            transform: translateX(-50%) translateY(0);
-            display: flex;
-            flex-wrap: nowrap;
-            justify-content: center;
-            gap: 2px;
-            z-index: 4000;
-            background: rgba(30, 30, 30, 0.92);
-            border-radius: 0 0 10px 10px;
-            padding: 6px 10px;
-            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
-            backdrop-filter: blur(8px);
-            max-width: 100vw;
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-        }
-
-        #toolbar.hidden {
-            transform: translateX(-50%) translateY(-100%);
-        }
-
-        #toolbar-trigger {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 6px;
-            z-index: 3999;
-        }
-
-        #btn-pin {
-            background: none;
-            border: none;
-            color: #aaa;
-            cursor: pointer;
-            font-size: 14px;
-            padding: 2px 6px;
-            border-radius: 4px;
-            transition: color 0.15s;
-        }
-
-        #btn-pin:hover {
-            color: #fff;
-        }
-
-        #btn-pin.pinned {
-            color: #4a9eff;
-        }
-
-        .btn {
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            color: #eee;
-            padding: 6px 14px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 13px;
-            transition: all 0.15s;
-            white-space: nowrap;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            text-decoration: none;
-        }
-
-        @media (max-width: 600px) {
-            #toolbar {
-                padding: 4px 6px;
-                gap: 1px;
-            }
-
-            .btn {
-                padding: 4px 8px;
-                font-size: 11px;
-            }
-
-            .btn .shortcut,
-            .btn .btn-text {
-                display: none;
-            }
-
-            #btn-pin {
-                font-size: 12px;
-                padding: 1px 4px;
-            }
-        }
-
-        .btn:hover {
-            background: rgba(255, 255, 255, 0.18);
-            color: #fff;
-        }
-
-        .btn.active {
-            background: rgba(0, 102, 204, 0.6);
-            border-color: rgba(0, 102, 204, 0.8);
-        }
-
-        .btn .shortcut {
-            font-size: 10px;
-            color: rgba(255, 255, 255, 0.4);
-            background: rgba(255, 255, 255, 0.08);
-            padding: 1px 5px;
-            border-radius: 3px;
-            font-family: monospace;
-        }
-
-        /* 配置下拉菜单 */
-        #config-dropdown {
-            display: none;
-            position: fixed;
-            top: 44px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(30, 30, 30, 0.97);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 10px;
-            padding: 14px 18px;
-            z-index: 1001;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
-            backdrop-filter: blur(12px);
-            gap: 12px;
-            flex-direction: column;
-            min-width: 320px;
-        }
-
-        #config-dropdown.open {
-            display: flex;
-        }
-
-        .dropdown-section {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-
-        .dropdown-title {
-            color: #888;
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .dropdown-note {
-            color: #666;
-            font-size: 10px;
-            margin-top: -4px;
-        }
-
-        .dropdown-options {
-            display: flex;
-            gap: 4px;
-            flex-wrap: wrap;
-        }
-
-        .dropdown-options button {
-            background: rgba(255, 255, 255, 0.06);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            color: #ccc;
-            padding: 5px 12px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: all 0.12s;
-        }
-
-        .dropdown-options button:hover {
-            background: rgba(255, 255, 255, 0.14);
-            color: #fff;
-        }
-
-        .dropdown-options button.active {
-            background: rgba(0, 102, 204, 0.5);
-            border-color: #4a9eff;
-            color: #fff;
-        }
-
-        .dropdown-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            z-index: 1000;
-        }
-
-        .dropdown-overlay.open {
-            display: block;
-            top: 44px;
-        }
-
-        /* Shell badge */
-        #toolbar-title {
-            color: #aaa;
-            font-size: 13px;
-            margin-right: 4px;
-            white-space: nowrap;
-        }
-
-        .badge {
-            font-size: 11px;
-            padding: 2px 6px;
-            border-radius: 3px;
-            white-space: nowrap;
-        }
-
-        .badge.interactive {
-            background: #2a6;
-            color: #fff;
-        }
-
-        .badge.oneshot {
-            background: #666;
-            color: #fff;
-        }
-
-        /* Shell output */
-        #output {
-            position: absolute;
-            top: 44px;
-            bottom: 52px;
-            left: 0;
-            right: 0;
-            overflow-y: auto;
-            padding: 12px 16px;
-            font-size: 13px;
-            line-height: 1.4;
-            white-space: pre-wrap;
-            word-break: break-all;
-            background: #111;
-            font-family: 'Consolas', 'Courier New', monospace;
-        }
-
-        #output .stdout {
-            color: #ccc;
-        }
-
-        #output .stderr {
-            color: #f55;
-        }
-
-        #output .error {
-            color: #f55;
-            font-weight: bold;
-        }
-
-        #output .info {
-            color: #888;
-        }
-
-        /* Prompt line */
-        #prompt-line {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            z-index: 100;
-            display: flex;
-            align-items: center;
-            padding: 8px 16px;
-            background: #222;
-            border-top: 1px solid #333;
-            gap: 8px;
-        }
-
-        #prompt-label {
-            color: #4a9eff;
-            font-size: 13px;
-            user-select: none;
-            white-space: pre;
-        }
-
-        #cmd-input {
-            flex: 1;
-            background: #111;
-            border: 1px solid #333;
-            border-radius: 4px;
-            padding: 8px 12px;
-            color: #eee;
-            font-family: 'Consolas', 'Courier New', monospace;
-            font-size: 13px;
-            outline: none;
-        }
-
-        #cmd-input:focus {
-            border-color: #4a9eff;
-        }
-
-        #cmd-input.hidden {
-            display: none;
-        }
-
-        #terminal-input {
-            flex: 1;
-            background: transparent;
-            border: none;
-            color: transparent;
-            caret-color: #eee;
-            font-family: 'Consolas', 'Courier New', monospace;
-            font-size: 13px;
-            outline: none;
-            position: absolute;
-            left: -9999px;
-        }
-
-        #prompt-line button {
-            padding: 8px 16px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 13px;
-        }
-
-        #btn-exec {
-            background: #4a9eff;
-            color: #fff;
-        }
-
-        #btn-exec:hover {
-            background: #3a8eef;
-        }
-
-        #btn-clear {
-            background: #444;
-            color: #ccc;
-        }
-
-        #btn-clear:hover {
-            background: #555;
-        }
-
-        #btn-exec:disabled {
-            opacity: 0.5;
-            cursor: default;
-        }
-
-        #cursor {
-            display: inline;
-            animation: blink 1s step-end infinite;
-        }
-
-        @keyframes blink {
-            50% {
-                opacity: 0;
-            }
-        }
-
-        /* 右键菜单 */
-        #context-menu {
-            display: none;
-            position: fixed;
-            background: #2a2a2a;
-            border: 1px solid #444;
-            border-radius: 6px;
-            padding: 4px 0;
-            min-width: 140px;
-            z-index: 9999;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-            font-family: 'Consolas', 'Courier New', monospace;
-            font-size: 13px;
-        }
-
-        #context-menu.open {
-            display: block;
-        }
-
-        #context-menu .item {
-            padding: 6px 16px;
-            cursor: pointer;
-            color: #ccc;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        #context-menu .item:hover {
-            background: #4a9eff;
-            color: #fff;
-        }
-
-        #context-menu .separator {
-            height: 1px;
-            background: #444;
-            margin: 4px 8px;
-        }
+        /* ====== 样式完全保留（与之前一致） ====== */
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { background:#1a1a1a; color:#eee; font-family:'Consolas','Courier New',monospace; min-height:100vh; position:relative; }
+        #toolbar { position:fixed; top:0; left:50%; transform:translateX(-50%) translateY(0); display:flex; flex-wrap:nowrap; justify-content:center; gap:2px; z-index:4000; background:rgba(30,30,30,0.92); border-radius:0 0 10px 10px; padding:6px 10px; transition:transform 0.3s cubic-bezier(0.4,0,0.2,1); box-shadow:0 2px 12px rgba(0,0,0,0.4); backdrop-filter:blur(8px); max-width:100vw; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+        #toolbar.hidden { transform:translateX(-50%) translateY(-100%); }
+        #toolbar-trigger { position:fixed; top:0; left:0; right:0; height:6px; z-index:3999; }
+        #btn-pin { background:none; border:none; color:#aaa; cursor:pointer; font-size:14px; padding:2px 6px; border-radius:4px; transition:color 0.15s; }
+        #btn-pin:hover { color:#fff; }
+        #btn-pin.pinned { color:#4a9eff; }
+        .btn { background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#eee; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px; transition:all 0.15s; white-space:nowrap; display:flex; align-items:center; gap:6px; text-decoration:none; }
+        @media (max-width:600px) { #toolbar { padding:4px 6px; gap:1px; } .btn { padding:4px 8px; font-size:11px; } .btn .shortcut, .btn .btn-text { display:none; } #btn-pin { font-size:12px; padding:1px 4px; } }
+        .btn:hover { background:rgba(255,255,255,0.18); color:#fff; }
+        .btn.active { background:rgba(0,102,204,0.6); border-color:rgba(0,102,204,0.8); }
+        .btn .shortcut { font-size:10px; color:rgba(255,255,255,0.4); background:rgba(255,255,255,0.08); padding:1px 5px; border-radius:3px; font-family:monospace; }
+        #config-dropdown { display:none; position:fixed; top:44px; left:50%; transform:translateX(-50%); background:rgba(30,30,30,0.97); border:1px solid rgba(255,255,255,0.12); border-radius:10px; padding:14px 18px; z-index:1001; box-shadow:0 8px 32px rgba(0,0,0,0.6); backdrop-filter:blur(12px); gap:12px; flex-direction:column; min-width:320px; }
+        #config-dropdown.open { display:flex; }
+        .dropdown-section { display:flex; flex-direction:column; gap:6px; }
+        .dropdown-title { color:#888; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }
+        .dropdown-note { color:#666; font-size:10px; margin-top:-4px; }
+        .dropdown-options { display:flex; gap:4px; flex-wrap:wrap; }
+        .dropdown-options button { background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); color:#ccc; padding:5px 12px; border-radius:5px; cursor:pointer; font-size:12px; transition:all 0.12s; }
+        .dropdown-options button:hover { background:rgba(255,255,255,0.14); color:#fff; }
+        .dropdown-options button.active { background:rgba(0,102,204,0.5); border-color:#4a9eff; color:#fff; }
+        .dropdown-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; z-index:1000; }
+        .dropdown-overlay.open { display:block; top:44px; }
+        #output { position:absolute; top:44px; bottom:52px; left:0; right:0; overflow-y:auto; padding:12px 16px; font-size:13px; line-height:1.4; white-space:pre-wrap; word-break:break-all; background:#111; font-family:'Consolas','Courier New',monospace; }
+        #output .stdout { color:#ccc; }
+        #output .stderr { color:#f55; }
+        #output .error { color:#f55; font-weight:bold; }
+        #output .info { color:#888; }
+        #prompt-line { position:fixed; bottom:0; left:0; right:0; z-index:100; display:flex; align-items:center; padding:8px 16px; background:#222; border-top:1px solid #333; gap:8px; }
+        #prompt-label { color:#4a9eff; font-size:13px; user-select:none; white-space:pre; }
+        #cmd-input { flex:1; background:#111; border:1px solid #333; border-radius:4px; padding:8px 12px; color:#eee; font-family:'Consolas','Courier New',monospace; font-size:13px; outline:none; }
+        #cmd-input:focus { border-color:#4a9eff; }
+        #cmd-input.hidden { display:none; }
+        #prompt-line button { padding:8px 16px; border:none; border-radius:4px; cursor:pointer; font-size:13px; }
+        #btn-exec { background:#4a9eff; color:#fff; }
+        #btn-exec:hover { background:#3a8eef; }
+        #btn-clear { background:#444; color:#ccc; }
+        #btn-clear:hover { background:#555; }
+        #btn-exec:disabled { opacity:0.5; cursor:default; }
+        #cursor { display:inline; animation:blink 1s step-end infinite; }
+        @keyframes blink { 50% { opacity:0; } }
+        #context-menu { display:none; position:fixed; background:#2a2a2a; border:1px solid #444; border-radius:6px; padding:4px 0; min-width:140px; z-index:9999; box-shadow:0 4px 16px rgba(0,0,0,0.5); font-family:'Consolas','Courier New',monospace; font-size:13px; }
+        #context-menu.open { display:block; }
+        #context-menu .item { padding:6px 16px; cursor:pointer; color:#ccc; display:flex; align-items:center; gap:8px; }
+        #context-menu .item:hover { background:#4a9eff; color:#fff; }
+        #context-menu .separator { height:1px; background:#444; margin:4px 8px; }
     </style>
 </head>
-
 <body>
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
         <button id="btn-pin" title="固定工具栏">📌</button>
-        <span id="toolbar-title">🔧 远程 Shell</span>
-        <span id="mode-badge" class="badge oneshot">one-shot</span>
         <button class="btn" id="btn-quality" onclick="toggleConfigDropdown()">
             <span class="btn-icon">🎨</span>
             <span class="btn-text">画质: 中</span>
         </button>
-        <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span
-                class="btn-text">文件</span></button>
-        <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span
-                class="btn-icon">👤</span><span class="btn-text">用户</span></button>
-        <a class="btn" id="btn-desktop" href="/" target="_blank"><span class="btn-icon">←</span><span
-                class="btn-text">桌面</span></a>
+        <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span class="btn-text">文件</span></button>
+        <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span class="btn-icon">👤</span><span class="btn-text">用户</span></button>
+        <a class="btn" id="btn-desktop" href="/" target="_blank"><span class="btn-icon">←</span><span class="btn-text">桌面</span></a>
         <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">
             <span class="btn-icon">⛶</span>
             <span class="btn-text">全屏</span>
@@ -471,9 +108,7 @@
         </div>
     </div>
 
-    <div id="output">
-        <div class="info">正在连接...</div>
-    </div>
+    <div id="output"><div class="info">正在连接...</div></div>
 
     <div id="prompt-line">
         <span id="prompt-label">$</span>
@@ -491,772 +126,793 @@
     </div>
 
     <script>
-        // ==================== 工具栏 ====================
-        const QUALITY_MAP = { high: '高', medium: '中', low: '低', verylow: '极低' };
-        const FPS_VALUES = [60, 30, 15];
-        const SCALE_VALUES = [100, 75, 50, 25];
+        // ==================== 所有脚本在 DOM 加载完成后执行 ====================
+        document.addEventListener('DOMContentLoaded', function() {
 
-        const state = {
-            ws: null,
-            screenWidth: 0,
-            screenHeight: 0,
-            resolutions: [],
-            currentConfig: { quality: 'medium', fps: 30, scale: 75, resolution: '' },
-        };
+            // ---------- 工具栏配置 ----------
+            const QUALITY_MAP = { high:'高', medium:'中', low:'低', verylow:'极低' };
+            const state = {
+                ws: null,
+                screenWidth: 0, screenHeight: 0,
+                resolutions: [],
+                currentConfig: { quality:'medium', fps:30, scale:75, resolution:'' }
+            };
 
-        function toggleConfigDropdown() {
-            const dd = document.getElementById('config-dropdown');
-            const ov = document.getElementById('config-overlay');
-            const open = !dd.classList.contains('open');
-            dd.classList.toggle('open', open);
-            ov.classList.toggle('open', open);
-        }
+            const configDropdown = document.getElementById('config-dropdown');
+            const configOverlay = document.getElementById('config-overlay');
+            const btnQuality = document.getElementById('btn-quality');
+            const resolutionOptions = document.getElementById('resolution-options');
 
-        function updateDropdownActive() {
-            const cfg = state.currentConfig;
-            document.querySelectorAll('#config-dropdown .dropdown-options').forEach(function (group) {
-                const key = group.dataset.key;
-                if (!key) return;
-                const val = String(cfg[key]);
-                group.querySelectorAll('button').forEach(function (btn) {
-                    btn.classList.toggle('active', btn.dataset.value === val);
+            function toggleConfigDropdown() {
+                const open = configDropdown.classList.contains('open');
+                configDropdown.classList.toggle('open', !open);
+                configOverlay.classList.toggle('open', !open);
+            }
+
+            function updateDropdownActive() {
+                const cfg = state.currentConfig;
+                document.querySelectorAll('#config-dropdown .dropdown-options').forEach(function(group) {
+                    const key = group.dataset.key;
+                    if (!key) return;
+                    const val = String(cfg[key]);
+                    group.querySelectorAll('button').forEach(function(btn) {
+                        btn.classList.toggle('active', btn.dataset.value === val);
+                    });
                 });
-            });
-        }
+            }
 
-        function updateQualityLabel() {
-            const label = QUALITY_MAP[state.currentConfig.quality] || '中';
-            document.getElementById('btn-quality').querySelector('.btn-text').textContent = '画质: ' + label;
-        }
+            function updateQualityLabel() {
+                const label = QUALITY_MAP[state.currentConfig.quality] || '中';
+                const span = btnQuality.querySelector('.btn-text');
+                if (span) span.textContent = '画质: ' + label;
+            }
 
-        function onDropdownClick(e) {
-            const btn = e.target.closest('button');
-            if (!btn) return;
-            const group = btn.closest('.dropdown-options');
-            if (!group) return;
-            const key = group.dataset.key;
-            const val = btn.dataset.value;
+            function onDropdownClick(e) {
+                const btn = e.target.closest('button');
+                if (!btn) return;
+                const group = btn.closest('.dropdown-options');
+                if (!group) return;
+                const key = group.dataset.key;
+                const val = btn.dataset.value;
 
-            if (key === 'quality') {
-                const fps = state.currentConfig.fps;
-                state.currentConfig.quality = val;
-                send({ type: 'config', quality: val, fps: fps });
-            } else if (key === 'fps') {
-                const newFps = parseInt(val);
-                const quality = state.currentConfig.quality;
-                state.currentConfig.fps = newFps;
-                send({ type: 'config', quality: quality, fps: newFps });
-            } else if (key === 'scale') {
-                const newScale = parseInt(val);
-                state.currentConfig.scale = newScale;
-                send({ type: 'config', scale: newScale });
-                buildResolutionOptions();
-            } else if (key === 'resolution') {
-                const parts = val.split('x');
-                const resW = parseInt(parts[0]), resH = parseInt(parts[1]);
-                state.currentConfig.resolution = val;
-                if (state.screenWidth > 0 && resW <= state.screenWidth) {
-                    state.currentConfig.scale = 100;
-                    send({ type: 'set_resolution', width: resW, height: resH });
+                if (key === 'quality') {
+                    state.currentConfig.quality = val;
+                    send({ type:'config', quality:val, fps:state.currentConfig.fps });
+                } else if (key === 'fps') {
+                    const newFps = parseInt(val);
+                    state.currentConfig.fps = newFps;
+                    send({ type:'config', quality:state.currentConfig.quality, fps:newFps });
+                } else if (key === 'scale') {
+                    const newScale = parseInt(val);
+                    state.currentConfig.scale = newScale;
+                    send({ type:'config', scale:newScale });
+                    buildResolutionOptions();
+                } else if (key === 'resolution') {
+                    const parts = val.split('x');
+                    const resW = parseInt(parts[0]), resH = parseInt(parts[1]);
+                    state.currentConfig.resolution = val;
+                    if (state.screenWidth > 0 && resW <= state.screenWidth) {
+                        state.currentConfig.scale = 100;
+                        send({ type:'set_resolution', width:resW, height:resH });
+                    }
+                    buildResolutionOptions();
                 }
-                buildResolutionOptions();
+                updateDropdownActive();
+                updateQualityLabel();
             }
-            updateDropdownActive();
-            updateQualityLabel();
-        }
 
-        function buildResolutionOptions() {
-            const container = document.getElementById('resolution-options');
-            container.innerHTML = '';
-            let resolutions = state.resolutions;
-            if (!resolutions || resolutions.length === 0) {
-                const sw = state.screenWidth, sh = state.screenHeight;
-                if (!sw || !sh) return;
-                resolutions = [
-                    { width: sw, height: sh },
-                    { width: 1920, height: 1080 },
-                    { width: 1680, height: 1050 },
-                    { width: 1600, height: 900 },
-                    { width: 1440, height: 900 },
-                    { width: 1366, height: 768 },
-                    { width: 1280, height: 720 },
-                    { width: 1024, height: 768 },
-                ];
+            function buildResolutionOptions() {
+                if (!resolutionOptions) return;
+                resolutionOptions.innerHTML = '';
+                let resolutions = state.resolutions;
+                if (!resolutions || resolutions.length === 0) {
+                    const sw = state.screenWidth, sh = state.screenHeight;
+                    if (!sw || !sh) return;
+                    resolutions = [
+                        { width:sw, height:sh },
+                        { width:1920, height:1080 },
+                        { width:1680, height:1050 },
+                        { width:1600, height:900 },
+                        { width:1440, height:900 },
+                        { width:1366, height:768 },
+                        { width:1280, height:720 },
+                        { width:1024, height:768 }
+                    ];
+                }
+                const nativeRes = (state.screenWidth > 0) ? state.screenWidth+'x'+state.screenHeight : '';
+                for (const res of resolutions) {
+                    const w = res.width || res.w;
+                    const h = res.height || res.h;
+                    const resolutionStr = w + 'x' + h;
+                    const btn = document.createElement('button');
+                    btn.dataset.value = resolutionStr;
+                    const isNative = (resolutionStr === nativeRes);
+                    const scalePct = nativeRes ? Math.round(w/state.screenWidth*100) : 100;
+                    btn.textContent = (isNative ? '原始 ' : '') + w + '×' + h + ' (' + scalePct + '%)';
+                    resolutionOptions.appendChild(btn);
+                }
             }
-            const nativeRes = (state.screenWidth > 0)
-                ? state.screenWidth + 'x' + state.screenHeight : '';
-            for (const res of resolutions) {
-                const w = res.width || res.w;
-                const h = res.height || res.h;
-                const resolutionStr = w + 'x' + h;
-                const btn = document.createElement('button');
-                btn.dataset.value = resolutionStr;
-                const isNative = (resolutionStr === nativeRes);
-                const scalePct = nativeRes ? Math.round(w / state.screenWidth * 100) : 100;
-                btn.textContent = (isNative ? '原始 ' : '') + w + '×' + h + ' (' + scalePct + '%)';
-                container.appendChild(btn);
+
+            function toggleFullscreen() {
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen();
+                } else {
+                    document.exitFullscreen();
+                }
             }
-        }
-
-        function toggleFullscreen() {
-            if (!document.fullscreenElement) {
-                document.documentElement.requestFullscreen();
-            } else {
-                document.exitFullscreen();
+            function toggleFilePanel() { window.open('/files','_blank'); }
+            function send(data) {
+                if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                    state.ws.send(JSON.stringify(data));
+                }
             }
-        }
 
-        function toggleFilePanel() {
-            window.open('/files', '_blank');
-        }
+            configDropdown.addEventListener('click', onDropdownClick);
 
-        function send(data) {
-            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-                state.ws.send(JSON.stringify(data));
+            // ---------- Shell 核心 ----------
+            let history = [];
+            let historyIdx = -1;
+            let running = false;
+            let cwd = '';
+            let mode = 'oneshot';
+            let ws = null;
+            let termBuf = '';                // 完整屏幕缓冲区
+            let interactiveCmdBuf = '';      // 当前行命令（不含提示符）
+            let localEchoEnabled = false;
+            let cursorPos = 0;               // 在 termBuf 中的光标位置
+
+            const output = document.getElementById('output');
+            const input = document.getElementById('cmd-input');
+            const btnExec = document.getElementById('btn-exec');
+            const btnClear = document.getElementById('btn-clear');
+            const promptLabel = document.getElementById('prompt-label');
+            const ctxMenu = document.getElementById('context-menu');
+
+            // ----- 辅助函数 -----
+            function stripAnsi(str) {
+                return str.replace(/\x1B\[[?0-9;]*[a-zA-Z]/g, '')
+                    .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, '')
+                    .replace(/\x1B./g, '');
             }
-        }
 
-        document.getElementById('config-dropdown').addEventListener('click', onDropdownClick);
-
-        // ==================== Shell ====================
-        let history = [];
-        let historyIdx = -1;
-        let running = false;
-        let cwd = '';
-        let mode = 'oneshot';
-        let ws = null;
-        let inputBuffer = '';
-        let termBuf = '';
-        let interactiveCmdBuf = '';
-        let localEchoEnabled = false;
-        let cursorPos = 0;
-
-        const output = document.getElementById('output');
-        const input = document.getElementById('cmd-input');
-        const btnExec = document.getElementById('btn-exec');
-        const btnClear = document.getElementById('btn-clear');
-        const promptLabel = document.getElementById('prompt-label');
-        const modeBadge = document.getElementById('mode-badge');
-
-        function stripAnsi(str) {
-            return str.replace(/\x1B\[[?0-9;]*[a-zA-Z]/g, '')
-                .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, '')
-                .replace(/\x1B./g, '');
-        }
-
-        function appendOutput(text, className) {
-            const div = document.createElement('div');
-            div.className = className || 'stdout';
-            div.textContent = text;
-            output.appendChild(div);
-            output.scrollTop = output.scrollHeight;
-        }
-
-        function appendOutputRaw(text) {
-            const span = document.createElement('span');
-            span.className = 'stdout';
-            span.textContent = text;
-            output.appendChild(span);
-            output.scrollTop = output.scrollHeight;
-        }
-
-        function safeBackspace() {
-            const n = termBuf.lastIndexOf('\n');
-            if (n >= 0 && termBuf.length <= n + 1)
-                return false;
-            if (termBuf.length > 0) {
-                termBuf = termBuf.slice(0, -1);
-                return true;
+            function appendOutput(text, className) {
+                const div = document.createElement('div');
+                div.className = className || 'stdout';
+                div.textContent = text;
+                output.appendChild(div);
+                output.scrollTop = output.scrollHeight;
             }
-            return false;
-        }
 
-        function navigateHistory(dir) {
-            if (history.length === 0) return;
-            var newIdx = historyIdx + dir;
-            if (newIdx < 0) return;
-            if (newIdx > history.length) return;
-            var inputStart = termBuf.lastIndexOf('\n') + 1;
-            if (newIdx === history.length) {
-                historyIdx = history.length;
-                var newInput = '';
-            } else {
+            function clearOutput() {
+                output.innerHTML = '';
+                termBuf = '';
+                cursorPos = 0;
+                interactiveCmdBuf = '';
+                if (mode === 'interactive' && ws && ws.readyState === WebSocket.OPEN) {
+                    wsSend('\n');  // 让服务器输出新提示符
+                }
+                renderOutput();
+            }
+
+            function updatePrompt(newCwd) {
+                if (newCwd) cwd = newCwd;
+                promptLabel.textContent = cwd ? cwd + ' $' : '$';
+            }
+
+            // 从当前行提取提示符和命令
+            function getPromptAndCmd() {
+                const lineStart = termBuf.lastIndexOf('\n') + 1;
+                const line = termBuf.substring(lineStart);
+                const match = line.match(/^(.*?)([$#>])\s*/);
+                if (match) {
+                    const prompt = match[1] + match[2] + ' ';
+                    const cmd = line.substring(match[0].length);
+                    return { prompt, cmd };
+                }
+                return { prompt: '', cmd: line };
+            }
+
+            function updateCmdBuf() {
+                const { cmd } = getPromptAndCmd();
+                interactiveCmdBuf = cmd;
+            }
+
+            function renderOutput() {
+                if (mode === 'interactive') {
+                    let html = '';
+                    for (let i = 0; i < termBuf.length; i++) {
+                        if (i === cursorPos) html += '<span id="cursor">|</span>';
+                        const ch = termBuf[i];
+                        if (ch === '&') html += '&amp;';
+                        else if (ch === '<') html += '&lt;';
+                        else if (ch === '>') html += '&gt;';
+                        else html += ch;
+                    }
+                    if (cursorPos >= termBuf.length) html += '<span id="cursor">|</span>';
+                    output.innerHTML = html;
+                } else {
+                    output.innerHTML = termBuf.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                }
+                output.scrollTop = output.scrollHeight;
+            }
+
+            // ----- 历史导航（同步发送退格和字符） -----
+            function navigateHistory(dir) {
+                if (history.length === 0) return;
+                const newIdx = historyIdx + dir;
+                if (newIdx < 0 || newIdx > history.length) return;
+
+                const { prompt } = getPromptAndCmd();
+                const newCmd = (newIdx === history.length) ? '' : history[newIdx];
+                const lineStart = termBuf.lastIndexOf('\n') + 1;
+                // 当前行的命令部分（不含提示符）
+                const currentLine = termBuf.substring(lineStart);
+                const currentCmd = currentLine.replace(/^.*?[$#>]\s*/, '');
+                // 删除当前命令（发送退格）
+                for (let i = 0; i < currentCmd.length; i++) {
+                    wsSend('\x7f');
+                }
+                // 发送新命令字符
+                for (let i = 0; i < newCmd.length; i++) {
+                    wsSend(newCmd[i]);
+                }
+                // 更新本地缓冲区
+                termBuf = termBuf.substring(0, lineStart) + prompt + newCmd;
+                cursorPos = termBuf.length;
                 historyIdx = newIdx;
-                var newInput = history[historyIdx];
+                interactiveCmdBuf = newCmd;
+                renderOutput();
             }
-            for (var i = 0; i < interactiveCmdBuf.length; i++) wsSend('\x7f');
-            for (var j = 0; j < newInput.length; j++) wsSend(newInput[j]);
-            termBuf = termBuf.slice(0, inputStart) + newInput;
-            cursorPos = termBuf.length;
-            interactiveCmdBuf = newInput;
-            renderOutput();
-        }
 
-        function clearOutput() {
-            output.innerHTML = '';
-            termBuf = '';
-            cursorPos = 0;
-            if (mode === 'interactive' && ws && ws.readyState === WebSocket.OPEN)
-                wsSend('\n');
-        }
-
-        function updatePrompt(newCwd) {
-            if (newCwd) cwd = newCwd;
-            promptLabel.textContent = cwd ? cwd + ' $' : '$';
-        }
-
-        function renderOutput() {
-            if (mode === 'interactive') {
-                var html = '';
-                for (var i = 0; i < termBuf.length; i++) {
-                    if (i === cursorPos) html += '<span id="cursor">|</span>';
-                    var ch = termBuf[i];
-                    if (ch === '&') html += '&amp;';
-                    else if (ch === '<') html += '&lt;';
-                    else if (ch === '>') html += '&gt;';
-                    else html += ch;
+            // ----- WebSocket 发送（Base64） -----
+            function strToBase64(str) {
+                let binary = '';
+                for (let i=0; i<str.length; i++) {
+                    let code = str.charCodeAt(i);
+                    if (code < 0x80) binary += String.fromCharCode(code);
+                    else if (code < 0x800) {
+                        binary += String.fromCharCode(0xC0 | (code>>6));
+                        binary += String.fromCharCode(0x80 | (code & 0x3F));
+                    } else if (code < 0xD800 || code > 0xDBFF) {
+                        binary += String.fromCharCode(0xE0 | (code>>12));
+                        binary += String.fromCharCode(0x80 | ((code>>6)&0x3F));
+                        binary += String.fromCharCode(0x80 | (code&0x3F));
+                    } else {
+                        i++;
+                        code = 0x10000 + ((code-0xD800)<<10) + (str.charCodeAt(i)-0xDC00);
+                        binary += String.fromCharCode(0xF0 | (code>>18));
+                        binary += String.fromCharCode(0x80 | ((code>>12)&0x3F));
+                        binary += String.fromCharCode(0x80 | ((code>>6)&0x3F));
+                        binary += String.fromCharCode(0x80 | (code&0x3F));
+                    }
                 }
-                if (cursorPos >= termBuf.length) html += '<span id="cursor">|</span>';
-                output.innerHTML = html;
-            } else {
-                output.innerHTML = termBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return btoa(binary);
             }
-            output.scrollTop = output.scrollHeight;
-        }
 
-        function startInteractive() {
-            mode = 'interactive';
-            modeBadge.textContent = 'interactive';
-            modeBadge.className = 'badge interactive';
-            output.innerHTML = '';
-            interactiveCmdBuf = '';
-            cursorPos = 0;
-            appendOutput('交互式 Shell (PTY) — 支持 su/ssh/top 等命令\r\n', 'info');
+            function wsSend(data) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type:'input', data:strToBase64(data) }));
+                }
+            }
 
-            input.style.display = 'none';
-            btnExec.style.display = 'none';
+            function wsSendResize() {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    const cols = Math.floor(output.clientWidth / 9);
+                    const rows = Math.floor(output.clientHeight / 18);
+                    if (cols>0 && rows>0) {
+                        ws.send(JSON.stringify({
+                            type:'resize',
+                            cols: Math.max(cols,40),
+                            rows: Math.max(rows,10)
+                        }));
+                    }
+                }
+            }
 
-            output.setAttribute('tabindex', '-1');
-            output.focus();
+            // ----- 键盘事件（完整修复） -----
+            function onKeyDown(e) {
+                if (e.isComposing) return;
+                if (e.ctrlKey || e.altKey || e.metaKey) {
+                    if (e.ctrlKey && (e.key==='c' || e.key==='C' || e.code==='KeyC')) {
+                        e.preventDefault(); e.stopPropagation();
+                        appendOutput('^C','stdout');
+                        wsSend('\x03');
+                        return;
+                    }
+                    if (e.ctrlKey && e.key==='d') { e.preventDefault(); wsSend('\x04'); return; }
+                    if (e.ctrlKey && e.key==='l') { e.preventDefault(); wsSend('\x0c'); clearOutput(); return; }
+                    if (e.ctrlKey && e.key==='z') { e.preventDefault(); wsSend('\x1a'); return; }
+                    if (e.ctrlKey && (e.key==='v' || e.key==='V')) return; // 让粘贴事件处理
+                    return;
+                }
 
-            document.removeEventListener('keydown', onKeyDown);
-            document.addEventListener('keydown', onKeyDown);
-            document.addEventListener('paste', onPaste);
-            document.addEventListener('compositionend', function (e) {
-                if (e.data && e.data.length > 0) {
-                    for (const ch of e.data)
-                        wsSend(ch);
+                // 回车
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const cmdText = interactiveCmdBuf.trim().toLowerCase();
+                    if (cmdText === 'cls' || cmdText === 'clear') {
+                        clearOutput();
+                        interactiveCmdBuf = '';
+                        return;
+                    }
+                    // 本地 echo 模式：先清空服务端 lineBuf_，再重放正确命令
                     if (localEchoEnabled) {
-                        termBuf = termBuf.slice(0, cursorPos) + e.data + termBuf.slice(cursorPos);
-                        cursorPos += e.data.length;
-                        interactiveCmdBuf += e.data;
+                        // 发送足够多退格清空服务端缓冲区（可能比 interactiveCmdBuf 长）
+                        var bsCount = Math.max(interactiveCmdBuf.length + 32, 64);
+                        for (var _i = 0; _i < bsCount; _i++) wsSend('\x7f');
+                        for (var _j = 0; _j < interactiveCmdBuf.length; _j++) wsSend(interactiveCmdBuf[_j]);
+                        if (interactiveCmdBuf.trim()) {
+                            history.push(interactiveCmdBuf);
+                            historyIdx = history.length;
+                        }
+                        termBuf += '\n';
+                        cursorPos = termBuf.length;
+                    }
+                    wsSend('\n');
+                    interactiveCmdBuf = '';
+                    renderOutput();
+                    return;
+                }
+
+                // Backspace
+                if (e.key === 'Backspace') {
+                    e.preventDefault();
+                    if (localEchoEnabled) {
+                        const lineStart = termBuf.lastIndexOf('\n') + 1;
+                        const line = termBuf.substring(lineStart);
+                        const promptMatch = line.match(/^(.*?)([$#>])\s*/);
+                        const cmdStart = lineStart + (promptMatch ? promptMatch[0].length : 0);
+                        if (cursorPos <= cmdStart) return;
+                        const before = termBuf.substring(0, cursorPos-1);
+                        const after = termBuf.substring(cursorPos);
+                        termBuf = before + after;
+                        cursorPos--;
+                        updateCmdBuf();
+                        if (cursorPos === termBuf.length) {
+                            wsSend('\x7f');
+                        }
+                        renderOutput();
+                    } else {
+                        wsSend('\x7f');
+                    }
+                    return;
+                }
+
+                // Delete
+                if (e.key === 'Delete') {
+                    e.preventDefault();
+                    if (localEchoEnabled) {
+                        if (cursorPos >= termBuf.length) return;
+                        const before = termBuf.substring(0, cursorPos);
+                        const after = termBuf.substring(cursorPos+1);
+                        termBuf = before + after;
+                        wsSend('\x1b[3~');
+                        updateCmdBuf();
+                        renderOutput();
+                    } else {
+                        wsSend('\x1b[3~');
+                    }
+                    return;
+                }
+
+                // Tab
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    wsSend('\t');
+                    if (localEchoEnabled) {
+                        const before = termBuf.substring(0, cursorPos);
+                        const after = termBuf.substring(cursorPos);
+                        termBuf = before + '\t' + after;
+                        cursorPos++;
+                        updateCmdBuf();
+                        renderOutput();
+                    }
+                    return;
+                }
+
+                // 上下箭头（历史）
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (localEchoEnabled) {
+                        if (history.length === 0) return;
+                        if (historyIdx === -1 || historyIdx === history.length) {
+                            historyIdx = history.length;
+                        }
+                        navigateHistory(-1);
+                    } else {
+                        wsSend('\x1b[A');
+                    }
+                    return;
+                }
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (localEchoEnabled) {
+                        if (history.length === 0) return;
+                        if (historyIdx === -1 || historyIdx === history.length) {
+                            return; // 底部，无操作
+                        }
+                        navigateHistory(1);
+                    } else {
+                        wsSend('\x1b[B');
+                    }
+                    return;
+                }
+
+                // 左右箭头、Home/End
+                if (e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    if (localEchoEnabled) {
+                        if (cursorPos < termBuf.length) cursorPos++;
+                    } else {
+                        wsSend('\x1b[C');
+                    }
+                    renderOutput();
+                    return;
+                }
+                if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    if (localEchoEnabled) {
+                        if (cursorPos > 0) cursorPos--;
+                    } else {
+                        wsSend('\x1b[D');
+                    }
+                    renderOutput();
+                    return;
+                }
+                if (e.key === 'Home') {
+                    e.preventDefault();
+                    if (localEchoEnabled) {
+                        cursorPos = termBuf.lastIndexOf('\n', cursorPos-1) + 1;
+                    } else {
+                        wsSend('\x1b[H');
+                    }
+                    renderOutput();
+                    return;
+                }
+                if (e.key === 'End') {
+                    e.preventDefault();
+                    if (localEchoEnabled) {
+                        const lineEnd = termBuf.indexOf('\n', cursorPos);
+                        cursorPos = (lineEnd === -1) ? termBuf.length : lineEnd;
+                    } else {
+                        wsSend('\x1b[F');
+                    }
+                    renderOutput();
+                    return;
+                }
+
+                // 普通字符
+                if (e.key.length === 1) {
+                    e.preventDefault();
+                    wsSend(e.key);
+                    if (localEchoEnabled) {
+                        const before = termBuf.substring(0, cursorPos);
+                        const after = termBuf.substring(cursorPos);
+                        termBuf = before + e.key + after;
+                        cursorPos++;
+                        updateCmdBuf();
                         renderOutput();
                     }
                 }
-            });
-        }
-
-        function onPaste(e) {
-            e.preventDefault();
-            const text = e.clipboardData.getData('text/plain');
-            if (text) {
-                wsSend(text);
-                if (localEchoEnabled) {
-                    termBuf = termBuf.slice(0, cursorPos) + text + termBuf.slice(cursorPos);
-                    cursorPos += text.length;
-                    interactiveCmdBuf += text;
-                    renderOutput();
-                }
-            }
-        }
-
-        function onKeyDown(e) {
-            if (e.isComposing) return;
-            if (e.ctrlKey || e.altKey || e.metaKey) {
-                if (e.ctrlKey && (e.key === 'c' || e.key === 'C' || e.code === 'KeyC')) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    appendOutput('^C', 'stdout');
-                    wsSend('\x03');
-                    return;
-                }
-                if (e.ctrlKey && e.key === 'd') {
-                    e.preventDefault();
-                    wsSend('\x04');
-                    return;
-                }
-                if (e.ctrlKey && e.key === 'l') {
-                    e.preventDefault();
-                    wsSend('\x0c');
-                    clearOutput();
-                    return;
-                }
-                if (e.ctrlKey && e.key === 'z') {
-                    e.preventDefault();
-                    wsSend('\x1a');
-                    return;
-                }
-                if (e.ctrlKey && (e.key === 'v' || e.key === 'V' || e.code === 'KeyV')) {
-                    return;
-                }
-                return;
             }
 
-            if (e.key === 'Enter') {
+            // ----- 粘贴事件（Ctrl+V） -----
+            function onPaste(e) {
                 e.preventDefault();
-                wsSend('\n');
-                if (localEchoEnabled) {
-                    if (interactiveCmdBuf.trim()) {
-                        history.push(interactiveCmdBuf);
-                        historyIdx = history.length;
-                    }
-                    termBuf += '\n';
-                    cursorPos = termBuf.length;
-                }
-                const cmd1 = interactiveCmdBuf.trim().toLowerCase();
-                let cmd2 = '';
-                if (localEchoEnabled) {
-                    const lines = termBuf.split('\n');
-                    if (lines.length >= 2)
-                        cmd2 = lines[lines.length - 2].trim().toLowerCase();
-                }
-                if (cmd1 === 'cls' || cmd1 === 'clear' || cmd2 === 'cls' || cmd2 === 'clear')
-                    clearOutput();
-                interactiveCmdBuf = '';
-                return;
-            }
-
-            if (e.key === 'Backspace') {
-                e.preventDefault();
-                if (localEchoEnabled) {
-                    if (interactiveCmdBuf.length === 0 || cursorPos === 0) return;
-                    termBuf = termBuf.slice(0, cursorPos - 1) + termBuf.slice(cursorPos);
-                    cursorPos--;
-                    interactiveCmdBuf = interactiveCmdBuf.slice(0, -1);
-                    wsSend('\x7f');
-                    renderOutput();
-                } else {
-                    wsSend('\x7f');
-                }
-                return;
-            }
-
-            if (e.key === 'Tab') {
-                e.preventDefault();
-                wsSend('\t');
-                if (localEchoEnabled) {
-                    termBuf = termBuf.slice(0, cursorPos) + '\t' + termBuf.slice(cursorPos);
-                    cursorPos++;
-                }
-                return;
-            }
-
-            if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                if (localEchoEnabled) {
-                    navigateHistory(-1);
-                } else {
-                    wsSend('\x1b[A');
-                }
-                return;
-            }
-
-            if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                if (localEchoEnabled) {
-                    navigateHistory(1);
-                } else {
-                    wsSend('\x1b[B');
-                }
-                return;
-            }
-
-            if (e.key === 'ArrowRight') {
-                e.preventDefault();
-                if (localEchoEnabled) {
-                    if (cursorPos < termBuf.length) cursorPos++;
-                } else {
-                    wsSend('\x1b[C');
-                }
-                return;
-            }
-
-            if (e.key === 'ArrowLeft') {
-                e.preventDefault();
-                if (localEchoEnabled) {
-                    if (cursorPos > 0) cursorPos--;
-                } else {
-                    wsSend('\x1b[D');
-                }
-                return;
-            }
-
-            if (localEchoEnabled && (e.key === 'Home' || e.key === 'End')) {
-                e.preventDefault();
-                cursorPos = e.key === 'Home' ? (termBuf.lastIndexOf('\n') + 1 || 0) : termBuf.length;
-                return;
-            }
-
-            if (e.key.length === 1) {
-                e.preventDefault();
-                wsSend(e.key);
-                if (localEchoEnabled) {
-                    termBuf = termBuf.slice(0, cursorPos) + e.key + termBuf.slice(cursorPos);
-                    cursorPos++;
-                    interactiveCmdBuf += e.key;
-                    renderOutput();
-                }
-            }
-        }
-
-        function strToBase64(str) {
-            let binary = '';
-            for (let i = 0; i < str.length; i++) {
-                let code = str.charCodeAt(i);
-                if (code < 0x80) {
-                    binary += String.fromCharCode(code);
-                } else if (code < 0x800) {
-                    binary += String.fromCharCode(0xC0 | (code >> 6));
-                    binary += String.fromCharCode(0x80 | (code & 0x3F));
-                } else if (code < 0xD800 || code > 0xDBFF) {
-                    binary += String.fromCharCode(0xE0 | (code >> 12));
-                    binary += String.fromCharCode(0x80 | ((code >> 6) & 0x3F));
-                    binary += String.fromCharCode(0x80 | (code & 0x3F));
-                } else {
-                    i++;
-                    code = 0x10000 + ((code - 0xD800) << 10) + (str.charCodeAt(i) - 0xDC00);
-                    binary += String.fromCharCode(0xF0 | (code >> 18));
-                    binary += String.fromCharCode(0x80 | ((code >> 12) & 0x3F));
-                    binary += String.fromCharCode(0x80 | ((code >> 6) & 0x3F));
-                    binary += String.fromCharCode(0x80 | (code & 0x3F));
-                }
-            }
-            return btoa(binary);
-        }
-
-        function wsSend(data) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                const msg = JSON.stringify({
-                    type: 'input',
-                    data: strToBase64(data)
-                });
-                ws.send(msg);
-            }
-        }
-
-        function wsSendResize() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                const cols = Math.floor(output.clientWidth / 9);
-                const rows = Math.floor(output.clientHeight / 18);
-                if (cols > 0 && rows > 0) {
-                    const msg = JSON.stringify({
-                        type: 'resize',
-                        cols: Math.max(cols, 40),
-                        rows: Math.max(rows, 10)
-                    });
-                    ws.send(msg);
-                }
-            }
-        }
-
-        function tryConnectWS() {
-            const loc = window.location;
-            const httpPort = parseInt(loc.port) || (loc.protocol === 'https:' ? 443 : 80);
-            const wsPort = httpPort + 1;
-            const proto = loc.protocol === 'https:' ? 'wss://' : 'ws://';
-            const url = proto + loc.hostname + ':' + wsPort + '/api/shell/ws';
-
-            ws = new WebSocket(url);
-            ws.binaryType = 'arraybuffer';
-
-            ws.onopen = function () {
-                state.ws = ws;
-                startInteractive();
-                setTimeout(wsSendResize, 200);
-            };
-
-            ws.onmessage = function (e) {
-                if (typeof e.data === 'string') {
-                    if (e.data.startsWith('{')) {
-                        try {
-                            const cfg = JSON.parse(e.data);
-                            if (cfg.type === 'config' && cfg.localEcho !== undefined) {
-                                localEchoEnabled = cfg.localEcho;
-                                return;
-                            }
-                        } catch (_) { }
-                    }
-                    const text = stripAnsi(e.data);
-                    for (const ch of text) {
-                        if (ch === '\b') {
-                            if (localEchoEnabled) {
-                                if (cursorPos > 0) cursorPos--;
-                            } else {
-                                safeBackspace();
-                            }
-                            cursorPos = termBuf.length;
-                        } else if (ch === '\r') {
-                        } else if (ch === '\n') {
-                            termBuf += '\n';
-                            cursorPos = termBuf.length;
-                            if (localEchoEnabled) {
-                                interactiveCmdBuf = '';
-                            }
-                        } else if (ch >= ' ') {
-                            termBuf += ch;
-                            cursorPos = termBuf.length;
-                        }
-                    }
-                    renderOutput();
-                }
-            };
-
-            ws.onclose = function () {
-                state.ws = null;
-                if (mode === 'interactive') {
-                    appendOutput('\r\n--- 连接已关闭 ---', 'error');
-                }
-                ws = null;
-            };
-
-            ws.onerror = function () {
-                state.ws = null;
-                ws = null;
-            };
-
-            setTimeout(function () {
-                if (mode !== 'interactive') {
-                    if (ws) {
-                        ws.onclose = null;
-                        ws.close();
-                        ws = null;
-                    }
-                    startOneShot();
-                }
-            }, 2000);
-        }
-
-        function startOneShot() {
-            mode = 'oneshot';
-            modeBadge.textContent = 'one-shot';
-            modeBadge.className = 'badge oneshot';
-            output.innerHTML = '';
-            appendOutput('交互式 Shell 不可用，使用 one-shot 模式（不支持 su/ssh/top 等交互命令）', 'info');
-
-            input.style.display = '';
-            btnExec.style.display = '';
-        }
-
-        async function execCmd() {
-            const cmd = input.value.trim();
-            if (!cmd || running) return;
-
-            const lower = cmd.toLowerCase();
-            if (lower === 'cls' || lower === 'clear')
-                return clearOutput();
-
-            running = true;
-            btnExec.disabled = true;
-            btnExec.textContent = '执行中...';
-
-            appendOutput((cwd ? cwd + ' ' : '') + '$ ' + cmd, 'stdout');
-            history.push(cmd);
-            historyIdx = history.length;
-            input.value = '';
-
-            try {
-                const resp = await fetch('/api/shell/exec', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: cmd })
-                });
-                const result = await resp.json();
-                if (result.cwd) updatePrompt(result.cwd);
-                if (result.success) {
-                    if (result.stdout) appendOutput(result.stdout, 'stdout');
-                    if (result.stderr) appendOutput(result.stderr, 'stderr');
-                    if (result.stdout || result.stderr)
-                        appendOutput('exit: ' + result.exitCode, 'info');
-                } else {
-                    appendOutput('错误: ' + (result.error || '执行失败'), 'error');
-                }
-            } catch (e) {
-                appendOutput('网络错误: ' + e.message, 'error');
-            } finally {
-                running = false;
-                btnExec.disabled = false;
-                btnExec.textContent = '执行';
-                input.focus();
-            }
-        }
-
-        input.addEventListener('keydown', function (e) {
-            if (e.isComposing) return;
-            if (e.key === 'Enter') {
-                execCmd();
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                if (historyIdx > 0) {
-                    historyIdx--;
-                    input.value = history[historyIdx];
-                }
-            } else if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                if (historyIdx < history.length - 1) {
-                    historyIdx++;
-                    input.value = history[historyIdx];
-                } else {
-                    historyIdx = history.length;
-                    input.value = '';
-                }
-            }
-        });
-
-        window.addEventListener('resize', function () {
-            if (mode === 'interactive' && ws) {
-                wsSendResize();
-            }
-        });
-
-        // Init
-        fetch('/api/shell/cwd').then(function (r) { return r.json(); }).then(function (d) {
-            if (d.cwd) updatePrompt(d.cwd);
-        }).catch(function () { });
-
-        tryConnectWS();
-        input.focus();
-
-        // ---- 右键菜单 ----
-        const ctxMenu = document.getElementById('context-menu');
-        let ctxSel = '';
-
-        output.addEventListener('contextmenu', function (e) {
-            e.preventDefault();
-            ctxSel = window.getSelection().toString();
-            ctxMenu.style.left = e.clientX + 'px';
-            ctxMenu.style.top = e.clientY + 'px';
-            ctxMenu._x = e.clientX;
-            ctxMenu._y = e.clientY;
-            ctxMenu.classList.add('open');
-        });
-
-        document.addEventListener('click', function () {
-            ctxMenu.classList.remove('open');
-        });
-
-        ctxMenu.addEventListener('click', function (e) {
-            const item = e.target.closest('.item');
-            if (!item) return;
-            const action = item.dataset.action;
-            ctxMenu.classList.remove('open');
-            if (action === 'copy') {
-                if (!ctxSel) return;
-                if (navigator.clipboard) {
-                    navigator.clipboard.writeText(ctxSel).catch(function () { });
-                } else {
-                    const ta = document.createElement('textarea');
-                    ta.value = ctxSel;
-                    ta.style.position = 'fixed';
-                    ta.style.left = '-9999px';
-                    document.body.appendChild(ta);
-                    ta.select();
-                    document.execCommand('copy');
-                    document.body.removeChild(ta);
-                }
-            } else if (action === 'paste') {
-                doPaste();
-            } else if (action === 'selectAll') {
-                const range = document.createRange();
-                range.selectNodeContents(output);
-                window.getSelection().removeAllRanges();
-                window.getSelection().addRange(range);
-            } else if (action === 'clear') {
-                clearOutput();
-            }
-        });
-
-        function doPaste() {
-            if (navigator.clipboard && navigator.clipboard.readText) {
-                navigator.clipboard.readText().then(function (text) {
-                    if (text) {
-                        wsSend(text);
-                        if (localEchoEnabled) {
-                            termBuf = termBuf.slice(0, cursorPos) + text + termBuf.slice(cursorPos);
-                            cursorPos += text.length;
-                            renderOutput();
-                        }
-                    }
-                }).catch(function () {
-                    simulateCtrlV();
-                });
-            } else {
-                simulateCtrlV();
-            }
-        }
-
-        function simulateCtrlV() {
-            const ta = document.createElement('textarea');
-            ta.style.position = 'fixed';
-            ta.style.left = '-9999px';
-            document.body.appendChild(ta);
-            ta.focus();
-            ta.addEventListener('paste', function handler(ev) {
-                ev.preventDefault();
-                document.removeEventListener('paste', handler, true);
-                const text = ev.clipboardData.getData('text/plain');
-                document.body.removeChild(ta);
+                const text = e.clipboardData.getData('text/plain');
                 if (text) {
                     wsSend(text);
                     if (localEchoEnabled) {
-                        termBuf = termBuf.slice(0, cursorPos) + text + termBuf.slice(cursorPos);
+                        const before = termBuf.substring(0, cursorPos);
+                        const after = termBuf.substring(cursorPos);
+                        termBuf = before + text + after;
                         cursorPos += text.length;
+                        updateCmdBuf();
                         renderOutput();
                     }
                 }
-            }, true);
-            ta.addEventListener('blur', function () {
-                document.body.removeChild(ta);
-            }, { once: true });
-            document.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true
-            }));
-            setTimeout(function () {
-                if (document.body.contains(ta))
-                    document.body.removeChild(ta);
-            }, 500);
-        }
-
-        // ---- 工具栏固定/自动隐藏 ----
-        const toolbar = document.getElementById('toolbar');
-        const trigger = document.getElementById('toolbar-trigger');
-        const pinBtn = document.getElementById('btn-pin');
-        let toolbarTimer = null;
-        let toolbarPinned = true;
-        pinBtn.classList.add('pinned');
-
-        function showToolbar() {
-            clearTimeout(toolbarTimer);
-            toolbar.classList.remove('hidden');
-        }
-        function hideToolbar() {
-            if (!toolbarPinned)
-                toolbarTimer = setTimeout(function () { toolbar.classList.add('hidden'); }, 600);
-        }
-        function togglePin() {
-            toolbarPinned = !toolbarPinned;
-            pinBtn.classList.toggle('pinned', toolbarPinned);
-            pinBtn.title = toolbarPinned ? '固定工具栏' : '取消固定';
-            if (toolbarPinned) {
-                clearTimeout(toolbarTimer);
-                toolbar.classList.remove('hidden');
             }
-        }
 
-        pinBtn.addEventListener('click', togglePin);
-        trigger.addEventListener('mouseenter', showToolbar);
-        toolbar.addEventListener('mouseenter', function () { clearTimeout(toolbarTimer); });
-        toolbar.addEventListener('mouseleave', hideToolbar);
+            // ----- 启动交互模式 -----
+            function startInteractive() {
+                mode = 'interactive';
+                output.innerHTML = '';
+                termBuf = '';
+                interactiveCmdBuf = '';
+                cursorPos = 0;
+                appendOutput('交互式 Shell (PTY) — 支持 su/ssh/top 等命令\r\n', 'info');
+
+                input.style.display = 'none';
+                btnExec.style.display = 'none';
+
+                output.setAttribute('tabindex', '-1');
+                output.focus();
+
+                document.removeEventListener('keydown', onKeyDown);
+                document.addEventListener('keydown', onKeyDown);
+                document.addEventListener('paste', onPaste);
+                document.addEventListener('compositionend', function(e) {
+                    if (e.data && e.data.length > 0) {
+                        for (const ch of e.data) wsSend(ch);
+                        if (localEchoEnabled) {
+                            const before = termBuf.substring(0, cursorPos);
+                            const after = termBuf.substring(cursorPos);
+                            termBuf = before + e.data + after;
+                            cursorPos += e.data.length;
+                            updateCmdBuf();
+                            renderOutput();
+                        }
+                    }
+                });
+            }
+
+            // ----- WebSocket 连接 -----
+            function tryConnectWS() {
+                const loc = window.location;
+                const httpPort = parseInt(loc.port) || (loc.protocol === 'https:' ? 443 : 80);
+                const wsPort = httpPort + 1;
+                const proto = loc.protocol === 'https:' ? 'wss://' : 'ws://';
+                const url = proto + loc.hostname + ':' + wsPort + '/api/shell/ws';
+
+                ws = new WebSocket(url);
+                ws.binaryType = 'arraybuffer';
+
+                ws.onopen = function() {
+                    state.ws = ws;
+                    startInteractive();
+                    setTimeout(wsSendResize, 200);
+                };
+
+                ws.onmessage = function(e) {
+                    if (typeof e.data === 'string') {
+                        // 处理 JSON 配置消息
+                        if (e.data.startsWith('{')) {
+                            try {
+                                const cfg = JSON.parse(e.data);
+                                if (cfg.type === 'config' && cfg.localEcho !== undefined) {
+                                    localEchoEnabled = cfg.localEcho;
+                                    return;
+                                }
+                            } catch(_) {}
+                        }
+                        // 普通文本（可能包含 ANSI）
+                        const text = stripAnsi(e.data);
+                        for (const ch of text) {
+                            if (ch === '\b') {
+                                if (localEchoEnabled && cursorPos > 0) {
+                                    const before = termBuf.substring(0, cursorPos-1);
+                                    const after = termBuf.substring(cursorPos);
+                                    termBuf = before + after;
+                                    cursorPos--;
+                                    updateCmdBuf();
+                                } else {
+                                    if (termBuf.length > 0) termBuf = termBuf.slice(0, -1);
+                                }
+                                cursorPos = termBuf.length;
+                                renderOutput();
+                            } else if (ch === '\r') {
+                                // ignore
+                            } else if (ch === '\n') {
+                                termBuf += '\n';
+                                cursorPos = termBuf.length;
+                                if (localEchoEnabled) interactiveCmdBuf = '';
+                                renderOutput();
+                            } else if (ch >= ' ') {
+                                termBuf += ch;
+                                cursorPos = termBuf.length;
+                                if (localEchoEnabled) updateCmdBuf();
+                                renderOutput();
+                            }
+                        }
+                    }
+                };
+
+                ws.onclose = function() {
+                    state.ws = null;
+                    if (mode === 'interactive') {
+                        appendOutput('\r\n--- 连接已关闭 ---','error');
+                    }
+                    ws = null;
+                };
+                ws.onerror = function() { state.ws = null; ws = null; };
+
+                setTimeout(function() {
+                    if (mode !== 'interactive') {
+                        if (ws) { ws.onclose=null; ws.close(); ws=null; }
+                        startOneShot();
+                    }
+                }, 2000);
+            }
+
+            function startOneShot() {
+                mode = 'oneshot';
+                output.innerHTML = '';
+                appendOutput('交互式 Shell 不可用，使用 one-shot 模式（不支持 su/ssh/top 等交互命令）', 'info');
+                input.style.display = '';
+                btnExec.style.display = '';
+            }
+
+            // ----- one-shot 命令执行 -----
+            async function execCmd() {
+                const cmd = input.value.trim();
+                if (!cmd || running) return;
+                if (cmd.toLowerCase()==='cls' || cmd.toLowerCase()==='clear') return clearOutput();
+
+                running = true;
+                btnExec.disabled = true;
+                btnExec.textContent = '执行中...';
+                appendOutput((cwd?cwd+' ':'') + '$ ' + cmd, 'stdout');
+                history.push(cmd);
+                historyIdx = history.length;
+                input.value = '';
+
+                try {
+                    const resp = await fetch('/api/shell/exec', {
+                        method:'POST',
+                        headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({ command:cmd })
+                    });
+                    const result = await resp.json();
+                    if (result.cwd) updatePrompt(result.cwd);
+                    if (result.success) {
+                        if (result.stdout) appendOutput(result.stdout,'stdout');
+                        if (result.stderr) appendOutput(result.stderr,'stderr');
+                        if (result.stdout || result.stderr) appendOutput('exit: '+result.exitCode,'info');
+                    } else {
+                        appendOutput('错误: '+ (result.error||'执行失败'),'error');
+                    }
+                } catch(e) {
+                    appendOutput('网络错误: '+e.message,'error');
+                } finally {
+                    running = false;
+                    btnExec.disabled = false;
+                    btnExec.textContent = '执行';
+                    input.focus();
+                }
+            }
+
+            input.addEventListener('keydown', function(e) {
+                if (e.isComposing) return;
+                if (e.key === 'Enter') execCmd();
+                else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (historyIdx > 0) { historyIdx--; input.value = history[historyIdx]; }
+                } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (historyIdx < history.length-1) { historyIdx++; input.value = history[historyIdx]; }
+                    else { historyIdx = history.length; input.value = ''; }
+                }
+            });
+
+            window.addEventListener('resize', function() {
+                if (mode === 'interactive' && ws) wsSendResize();
+            });
+
+            // ---- 初始化 ----
+            fetch('/api/shell/cwd').then(r=>r.json()).then(d=>{ if(d.cwd) updatePrompt(d.cwd); }).catch(()=>{});
+            tryConnectWS();
+            input.focus();
+
+            // ---- 右键菜单 ----
+            let ctxSel = '';
+
+            function sendPastedText(text) {
+                if (!text) return;
+                if (mode === 'interactive' && ws && ws.readyState === WebSocket.OPEN) {
+                    wsSend(text);
+                    if (localEchoEnabled) {
+                        const before = termBuf.substring(0, cursorPos);
+                        const after = termBuf.substring(cursorPos);
+                        termBuf = before + text + after;
+                        cursorPos += text.length;
+                        updateCmdBuf();
+                        renderOutput();
+                    }
+                } else if (mode === 'oneshot') {
+                    const inputEl = input;
+                    const start = inputEl.selectionStart;
+                    const end = inputEl.selectionEnd;
+                    const val = inputEl.value;
+                    inputEl.value = val.slice(0,start) + text + val.slice(end);
+                    inputEl.selectionStart = inputEl.selectionEnd = start + text.length;
+                    inputEl.focus();
+                }
+            }
+
+            function fallbackPaste() {
+                const ta = document.createElement('textarea');
+                ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;';
+                document.body.appendChild(ta);
+                ta.focus();
+                try {
+                    if (document.execCommand('paste')) {
+                        const text = ta.value;
+                        if (text) sendPastedText(text);
+                        else appendOutput('\n[提示] 粘贴内容为空\n','info');
+                    } else {
+                        appendOutput('\n[提示] 粘贴失败，请使用 Ctrl+V\n','info');
+                    }
+                } catch(e) {
+                    appendOutput('\n[提示] 粘贴失败，请使用 Ctrl+V\n','info');
+                }
+                document.body.removeChild(ta);
+            }
+
+            function doPaste() {
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    navigator.clipboard.readText().then(text => {
+                        if (text) sendPastedText(text);
+                    }).catch(() => fallbackPaste());
+                } else {
+                    fallbackPaste();
+                }
+            }
+
+            output.addEventListener('contextmenu', function(e) {
+                e.preventDefault();
+                ctxSel = window.getSelection().toString();
+                ctxMenu.style.left = e.clientX+'px';
+                ctxMenu.style.top = e.clientY+'px';
+                ctxMenu.classList.add('open');
+            });
+            document.addEventListener('click', function() { ctxMenu.classList.remove('open'); });
+            ctxMenu.addEventListener('click', function(e) {
+                const item = e.target.closest('.item');
+                if (!item) return;
+                const action = item.dataset.action;
+                ctxMenu.classList.remove('open');
+                if (action === 'copy') {
+                    if (!ctxSel) return;
+                    if (navigator.clipboard) navigator.clipboard.writeText(ctxSel).catch(()=>{});
+                    else {
+                        const ta = document.createElement('textarea');
+                        ta.value = ctxSel;
+                        ta.style.cssText = 'position:fixed;left:-9999px;';
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(ta);
+                    }
+                } else if (action === 'paste') {
+                    doPaste();
+                } else if (action === 'selectAll') {
+                    const range = document.createRange();
+                    range.selectNodeContents(output);
+                    window.getSelection().removeAllRanges();
+                    window.getSelection().addRange(range);
+                } else if (action === 'clear') {
+                    clearOutput();
+                }
+            });
+
+            // ---- 工具栏自动隐藏 ----
+            const toolbar = document.getElementById('toolbar');
+            const trigger = document.getElementById('toolbar-trigger');
+            const pinBtn = document.getElementById('btn-pin');
+            let toolbarTimer = null;
+            let toolbarPinned = true;
+            pinBtn.classList.add('pinned');
+
+            function showToolbar() { clearTimeout(toolbarTimer); toolbar.classList.remove('hidden'); }
+            function hideToolbar() { if(!toolbarPinned) toolbarTimer = setTimeout(()=>toolbar.classList.add('hidden'),600); }
+            function togglePin() {
+                toolbarPinned = !toolbarPinned;
+                pinBtn.classList.toggle('pinned', toolbarPinned);
+                pinBtn.title = toolbarPinned ? '固定工具栏' : '取消固定';
+                if (toolbarPinned) { clearTimeout(toolbarTimer); toolbar.classList.remove('hidden'); }
+            }
+            pinBtn.addEventListener('click', togglePin);
+            trigger.addEventListener('mouseenter', showToolbar);
+            toolbar.addEventListener('mouseenter', ()=>clearTimeout(toolbarTimer));
+            toolbar.addEventListener('mouseleave', hideToolbar);
+
+            // 暴露全局函数供 onclick 使用
+            window.toggleConfigDropdown = toggleConfigDropdown;
+            window.toggleFullscreen = toggleFullscreen;
+            window.toggleFilePanel = toggleFilePanel;
+            window.execCmd = execCmd;
+            window.clearOutput = clearOutput;
+        });
     </script>
 </body>
-
 </html>
