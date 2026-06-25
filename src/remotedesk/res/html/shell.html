@@ -1,67 +1,376 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>远程桌面 - Shell</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #1a1a1a; color: #eee; font-family: 'Consolas', 'Courier New', monospace; min-height: 100vh; position: relative; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a1a;
+            color: #eee;
+            font-family: 'Consolas', 'Courier New', monospace;
+            min-height: 100vh;
+            position: relative;
+        }
 
         /* 工具栏 */
-        #toolbar { position: fixed; top: 0; left: 50%; transform: translateX(-50%) translateY(0); display: flex; flex-wrap: nowrap; justify-content: center; gap: 2px; z-index: 4000; background: rgba(30,30,30,0.92); border-radius: 0 0 10px 10px; padding: 6px 10px; transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 2px 12px rgba(0,0,0,0.4); backdrop-filter: blur(8px); max-width: 100vw; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-        #toolbar.hidden { transform: translateX(-50%) translateY(-100%); }
-        #toolbar-trigger { position: fixed; top: 0; left: 0; right: 0; height: 6px; z-index: 3999; }
-        #btn-pin { background: none; border: none; color: #aaa; cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 4px; transition: color 0.15s; }
-        #btn-pin:hover { color: #fff; }
-        #btn-pin.pinned { color: #4a9eff; }
-        .btn { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: #eee; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.15s; white-space: nowrap; display: flex; align-items: center; gap: 6px; text-decoration: none; }
-        @media (max-width: 600px) { #toolbar { padding: 4px 6px; gap: 1px; } .btn { padding: 4px 8px; font-size: 11px; } .btn .shortcut, .btn .btn-text { display: none; } #btn-pin { font-size: 12px; padding: 1px 4px; } }
-        .btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
-        .btn.active { background: rgba(0,102,204,0.6); border-color: rgba(0,102,204,0.8); }
-        .btn .shortcut { font-size: 10px; color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; font-family: monospace; }
+        #toolbar {
+            position: fixed;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%) translateY(0);
+            display: flex;
+            flex-wrap: nowrap;
+            justify-content: center;
+            gap: 2px;
+            z-index: 4000;
+            background: rgba(30, 30, 30, 0.92);
+            border-radius: 0 0 10px 10px;
+            padding: 6px 10px;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(8px);
+            max-width: 100vw;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        #toolbar.hidden {
+            transform: translateX(-50%) translateY(-100%);
+        }
+
+        #toolbar-trigger {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 6px;
+            z-index: 3999;
+        }
+
+        #btn-pin {
+            background: none;
+            border: none;
+            color: #aaa;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: color 0.15s;
+        }
+
+        #btn-pin:hover {
+            color: #fff;
+        }
+
+        #btn-pin.pinned {
+            color: #4a9eff;
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: #eee;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.15s;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            text-decoration: none;
+        }
+
+        @media (max-width: 600px) {
+            #toolbar {
+                padding: 4px 6px;
+                gap: 1px;
+            }
+
+            .btn {
+                padding: 4px 8px;
+                font-size: 11px;
+            }
+
+            .btn .shortcut,
+            .btn .btn-text {
+                display: none;
+            }
+
+            #btn-pin {
+                font-size: 12px;
+                padding: 1px 4px;
+            }
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.18);
+            color: #fff;
+        }
+
+        .btn.active {
+            background: rgba(0, 102, 204, 0.6);
+            border-color: rgba(0, 102, 204, 0.8);
+        }
+
+        .btn .shortcut {
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.4);
+            background: rgba(255, 255, 255, 0.08);
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
 
         /* 配置下拉菜单 */
-        #config-dropdown { display: none; position: fixed; top: 44px; left: 50%; transform: translateX(-50%); background: rgba(30,30,30,0.97); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 14px 18px; z-index: 1001; box-shadow: 0 8px 32px rgba(0,0,0,0.6); backdrop-filter: blur(12px); gap: 12px; flex-direction: column; min-width: 320px; }
-        #config-dropdown.open { display: flex; }
-        .dropdown-section { display: flex; flex-direction: column; gap: 6px; }
-        .dropdown-title { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .dropdown-note { color: #666; font-size: 10px; margin-top: -4px; }
-        .dropdown-options { display: flex; gap: 4px; flex-wrap: wrap; }
-        .dropdown-options button { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #ccc; padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; transition: all 0.12s; }
-        .dropdown-options button:hover { background: rgba(255,255,255,0.14); color: #fff; }
-        .dropdown-options button.active { background: rgba(0,102,204,0.5); border-color: #4a9eff; color: #fff; }
-        .dropdown-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000; }
-        .dropdown-overlay.open { display: block; top: 44px; }
+        #config-dropdown {
+            display: none;
+            position: fixed;
+            top: 44px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(30, 30, 30, 0.97);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 14px 18px;
+            z-index: 1001;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(12px);
+            gap: 12px;
+            flex-direction: column;
+            min-width: 320px;
+        }
+
+        #config-dropdown.open {
+            display: flex;
+        }
+
+        .dropdown-section {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .dropdown-title {
+            color: #888;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .dropdown-note {
+            color: #666;
+            font-size: 10px;
+            margin-top: -4px;
+        }
+
+        .dropdown-options {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+
+        .dropdown-options button {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #ccc;
+            padding: 5px 12px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.12s;
+        }
+
+        .dropdown-options button:hover {
+            background: rgba(255, 255, 255, 0.14);
+            color: #fff;
+        }
+
+        .dropdown-options button.active {
+            background: rgba(0, 102, 204, 0.5);
+            border-color: #4a9eff;
+            color: #fff;
+        }
+
+        .dropdown-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 1000;
+        }
+
+        .dropdown-overlay.open {
+            display: block;
+            top: 44px;
+        }
 
         /* Shell badge */
-        #toolbar-title { color: #aaa; font-size: 13px; margin-right: 4px; white-space: nowrap; }
-        .badge { font-size: 11px; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
-        .badge.interactive { background: #2a6; color: #fff; }
-        .badge.oneshot { background: #666; color: #fff; }
+        #toolbar-title {
+            color: #aaa;
+            font-size: 13px;
+            margin-right: 4px;
+            white-space: nowrap;
+        }
+
+        .badge {
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            white-space: nowrap;
+        }
+
+        .badge.interactive {
+            background: #2a6;
+            color: #fff;
+        }
+
+        .badge.oneshot {
+            background: #666;
+            color: #fff;
+        }
 
         /* Shell output */
-        #output { position: absolute; top: 44px; bottom: 52px; left: 0; right: 0; overflow-y: auto; padding: 12px 16px; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; background: #111; font-family: 'Consolas', 'Courier New', monospace; }
-        #output .stdout { color: #ccc; }
-        #output .stderr { color: #f55; }
-        #output .error { color: #f55; font-weight: bold; }
-        #output .info { color: #888; }
+        #output {
+            position: absolute;
+            top: 44px;
+            bottom: 52px;
+            left: 0;
+            right: 0;
+            overflow-y: auto;
+            padding: 12px 16px;
+            font-size: 13px;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-all;
+            background: #111;
+            font-family: 'Consolas', 'Courier New', monospace;
+        }
+
+        #output .stdout {
+            color: #ccc;
+        }
+
+        #output .stderr {
+            color: #f55;
+        }
+
+        #output .error {
+            color: #f55;
+            font-weight: bold;
+        }
+
+        #output .info {
+            color: #888;
+        }
 
         /* Prompt line */
-        #prompt-line { position: fixed; bottom: 0; left: 0; right: 0; z-index: 100; display: flex; align-items: center; padding: 8px 16px; background: #222; border-top: 1px solid #333; gap: 8px; }
-        #prompt-label { color: #4a9eff; font-size: 13px; user-select: none; white-space: pre; }
-        #cmd-input { flex: 1; background: #111; border: 1px solid #333; border-radius: 4px; padding: 8px 12px; color: #eee; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; outline: none; }
-        #cmd-input:focus { border-color: #4a9eff; }
-        #cmd-input.hidden { display: none; }
-        #terminal-input { flex: 1; background: transparent; border: none; color: transparent; caret-color: #eee; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; outline: none; position: absolute; left: -9999px; }
-        #prompt-line button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-        #btn-exec { background: #4a9eff; color: #fff; }
-        #btn-exec:hover { background: #3a8eef; }
-        #btn-clear { background: #444; color: #ccc; }
-        #btn-clear:hover { background: #555; }
-        #btn-exec:disabled { opacity: 0.5; cursor: default; }
-        #cursor { display: inline; animation: blink 1s step-end infinite; }
-        @keyframes blink { 50% { opacity: 0; } }
+        #prompt-line {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            padding: 8px 16px;
+            background: #222;
+            border-top: 1px solid #333;
+            gap: 8px;
+        }
+
+        #prompt-label {
+            color: #4a9eff;
+            font-size: 13px;
+            user-select: none;
+            white-space: pre;
+        }
+
+        #cmd-input {
+            flex: 1;
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 8px 12px;
+            color: #eee;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 13px;
+            outline: none;
+        }
+
+        #cmd-input:focus {
+            border-color: #4a9eff;
+        }
+
+        #cmd-input.hidden {
+            display: none;
+        }
+
+        #terminal-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: transparent;
+            caret-color: #eee;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 13px;
+            outline: none;
+            position: absolute;
+            left: -9999px;
+        }
+
+        #prompt-line button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        #btn-exec {
+            background: #4a9eff;
+            color: #fff;
+        }
+
+        #btn-exec:hover {
+            background: #3a8eef;
+        }
+
+        #btn-clear {
+            background: #444;
+            color: #ccc;
+        }
+
+        #btn-clear:hover {
+            background: #555;
+        }
+
+        #btn-exec:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
+        #cursor {
+            display: inline;
+            animation: blink 1s step-end infinite;
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0;
+            }
+        }
 
         /* 右键菜单 */
         #context-menu {
@@ -73,11 +382,15 @@
             padding: 4px 0;
             min-width: 140px;
             z-index: 9999;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
             font-family: 'Consolas', 'Courier New', monospace;
             font-size: 13px;
         }
-        #context-menu.open { display: block; }
+
+        #context-menu.open {
+            display: block;
+        }
+
         #context-menu .item {
             padding: 6px 16px;
             cursor: pointer;
@@ -86,16 +399,20 @@
             align-items: center;
             gap: 8px;
         }
-        #context-menu .item:hover { background: #4a9eff; color: #fff; }
+
+        #context-menu .item:hover {
+            background: #4a9eff;
+            color: #fff;
+        }
+
         #context-menu .separator {
             height: 1px;
             background: #444;
             margin: 4px 8px;
         }
-
-
     </style>
 </head>
+
 <body>
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
@@ -106,9 +423,12 @@
             <span class="btn-icon">🎨</span>
             <span class="btn-text">画质: 中</span>
         </button>
-        <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span class="btn-text">文件</span></button>
-        <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span class="btn-icon">👤</span><span class="btn-text">用户</span></button>
-        <a class="btn" id="btn-desktop" href="/"><span class="btn-icon">←</span><span class="btn-text">桌面</span></a>
+        <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span
+                class="btn-text">文件</span></button>
+        <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span
+                class="btn-icon">👤</span><span class="btn-text">用户</span></button>
+        <a class="btn" id="btn-desktop" href="/" target="_blank"><span class="btn-icon">←</span><span
+                class="btn-text">桌面</span></a>
         <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">
             <span class="btn-icon">⛶</span>
             <span class="btn-text">全屏</span>
@@ -194,11 +514,11 @@
 
         function updateDropdownActive() {
             const cfg = state.currentConfig;
-            document.querySelectorAll('#config-dropdown .dropdown-options').forEach(function(group) {
+            document.querySelectorAll('#config-dropdown .dropdown-options').forEach(function (group) {
                 const key = group.dataset.key;
                 if (!key) return;
                 const val = String(cfg[key]);
-                group.querySelectorAll('button').forEach(function(btn) {
+                group.querySelectorAll('button').forEach(function (btn) {
                     btn.classList.toggle('active', btn.dataset.value === val);
                 });
             });
@@ -320,8 +640,8 @@
 
         function stripAnsi(str) {
             return str.replace(/\x1B\[[?0-9;]*[a-zA-Z]/g, '')
-                      .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, '')
-                      .replace(/\x1B./g, '');
+                .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, '')
+                .replace(/\x1B./g, '');
         }
 
         function appendOutput(text, className) {
@@ -422,7 +742,7 @@
             document.removeEventListener('keydown', onKeyDown);
             document.addEventListener('keydown', onKeyDown);
             document.addEventListener('paste', onPaste);
-            document.addEventListener('compositionend', function(e) {
+            document.addEventListener('compositionend', function (e) {
                 if (e.data && e.data.length > 0) {
                     for (const ch of e.data)
                         wsSend(ch);
@@ -649,13 +969,13 @@
             ws = new WebSocket(url);
             ws.binaryType = 'arraybuffer';
 
-            ws.onopen = function() {
+            ws.onopen = function () {
                 state.ws = ws;
                 startInteractive();
                 setTimeout(wsSendResize, 200);
             };
 
-            ws.onmessage = function(e) {
+            ws.onmessage = function (e) {
                 if (typeof e.data === 'string') {
                     if (e.data.startsWith('{')) {
                         try {
@@ -664,7 +984,7 @@
                                 localEchoEnabled = cfg.localEcho;
                                 return;
                             }
-                        } catch(_) {}
+                        } catch (_) { }
                     }
                     const text = stripAnsi(e.data);
                     for (const ch of text) {
@@ -691,7 +1011,7 @@
                 }
             };
 
-            ws.onclose = function() {
+            ws.onclose = function () {
                 state.ws = null;
                 if (mode === 'interactive') {
                     appendOutput('\r\n--- 连接已关闭 ---', 'error');
@@ -699,12 +1019,12 @@
                 ws = null;
             };
 
-            ws.onerror = function() {
+            ws.onerror = function () {
                 state.ws = null;
                 ws = null;
             };
 
-            setTimeout(function() {
+            setTimeout(function () {
                 if (mode !== 'interactive') {
                     if (ws) {
                         ws.onclose = null;
@@ -770,7 +1090,7 @@
             }
         }
 
-        input.addEventListener('keydown', function(e) {
+        input.addEventListener('keydown', function (e) {
             if (e.isComposing) return;
             if (e.key === 'Enter') {
                 execCmd();
@@ -792,16 +1112,16 @@
             }
         });
 
-        window.addEventListener('resize', function() {
+        window.addEventListener('resize', function () {
             if (mode === 'interactive' && ws) {
                 wsSendResize();
             }
         });
 
         // Init
-        fetch('/api/shell/cwd').then(function(r) { return r.json(); }).then(function(d) {
+        fetch('/api/shell/cwd').then(function (r) { return r.json(); }).then(function (d) {
             if (d.cwd) updatePrompt(d.cwd);
-        }).catch(function(){});
+        }).catch(function () { });
 
         tryConnectWS();
         input.focus();
@@ -810,7 +1130,7 @@
         const ctxMenu = document.getElementById('context-menu');
         let ctxSel = '';
 
-        output.addEventListener('contextmenu', function(e) {
+        output.addEventListener('contextmenu', function (e) {
             e.preventDefault();
             ctxSel = window.getSelection().toString();
             ctxMenu.style.left = e.clientX + 'px';
@@ -820,11 +1140,11 @@
             ctxMenu.classList.add('open');
         });
 
-        document.addEventListener('click', function() {
+        document.addEventListener('click', function () {
             ctxMenu.classList.remove('open');
         });
 
-        ctxMenu.addEventListener('click', function(e) {
+        ctxMenu.addEventListener('click', function (e) {
             const item = e.target.closest('.item');
             if (!item) return;
             const action = item.dataset.action;
@@ -832,7 +1152,7 @@
             if (action === 'copy') {
                 if (!ctxSel) return;
                 if (navigator.clipboard) {
-                    navigator.clipboard.writeText(ctxSel).catch(function(){});
+                    navigator.clipboard.writeText(ctxSel).catch(function () { });
                 } else {
                     const ta = document.createElement('textarea');
                     ta.value = ctxSel;
@@ -857,7 +1177,7 @@
 
         function doPaste() {
             if (navigator.clipboard && navigator.clipboard.readText) {
-                navigator.clipboard.readText().then(function(text) {
+                navigator.clipboard.readText().then(function (text) {
                     if (text) {
                         wsSend(text);
                         if (localEchoEnabled) {
@@ -866,7 +1186,7 @@
                             renderOutput();
                         }
                     }
-                }).catch(function() {
+                }).catch(function () {
                     simulateCtrlV();
                 });
             } else {
@@ -894,13 +1214,13 @@
                     }
                 }
             }, true);
-            ta.addEventListener('blur', function() {
+            ta.addEventListener('blur', function () {
                 document.body.removeChild(ta);
             }, { once: true });
             document.dispatchEvent(new KeyboardEvent('keydown', {
                 key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true
             }));
-            setTimeout(function() {
+            setTimeout(function () {
                 if (document.body.contains(ta))
                     document.body.removeChild(ta);
             }, 500);
@@ -920,7 +1240,7 @@
         }
         function hideToolbar() {
             if (!toolbarPinned)
-                toolbarTimer = setTimeout(function() { toolbar.classList.add('hidden'); }, 600);
+                toolbarTimer = setTimeout(function () { toolbar.classList.add('hidden'); }, 600);
         }
         function togglePin() {
             toolbarPinned = !toolbarPinned;
@@ -934,8 +1254,9 @@
 
         pinBtn.addEventListener('click', togglePin);
         trigger.addEventListener('mouseenter', showToolbar);
-        toolbar.addEventListener('mouseenter', function() { clearTimeout(toolbarTimer); });
+        toolbar.addEventListener('mouseenter', function () { clearTimeout(toolbarTimer); });
         toolbar.addEventListener('mouseleave', hideToolbar);
     </script>
 </body>
+
 </html>

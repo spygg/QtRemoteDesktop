@@ -1,17 +1,24 @@
 <!-- 资源文件: :/html/index.html -->
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Qt5 远程桌面</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            background: #1a1a1a; 
-            overflow: hidden; 
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a1a;
+            overflow: hidden;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
+
         #container {
             position: relative;
             width: 100vw;
@@ -20,18 +27,20 @@
             align-items: center;
             justify-content: center;
         }
+
         #screen {
             max-width: 100%;
             max-height: 100%;
             background: #000;
-            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
         }
+
         #status {
             position: fixed;
             bottom: 10px;
             left: 10px;
             color: #0f0;
-            background: rgba(0,0,0,0.7);
+            background: rgba(0, 0, 0, 0.7);
             padding: 8px 12px;
             border-radius: 4px;
             font-size: 12px;
@@ -39,6 +48,7 @@
             z-index: 1000;
             transition: opacity 0.3s;
         }
+
         /* 工具栏：顶部居中，默认显示 */
         #toolbar {
             position: fixed;
@@ -50,19 +60,21 @@
             justify-content: center;
             gap: 2px;
             z-index: 4000;
-            background: rgba(30,30,30,0.92);
+            background: rgba(30, 30, 30, 0.92);
             border-radius: 0 0 10px 10px;
             padding: 6px 10px;
             transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
             backdrop-filter: blur(8px);
             max-width: 100vw;
             overflow-x: auto;
             -webkit-overflow-scrolling: touch;
         }
+
         #toolbar.hidden {
             transform: translateX(-50%) translateY(-100%);
         }
+
         /* 鼠标触发区域 */
         #toolbar-trigger {
             position: fixed;
@@ -72,6 +84,7 @@
             height: 6px;
             z-index: 3999;
         }
+
         #btn-pin {
             background: none;
             border: none;
@@ -82,11 +95,18 @@
             border-radius: 4px;
             transition: color 0.15s;
         }
-        #btn-pin:hover { color: #fff; }
-        #btn-pin.pinned { color: #4a9eff; }
+
+        #btn-pin:hover {
+            color: #fff;
+        }
+
+        #btn-pin.pinned {
+            color: #4a9eff;
+        }
+
         .btn {
-            background: rgba(255,255,255,0.08);
-            border: 1px solid rgba(255,255,255,0.15);
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
             color: #eee;
             padding: 6px 14px;
             border-radius: 6px;
@@ -98,19 +118,43 @@
             align-items: center;
             gap: 6px;
         }
+
         @media (max-width: 600px) {
-            #toolbar { padding: 4px 6px; gap: 1px; }
-            .btn { padding: 4px 8px; font-size: 11px; }
+            #toolbar {
+                padding: 4px 6px;
+                gap: 1px;
+            }
+
+            .btn {
+                padding: 4px 8px;
+                font-size: 11px;
+            }
+
             .btn .shortcut,
-            .btn .btn-text { display: none; }
-            #btn-pin { font-size: 12px; padding: 1px 4px; }
+            .btn .btn-text {
+                display: none;
+            }
+
+            #btn-pin {
+                font-size: 12px;
+                padding: 1px 4px;
+            }
         }
-        .btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
-        .btn.active { background: rgba(0,102,204,0.6); border-color: rgba(0,102,204,0.8); }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.18);
+            color: #fff;
+        }
+
+        .btn.active {
+            background: rgba(0, 102, 204, 0.6);
+            border-color: rgba(0, 102, 204, 0.8);
+        }
+
         .btn .shortcut {
             font-size: 10px;
-            color: rgba(255,255,255,0.4);
-            background: rgba(255,255,255,0.08);
+            color: rgba(255, 255, 255, 0.4);
+            background: rgba(255, 255, 255, 0.08);
             padding: 1px 5px;
             border-radius: 3px;
             font-family: monospace;
@@ -123,25 +167,50 @@
             top: 44px;
             left: 50%;
             transform: translateX(-50%);
-            background: rgba(30,30,30,0.97);
-            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(30, 30, 30, 0.97);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 10px;
             padding: 14px 18px;
             z-index: 1001;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
             backdrop-filter: blur(12px);
             gap: 12px;
             flex-direction: column;
             min-width: 320px;
         }
-        #config-dropdown.open { display: flex; }
-        .dropdown-section { display: flex; flex-direction: column; gap: 6px; }
-        .dropdown-title { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .dropdown-note { color: #666; font-size: 10px; margin-top: -4px; }
-        .dropdown-options { display: flex; gap: 4px; flex-wrap: wrap; }
+
+        #config-dropdown.open {
+            display: flex;
+        }
+
+        .dropdown-section {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .dropdown-title {
+            color: #888;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .dropdown-note {
+            color: #666;
+            font-size: 10px;
+            margin-top: -4px;
+        }
+
+        .dropdown-options {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+
         .dropdown-options button {
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.1);
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             color: #ccc;
             padding: 5px 12px;
             border-radius: 5px;
@@ -149,45 +218,75 @@
             font-size: 12px;
             transition: all 0.12s;
         }
-        .dropdown-options button:hover { background: rgba(255,255,255,0.14); color: #fff; }
-        .dropdown-options button.active { background: rgba(0,102,204,0.5); border-color: #4a9eff; color: #fff; }
+
+        .dropdown-options button:hover {
+            background: rgba(255, 255, 255, 0.14);
+            color: #fff;
+        }
+
+        .dropdown-options button.active {
+            background: rgba(0, 102, 204, 0.5);
+            border-color: #4a9eff;
+            color: #fff;
+        }
+
         .dropdown-overlay {
             display: none;
             position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
             z-index: 1000;
         }
-        .dropdown-overlay.open { display: block; top: 44px; }
-        
+
+        .dropdown-overlay.open {
+            display: block;
+            top: 44px;
+        }
+
         /* 远程光标 */
         #remote-cursor {
             position: fixed;
             pointer-events: none;
             z-index: 9999;
             transition: transform 0.05s linear;
-            filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.5));
+            filter: drop-shadow(1px 1px 2px rgba(0, 0, 0, 0.5));
         }
-        
+
         /* 连接断开遮罩 */
         #overlay {
             position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.8);
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
             display: none;
             align-items: center;
             justify-content: center;
             flex-direction: column;
             z-index: 2000;
         }
-        #overlay.active { display: flex; }
+
+        #overlay.active {
+            display: flex;
+        }
+
         .spinner {
-            width: 40px; height: 40px;
-            border: 3px solid rgba(255,255,255,0.3);
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
             border-top-color: #fff;
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
-        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
 
         /* 文件传输面板 */
         #file-panel {
@@ -196,24 +295,29 @@
             top: 0;
             bottom: 0;
             width: 350px;
-            background: rgba(24,24,28,0.97);
-            border-left: 1px solid rgba(255,255,255,0.1);
+            background: rgba(24, 24, 28, 0.97);
+            border-left: 1px solid rgba(255, 255, 255, 0.1);
             z-index: 1500;
             display: flex;
             flex-direction: column;
             transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             backdrop-filter: blur(12px);
         }
-        #file-panel.open { right: 0; }
+
+        #file-panel.open {
+            right: 0;
+        }
+
         #file-panel-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
             padding: 12px 16px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
             color: #eee;
             font-size: 14px;
         }
+
         #file-panel-header .close-btn {
             background: none;
             border: none;
@@ -222,42 +326,65 @@
             cursor: pointer;
             padding: 4px 8px;
         }
-        #file-panel-header .close-btn:hover { color: #fff; }
+
+        #file-panel-header .close-btn:hover {
+            color: #fff;
+        }
+
         #file-path-bar {
             display: flex;
             align-items: center;
             gap: 6px;
             padding: 8px 12px;
-            border-bottom: 1px solid rgba(255,255,255,0.06);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
         }
+
         #file-path-input {
             flex: 1;
-            background: rgba(255,255,255,0.08);
-            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             color: #eee;
             padding: 6px 10px;
             border-radius: 4px;
             font-size: 12px;
             font-family: monospace;
         }
-        #file-path-input:focus { outline: none; border-color: rgba(0,102,204,0.6); }
+
+        #file-path-input:focus {
+            outline: none;
+            border-color: rgba(0, 102, 204, 0.6);
+        }
+
         .file-action-btn {
-            background: rgba(255,255,255,0.08);
-            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             color: #ccc;
             padding: 4px 10px;
             border-radius: 4px;
             cursor: pointer;
             font-size: 11px;
         }
-        .file-action-btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
+
+        .file-action-btn:hover {
+            background: rgba(255, 255, 255, 0.18);
+            color: #fff;
+        }
+
         #file-list {
             flex: 1;
             overflow-y: auto;
             padding: 4px 0;
         }
-        #file-list::-webkit-scrollbar { width: 6px; }
-        #file-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+        #file-list::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #file-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 3px;
+        }
+
         .file-item {
             display: flex;
             align-items: center;
@@ -268,22 +395,49 @@
             font-size: 13px;
             transition: background 0.1s;
         }
-        .file-item:hover { background: rgba(255,255,255,0.08); }
-        .file-item .icon { font-size: 16px; width: 20px; text-align: center; }
-        .file-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .file-item .size { color: #888; font-size: 11px; }
+
+        .file-item:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .file-item .icon {
+            font-size: 16px;
+            width: 20px;
+            text-align: center;
+        }
+
+        .file-item .name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-item .size {
+            color: #888;
+            font-size: 11px;
+        }
+
         #file-panel-footer {
             padding: 10px 12px;
-            border-top: 1px solid rgba(255,255,255,0.1);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
             display: flex;
             gap: 8px;
         }
-        #file-upload-input, #folder-upload-input { display: none; }
+
+        #file-upload-input,
+        #folder-upload-input {
+            display: none;
+        }
+
         /* 锁屏遮罩 */
         #lock-overlay {
             position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.85);
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
             display: none;
             align-items: center;
             justify-content: center;
@@ -291,24 +445,86 @@
             z-index: 3000;
             backdrop-filter: blur(4px);
         }
-        #lock-overlay.active { display: flex; }
-        #lock-overlay { pointer-events: none; }
-        #lock-overlay .lock-input-area { pointer-events: auto; }
-        #lock-overlay .lock-icon { font-size: 64px; margin-bottom: 16px; }
-        #lock-overlay .lock-text { color: #fff; font-size: 24px; font-weight: 300; }
-        #lock-overlay .lock-hint { color: #aaa; font-size: 14px; margin-top: 8px; }
-        #lock-overlay .lock-input-area { margin-top: 24px; display: flex; gap: 8px; align-items: center; }
-        #lock-overlay .lock-input-area input { padding: 10px 16px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.1); color: #fff; font-size: 16px; width: 240px; outline: none; }
-        #lock-overlay .lock-input-area input:focus { border-color: #4a9eff; }
-        #lock-overlay .lock-input-area input::placeholder { color: rgba(255,255,255,0.4); }
-        #lock-overlay .lock-input-area button { padding: 10px 20px; border-radius: 6px; border: none; background: #4a9eff; color: #fff; font-size: 16px; cursor: pointer; }
-        #lock-overlay .lock-input-area button:hover { background: #3a8eef; }
-        #lock-overlay .lock-input-area button:disabled { opacity: 0.5; cursor: default; }
+
+        #lock-overlay.active {
+            display: flex;
+        }
+
+        #lock-overlay {
+            pointer-events: none;
+        }
+
+        #lock-overlay .lock-input-area {
+            pointer-events: auto;
+        }
+
+        #lock-overlay .lock-icon {
+            font-size: 64px;
+            margin-bottom: 16px;
+        }
+
+        #lock-overlay .lock-text {
+            color: #fff;
+            font-size: 24px;
+            font-weight: 300;
+        }
+
+        #lock-overlay .lock-hint {
+            color: #aaa;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+
+        #lock-overlay .lock-input-area {
+            margin-top: 24px;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        #lock-overlay .lock-input-area input {
+            padding: 10px 16px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 16px;
+            width: 240px;
+            outline: none;
+        }
+
+        #lock-overlay .lock-input-area input:focus {
+            border-color: #4a9eff;
+        }
+
+        #lock-overlay .lock-input-area input::placeholder {
+            color: rgba(255, 255, 255, 0.4);
+        }
+
+        #lock-overlay .lock-input-area button {
+            padding: 10px 20px;
+            border-radius: 6px;
+            border: none;
+            background: #4a9eff;
+            color: #fff;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        #lock-overlay .lock-input-area button:hover {
+            background: #3a8eef;
+        }
+
+        #lock-overlay .lock-input-area button:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
         #transfer-status {
             position: fixed;
             bottom: 40px;
             left: 10px;
-            background: rgba(0,0,0,0.85);
+            background: rgba(0, 0, 0, 0.85);
             color: #0f0;
             padding: 8px 14px;
             border-radius: 6px;
@@ -317,13 +533,14 @@
             z-index: 2000;
             display: none;
         }
+
         /* 传输监视器 */
         #transfer-monitor {
             position: fixed;
             bottom: 80px;
             left: 10px;
-            background: rgba(0,0,0,0.88);
-            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(0, 0, 0, 0.88);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 8px;
             padding: 10px 14px;
             color: #eee;
@@ -333,16 +550,24 @@
             min-width: 300px;
             display: none;
             backdrop-filter: blur(8px);
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
         }
-        #transfer-monitor.active { display: block; }
+
+        #transfer-monitor.active {
+            display: block;
+        }
+
         #transfer-monitor-header {
             display: flex;
             align-items: center;
             gap: 8px;
             margin-bottom: 6px;
         }
-        #transfer-monitor-icon { font-size: 16px; }
+
+        #transfer-monitor-icon {
+            font-size: 16px;
+        }
+
         #transfer-monitor-name {
             flex: 1;
             overflow: hidden;
@@ -350,13 +575,15 @@
             white-space: nowrap;
             color: #fff;
         }
+
         #transfer-monitor-bar {
             height: 6px;
-            background: rgba(255,255,255,0.12);
+            background: rgba(255, 255, 255, 0.12);
             border-radius: 3px;
             overflow: hidden;
             margin-bottom: 4px;
         }
+
         #transfer-monitor-fill {
             height: 100%;
             width: 0%;
@@ -364,12 +591,14 @@
             border-radius: 3px;
             transition: width 0.2s;
         }
+
         #transfer-monitor-stats {
             display: flex;
             justify-content: space-between;
             color: #aaa;
             font-size: 11px;
         }
+
         #transfer-monitor-cancel {
             background: none;
             border: none;
@@ -378,12 +607,17 @@
             font-size: 14px;
             padding: 0 4px;
         }
-        #transfer-monitor-cancel:hover { color: #f00; }
+
+        #transfer-monitor-cancel:hover {
+            color: #f00;
+        }
     </style>
 </head>
+
 <body>
+
     <div id="status" style="display:none"></div>
-    
+
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
         <button id="btn-pin" title="固定工具栏">📌</button>
@@ -391,16 +625,19 @@
             <span class="btn-icon">🎨</span>
             <span class="btn-text">画质: 中</span>
         </button>
-        <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span class="btn-text">文件</span></button>
-        <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span class="btn-icon">👤</span><span class="btn-text">用户</span></button>
-        <a class="btn" id="btn-shell" href="/shell" target="_blank"><span class="btn-icon">🔧</span><span class="btn-text">Shell</span></a>
+        <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span
+                class="btn-text">文件</span></button>
+        <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span
+                class="btn-icon">👤</span><span class="btn-text">用户</span></button>
+        <a class="btn" id="btn-shell" href="/shell" target="_blank"><span class="btn-icon">🔧</span><span
+                class="btn-text">Shell</span></a>
         <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">
             <span class="btn-icon">⛶</span>
             <span class="btn-text">全屏</span>
             <span class="shortcut">F11</span>
         </button>
     </div>
-    
+
     <!-- 配置下拉菜单遮罩 -->
     <div id="config-overlay" class="dropdown-overlay" onclick="toggleConfigDropdown()"></div>
     <!-- 配置下拉菜单 -->
@@ -441,9 +678,11 @@
     <div id="container">
         <canvas id="screen"></canvas>
     </div>
-    
-    <img id="remote-cursor" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' stroke='%23000' stroke-width='1' d='M0 0l6.5 19.5L10 12l7.5 2.5z'/%3E%3C/svg%3E" style="display:none;">
-    
+
+    <img id="remote-cursor"
+        src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' stroke='%23000' stroke-width='1' d='M0 0l6.5 19.5L10 12l7.5 2.5z'/%3E%3C/svg%3E"
+        style="display:none;">
+
     <div id="overlay">
         <div class="spinner"></div>
         <p style="color:#fff;margin-top:16px;">连接中...</p>
@@ -456,14 +695,18 @@
             <button class="close-btn" onclick="toggleFilePanel()">✕</button>
         </div>
         <div id="file-path-bar">
-            <input type="text" id="file-path-input" value="/" onkeydown="if(event.isComposing||event.key!=='Enter')return;navigateTo(this.value)">
-            <button class="file-action-btn" onclick="navigateTo(document.getElementById('file-path-input').value)">跳转</button>
+            <input type="text" id="file-path-input" value="/"
+                onkeydown="if(event.isComposing||event.key!=='Enter')return;navigateTo(this.value)">
+            <button class="file-action-btn"
+                onclick="navigateTo(document.getElementById('file-path-input').value)">跳转</button>
             <button class="file-action-btn" onclick="refreshFileList()">刷新</button>
         </div>
         <div id="file-list"></div>
         <div id="file-panel-footer" style="flex-direction:column;gap:4px">
-            <button class="file-action-btn" onclick="document.getElementById('file-upload-input').click()">⬆ 上传文件</button>
-            <button class="file-action-btn" onclick="document.getElementById('folder-upload-input').click()">⬆ 上传文件夹</button>
+            <button class="file-action-btn" onclick="document.getElementById('file-upload-input').click()">⬆
+                上传文件</button>
+            <button class="file-action-btn" onclick="document.getElementById('folder-upload-input').click()">⬆
+                上传文件夹</button>
             <input type="file" id="file-upload-input" multiple onchange="handleFileUpload(this.files)">
             <input type="file" id="folder-upload-input" webkitdirectory onchange="handleFileUpload(this.files)">
         </div>
@@ -488,7 +731,9 @@
             <span id="transfer-monitor-name"></span>
             <button id="transfer-monitor-cancel" onclick="cancelCurrentTransfer()" title="取消">✕</button>
         </div>
-        <div id="transfer-monitor-bar"><div id="transfer-monitor-fill"></div></div>
+        <div id="transfer-monitor-bar">
+            <div id="transfer-monitor-fill"></div>
+        </div>
         <div id="transfer-monitor-stats">
             <span id="transfer-monitor-progress">0%</span>
             <span id="transfer-monitor-speed">0 KB/s</span>
@@ -571,7 +816,7 @@
                     // 从关键帧提取 extradata (简化处理)
                     this.configure(new Uint8Array(0));
                 }
-                
+
                 if (!this.configured) return;
 
                 const chunk = new EncodedVideoChunk({
@@ -585,7 +830,7 @@
 
             handleFrame(frame) {
                 // 自适应画布尺寸
-                if (state.canvas.width !== frame.displayWidth || 
+                if (state.canvas.width !== frame.displayWidth ||
                     state.canvas.height !== frame.displayHeight) {
                     state.canvas.width = frame.displayWidth;
                     state.canvas.height = frame.displayHeight;
@@ -595,7 +840,7 @@
                 // 高性能渲染
                 state.ctx.drawImage(frame, 0, 0);
                 frame.close();
-                
+
                 updateFps();
             }
         }
@@ -617,10 +862,10 @@
                 if (state.showFps) updateStatus('🟢 已连接');
                 else updateStatus('');
                 overlay.classList.remove('active');
-                
+
                 // 初始化解码器
                 state.decoder = new H264Decoder();
-                
+
                 // 发送认证
                 send({ type: 'auth', version: '1.0' });
             };
@@ -732,7 +977,7 @@
         }
 
         function handleJson(msg) {
-            switch(msg.type) {
+            switch (msg.type) {
                 case 'screen_info':
                     state.screenWidth = msg.width;
                     state.screenHeight = msg.height;
@@ -747,9 +992,9 @@
                     updateRemoteCursor(msg.x, msg.y);
                     break;
                 case 'codec_config':
-                        const extra = Uint8Array.from(atob(msg.extradata), c => c.charCodeAt(0));
-                        if (state.decoder) state.decoder.configure(extra);
-                        break;
+                    const extra = Uint8Array.from(atob(msg.extradata), c => c.charCodeAt(0));
+                    if (state.decoder) state.decoder.configure(extra);
+                    break;
                 case 'file_list':
                     if (msg.items) renderFileList(msg.items);
                     if (msg.path) {
@@ -897,13 +1142,13 @@
             let lastMove = 0;
             canvas.addEventListener('mousemove', (e) => {
                 const now = performance.now();
-                if (now - lastMove < 1000/60) return; // 60Hz 节流
+                if (now - lastMove < 1000 / 60) return; // 60Hz 节流
                 lastMove = now;
 
                 const pos = getCanvasPos(e);
                 state.mouseX = pos.x;
                 state.mouseY = pos.y;
-                
+
                 send({
                     type: 'mousemove',
                     x: Math.round(pos.x),
@@ -978,7 +1223,7 @@
                 // 防止远程输入重复
                 e.preventDefault();
                 if (state.keysPressed.has(e.code)) return;
-                
+
                 state.keysPressed.add(e.code);
                 send({
                     type: 'keydown',
@@ -1016,7 +1261,7 @@
 
             // 防止右键菜单
             canvas.addEventListener('contextmenu', e => e.preventDefault());
-            
+
             // 剪贴板同步
             window.addEventListener('paste', (e) => {
                 const text = e.clipboardData.getData('text');
@@ -1214,9 +1459,9 @@
 
         function formatSize(bytes) {
             if (bytes < 1024) return bytes + ' B';
-            if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
-            if (bytes < 1024*1024*1024) return (bytes/1024/1024).toFixed(1) + ' MB';
-            return (bytes/1024/1024/1024).toFixed(2) + ' GB';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+            return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
         }
 
         function parentDir(path) {
@@ -1252,8 +1497,8 @@
                 container.appendChild(item);
             }
             // Dirs first, then files
-            const dirs = items.filter(i => i.isDir).sort((a,b) => a.name.localeCompare(b.name));
-            const files = items.filter(i => !i.isDir).sort((a,b) => a.name.localeCompare(b.name));
+            const dirs = items.filter(i => i.isDir).sort((a, b) => a.name.localeCompare(b.name));
+            const files = items.filter(i => !i.isDir).sort((a, b) => a.name.localeCompare(b.name));
             for (const item of dirs) {
                 const fullPath = joinPath(currentRemotePath, item.name);
                 const div = document.createElement('div');
@@ -1430,4 +1675,5 @@
         window.onbeforeunload = () => '确定要断开远程桌面连接吗？';
     </script>
 </body>
+
 </html>
