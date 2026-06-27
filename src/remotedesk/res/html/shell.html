@@ -691,15 +691,22 @@
                                 cursorPos = termBuf.length;
                                 renderOutput();
                             } else if (ch === '\r') {
-                                // ignore
+                                if (!localEchoEnabled) {
+                                    cursorPos = termBuf.lastIndexOf('\n') + 1;
+                                }
                             } else if (ch === '\n') {
                                 termBuf += '\n';
                                 cursorPos = termBuf.length;
                                 if (localEchoEnabled) interactiveCmdBuf = '';
                                 renderOutput();
                             } else if (ch >= ' ') {
-                                termBuf += ch;
-                                cursorPos = termBuf.length;
+                                if (!localEchoEnabled && cursorPos < termBuf.length) {
+                                    termBuf = termBuf.substring(0, cursorPos) + ch + termBuf.substring(cursorPos + 1);
+                                    cursorPos++;
+                                } else {
+                                    termBuf += ch;
+                                    cursorPos = termBuf.length;
+                                }
                                 if (localEchoEnabled) updateCmdBuf();
                                 renderOutput();
                             }
