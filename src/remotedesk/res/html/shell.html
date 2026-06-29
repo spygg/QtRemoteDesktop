@@ -260,6 +260,7 @@
             let interactiveCmdBuf = '';      // 当前行命令（不含提示符）
             let localEchoEnabled = false;
             let cursorPos = 0;               // 在 termBuf 中的光标位置
+            let compHandler = null;          // compositionend 处理器引用
 
             const output = document.getElementById('output');
             const input = document.getElementById('cmd-input');
@@ -377,7 +378,7 @@
                         binary += String.fromCharCode(0xE0 | (code>>12));
                         binary += String.fromCharCode(0x80 | ((code>>6)&0x3F));
                         binary += String.fromCharCode(0x80 | (code&0x3F));
-                    } else {
+                    } else if (i + 1 < str.length) {
                         i++;
                         code = 0x10000 + ((code-0xD800)<<10) + (str.charCodeAt(i)-0xDC00);
                         binary += String.fromCharCode(0xF0 | (code>>18));
@@ -630,8 +631,10 @@
 
                 document.removeEventListener('keydown', onKeyDown);
                 document.addEventListener('keydown', onKeyDown);
+                document.removeEventListener('paste', onPaste);
                 document.addEventListener('paste', onPaste);
-                document.addEventListener('compositionend', function(e) {
+                if (compHandler) document.removeEventListener('compositionend', compHandler);
+                compHandler = function(e) {
                     if (e.data && e.data.length > 0) {
                         for (const ch of e.data) wsSend(ch);
                         if (localEchoEnabled) {
@@ -726,9 +729,10 @@
                 setTimeout(function() {
                     if (mode !== 'interactive') {
                         if (ws) { ws.onclose=null; ws.close(); ws=null; }
+                        appendOutput('\nWebSocket 连接超时，降级为 one-shot 模式\n', 'info');
                         startOneShot();
                     }
-                }, 2000);
+                }, 8000);
             }
 
             function startOneShot() {
