@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 2.8)
 
 find_package(QT NAMES Qt5 Qt6 REQUIRED COMPONENTS  Core Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS  Core Network)
@@ -42,6 +42,6 @@ target_compile_definitions(${MODULE} PUBLIC GUIWIDGET)
 # 如果 需要 MOC 处理（有 Q_OBJECT 宏），确保继承父目录设置
 set_target_properties(${MODULE} PROPERTIES
     AUTOMOC ON
-    CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON  # Windows静态库符号导出，避免链接问题
+    CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 

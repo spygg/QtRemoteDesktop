@@ -253,6 +253,8 @@ bool InputManager::initUinput()
     for (int i = 1; i <= 126; i++)
         ioctl(fd, UI_SET_KEYBIT, i);
 
+#ifdef UI_DEV_SETUP
+    // 新版 uinput API (内核 ≥ 4.x)
     struct uinput_setup usetup = {};
     usetup.id.bustype = BUS_USB;
     usetup.id.vendor = 0x1234;
@@ -264,6 +266,21 @@ bool InputManager::initUinput()
         close(fd);
         return false;
     }
+#else
+    // 旧版 uinput API (RHEL 7 / CentOS 7)
+    struct uinput_user_dev usetup;
+    memset(&usetup, 0, sizeof(usetup));
+    usetup.id.bustype = BUS_USB;
+    usetup.id.vendor = 0x1234;
+    usetup.id.product = 0x5678;
+    snprintf(usetup.name, sizeof(usetup.name), "QtRemoteDesktop Virtual Keyboard");
+
+    if (write(fd, &usetup, sizeof(usetup)) < 0) {
+        qWarning() << "InputManager: uinput write failed";
+        close(fd);
+        return false;
+    }
+#endif
 
     if (ioctl(fd, UI_DEV_CREATE) < 0) {
         qWarning() << "InputManager: uinput UI_DEV_CREATE failed";
