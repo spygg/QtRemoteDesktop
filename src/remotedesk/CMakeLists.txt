@@ -133,7 +133,7 @@ elseif(APPLE)
 elseif(UNIX AND NOT APPLE AND NOT ANDROID)
         find_package(X11 REQUIRED)
         target_link_libraries(InputManager PUBLIC ${X11_LIBRARIES} Xtst)
-        target_link_libraries(ScreenCapturer PUBLIC ${X11_LIBRARIES} Xtst Xdamage Xcomposite Xrender)
+        target_link_libraries(ScreenCapturer PUBLIC ${X11_LIBRARIES} Xtst Xdamage Xcomposite Xrender Xfixes)
 endif()
 
 if(WIN32)

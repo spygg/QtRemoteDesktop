@@ -58,6 +58,7 @@ int HelperProcess::run(int argc, char* argv[])
     bool screenInfoSent = false;
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
+        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
         if (!screenInfoSent) {
             screenInfoSent = true;
             QJsonObject info;
@@ -73,6 +74,7 @@ int HelperProcess::run(int argc, char* argv[])
         });
     QObject::connect(&ws, &QWebSocket::disconnected, &app, [&]() {
         qWarning() << "Helper WS disconnected (helper may have crashed), retrying in 3s...";
+        SetThreadExecutionState(ES_CONTINUOUS);
         QTimer::singleShot(3000, [&]() {
             ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
         });
@@ -314,6 +316,9 @@ int HelperProcess::run(int argc, char* argv[])
         }
     }
 
+    QObject::connect(&app, &QGuiApplication::aboutToQuit, [&]() {
+        SetThreadExecutionState(ES_CONTINUOUS);
+    });
     return app.exec();
 #else
     (void)argc; (void)argv;

@@ -64,7 +64,7 @@ void JpegCompressor::enqueue(const QImage& frame)
     QMutexLocker locker(&mutex_);
     if (queue_.size() >= kMaxQueueSize)
         queue_.dequeue();
-    queue_.enqueue(frame.copy());
+    queue_.enqueue(frame);
     cond_.wakeOne();
 }
 

@@ -41,6 +41,7 @@ void ScreenCapturer::cleanupPlatform()
 #include <X11/extensions/Xcomposite.h>
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xrender.h>
+#include <X11/extensions/Xfixes.h>
 
 // 安装 X11 错误处理函数，阻止 BadMatch 等异步 X 错误导致 abort() 崩溃
 static int (*s_oldXErrorHandler)(Display*, XErrorEvent*) = nullptr;
@@ -96,6 +97,18 @@ public:
 
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
+        if (damageSupported_) {
+            XserverRegion region = XFixesCreateRegion(display_, nullptr, 0);
+            XDamageSubtract(display_, damage_, None, region);
+            XRectangle extents;
+            XFixesFetchRegion(display_, region, &extents);
+            XFixesDestroyRegion(display_, region);
+            if (extents.width == 0 && extents.height == 0) {
+                if (updated) *updated = false;
+                return true;
+            }
+        }
+
         if (updated) *updated = true;
 
         XImage* ximage = XGetImage(display_, rootWindow_, 0, 0, width_, height_, AllPlanes, ZPixmap);
@@ -121,9 +134,7 @@ public:
 
     void resetDamage() override
     {
-        if (damageSupported_) {
-            XDamageSubtract(display_, damage_, None, None);
-        }
+        // Damage already subtracted in captureFrame(), no-op
     }
 
     int width() const { return width_; }
@@ -170,7 +181,8 @@ void ScreenCapturer::captureFrame()
 {
     QImage frame;
     if (useX11_ && x11Capturer_) {
-        if (!x11Capturer_->captureFrame(frame)) {
+        bool updated = true;
+        if (!x11Capturer_->captureFrame(frame, &updated)) {
             captureFailCount_++;
             if (captureFailCount_ >= 5 && !screenLocked_) {
                 screenLocked_ = true;
@@ -179,6 +191,9 @@ void ScreenCapturer::captureFrame()
             return;
         }
         captureFailCount_ = 0;
+
+        if (!updated)
+            return;
 
         if (isFrameBlack(frame)) {
             if (!screenLocked_) {
@@ -206,7 +221,6 @@ void ScreenCapturer::captureFrame()
         lastFrameChecksum_ = checksum;
 
         emit frameCaptured(frame);
-        x11Capturer_->resetDamage();
         return;
     }
 
