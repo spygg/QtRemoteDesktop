@@ -100,10 +100,20 @@ public:
         if (damageSupported_) {
             XserverRegion region = XFixesCreateRegion(display_, nullptr, 0);
             XDamageSubtract(display_, damage_, None, region);
-            XRectangle extents;
-            XFixesFetchRegion(display_, region, &extents);
+            int rectCount = 0;
+            XRectangle* rects = XFixesFetchRegion(display_, region, &rectCount);
+            bool empty = true;
+            if (rects) {
+                for (int i = 0; i < rectCount; ++i) {
+                    if (rects[i].width > 0 && rects[i].height > 0) {
+                        empty = false;
+                        break;
+                    }
+                }
+                XFree(rects);
+            }
             XFixesDestroyRegion(display_, region);
-            if (extents.width == 0 && extents.height == 0) {
+            if (empty) {
                 if (updated) *updated = false;
                 return true;
             }
