@@ -284,7 +284,10 @@ bin\QtRemoteDesktop.exe --uninstall
     "console": false,
     "fps": 30,
     "quality": 60,
-    "scale": 75
+    "scale": 75,
+    "users": {
+        "admin": "2923be84e16cd6ae529049f1f1bbe9eb:3400f2e7a3b6612bf40e6762b7d40a9ac64217fb4e039cf953c5b17f9ae071e7"
+    }
 }
 ```
 

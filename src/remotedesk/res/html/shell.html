@@ -431,7 +431,11 @@
                 if (e.key === 'Enter') {
                     e.preventDefault();
                     const cmdText = interactiveCmdBuf.trim().toLowerCase();
-                    if (cmdText === 'cls' || cmdText === 'clear') {
+                    // PTY 模式也从 termBuf 当前行检测 clear/cls
+                    const lines = termBuf.split('\n');
+                    const currentLine = lines[lines.length - 1] || '';
+                    const cmdFromLine = currentLine.replace(/^.*?[$#>]\s*/, '').trim().toLowerCase();
+                    if (cmdText === 'cls' || cmdText === 'clear' || cmdFromLine === 'cls' || cmdFromLine === 'clear') {
                         clearOutput();
                         interactiveCmdBuf = '';
                         return;
@@ -646,7 +650,8 @@
                             renderOutput();
                         }
                     }
-                });
+                };
+                document.addEventListener('compositionend', compHandler);
             }
 
             // ----- WebSocket 连接 -----
