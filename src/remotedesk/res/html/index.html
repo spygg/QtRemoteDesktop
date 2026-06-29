@@ -813,8 +813,8 @@
 
             decode(data, isKeyframe, timestamp) {
                 if (!this.configured && isKeyframe) {
-                    // 从关键帧提取 extradata (简化处理)
-                    this.configure(new Uint8Array(0));
+                    // Annex B 格式含内联 SPS/PPS，无需 extradata
+                    this.configured = true;
                 }
 
                 if (!this.configured) return;
@@ -992,8 +992,11 @@
                     updateRemoteCursor(msg.x, msg.y);
                     break;
                 case 'codec_config':
-                    const extra = Uint8Array.from(atob(msg.extradata), c => c.charCodeAt(0));
-                    if (state.decoder) state.decoder.configure(extra);
+                    if (msg.extradata && state.decoder) {
+                        const extra = Uint8Array.from(atob(msg.extradata), c => c.charCodeAt(0));
+                        if (extra.byteLength > 0)
+                            state.decoder.configure(extra);
+                    }
                     break;
                 case 'file_list':
                     if (msg.items) renderFileList(msg.items);

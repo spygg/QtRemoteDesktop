@@ -6,6 +6,7 @@
 #include <QMutex>
 #include <QObject>
 #include <QQueue>
+#include <QString>
 #include <QThread>
 #include <QWaitCondition>
 #include <atomic>
@@ -14,6 +15,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
@@ -54,6 +56,9 @@ private:
     AVCodecContext* codecCtx_ = nullptr;
     AVFrame* frame_ = nullptr;
     SwsContext* swsCtx_ = nullptr;
+    AVPixelFormat pixFmt_ = AV_PIX_FMT_YUV420P;
+    AVBufferRef* hwDeviceCtx_ = nullptr;
+    QString hwName_;
     int64_t frameCount_ = 0;
     qint64 startTime_ = 0;
     int fps_ = 30;

@@ -1,15 +1,8 @@
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-if(USE_FFMPEG)
-    if(WIN32)
-        set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thridparty/ffmpeg/windows")
-    elseif(UNIX AND NOT APPLE AND NOT ANDROID)
-        set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thridparty/ffmpeg/linux")
-    endif()
-    set(FFMPEG_INCLUDE_DIRS "${FFMPEG_ROOT}/include")
-    set(FFMPEG_LIBRARIES "${FFMPEG_ROOT}/lib")
-    link_directories(${FFMPEG_LIBRARIES})
+if(FFMPEG_FOUND)
+    include_directories(${FFMPEG_INCLUDE_DIRS})
 endif()
 
 find_package(QT NAMES Qt5 Qt6 REQUIRED COMPONENTS Core Gui Widgets Network WebSockets)
@@ -45,7 +38,7 @@ add_subdirectory(thridparty/startup)
 add_subdirectory(thridparty/systemsleepblocker)
 
 # ---- Video encoder (optional) ----
-if(USE_FFMPEG)
+if(FFMPEG_FOUND)
     add_subdirectory(server/videoencoder)
 endif()
 
@@ -87,29 +80,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/server
 )
 
-if(USE_FFMPEG)
-    target_include_directories(${PROJECT_NAME} PRIVATE ${FFMPEG_INCLUDE_DIRS})
+if(FFMPEG_FOUND)
     target_compile_definitions(${PROJECT_NAME} PRIVATE USE_FFMPEG)
     target_link_libraries(${PROJECT_NAME} PRIVATE VideoEncoder)
-    if(WIN32)
-        if(MSVC)
-            target_link_libraries(${PROJECT_NAME} PRIVATE
-                ${FFMPEG_LIBRARIES}/avcodec.lib
-                ${FFMPEG_LIBRARIES}/avutil.lib
-                ${FFMPEG_LIBRARIES}/swscale.lib
-            )
-        else()
-            target_link_libraries(${PROJECT_NAME} PRIVATE
-                ${FFMPEG_LIBRARIES}/libavcodec.a
-                ${FFMPEG_LIBRARIES}/libavutil.a
-                ${FFMPEG_LIBRARIES}/libswscale.a
-            )
-        endif()
-    elseif(UNIX AND NOT APPLE AND NOT ANDROID)
-        target_link_libraries(${PROJECT_NAME} PRIVATE
-            -L${FFMPEG_LIBRARIES} -lavcodec -lavutil -lswscale
-        )
-    endif()
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES})
 endif()
 
 if(POLICY CMP0079)
@@ -140,6 +114,12 @@ if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
     if(MSVC)
         set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "/MANIFEST:NO")
+        # Qt5: qtmain provides WinMain for /SUBSYSTEM:WINDOWS
+        if(QT_VERSION_MAJOR EQUAL 6)
+            target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::EntryPointPrivate)
+        else()
+            target_link_libraries(${PROJECT_NAME} PRIVATE Qt5::WinMain)
+        endif()
     endif()
 endif()
 
