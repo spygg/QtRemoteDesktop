@@ -34,7 +34,7 @@ add_subdirectory(server/singleapplication)
 add_subdirectory(server/helper_process)
 add_subdirectory(server/secure_input_process)
 add_subdirectory(server/service)
-add_subdirectory(thridparty/startup)
+# add_subdirectory(thridparty/startup)
 add_subdirectory(thridparty/systemsleepblocker)
 
 # ---- Video encoder (optional) ----
@@ -70,7 +70,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ScreenCapturer
     WebsocketServer
     SingleApp
-    StartUp
+    # StartUp
     SystemSleepBlocker
     Service
 )

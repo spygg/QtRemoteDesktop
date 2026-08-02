@@ -3,7 +3,7 @@
 #include "screencapturer.h"
 #include "service/service.h"
 #include "singleapplication.h"
-#include "startup.h"
+// #include "startup.h"
 #include "systemsleepblocker.h"
 
 #include <QCommandLineParser>

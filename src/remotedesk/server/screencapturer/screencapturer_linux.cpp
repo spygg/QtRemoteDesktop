@@ -9,22 +9,10 @@
 
 static bool isFrameBlack(const QImage& frame)
 {
-    if (frame.isNull() || frame.width() < 10 || frame.height() < 10)
-        return true;
-    int pixelSize = frame.depth() / 8;
-    if (pixelSize < 3) return true;
-    int sampleCount = 0;
-    int darkCount = 0;
-    int step = qMax(1, qMin(frame.width(), frame.height()) / 10);
-    for (int y = 0; y < frame.height(); y += step) {
-        const uchar* line = frame.constScanLine(y);
-        for (int x = 0; x < frame.width(); x += step) {
-            sampleCount++;
-            if (line[x * pixelSize] + line[x * pixelSize + 1] + line[x * pixelSize + 2] < 18)
-                darkCount++;
-        }
-    }
-    return sampleCount > 0 && (darkCount * 100 / sampleCount) > 90;
+    // 该启发式函数原用于检测锁屏/黑屏界面，但深色桌面主题会误判。
+    // 暂时禁用，避免正常桌面被当作黑屏而不发送画面。
+    Q_UNUSED(frame)
+    return false;
 }
 
 void ScreenCapturer::cleanupPlatform()
@@ -62,6 +50,7 @@ class X11Capturer : public PlatformCapturer {
     Damage damage_;
     XserverRegion region_;
     bool damageSupported_ = false;
+    int emptyDamageCount_ = 0; // 连续空 damage 计数，用于 xrdp 等驱动无 damage 时回退全量捕获
 
 public:
     bool initialize() override
@@ -114,8 +103,13 @@ public:
             }
             XFixesDestroyRegion(display_, region);
             if (empty) {
-                if (updated) *updated = false;
-                return true;
+                // xrdp 等部分 Xorg 驱动不会通过 Damage 报告变化，连续空 damage 时回退到全量捕获
+                if (++emptyDamageCount_ < 3) {
+                    if (updated) *updated = false;
+                    return true;
+                }
+            } else {
+                emptyDamageCount_ = 0;
             }
         }
 
