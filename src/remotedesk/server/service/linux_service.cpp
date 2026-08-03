@@ -335,25 +335,46 @@ int LinuxService::run(int argc, char* argv[])
 
     // 立即启动捕获（无 X 时必然失败，但会设置 captureAvailable_ = false）
     // 这样前端在无头环境下就会显示 shell 页面，而非远程桌面
-    if (!server.startCapture()) {
-        QTimer* checkTimer = new QTimer(&app);
-        QObject::connect(checkTimer, &QTimer::timeout, [checkTimer, &server]() {
-            if (server.isCaptureConnected()) {
-                checkTimer->stop();
-                return;
-            }
-            if (detectUserX11Env()) {
-                qInfo() << "Linux service: display detected, starting capture";
-                {   const char* d = getenv("DISPLAY");
-                    const char* a = getenv("XAUTHORITY");
-                    qInfo() << "  DISPLAY =" << (d ? d : "(null)")
-                            << "XAUTHORITY =" << (a ? a : "(null)"); }
-                server.startCapture();
-                checkTimer->stop();
-            }
-        });
-        checkTimer->start(2000);
-    }
+    server.startCapture();
+
+    // 持续监控 capture 健康状态。当 capture 不可用或持续锁屏（说明当前选中的
+    // display 已失效，例如服务启动时只有 GDM greeter，之后 xrdp 会话才出现）
+    // 时，重新探测 display 环境；若探测到的 display 与当前不同则重启 capture，
+    // 从而自动跟随实际活跃的桌面会话。
+    QTimer* checkTimer = new QTimer(&app);
+    QObject::connect(checkTimer, &QTimer::timeout, [checkTimer, &server]() {
+        // 健康（已连接且未锁屏）则不干预
+        if (server.isCaptureConnected() && !server.isScreenLocked())
+            return;
+
+        // 不健康：记录当前 display，重新探测
+        QByteArray prevDisplay;
+        if (const char* d = getenv("DISPLAY")) prevDisplay = d;
+
+        if (!detectUserX11Env())
+            return;  // 仍无任何 display
+
+        const char* newDpy = getenv("DISPLAY");
+        if (newDpy && QByteArray(newDpy) != prevDisplay) {
+            // display 变化（例如 :1024 GDM → :10 xrdp），重启 capture 切换会话
+            qInfo() << "Linux service: display changed" << prevDisplay << "->" << newDpy
+                    << ", restarting capture";
+            const char* a = getenv("XAUTHORITY");
+            qInfo() << "  DISPLAY =" << newDpy
+                    << "XAUTHORITY =" << (a ? a : "(null)");
+            server.restartCapture();
+        } else if (!server.isCaptureConnected()) {
+            // display 未变但 capture 尚未启动（首次探测到 display）
+            qInfo() << "Linux service: display detected, starting capture";
+            {   const char* d = getenv("DISPLAY");
+                const char* a = getenv("XAUTHORITY");
+                qInfo() << "  DISPLAY =" << (d ? d : "(null)")
+                        << "XAUTHORITY =" << (a ? a : "(null)"); }
+            server.startCapture();
+        }
+        // display 未变且 capture 已连接（但锁屏）：保持现状，等待更优 display 出现
+    });
+    checkTimer->start(3000);
 
     return app.exec();
 }

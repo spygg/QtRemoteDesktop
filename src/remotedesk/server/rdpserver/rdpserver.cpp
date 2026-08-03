@@ -1389,6 +1389,21 @@ bool RDPServer::isCaptureConnected() const
     return screenCapturer_ != nullptr && captureAvailable_;
 }
 
+bool RDPServer::restartCapture()
+{
+    // Tear down the existing capturer (drops the X11 connection / Display*),
+    // then start fresh so the new ScreenCapturer picks up the current DISPLAY /
+    // XAUTHORITY environment. Used when the active X session changes at runtime
+    // (e.g. xrdp session appears after the service started on the GDM greeter).
+    if (screenCapturer_) {
+        screenCapturer_->stop();
+        screenCapturer_.reset();  // ~ScreenCapturer() -> cleanupPlatform()
+    }
+    captureAvailable_ = false;
+    screenLocked_ = false;
+    return startCapture();
+}
+
 void RDPServer::onClientConnected(const QString& clientId)
 {
     // Validate auth token

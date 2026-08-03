@@ -68,8 +68,10 @@ public:
     bool initialize(const QString& configPath = QString(), bool useSslOverride = true, bool serviceMode = false);
     void start();
     bool startCapture();
+    bool restartCapture();
     bool isCaptureConnected() const;
     bool isCaptureSourceConnected() const;
+    bool isScreenLocked() const { return screenLocked_; }
 
     void loadSslConfig();
 private slots:
