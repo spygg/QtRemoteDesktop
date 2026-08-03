@@ -11,6 +11,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <pwd.h>
 #include <unistd.h>
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
@@ -60,15 +61,79 @@ static const char* findEnv(const char* env, size_t envSize, const char* key, siz
     return nullptr;
 }
 
-// Find DISPLAY and XAUTHORITY from any running process
+// Read the real UID of a process from /proc/<pid>/status. Returns -1 on failure.
+static int readProcUid(const char* pid)
+{
+    char statusPath[64];
+    snprintf(statusPath, sizeof(statusPath), "/proc/%s/status", pid);
+    FILE* f = fopen(statusPath, "r");
+    if (!f) return -1;
+    char line[256];
+    int uid = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "Uid:", 4) == 0) {
+            // Format: "Uid:\t<real>\t<eff>\t<saved>\t<fs>"
+            sscanf(line + 4, "%d", &uid);
+            break;
+        }
+    }
+    fclose(f);
+    return uid;
+}
+
+// Score a (DISPLAY, XAUTHORITY, uid) candidate. Higher = more likely a real
+// user desktop session rather than a greeter / login screen.
+//   - uid >= 1000  → real user session (+100); gdm(42) → greeter (-100)
+//   - DISPLAY ":N" with N < 100  → classic Xorg session (+50)
+//   - DISPLAY ":N" with N >= 1000 → Xwayland greeter (-50)
+//   - XAUTHORITY under /home/    → user session (+30)
+//   - XAUTHORITY under /run/user/42 → gdm greeter (-30)
+static int scoreCandidate(const char* display, const char* xauth, int uid)
+{
+    int score = 0;
+    if (uid >= 1000) score += 100;
+    else if (uid == 42) score -= 100;
+
+    if (display && display[0] == ':') {
+        int n = atoi(display + 1);
+        if (n < 100) score += 50;
+        else if (n >= 1000) score -= 50;
+    }
+
+    if (xauth) {
+        if (strstr(xauth, "/home/")) score += 30;
+        if (strstr(xauth, "/run/user/42")) score -= 30;
+    }
+    return score;
+}
+
+// Find DISPLAY and XAUTHORITY from any running process.
+// Collects all candidates and picks the one most likely to be a real user
+// desktop session (not the GDM greeter / login screen).
 static bool detectUserX11Env()
 {
     if (getenv("DISPLAY") && getenv("DISPLAY")[0])
         return true;
 
-    // ── Pass 1: find XAUTHORITY from ANY process ──
-    char xauthBuf[4096] = {};
-    bool xauthFound = false;
+    // Aggregate candidates per-DISPLAY. A single display is usually owned by
+    // several processes; only some of them carry XAUTHORITY (e.g. the Xorg
+    // process is started with `-auth` rather than the env var). So we keep the
+    // best score per display and merge any non-empty XAUTHORITY seen for it.
+    struct DisplayEntry {
+        char display[64];
+        char xauth[1024];
+        int uid;
+        int score;
+    };
+    DisplayEntry entries[32];
+    int entryCount = 0;
+
+    for (int i = 0; i < 32; ++i) {
+        entries[i].display[0] = '\0';
+        entries[i].xauth[0] = '\0';
+        entries[i].uid = -1;
+        entries[i].score = -1000000;
+    }
 
     DIR* proc = opendir("/proc");
     if (proc) {
@@ -86,46 +151,70 @@ static bool detectUserX11Env()
             size_t envSize = 0;
             char* env = readProcEnv(pid, &envSize);
             if (!env) continue;
-            const char* xa = findEnv(env, envSize, "XAUTHORITY=", 11);
-            if (xa && xa[0] && !xauthFound) {
-                strncpy(xauthBuf, xa, sizeof(xauthBuf) - 1);
-                xauthFound = true;
-            }
-            free(env);
-        }
-        rewinddir(proc);
-
-        // ── Pass 2: find DISPLAY from any process ──
-        while ((entry = readdir(proc)) != nullptr) {
-            if (!isPidDir(entry)) continue;
-            const char* pid = entry->d_name;
-            if (!pid[0]) continue;
-            bool allDigits = true;
-            for (const char* p = pid; *p; ++p) {
-                if (*p < '0' || *p > '9') { allDigits = false; break; }
-            }
-            if (!allDigits) continue;
-
-            size_t envSize = 0;
-            char* env = readProcEnv(pid, &envSize);
-            if (!env) continue;
             const char* dpy = findEnv(env, envSize, "DISPLAY=", 8);
             if (dpy && dpy[0]) {
-                setenv("DISPLAY", dpy, 1);
-                if (xauthFound)
-                    setenv("XAUTHORITY", xauthBuf, 1);
-                free(env);
-                closedir(proc);
-                return true;
+                const char* xa = findEnv(env, envSize, "XAUTHORITY=", 11);
+                int uid = readProcUid(pid);
+                int sc = scoreCandidate(dpy, xa, uid);
+
+                int idx = -1;
+                for (int i = 0; i < entryCount; ++i) {
+                    if (strcmp(entries[i].display, dpy) == 0) { idx = i; break; }
+                }
+                if (idx < 0 && entryCount < 32) {
+                    idx = entryCount++;
+                    strncpy(entries[idx].display, dpy, sizeof(entries[idx].display) - 1);
+                    entries[idx].display[sizeof(entries[idx].display) - 1] = '\0';
+                }
+                if (idx >= 0) {
+                    if (sc > entries[idx].score) {
+                        entries[idx].score = sc;
+                        entries[idx].uid = uid;
+                    }
+                    // Prefer a non-empty XAUTHORITY, especially under /home/.
+                    if (xa && xa[0]) {
+                        if (entries[idx].xauth[0] == '\0' || strstr(xa, "/home/")) {
+                            strncpy(entries[idx].xauth, xa, sizeof(entries[idx].xauth) - 1);
+                            entries[idx].xauth[sizeof(entries[idx].xauth) - 1] = '\0';
+                        }
+                    }
+                }
             }
             free(env);
         }
         closedir(proc);
     }
 
-    // XAUTHORITY found but no DISPLAY process — still useful
-    if (xauthFound) {
-        setenv("XAUTHORITY", xauthBuf, 1);
+    // Pick the display with the highest score.
+    int bestIdx = -1;
+    for (int i = 0; i < entryCount; ++i) {
+        if (bestIdx < 0 || entries[i].score > entries[bestIdx].score)
+            bestIdx = i;
+    }
+
+    if (bestIdx >= 0) {
+        setenv("DISPLAY", entries[bestIdx].display, 1);
+        if (entries[bestIdx].xauth[0]) {
+            setenv("XAUTHORITY", entries[bestIdx].xauth, 1);
+        } else if (entries[bestIdx].uid >= 1000) {
+            // No XAUTHORITY env var on any process for this display. The
+            // session almost certainly relies on the default $HOME/.Xauthority
+            // (xrdp starts Xorg with `-auth .Xauthority`). Resolve the home
+            // dir from the uid directly — more reliable than scanning /home.
+            struct passwd* pw = getpwuid(entries[bestIdx].uid);
+            if (pw && pw->pw_dir && pw->pw_dir[0]) {
+                char path[1024];
+                snprintf(path, sizeof(path), "%s/.Xauthority", pw->pw_dir);
+                if (access(path, R_OK) == 0)
+                    setenv("XAUTHORITY", path, 1);
+            }
+        }
+        qInfo() << "detectUserX11Env: selected DISPLAY =" << entries[bestIdx].display
+                << "XAUTHORITY =" << (getenv("XAUTHORITY") ? getenv("XAUTHORITY") : "(none)")
+                << "uid =" << entries[bestIdx].uid << "score =" << entries[bestIdx].score
+                << "candidates =" << entryCount;
+        // Do NOT return yet: if XAUTHORITY is still empty, fall through to the
+        // well-known-path / /home/*/.Xauthority fallback below.
     }
 
     // ── Fallback DISPLAY: common X socket paths ──
