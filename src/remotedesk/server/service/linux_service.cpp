@@ -112,8 +112,11 @@ static int scoreCandidate(const char* display, const char* xauth, int uid)
 // desktop session (not the GDM greeter / login screen).
 static bool detectUserX11Env()
 {
-    if (getenv("DISPLAY") && getenv("DISPLAY")[0])
-        return true;
+    // 注意：不做“DISPLAY 已设置就直接返回”的短路处理。服务若在用户登录前启动，
+    // 可能早已选定 GDM greeter 的 display（如 :1024），一旦短路就永远不会重新
+    // 扫描 /proc，也就无法在真实用户会话出现后自动切换过去 —— 以前只能靠
+    // `systemctl restart remotedesk` 清空 DISPLAY 才恢复。现在每次都重新扫描，
+    // 并以当前 display 为基线，只有发现更优会话时才切换（见下文基线逻辑）。
 
     // Aggregate candidates per-DISPLAY. A single display is usually owned by
     // several processes; only some of them carry XAUTHORITY (e.g. the Xorg
@@ -124,6 +127,7 @@ static bool detectUserX11Env()
         char xauth[1024];
         int uid;
         int score;
+        bool confirmed; // 有活进程真正在使用该 display，而非基线占位
     };
     DisplayEntry entries[32];
     int entryCount = 0;
@@ -133,6 +137,29 @@ static bool detectUserX11Env()
         entries[i].xauth[0] = '\0';
         entries[i].uid = -1;
         entries[i].score = -1000000;
+        entries[i].confirmed = false;
+    }
+
+    // 基线：把当前已选中的 DISPLAY 作为占位候选放入，保证健康会话不会被轻易
+    // 切走。它只是占位（confirmed=false），只有扫描到该 display 的真实进程后
+    // 才会被确认（confirmed=true），分数也会被合并逻辑更新为实际得分。这样：
+    //   - 服务若在用户登录前启动、先选中了 GDM greeter（负分），一旦真实用户
+    //     会话出现（正分 > 0），就会自动切换过去，无需 systemctl restart；
+    //   - 若当前 display 已死亡（无任何进程），占位不会被确认，就不会靠 0 分
+    //     压过其他真实会话，从而避免停留在死会话上。
+    const char* curDpy = getenv("DISPLAY");
+    const char* curXauth = getenv("XAUTHORITY");
+    if (curDpy && curDpy[0]) {
+        DisplayEntry& base = entries[entryCount++];
+        strncpy(base.display, curDpy, sizeof(base.display) - 1);
+        base.display[sizeof(base.display) - 1] = '\0';
+        if (curXauth && curXauth[0]) {
+            strncpy(base.xauth, curXauth, sizeof(base.xauth) - 1);
+            base.xauth[sizeof(base.xauth) - 1] = '\0';
+        }
+        base.uid = -1;
+        base.score = 0;
+        base.confirmed = false;
     }
 
     DIR* proc = opendir("/proc");
@@ -167,6 +194,7 @@ static bool detectUserX11Env()
                     entries[idx].display[sizeof(entries[idx].display) - 1] = '\0';
                 }
                 if (idx >= 0) {
+                    entries[idx].confirmed = true;
                     if (sc > entries[idx].score) {
                         entries[idx].score = sc;
                         entries[idx].uid = uid;
@@ -185,14 +213,29 @@ static bool detectUserX11Env()
         closedir(proc);
     }
 
-    // Pick the display with the highest score.
+    // Pick the display with the highest score, preferring confirmed (live)
+    // sessions over the unconfirmed current-display baseline. This way a
+    // baseline whose display has died cannot win by its placeholder score 0.
     int bestIdx = -1;
     for (int i = 0; i < entryCount; ++i) {
+        if (!entries[i].confirmed) continue;
         if (bestIdx < 0 || entries[i].score > entries[bestIdx].score)
             bestIdx = i;
     }
+    // 没有任何活进程使用任何 display（例如纯无头），仍保留当前已选中的 display。
+    if (bestIdx < 0 && curDpy && curDpy[0]) {
+        bestIdx = 0; // 基线占位
+    }
 
     if (bestIdx >= 0) {
+        // 记录调用前的值，仅在实际发生变化时输出日志，避免每 3 秒刷屏
+        char prevDpy[64] = {};
+        char prevXauth[1024] = {};
+        const char* oldD = getenv("DISPLAY");
+        const char* oldA = getenv("XAUTHORITY");
+        if (oldD) { strncpy(prevDpy, oldD, sizeof(prevDpy) - 1); prevDpy[sizeof(prevDpy) - 1] = '\0'; }
+        if (oldA) { strncpy(prevXauth, oldA, sizeof(prevXauth) - 1); prevXauth[sizeof(prevXauth) - 1] = '\0'; }
+
         setenv("DISPLAY", entries[bestIdx].display, 1);
         if (entries[bestIdx].xauth[0]) {
             setenv("XAUTHORITY", entries[bestIdx].xauth, 1);
@@ -209,10 +252,15 @@ static bool detectUserX11Env()
                     setenv("XAUTHORITY", path, 1);
             }
         }
-        qInfo() << "detectUserX11Env: selected DISPLAY =" << entries[bestIdx].display
-                << "XAUTHORITY =" << (getenv("XAUTHORITY") ? getenv("XAUTHORITY") : "(none)")
-                << "uid =" << entries[bestIdx].uid << "score =" << entries[bestIdx].score
-                << "candidates =" << entryCount;
+        const char* newD = getenv("DISPLAY");
+        const char* newA = getenv("XAUTHORITY");
+        if (strcmp(prevDpy, newD) != 0 ||
+            strcmp(prevXauth, newA ? newA : "") != 0) {
+            qInfo() << "detectUserX11Env: selected DISPLAY =" << entries[bestIdx].display
+                    << "XAUTHORITY =" << (newA ? newA : "(none)")
+                    << "uid =" << entries[bestIdx].uid << "score =" << entries[bestIdx].score
+                    << "candidates =" << entryCount;
+        }
         // Do NOT return yet: if XAUTHORITY is still empty, fall through to the
         // well-known-path / /home/*/.Xauthority fallback below.
     }
@@ -337,17 +385,14 @@ int LinuxService::run(int argc, char* argv[])
     // 这样前端在无头环境下就会显示 shell 页面，而非远程桌面
     server.startCapture();
 
-    // 持续监控 capture 健康状态。当 capture 不可用或持续锁屏（说明当前选中的
-    // display 已失效，例如服务启动时只有 GDM greeter，之后 xrdp 会话才出现）
-    // 时，重新探测 display 环境；若探测到的 display 与当前不同则重启 capture，
-    // 从而自动跟随实际活跃的桌面会话。
+    // 持续监控 display 环境。detectUserX11Env 现在每次都会重新扫描 /proc，
+    // 并以当前 display 为基线：只有当出现更优的真实用户会话（confirmed 且分数
+    // 更高，例如 GDM greeter :1024 → 用户桌面 :0）时才切换 DISPLAY。因此这里
+    // 不能再像以前那样“健康（已连接且未锁屏）就直接 return”，否则服务停在
+    // greeter 上时永远注意不到之后出现的真实会话，只能靠 systemctl restart 恢复。
     QTimer* checkTimer = new QTimer(&app);
     QObject::connect(checkTimer, &QTimer::timeout, [checkTimer, &server]() {
-        // 健康（已连接且未锁屏）则不干预
-        if (server.isCaptureConnected() && !server.isScreenLocked())
-            return;
-
-        // 不健康：记录当前 display，重新探测
+        // 记录当前 display，重新探测
         QByteArray prevDisplay;
         if (const char* d = getenv("DISPLAY")) prevDisplay = d;
 
@@ -372,7 +417,7 @@ int LinuxService::run(int argc, char* argv[])
                         << "XAUTHORITY =" << (a ? a : "(null)"); }
             server.startCapture();
         }
-        // display 未变且 capture 已连接（但锁屏）：保持现状，等待更优 display 出现
+        // display 未变且 capture 已连接（健康或锁屏）：保持现状，等待更优 display 出现
     });
     checkTimer->start(3000);
 

@@ -24,6 +24,7 @@ endif()
 
 # ---- Sub-module static libraries ----
 add_subdirectory(server/authmanager)
+add_subdirectory(server/clipboardservice)
 add_subdirectory(server/filetransferservice)
 add_subdirectory(server/inputmanger)
 add_subdirectory(server/rdpserver)

@@ -1,0 +1,7 @@
+set(CLIPBOARD_SERVICE Clipboardservice)
+set(HEADERS clipboardservice.h)
+set(SOURCES clipboardservice.cpp)
+add_library(${CLIPBOARD_SERVICE} STATIC ${HEADERS} ${SOURCES})
+target_include_directories(${CLIPBOARD_SERVICE} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui)
+target_link_libraries(${CLIPBOARD_SERVICE} PUBLIC Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui)

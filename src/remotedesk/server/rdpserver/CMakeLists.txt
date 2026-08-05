@@ -17,4 +17,5 @@ target_link_libraries(${RDP_SERVER} PUBLIC
     InteractiveShell
     ScreenCapturer
     FileTransferService
+    Clipboardservice
 )

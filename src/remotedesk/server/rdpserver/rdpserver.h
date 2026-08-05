@@ -23,6 +23,7 @@ class WebSocketServer;
 class ScreenCapturer;
 class AuthManager;
 class FileTransferService;
+class ClipboardService;
 
 #ifdef USE_FFMPEG
 class VideoEncoder;
@@ -138,6 +139,7 @@ private:
 
     std::unique_ptr<InputManager> inputManager_;
     std::unique_ptr<JpegCompressor> jpegCompressor_;
+    std::unique_ptr<ClipboardService> clipboardService_;
 
     AuthManager* authManager_ = nullptr;
     FileTransferService* fileTransferService_ = nullptr;

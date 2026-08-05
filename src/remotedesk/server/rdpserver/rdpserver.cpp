@@ -1,6 +1,7 @@
 // server/rdp_server.cpp
 #include "rdpserver.h"
 #include "authmanager.h"
+#include "clipboardservice.h"
 #include "filetransferservice.h"
 #include "inputmanager.h"
 #include "screencapturer.h"
@@ -318,6 +319,17 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         this, &RDPServer::onClientDisconnected);
     connect(wsServer_.get(), &WebSocketServer::inputReceived,
         this, &RDPServer::onInputReceived);
+
+    // 剪贴板服务：系统剪贴板变化 → 广播给所有客户端
+    clipboardService_ = std::unique_ptr<ClipboardService>(new ClipboardService(this));
+    clipboardService_->start();
+    connect(clipboardService_.get(), &ClipboardService::textChanged,
+        this, [this](const QString& text) {
+            wsServer_->broadcastJson(QJsonObject {
+                { "type", "clipboard" },
+                { "text", text },
+            });
+        });
 
     connect(wsServer_.get(), &WebSocketServer::modeChangeRequested,
         this, &RDPServer::onModeChangeRequested);
@@ -1426,6 +1438,17 @@ void RDPServer::onClientConnected(const QString& clientId)
         wsServer_->sendToCaptureSource(msg);
     }
 
+    // 发送当前剪贴板内容（若有）
+    if (clipboardService_) {
+        QString clipText = clipboardService_->text();
+        if (!clipText.isEmpty()) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "clipboard" },
+                { "text", clipText },
+            });
+        }
+    }
+
     // 发送屏幕分辨率
     if (screenCapturer_) {
         QJsonObject info;
@@ -1507,6 +1530,13 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 {
     // config 和 set_resolution 需要在 service mode 转发前先本地处理
     QString type = input["type"].toString();
+
+    if (type == "clipboard") {
+        // 浏览器 → 服务端：写入系统剪贴板
+        if (clipboardService_)
+            clipboardService_->setTextFromClient(input["text"].toString());
+        return;
+    }
 
     if (serviceMode_) {
         if (wsServer_->isCaptureSourceConnected()) {
