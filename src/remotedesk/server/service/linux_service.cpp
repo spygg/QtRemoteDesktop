@@ -339,7 +339,7 @@ int LinuxService::install(int argc, char* argv[])
     fprintf(f, "After=network.target\n\n");
     fprintf(f, "[Service]\n");
     fprintf(f, "Type=simple\n");
-    fprintf(f, "ExecStart=%s --service\n", exePath);
+    fprintf(f, "ExecStart=%s.sh --service\n", exePath);
     fprintf(f, "Restart=on-failure\n");
     fprintf(f, "RestartSec=5\n\n");
     fprintf(f, "[Install]\n");
