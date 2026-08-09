@@ -38,7 +38,9 @@ void WinInteractiveShell::start()
     connect(proc_, &QProcess::readyReadStandardOutput, this, [this]() {
         QByteArray data = proc_->readAllStandardOutput();
         if (!data.isEmpty())
-            ws_->sendTextMessage(QString::fromLocal8Bit(data));
+            // cmd 输出按本地代码页字节接收，转成 UTF-8 后用二进制帧发送，
+            // 使前端 xterm 按 UTF-8 渲染，避免多字节字符乱码
+            ws_->sendBinaryMessage(QString::fromLocal8Bit(data).toUtf8());
     });
     connect(proc_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this]() { ws_->close(); });

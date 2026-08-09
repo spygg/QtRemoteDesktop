@@ -4,6 +4,7 @@
 #include "screencapturer.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QDataStream>
 #include <QDir>
 #include <QFile>
@@ -114,6 +115,28 @@ int HelperProcess::run(int argc, char* argv[])
     qInfo() << "Helper: starting desktop polling, isWin7 =" << isWin7 << "isWinXP =" << isWinXP;
 
     InputManager inputMgr;
+
+    // 共享剪贴板：监听用户会话剪贴板变化，去抖后上报给服务端（服务端广播给所有客户端）
+    QString lastClipText;
+    QTimer* clipTimer = new QTimer(&app);
+    clipTimer->setSingleShot(true);
+    clipTimer->setInterval(150);
+    QObject::connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, &app, [&]() {
+        clipTimer->start();
+    });
+    QObject::connect(clipTimer, &QTimer::timeout, &app, [&]() {
+        QString t = QGuiApplication::clipboard()->text();
+        if (t.isEmpty() || t == lastClipText)
+            return;
+        lastClipText = t;
+        if (ws.state() != QAbstractSocket::ConnectedState)
+            return;
+        QJsonObject msg;
+        msg["type"] = "clipboard";
+        msg["text"] = t;
+        ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
+    });
+
     QObject::connect(&ws, &QWebSocket::textMessageReceived, &app,
         [&](const QString& msg) {
             QJsonParseError err;
@@ -131,6 +154,14 @@ int HelperProcess::run(int argc, char* argv[])
                 } else if (action == "resume") {
                     qInfo() << "Helper: capture resume requested";
                     capturer.resume();
+                    // 客户端接入：上报当前剪贴板文本，让新客户端拿到初始状态
+                    QString t = QGuiApplication::clipboard()->text();
+                    if (!t.isEmpty()) {
+                        QJsonObject c;
+                        c["type"] = "clipboard";
+                        c["text"] = t;
+                        ws.sendTextMessage(QString::fromUtf8(QJsonDocument(c).toJson(QJsonDocument::Compact)));
+                    }
                 }
                 return;
             }
@@ -166,6 +197,23 @@ int HelperProcess::run(int argc, char* argv[])
                     err["type"] = "error";
                     err["message"] = QString("分辨率 %1x%2 切换失败").arg(w).arg(h);
                     ws.sendTextMessage(QString::fromUtf8(QJsonDocument(err).toJson(QJsonDocument::Compact)));
+                }
+                return;
+            }
+
+            if (type == "clipboard") {
+                // 客户端粘贴 → 写入用户会话剪贴板，并在远端注入一次 Ctrl+V
+                QString text = obj["text"].toString();
+                if (text.isEmpty())
+                    return;
+                QClipboard* cb = QGuiApplication::clipboard();
+                if (cb)
+                    cb->setText(text);
+                lastClipText = text;  // 避免监听到自己的写入后重复上报
+                if (!locked) {
+                    inputMgr.injectKeyboard(86, "KeyV", true, true, false, false, false, false);
+                    inputMgr.injectKeyboard(86, "KeyV", false, true, false, false, false, false);
+                    inputMgr.updateModifiers(false, false, false);
                 }
                 return;
             }

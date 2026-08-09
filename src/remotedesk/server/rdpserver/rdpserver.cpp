@@ -918,6 +918,36 @@ void RDPServer::onHttpRequest()
         return;
     }
 
+    // Static vendor assets (xterm.js 等)，免鉴权。JS/CSS 为静态库文件，与登录态无关
+    if (path.startsWith("/vendor/")) {
+        QString vendorRel = path.mid(1);
+        int qIdx = vendorRel.indexOf('?');
+        if (qIdx >= 0)
+            vendorRel = vendorRel.left(qIdx);
+        if (!vendorRel.contains("..") && !vendorRel.endsWith('/')) {
+            QFile vendorFile(QString(":/res/%1").arg(vendorRel));
+            if (vendorFile.open(QIODevice::ReadOnly)) {
+                QString mime = "application/octet-stream";
+                if (vendorRel.endsWith(".js"))
+                    mime = "application/javascript; charset=utf-8";
+                else if (vendorRel.endsWith(".css"))
+                    mime = "text/css; charset=utf-8";
+                else if (vendorRel.endsWith(".png"))
+                    mime = "image/png";
+                QByteArray vendorResp = buildHttpResponse(200, "OK", mime, vendorFile.readAll());
+                socket->write(vendorResp);
+                socket->flush();
+                socket->disconnectFromHost();
+                return;
+            }
+        }
+        QByteArray nfResp = buildHttpResponse(404, "Not Found", "text/plain; charset=utf-8", "Not Found");
+        socket->write(nfResp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
     // 无屏幕捕获（无头模式）→ 免登录，直接使用
     bool skipAuth = !captureAvailable_ && (path == "/" || path == "/shell" || path.startsWith("/shell?") || path == "/api/shell/cwd" || path == "/api/shell/exec" || path.startsWith("/api/shell/exec?"));
 
@@ -1532,9 +1562,31 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     QString type = input["type"].toString();
 
     if (type == "clipboard") {
-        // 浏览器 → 服务端：写入系统剪贴板
-        if (clipboardService_)
-            clipboardService_->setTextFromClient(input["text"].toString());
+        if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
+            // 服务模式：剪贴板在用户会话的 helper 进程中读写，转发给 helper；
+            // 同时广播给所有客户端（含发送者），让多端剪贴板保持一致，发送者前端按内容去重
+            wsServer_->sendToCaptureSource(QJsonObject {
+                { "type", "clipboard" },
+                { "text", input["text"].toString() },
+            });
+            wsServer_->broadcastJson(QJsonObject {
+                { "type", "clipboard" },
+                { "text", input["text"].toString() },
+            });
+            return;
+        }
+        // 直接模式：浏览器粘贴/同步 → 写入远端系统剪贴板，并在远端触发一次 Ctrl+V 粘贴
+        if (clipboardService_) {
+            QString text = input["text"].toString();
+            if (clipboardService_->setTextFromClient(text)) {
+                // 广播给所有客户端（含发送者），保持多端一致；发送者前端按内容去重
+                wsServer_->broadcastJson(QJsonObject {
+                    { "type", "clipboard" },
+                    { "text", text },
+                });
+                injectPasteShortcut();
+            }
+        }
         return;
     }
 
@@ -1707,6 +1759,39 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             err["message"] = QString("分辨率 %1x%2 切换失败").arg(w).arg(h);
             wsServer_->sendJson(clientId, err);
         }
+    }
+}
+
+void RDPServer::injectPasteShortcut()
+{
+    // 远端剪贴板已写入浏览器发来的文本后，注入一次 Ctrl+V 让聚焦的远端应用完成粘贴
+    QJsonObject down {
+        { "type", "keydown" },
+        { "keycode", 86 },      // V
+        { "code", "KeyV" },
+        { "ctrl", true },
+        { "alt", false },
+        { "shift", false },
+        { "meta", false },
+        { "isChar", false },
+    };
+    QJsonObject up {
+        { "type", "keyup" },
+        { "keycode", 86 },
+        { "code", "KeyV" },
+    };
+
+    if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
+        // 服务模式：由 helper 进程注入
+        wsServer_->sendToCaptureSource(down);
+        wsServer_->sendToCaptureSource(up);
+        if (screenLocked_ && secureInputRunning_)
+            wsServer_->sendToSecureInput(down);
+    } else if (!serviceMode_ && inputManager_) {
+        // 直接模式：本进程注入
+        inputManager_->injectKeyboard(86, "KeyV", true, true, false, false, false, false);
+        inputManager_->injectKeyboard(86, "KeyV", false, true, false, false, false, false);
+        inputManager_->updateModifiers(false, false, false); // 释放 Ctrl
     }
 }
 

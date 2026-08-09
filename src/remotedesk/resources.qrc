@@ -4,6 +4,9 @@
         <file>res/html/login.html</file>
         <file>res/html/user-management.html</file>
         <file>res/html/shell.html</file>
+        <file>res/vendor/xterm.js</file>
+        <file>res/vendor/xterm.css</file>
+        <file>res/vendor/xterm-fit.js</file>
         <file>res/sslperm/cacert.crt</file>
         <file>res/sslperm/privkey.pem</file>
         <file>res/main.png</file>

@@ -179,6 +179,7 @@ private:
     void saveServerConfig(const QString& configPath);
     void startSecureInputProcess();
     void stopSecureInputProcess();
+    void injectPasteShortcut();
 
 public:
     static QStringList getLocalIpAddr();

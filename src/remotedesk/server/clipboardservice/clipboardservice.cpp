@@ -3,18 +3,23 @@
 #include <QClipboard>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QTimer>
 
 ClipboardService::ClipboardService(QObject* parent)
     : QObject(parent)
 {
+    debounceTimer_ = new QTimer(this);
+    debounceTimer_->setSingleShot(true);
+    debounceTimer_->setInterval(150);
+    connect(debounceTimer_, &QTimer::timeout, this, &ClipboardService::flushPending);
 }
 
 ClipboardService::~ClipboardService() = default;
 
 void ClipboardService::start()
 {
-    // 无 QGuiApplication（如 Windows 服务仅创建 QCoreApplication）时，
-    // QGuiApplication::clipboard() 返回的指针无效，访问会崩溃。
+    // No QGuiApplication (e.g. Windows service runs as QCoreApplication only):
+    // QGuiApplication::clipboard() would return an invalid pointer. Bail out.
     if (!qobject_cast<QGuiApplication*>(QCoreApplication::instance())) {
         qWarning("ClipboardService: no QGuiApplication, clipboard disabled");
         return;
@@ -28,7 +33,7 @@ void ClipboardService::start()
     connect(clipboard, &QClipboard::dataChanged,
         this, &ClipboardService::onClipboardChanged);
 
-    // 推送当前剪贴板内容作为初始状态
+    // Push current clipboard content as initial state
     QString t = clipboard->text();
     if (!t.isEmpty() && t != lastText_) {
         lastText_ = t;
@@ -46,27 +51,35 @@ QString ClipboardService::text() const
 
 void ClipboardService::onClipboardChanged()
 {
-    if (!available_)
-        return;
+    // A single copy action can fire dataChanged several times;
+    // buffer the value and debounce so we only report the final content.
     QClipboard* clipboard = QGuiApplication::clipboard();
     if (!clipboard)
         return;
-    QString t = clipboard->text();
-    if (t.isEmpty() || t == lastText_)
-        return;
-    lastText_ = t;
-    emit textChanged(t);
+    pendingText_ = clipboard->text();
+    debounceTimer_->start();
 }
 
-void ClipboardService::setTextFromClient(const QString& text)
+void ClipboardService::flushPending()
 {
-    if (!available_ || text.isEmpty() || text == lastText_)
+    if (pendingText_.isEmpty() || pendingText_ == lastText_)
         return;
+    lastText_ = pendingText_;
+    emit textChanged(pendingText_);
+}
+
+bool ClipboardService::setTextFromClient(const QString& text)
+{
+    if (!available_ || text.isEmpty())
+        return false;
+    // 先更新 lastText_ 再写入，setText 触发的 dataChanged 会被 flushPending 抑制，避免回声
+    lastText_ = text;
+    pendingText_.clear();
     QClipboard* clipboard = QGuiApplication::clipboard();
     if (!clipboard)
-        return;
-    // 先记录，避免 setText 触发的 dataChanged 又被广播回去
-    lastText_ = text;
+        return false;
     clipboard->setText(text);
-    emit textChanged(text);
+    // 即使文本与当前剪贴板相同也返回 true：客户端主动粘贴必须触发一次远端 Ctrl+V，
+    // 否则"远端复制→本地同步→再粘贴回远端"的场景会被去重吞掉
+    return true;
 }

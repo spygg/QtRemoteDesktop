@@ -23,6 +23,7 @@ public:
     void injectMouseButton(int x, int y, int button, bool isDown);
     void injectWheel(int delta);
     void injectKeyboard(int keycode, const QString &code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback = false, bool isChar = false);
+    void updateModifiers(bool ctrl, bool alt, bool shift);
 
 
 
@@ -34,7 +35,6 @@ public:
 #endif
 
 private:
-    void updateModifiers(bool ctrl, bool alt, bool shift);
     void sendModifierEvent(int vk, bool isDown);
 
 

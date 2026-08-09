@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>远程桌面 - Shell</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
     <style>
         /* ====== 样式完全保留（与之前一致） ====== */
         * { margin:0; padding:0; box-sizing:border-box; }
@@ -30,12 +31,19 @@
         .dropdown-options button.active { background:rgba(0,102,204,0.5); border-color:#4a9eff; color:#fff; }
         .dropdown-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; z-index:1000; }
         .dropdown-overlay.open { display:block; top:44px; }
+        /* 交互式终端宿主（xterm.js 渲染区） */
+        #term-host { position:absolute; top:44px; bottom:52px; left:0; right:0; background:#111; overflow:hidden; }
+        #term-host.hidden { display:none; }
+        #term-host .xterm { height:100%; width:100%; }
+        /* one-shot 模式输出区 */
         #output { position:absolute; top:44px; bottom:52px; left:0; right:0; overflow-y:auto; padding:12px 16px; font-size:13px; line-height:1.4; white-space:pre-wrap; word-break:break-all; background:#111; font-family:'Consolas','Courier New',monospace; }
+        #output.hidden { display:none; }
         #output .stdout { color:#ccc; }
         #output .stderr { color:#f55; }
         #output .error { color:#f55; font-weight:bold; }
         #output .info { color:#888; }
-        #prompt-line { position:fixed; bottom:0; left:0; right:0; z-index:100; display:flex; align-items:center; padding:8px 16px; background:#222; border-top:1px solid #333; gap:8px; }
+        #prompt-line { position:fixed; bottom:0; left:0; right:0; z-index:100; display:none; align-items:center; padding:8px 16px; background:#222; border-top:1px solid #333; gap:8px; }
+        #prompt-line.visible { display:flex; }
         #prompt-label { color:#4a9eff; font-size:13px; user-select:none; white-space:pre; }
         #cmd-input { flex:1; background:#111; border:1px solid #333; border-radius:4px; padding:8px 12px; color:#eee; font-family:'Consolas','Courier New',monospace; font-size:13px; outline:none; }
         #cmd-input:focus { border-color:#4a9eff; }
@@ -46,8 +54,6 @@
         #btn-clear { background:#444; color:#ccc; }
         #btn-clear:hover { background:#555; }
         #btn-exec:disabled { opacity:0.5; cursor:default; }
-        #cursor { display:inline; animation:blink 1s step-end infinite; }
-        @keyframes blink { 50% { opacity:0; } }
         #context-menu { display:none; position:fixed; background:#2a2a2a; border:1px solid #444; border-radius:6px; padding:4px 0; min-width:140px; z-index:9999; box-shadow:0 4px 16px rgba(0,0,0,0.5); font-family:'Consolas','Courier New',monospace; font-size:13px; }
         #context-menu.open { display:block; }
         #context-menu .item { padding:6px 16px; cursor:pointer; color:#ccc; display:flex; align-items:center; gap:8px; }
@@ -108,6 +114,9 @@
         </div>
     </div>
 
+    <!-- 交互式终端（xterm.js 真实 VT 模拟，支持 vim/top 等全屏程序） -->
+    <div id="term-host" class="hidden"></div>
+
     <div id="output"><div class="info">正在连接...</div></div>
 
     <div id="prompt-line">
@@ -125,6 +134,8 @@
         <div class="item" data-action="clear">🗑️ 清屏</div>
     </div>
 
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/xterm-fit.js"></script>
     <script>
         // ==================== 所有脚本在 DOM 加载完成后执行 ====================
         document.addEventListener('DOMContentLoaded', function() {
@@ -254,14 +265,13 @@
             let historyIdx = -1;
             let running = false;
             let cwd = '';
-            let mode = 'oneshot';
+            let mode = 'connecting';       // 'connecting' | 'interactive' | 'oneshot'
             let ws = null;
-            let termBuf = '';                // 完整屏幕缓冲区
-            let interactiveCmdBuf = '';      // 当前行命令（不含提示符）
-            let localEchoEnabled = false;
-            let cursorPos = 0;               // 在 termBuf 中的光标位置
-            let compHandler = null;          // compositionend 处理器引用
+            let term = null;
+            let fitAddon = null;
+            let interactiveStarted = false;
 
+            const termHost = document.getElementById('term-host');
             const output = document.getElementById('output');
             const input = document.getElementById('cmd-input');
             const btnExec = document.getElementById('btn-exec');
@@ -269,13 +279,28 @@
             const promptLabel = document.getElementById('prompt-label');
             const ctxMenu = document.getElementById('context-menu');
 
-            // ----- 辅助函数 -----
-            function stripAnsi(str) {
-                return str.replace(/\x1B\[[?0-9;]*[a-zA-Z]/g, '')
-                    .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, '')
-                    .replace(/\x1B./g, '');
+            // ----- 模式切换 -----
+            function setMode(m) {
+                mode = m;
+                if (m === 'interactive') {
+                    termHost.classList.remove('hidden');
+                    output.classList.add('hidden');
+                    promptLine().classList.remove('visible');
+                } else {
+                    termHost.classList.add('hidden');
+                    output.classList.remove('hidden');
+                    if (m === 'oneshot') {
+                        promptLine().classList.add('visible');
+                        input.style.display = '';
+                        btnExec.style.display = '';
+                    } else {
+                        promptLine().classList.remove('visible');
+                    }
+                }
             }
+            function promptLine() { return document.getElementById('prompt-line'); }
 
+            // ----- 辅助函数 -----
             function appendOutput(text, className) {
                 const div = document.createElement('div');
                 div.className = className || 'stdout';
@@ -286,83 +311,14 @@
 
             function clearOutput() {
                 output.innerHTML = '';
-                termBuf = '';
-                cursorPos = 0;
-                interactiveCmdBuf = '';
-                if (mode === 'interactive' && ws && ws.readyState === WebSocket.OPEN) {
-                    wsSend('\n');  // 让服务器输出新提示符
+                if (term && mode === 'interactive') {
+                    term.clear();
                 }
-                renderOutput();
             }
 
             function updatePrompt(newCwd) {
                 if (newCwd) cwd = newCwd;
                 promptLabel.textContent = cwd ? cwd + ' $' : '$';
-            }
-
-            // 从当前行提取提示符和命令
-            function getPromptAndCmd() {
-                const lineStart = termBuf.lastIndexOf('\n') + 1;
-                const line = termBuf.substring(lineStart);
-                const match = line.match(/^(.*?)([$#>])\s*/);
-                if (match) {
-                    const prompt = match[1] + match[2] + ' ';
-                    const cmd = line.substring(match[0].length);
-                    return { prompt, cmd };
-                }
-                return { prompt: '', cmd: line };
-            }
-
-            function updateCmdBuf() {
-                const { cmd } = getPromptAndCmd();
-                interactiveCmdBuf = cmd;
-            }
-
-            function renderOutput() {
-                if (mode === 'interactive') {
-                    let html = '';
-                    for (let i = 0; i < termBuf.length; i++) {
-                        if (i === cursorPos) html += '<span id="cursor">|</span>';
-                        const ch = termBuf[i];
-                        if (ch === '&') html += '&amp;';
-                        else if (ch === '<') html += '&lt;';
-                        else if (ch === '>') html += '&gt;';
-                        else html += ch;
-                    }
-                    if (cursorPos >= termBuf.length) html += '<span id="cursor">|</span>';
-                    output.innerHTML = html;
-                } else {
-                    output.innerHTML = termBuf.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                }
-                output.scrollTop = output.scrollHeight;
-            }
-
-            // ----- 历史导航（同步发送退格和字符） -----
-            function navigateHistory(dir) {
-                if (history.length === 0) return;
-                const newIdx = historyIdx + dir;
-                if (newIdx < 0 || newIdx > history.length) return;
-
-                const { prompt } = getPromptAndCmd();
-                const newCmd = (newIdx === history.length) ? '' : history[newIdx];
-                const lineStart = termBuf.lastIndexOf('\n') + 1;
-                // 当前行的命令部分（不含提示符）
-                const currentLine = termBuf.substring(lineStart);
-                const currentCmd = currentLine.replace(/^.*?[$#>]\s*/, '');
-                // 删除当前命令（发送退格）
-                for (let i = 0; i < currentCmd.length; i++) {
-                    wsSend('\x7f');
-                }
-                // 发送新命令字符
-                for (let i = 0; i < newCmd.length; i++) {
-                    wsSend(newCmd[i]);
-                }
-                // 更新本地缓冲区
-                termBuf = termBuf.substring(0, lineStart) + prompt + newCmd;
-                cursorPos = termBuf.length;
-                historyIdx = newIdx;
-                interactiveCmdBuf = newCmd;
-                renderOutput();
             }
 
             // ----- WebSocket 发送（Base64） -----
@@ -396,262 +352,70 @@
                 }
             }
 
-            function wsSendResize() {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    const cols = Math.floor(output.clientWidth / 9);
-                    const rows = Math.floor(output.clientHeight / 18);
-                    if (cols>0 && rows>0) {
-                        ws.send(JSON.stringify({
-                            type:'resize',
-                            cols: Math.max(cols,40),
-                            rows: Math.max(rows,10)
-                        }));
-                    }
+            // ----- xterm.js 终端 -----
+            function createTerminal() {
+                if (term) { try { term.dispose(); } catch(_) {}
+                    term = null;
                 }
+                const TerminalCtor = (typeof Terminal === 'function') ? Terminal : (Terminal && Terminal.Terminal);
+                const FitCtor = (typeof FitAddon === 'function') ? FitAddon : (FitAddon && FitAddon.FitAddon);
+
+                if (typeof TerminalCtor !== 'function') {
+                    appendOutput('xterm.js 加载失败，切换到 one-shot 模式', 'error');
+                    setMode('oneshot');
+                    return null;
+                }
+
+                term = new TerminalCtor({
+                    cursorBlink: true,
+                    fontFamily: "'Consolas','Courier New',monospace",
+                    fontSize: 14,
+                    lineHeight: 1.35,
+                    scrollback: 200000,
+                    convertEol: false,
+                    allowProposedApi: true,
+                    theme: { background:'#111111', foreground:'#cccccc', cursor:'#4a9eff', cursorAccent:'#111111', selection:'#4a9eff55' }
+                });
+
+                if (FitCtor) {
+                    fitAddon = new FitCtor();
+                    try { term.loadAddon(fitAddon); } catch(_) { fitAddon = null; }
+                }
+
+                termHost.innerHTML = '';
+                term.open(termHost);
+                try { if (fitAddon) fitAddon.fit(); } catch(_) {}
+
+                // 用户输入 → 服务端
+                term.onData(function(d) { wsSend(d); });
+                // 终端尺寸变化 → 服务端 PTY
+                term.onResize(function(size) { sendResize(size.cols || term.cols, size.rows || term.rows); });
+
+                term.writeln('\x1b[90m交互式 Shell (PTY) — 支持 vim/top/su/ssh 等命令\x1b[0m');
+                term.focus();
+
+                // 等布局稳定后重新适配并下发尺寸
+                requestAnimationFrame(function() {
+                    try { if (fitAddon) fitAddon.fit(); } catch(_) {}
+                    sendResize(term.cols, term.rows);
+                });
+                return term;
             }
 
-            // ----- 键盘事件（完整修复） -----
-            function onKeyDown(e) {
-                if (e.isComposing) return;
-                if (e.ctrlKey || e.altKey || e.metaKey) {
-                    if (e.ctrlKey && (e.key==='c' || e.key==='C' || e.code==='KeyC')) {
-                        e.preventDefault(); e.stopPropagation();
-                        appendOutput('^C','stdout');
-                        wsSend('\x03');
-                        return;
-                    }
-                    if (e.ctrlKey && e.key==='d') { e.preventDefault(); wsSend('\x04'); return; }
-                    if (e.ctrlKey && e.key==='l') { e.preventDefault(); wsSend('\x0c'); clearOutput(); return; }
-                    if (e.ctrlKey && e.key==='z') { e.preventDefault(); wsSend('\x1a'); return; }
-                    if (e.ctrlKey && (e.key==='v' || e.key==='V')) return; // 让粘贴事件处理
-                    return;
-                }
-
-                // 回车
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    const cmdText = interactiveCmdBuf.trim().toLowerCase();
-                    // PTY 模式也从 termBuf 当前行检测 clear/cls
-                    const lines = termBuf.split('\n');
-                    const currentLine = lines[lines.length - 1] || '';
-                    const cmdFromLine = currentLine.replace(/^.*?[$#>]\s*/, '').trim().toLowerCase();
-                    if (cmdText === 'cls' || cmdText === 'clear' || cmdFromLine === 'cls' || cmdFromLine === 'clear') {
-                        clearOutput();
-                        interactiveCmdBuf = '';
-                        return;
-                    }
-                    // 本地 echo 模式：先清空服务端 lineBuf_，再重放正确命令
-                    if (localEchoEnabled) {
-                        // 发送足够多退格清空服务端缓冲区（可能比 interactiveCmdBuf 长）
-                        var bsCount = Math.max(interactiveCmdBuf.length + 32, 64);
-                        for (var _i = 0; _i < bsCount; _i++) wsSend('\x7f');
-                        for (var _j = 0; _j < interactiveCmdBuf.length; _j++) wsSend(interactiveCmdBuf[_j]);
-                        if (interactiveCmdBuf.trim()) {
-                            history.push(interactiveCmdBuf);
-                            historyIdx = history.length;
-                        }
-                        termBuf += '\n';
-                        cursorPos = termBuf.length;
-                    }
-                    wsSend('\n');
-                    interactiveCmdBuf = '';
-                    renderOutput();
-                    return;
-                }
-
-                // Backspace
-                if (e.key === 'Backspace') {
-                    e.preventDefault();
-                    if (localEchoEnabled) {
-                        const lineStart = termBuf.lastIndexOf('\n') + 1;
-                        const line = termBuf.substring(lineStart);
-                        const promptMatch = line.match(/^(.*?)([$#>])\s*/);
-                        const cmdStart = lineStart + (promptMatch ? promptMatch[0].length : 0);
-                        if (cursorPos <= cmdStart) return;
-                        const before = termBuf.substring(0, cursorPos-1);
-                        const after = termBuf.substring(cursorPos);
-                        termBuf = before + after;
-                        cursorPos--;
-                        updateCmdBuf();
-                        if (cursorPos === termBuf.length) {
-                            wsSend('\x7f');
-                        }
-                        renderOutput();
-                    } else {
-                        wsSend('\x7f');
-                    }
-                    return;
-                }
-
-                // Delete
-                if (e.key === 'Delete') {
-                    e.preventDefault();
-                    if (localEchoEnabled) {
-                        if (cursorPos >= termBuf.length) return;
-                        const before = termBuf.substring(0, cursorPos);
-                        const after = termBuf.substring(cursorPos+1);
-                        termBuf = before + after;
-                        wsSend('\x1b[3~');
-                        updateCmdBuf();
-                        renderOutput();
-                    } else {
-                        wsSend('\x1b[3~');
-                    }
-                    return;
-                }
-
-                // Tab
-                if (e.key === 'Tab') {
-                    e.preventDefault();
-                    wsSend('\t');
-                    if (localEchoEnabled) {
-                        const before = termBuf.substring(0, cursorPos);
-                        const after = termBuf.substring(cursorPos);
-                        termBuf = before + '\t' + after;
-                        cursorPos++;
-                        updateCmdBuf();
-                        renderOutput();
-                    }
-                    return;
-                }
-
-                // 上下箭头（历史）
-                if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    if (localEchoEnabled) {
-                        if (history.length === 0) return;
-                        if (historyIdx === -1 || historyIdx === history.length) {
-                            historyIdx = history.length;
-                        }
-                        navigateHistory(-1);
-                    } else {
-                        wsSend('\x1b[A');
-                    }
-                    return;
-                }
-                if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    if (localEchoEnabled) {
-                        if (history.length === 0) return;
-                        if (historyIdx === -1 || historyIdx === history.length) {
-                            return; // 底部，无操作
-                        }
-                        navigateHistory(1);
-                    } else {
-                        wsSend('\x1b[B');
-                    }
-                    return;
-                }
-
-                // 左右箭头、Home/End
-                if (e.key === 'ArrowRight') {
-                    e.preventDefault();
-                    if (localEchoEnabled) {
-                        if (cursorPos < termBuf.length) cursorPos++;
-                    } else {
-                        wsSend('\x1b[C');
-                    }
-                    renderOutput();
-                    return;
-                }
-                if (e.key === 'ArrowLeft') {
-                    e.preventDefault();
-                    if (localEchoEnabled) {
-                        if (cursorPos > 0) cursorPos--;
-                    } else {
-                        wsSend('\x1b[D');
-                    }
-                    renderOutput();
-                    return;
-                }
-                if (e.key === 'Home') {
-                    e.preventDefault();
-                    if (localEchoEnabled) {
-                        cursorPos = termBuf.lastIndexOf('\n', cursorPos-1) + 1;
-                    } else {
-                        wsSend('\x1b[H');
-                    }
-                    renderOutput();
-                    return;
-                }
-                if (e.key === 'End') {
-                    e.preventDefault();
-                    if (localEchoEnabled) {
-                        const lineEnd = termBuf.indexOf('\n', cursorPos);
-                        cursorPos = (lineEnd === -1) ? termBuf.length : lineEnd;
-                    } else {
-                        wsSend('\x1b[F');
-                    }
-                    renderOutput();
-                    return;
-                }
-
-                // 普通字符
-                if (e.key.length === 1) {
-                    e.preventDefault();
-                    wsSend(e.key);
-                    if (localEchoEnabled) {
-                        const before = termBuf.substring(0, cursorPos);
-                        const after = termBuf.substring(cursorPos);
-                        termBuf = before + e.key + after;
-                        cursorPos++;
-                        updateCmdBuf();
-                        renderOutput();
-                    }
-                }
+            function sendResize(cols, rows) {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                if (!cols || !rows) return;
+                ws.send(JSON.stringify({
+                    type:'resize',
+                    cols: Math.max(cols, 40),
+                    rows: Math.max(rows, 10)
+                }));
             }
 
-            // ----- 粘贴事件（Ctrl+V） -----
-            function onPaste(e) {
-                e.preventDefault();
-                const text = e.clipboardData.getData('text/plain');
-                if (text) {
-                    wsSend(text);
-                    if (localEchoEnabled) {
-                        const before = termBuf.substring(0, cursorPos);
-                        const after = termBuf.substring(cursorPos);
-                        termBuf = before + text + after;
-                        cursorPos += text.length;
-                        updateCmdBuf();
-                        renderOutput();
-                    }
-                }
-            }
-
-            // ----- 启动交互模式 -----
-            function startInteractive() {
-                mode = 'interactive';
-                output.innerHTML = '';
-                termBuf = '';
-                interactiveCmdBuf = '';
-                cursorPos = 0;
-                appendOutput('交互式 Shell (PTY) — 支持 su/ssh/top 等命令\r\n', 'info');
-
-                input.style.display = 'none';
-                btnExec.style.display = 'none';
-
-                output.setAttribute('tabindex', '-1');
-                output.focus();
-
-                document.removeEventListener('keydown', onKeyDown);
-                document.addEventListener('keydown', onKeyDown);
-                document.removeEventListener('paste', onPaste);
-                document.addEventListener('paste', onPaste);
-                if (compHandler) document.removeEventListener('compositionend', compHandler);
-                compHandler = function(e) {
-                    if (e.data && e.data.length > 0) {
-                        for (const ch of e.data) wsSend(ch);
-                        if (localEchoEnabled) {
-                            const before = termBuf.substring(0, cursorPos);
-                            const after = termBuf.substring(cursorPos);
-                            termBuf = before + e.data + after;
-                            cursorPos += e.data.length;
-                            updateCmdBuf();
-                            renderOutput();
-                        }
-                    }
-                };
-                document.addEventListener('compositionend', compHandler);
+            function syncTerminalSize() {
+                if (!term) return;
+                try { if (fitAddon) fitAddon.fit(); } catch(_) {}
+                sendResize(term.cols, term.rows);
             }
 
             // ----- WebSocket 连接 -----
@@ -667,88 +431,64 @@
 
                 ws.onopen = function() {
                     state.ws = ws;
-                    startInteractive();
-                    setTimeout(wsSendResize, 200);
+                    setMode('interactive');
+                    interactiveStarted = true;
+                    if (createTerminal()) syncTerminalSize();
                 };
 
                 ws.onmessage = function(e) {
                     if (typeof e.data === 'string') {
-                        // 处理 JSON 配置消息
-                        if (e.data.startsWith('{')) {
+                        if (e.data.charAt(0) === '{') {
                             try {
                                 const cfg = JSON.parse(e.data);
-                                if (cfg.type === 'config' && cfg.localEcho !== undefined) {
-                                    localEchoEnabled = cfg.localEcho;
-                                    return;
-                                }
+                                if (cfg.type === 'config') return; // 服务端配置消息，前端由 xterm 处理回显
                             } catch(_) {}
+                            return;
                         }
-                        // 普通文本（可能包含 ANSI）
-                        const text = stripAnsi(e.data);
-                        for (const ch of text) {
-                            if (ch === '\b') {
-                                if (localEchoEnabled && cursorPos > 0) {
-                                    const before = termBuf.substring(0, cursorPos-1);
-                                    const after = termBuf.substring(cursorPos);
-                                    termBuf = before + after;
-                                    cursorPos--;
-                                    updateCmdBuf();
-                                } else {
-                                    if (termBuf.length > 0) termBuf = termBuf.slice(0, -1);
-                                }
-                                cursorPos = termBuf.length;
-                                renderOutput();
-                            } else if (ch === '\r') {
-                                if (!localEchoEnabled) {
-                                    cursorPos = termBuf.lastIndexOf('\n') + 1;
-                                }
-                            } else if (ch === '\n') {
-                                termBuf += '\n';
-                                cursorPos = termBuf.length;
-                                if (localEchoEnabled) interactiveCmdBuf = '';
-                                renderOutput();
-                            } else if (ch >= ' ') {
-                                if (!localEchoEnabled && cursorPos < termBuf.length) {
-                                    termBuf = termBuf.substring(0, cursorPos) + ch + termBuf.substring(cursorPos + 1);
-                                    cursorPos++;
-                                } else {
-                                    termBuf += ch;
-                                    cursorPos = termBuf.length;
-                                }
-                                if (localEchoEnabled) updateCmdBuf();
-                                renderOutput();
-                            }
-                        }
+                        // 兼容文本消息
+                        if (term) term.write(e.data);
+                    } else if (e.data instanceof ArrayBuffer) {
+                        // PTY 输出为二进制帧，直接交给 xterm 渲染（避免 UTF-8 分帧乱码）
+                        if (term) term.write(new Uint8Array(e.data));
                     }
                 };
 
                 ws.onclose = function() {
-                    state.ws = null;
-                    if (mode === 'interactive') {
-                        appendOutput('\r\n--- 连接已关闭 ---','error');
+                    if (state.ws === ws) state.ws = null;
+                    ws = null;
+                    if (interactiveStarted && term) {
+                        term.writeln('\r\n\x1b[31m--- 连接已关闭 ---\x1b[0m');
                     }
+                };
+                ws.onerror = function() {
+                    if (state.ws === ws) state.ws = null;
                     ws = null;
                 };
-                ws.onerror = function() { state.ws = null; ws = null; };
 
+                // 8 秒未建立交互式连接 → 降级为 one-shot 模式
                 setTimeout(function() {
-                    if (mode !== 'interactive') {
-                        if (ws) { ws.onclose=null; ws.close(); ws=null; }
-                        appendOutput('\nWebSocket 连接超时，降级为 one-shot 模式\n', 'info');
-                        startOneShot();
+                    if (!interactiveStarted && ws) {
+                        try { if (ws.onclose) ws.onclose = null; ws.close(); } catch(_) {}
+                        ws = null;
+                        if (!interactiveStarted) {
+                            setMode('oneshot');
+                            appendOutput('交互式 Shell 不可用，使用 one-shot 模式（不支持 vim/ssh/top 等交互命令）', 'info');
+                            if (document.getElementById('cmd-input')) document.getElementById('cmd-input').focus();
+                        }
                     }
                 }, 8000);
             }
 
-            function startOneShot() {
-                mode = 'oneshot';
-                output.innerHTML = '';
-                appendOutput('交互式 Shell 不可用，使用 one-shot 模式（不支持 su/ssh/top 等交互命令）', 'info');
-                input.style.display = '';
-                btnExec.style.display = '';
-            }
+            // ---- Ctrl/Cmd+V 粘贴 ----
+            document.addEventListener('paste', function(e) {
+                if (mode !== 'interactive' || !ws || ws.readyState !== WebSocket.OPEN) return;
+                // 粘贴发生在 xterm 自带的输入元素内时，xterm.js 已自行处理，避免重复发送
+                if (term && termHost.contains(e.target)) return;
+                const text = e.clipboardData.getData('text/plain');
+                if (text) wsSend(text);
+            });
 
-            // ----- one-shot 命令执行 -----
+            // ---------- one-shot 命令执行 ----------
             async function execCmd() {
                 const cmd = input.value.trim();
                 if (!cmd || running) return;
@@ -801,13 +541,12 @@
             });
 
             window.addEventListener('resize', function() {
-                if (mode === 'interactive' && ws) wsSendResize();
+                if (mode === 'interactive') syncTerminalSize();
             });
 
             // ---- 初始化 ----
             fetch('/api/shell/cwd').then(r=>r.json()).then(d=>{ if(d.cwd) updatePrompt(d.cwd); }).catch(()=>{});
             tryConnectWS();
-            input.focus();
 
             // ---- 右键菜单 ----
             let ctxSel = '';
@@ -816,14 +555,6 @@
                 if (!text) return;
                 if (mode === 'interactive' && ws && ws.readyState === WebSocket.OPEN) {
                     wsSend(text);
-                    if (localEchoEnabled) {
-                        const before = termBuf.substring(0, cursorPos);
-                        const after = termBuf.substring(cursorPos);
-                        termBuf = before + text + after;
-                        cursorPos += text.length;
-                        updateCmdBuf();
-                        renderOutput();
-                    }
                 } else if (mode === 'oneshot') {
                     const inputEl = input;
                     const start = inputEl.selectionStart;
@@ -871,6 +602,14 @@
                 ctxMenu.style.top = e.clientY+'px';
                 ctxMenu.classList.add('open');
             });
+            termHost.addEventListener('contextmenu', function(e) {
+                e.preventDefault();
+                if (term) terminalCopy();
+                ctxSel = '';
+                ctxMenu.style.left = e.clientX+'px';
+                ctxMenu.style.top = e.clientY+'px';
+                ctxMenu.classList.add('open');
+            });
             document.addEventListener('click', function() { ctxMenu.classList.remove('open'); });
             ctxMenu.addEventListener('click', function(e) {
                 const item = e.target.closest('.item');
@@ -878,28 +617,39 @@
                 const action = item.dataset.action;
                 ctxMenu.classList.remove('open');
                 if (action === 'copy') {
-                    if (!ctxSel) return;
-                    if (navigator.clipboard) navigator.clipboard.writeText(ctxSel).catch(()=>{});
-                    else {
-                        const ta = document.createElement('textarea');
-                        ta.value = ctxSel;
-                        ta.style.cssText = 'position:fixed;left:-9999px;';
-                        document.body.appendChild(ta);
-                        ta.select();
-                        document.execCommand('copy');
-                        document.body.removeChild(ta);
-                    }
+                    copySelection();
                 } else if (action === 'paste') {
                     doPaste();
                 } else if (action === 'selectAll') {
-                    const range = document.createRange();
-                    range.selectNodeContents(output);
-                    window.getSelection().removeAllRanges();
-                    window.getSelection().addRange(range);
+                    if (term && mode === 'interactive') { term.clearSelection(); term.focus(); }
+                    else {
+                        const range = document.createRange();
+                        range.selectNodeContents(output);
+                        window.getSelection().removeAllRanges();
+                        window.getSelection().addRange(range);
+                    }
                 } else if (action === 'clear') {
                     clearOutput();
                 }
             });
+
+            function terminalCopy() {
+                if (term && mode === 'interactive') {
+                    const sel = term.getSelection && term.getSelection();
+                    if (sel) {
+                        if (navigator.clipboard) navigator.clipboard.writeText(sel).catch(()=>{});
+                    }
+                }
+            }
+            function copySelection() {
+                const s = window.getSelection().toString();
+                if (s) {
+                    if (navigator.clipboard) navigator.clipboard.writeText(s).catch(()=>{});
+                } else if (term && mode === 'interactive') {
+                    terminalCopy();
+                }
+            }
+            termHost.addEventListener('dblclick', function() { if (term) term.focus(); });
 
             // ---- 工具栏自动隐藏 ----
             const toolbar = document.getElementById('toolbar');

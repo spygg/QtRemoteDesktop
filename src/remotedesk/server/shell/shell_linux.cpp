@@ -62,6 +62,9 @@ void LinuxInteractiveShell::start()
         if (slaveFd > 2) close(slaveFd);
         close(masterFd_);
         setenv("TERM", "xterm-256color", 1);
+        // 强制 UTF-8，保证 PTY 输出字节与前端 xterm 的 UTF-8 解码一致，避免中文乱码
+        setenv("LANG", "C.UTF-8", 1);
+        setenv("LC_ALL", "C.UTF-8", 1);
         execl("/bin/bash", "/bin/bash", "--login", nullptr);
         _exit(1);
     }
@@ -77,7 +80,8 @@ void LinuxInteractiveShell::start()
         char buf[16384];
         int n = read(fd, buf, sizeof(buf));
         if (n > 0) {
-            ws_->sendTextMessage(QByteArray(buf, n));
+            // 用二进制帧发送原始终端字节，避免 UTF-8 多字节序列被拆成多帧导致乱码
+            ws_->sendBinaryMessage(QByteArray(buf, n));
         } else {
             ws_->close();
         }

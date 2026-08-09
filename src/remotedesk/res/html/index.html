@@ -430,77 +430,6 @@
             display: none;
         }
 
-        /* 剪贴板共享面板 */
-        #clipboard-panel {
-            position: fixed;
-            left: -360px;
-            top: 0;
-            bottom: 0;
-            width: 350px;
-            background: rgba(24, 24, 28, 0.97);
-            border-right: 1px solid rgba(255, 255, 255, 0.1);
-            z-index: 1500;
-            display: flex;
-            flex-direction: column;
-            transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            backdrop-filter: blur(12px);
-        }
-
-        #clipboard-panel.open {
-            left: 0;
-        }
-
-        #clipboard-panel-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 12px 16px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            color: #eee;
-            font-size: 14px;
-        }
-
-        #clipboard-panel-header .close-btn {
-            background: none;
-            border: none;
-            color: #aaa;
-            font-size: 18px;
-            cursor: pointer;
-            padding: 4px 8px;
-        }
-
-        #clipboard-panel-header .close-btn:hover {
-            color: #fff;
-        }
-
-        #clipboard-text {
-            flex: 1;
-            margin: 12px;
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            color: #eee;
-            border-radius: 6px;
-            padding: 10px;
-            font-family: monospace;
-            font-size: 13px;
-            line-height: 1.5;
-            resize: none;
-            outline: none;
-            white-space: pre-wrap;
-            word-break: break-all;
-        }
-
-        #clipboard-text:focus {
-            border-color: rgba(0, 102, 204, 0.6);
-        }
-
-        #clipboard-panel-footer {
-            padding: 10px 12px;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            display: flex;
-            gap: 8px;
-        }
-
         /* 锁屏遮罩 */
         #lock-overlay {
             position: fixed;
@@ -698,8 +627,6 @@
         </button>
         <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span
                 class="btn-text">文件</span></button>
-        <button class="btn" id="btn-clipboard" onclick="toggleClipboardPanel()"><span
-                class="btn-icon">📋</span><span class="btn-text">剪贴板</span></button>
         <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span
                 class="btn-icon">👤</span><span class="btn-text">用户</span></button>
         <a class="btn" id="btn-shell" href="/shell" target="_blank"><span class="btn-icon">🔧</span><span
@@ -786,19 +713,6 @@
     </div>
     <div id="transfer-status"></div>
 
-    <!-- 剪贴板共享面板 -->
-    <div id="clipboard-panel">
-        <div id="clipboard-panel-header">
-            <span>📋 共享剪贴板</span>
-            <button class="close-btn" onclick="toggleClipboardPanel()">✕</button>
-        </div>
-        <textarea id="clipboard-text" placeholder="剪贴板文本会在此显示，可直接编辑后发送到远端..."></textarea>
-        <div id="clipboard-panel-footer">
-            <button class="file-action-btn" onclick="sendClipboardText()">⬆ 发送到远端</button>
-            <button class="file-action-btn" onclick="readLocalClipboard()">📄 读取本地剪贴板</button>
-        </div>
-    </div>
-
     <!-- 锁屏遮罩 -->
     <div id="lock-overlay">
         <div class="lock-icon">🔒</div>
@@ -861,6 +775,7 @@
             mouseX: 0,
             mouseY: 0,
             keysPressed: new Set(),
+            clip: { remoteText: '', lastLocalSent: '', lastOsWritten: '', pendingLocalWrite: false },
         };
 
         // ==================== WebCodecs 解码器 ====================
@@ -1147,11 +1062,8 @@
                     }
                     break;
                 case 'clipboard':
-                    // 远端剪贴板变化 → 更新面板并尝试写入浏览器剪贴板
-                    document.getElementById('clipboard-text').value = msg.text || '';
-                    if (msg.text && navigator.clipboard && navigator.clipboard.writeText) {
-                        navigator.clipboard.writeText(msg.text).catch(() => {});
-                    }
+                    // 远端剪贴板变化 → 存入缓冲，下一次用户手势时写入本地系统剪贴板
+                    onRemoteClipboard(msg.text || '');
                     break;
                 case 'file_upload_done':
                     refreshFileList();
@@ -1316,6 +1228,11 @@
                     return;
                 }
 
+                // 剪贴板粘贴（Ctrl+V）：不 preventDefault，让浏览器触发 paste 事件，
+                // 由下方剪贴板处理器读取本地剪贴板并同步到远端（远端由服务端注入 Ctrl+V）。
+                // 若这里 preventDefault，浏览器会取消整个粘贴动作，paste 事件不会触发。
+                if (e.ctrlKey && e.code === 'KeyV' && !e.altKey && !e.shiftKey && !e.metaKey) return;
+
                 // 防止远程输入重复
                 e.preventDefault();
                 if (state.keysPressed.has(e.code)) return;
@@ -1358,11 +1275,31 @@
             // 防止右键菜单
             canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-            // 剪贴板同步
+            // ---- 共享剪贴板（无缝双向同步） ----
+            // 1) 本地复制 → 远端：拦截画布上的 Ctrl+V，读取浏览器剪贴板并发送到远端，
+            //    由服务端写入远端系统剪贴板并注入一次 Ctrl+V 让远端应用粘贴。
             window.addEventListener('paste', (e) => {
-                const text = e.clipboardData.getData('text');
-                send({ type: 'clipboard', data: text, action: 'paste' });
+                if (state.clip.disabled) return;
+                // 原生输入框（文件路径、锁屏密码等）→ 交给浏览器原生粘贴
+                const t = e.target;
+                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+                if (!state.connected || !state.ws) return;
+                e.preventDefault();
+                const text = (e.clipboardData || {}).getData('text/plain');
+                if (!text) return;
+                state.clip.lastLocalSent = text;
+                state.clip.remoteText = text;
+                send({ type: 'clipboard', text: text });
+                showTransferStatus('已粘贴到远端', 1500);
             });
+
+            // 2) 远端复制 → 本地：在下一次用户手势时把远端文本写入本地系统剪贴板
+            //    （浏览器要求用户手势授权 clipboard-write，故不能在消息到达时直接写入）
+            window.addEventListener('keydown', (e) => {
+                if (e.ctrlKey || e.metaKey || e.altKey) return; // 避免覆盖 Ctrl+V/Ctrl+C 场景
+                tryWriteRemoteClipToLocal();
+            });
+            window.addEventListener('mousedown', () => tryWriteRemoteClipToLocal());
         }
 
         function getCanvasPos(e) {
@@ -1543,43 +1480,54 @@
             }
         }
 
-        // ==================== 共享剪贴板 ====================
-        function toggleClipboardPanel() {
-            document.getElementById('clipboard-panel').classList.toggle('open');
+        // ==================== 共享剪贴板（无缝双向同步） ====================
+        function onRemoteClipboard(text) {
+            if (!text) return;
+            // 忽略自己刚发送的内容（服务端广播回来的回声）
+            if (text === state.clip.lastLocalSent) return;
+            state.clip.remoteText = text;
+            state.clip.pendingLocalWrite = true;
+            // 无手势时立即尝试一次（Chrome/Firefox 若已授权可直接写入）
+            tryWriteRemoteClipToLocal(true);
+            showTransferStatus('已同步远端剪贴板，可直接 Ctrl+V', 2000);
         }
 
-        function sendClipboardText() {
-            const text = document.getElementById('clipboard-text').value;
-            if (!text) {
-                showTransferStatus('剪贴板为空', 2000);
+        // 将远端剪贴板文本写入本地系统剪贴板；force 时无视手势要求直接尝试
+        function tryWriteRemoteClipToLocal(force) {
+            if (!state.clip.pendingLocalWrite || !state.clip.remoteText) return;
+            if (state.clip.remoteText === state.clip.lastOsWritten) {
+                state.clip.pendingLocalWrite = false;
                 return;
             }
-            send({ type: 'clipboard', text: text });
-            showTransferStatus('已发送到远端剪贴板', 2000);
+            const text = state.clip.remoteText;
+            const done = () => {
+                state.clip.lastOsWritten = text;
+                state.clip.pendingLocalWrite = false;
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(done).catch(() => fallbackWrite(text, done));
+            } else {
+                fallbackWrite(text, done);
+            }
         }
 
-        function readLocalClipboard() {
-            const textarea = document.getElementById('clipboard-text');
-            if (navigator.clipboard && navigator.clipboard.readText) {
-                navigator.clipboard.readText()
-                    .then(text => {
-                        if (text !== undefined && text !== null && text !== '') {
-                            textarea.value = text;
-                            send({ type: 'clipboard', text: text });
-                            showTransferStatus('已读取本地剪贴板并同步到远端', 2000);
-                        } else {
-                            showTransferStatus('本地剪贴板为空', 2000);
-                        }
-                    })
-                    .catch(err => {
-                        console.error('读取本地剪贴板失败:', err);
-                        textarea.focus();
-                        showTransferStatus('浏览器禁止自动读取剪贴板，请手动 Ctrl+V 粘贴后点击发送', 3000);
-                    });
-            } else {
-                textarea.focus();
-                showTransferStatus('浏览器不支持自动读取剪贴板，请手动 Ctrl+V 粘贴后点击发送', 3000);
-            }
+        // 兜底：http://IP 非安全上下文没有 navigator.clipboard，用隐藏 textarea + execCommand('copy')。
+        // execCommand 必须在用户手势内执行才会成功，失败则保持 pending，等下一次手势重试。
+        function fallbackWrite(text, done) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                ta.style.pointerEvents = 'none';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const ok = document.execCommand('copy');
+                ta.remove();
+                if (ok) { done(); return; }
+            } catch (e) { }
         }
 
         function navigateTo(path) {
