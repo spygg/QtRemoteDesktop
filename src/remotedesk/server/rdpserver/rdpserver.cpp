@@ -1928,10 +1928,13 @@ void RDPServer::switchToImageMode()
         return;
 
 #ifdef USE_WEBRTC
-    // WebRTC 依赖 H.264 编码器，有 WebRTC 客户端时不能退回图片模式
-    if (!webrtcSessions_.isEmpty()) {
-        qWarning() << "Cannot switch to image mode while WebRTC clients are connected";
-        return;
+    // WebRTC 依赖 H.264 编码器，有已连通（正在收 RTP 流）的 WebRTC 客户端时不能退回图片模式。
+    // 仅处于协商中/ICE 未连通的会话不阻塞降级（如浏览器不支持 WebCodecs 时需降级到图片）
+    for (auto it = webrtcSessions_.constBegin(); it != webrtcSessions_.constEnd(); ++it) {
+        if (it.value() && it.value()->isConnected()) {
+            qWarning() << "Cannot switch to image mode while WebRTC clients are connected";
+            return;
+        }
     }
 #endif
 

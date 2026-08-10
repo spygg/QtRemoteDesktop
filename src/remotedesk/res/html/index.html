@@ -804,6 +804,8 @@
 
         function initWebRTC() {
             if (!window.RTCPeerConnection || webrtcState.active || webrtcState.pc) return;
+            // 注意:WebRTC 用 <video> 播放,走浏览器原生 H.264 解码,不依赖 WebCodecs。
+            // 即使 WebCodecs 不可用也应先尝试 WebRTC;失败后再降级 WS视频/图片。
             const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
             webrtcState.pc = pc;
 
@@ -891,11 +893,14 @@
 
             async init() {
                 if (!('VideoDecoder' in window)) {
-                    console.warn('WebCodecs not supported, requesting image mode');
-                    send({ type: 'set_mode', mode: 'image' });  // 发送切换请求
+                    console.warn('WebCodecs not supported; WebRTC native decode will be preferred');
+                    this.supported = false;
+                    // 不立即请求 image：先让 WebRTC（浏览器原生 H.264 解码）有机会建立。
+                    // 若 WebRTC 失败，decode() 收到 WS 视频帧时再请求降级 image。
                     return;
                 }
 
+                this.supported = true;
                 this.decoder = new VideoDecoder({
                     output: this.handleFrame.bind(this),
                     error: (e) => console.error('Decode error:', e)
@@ -917,6 +922,18 @@
             }
 
             decode(data, isKeyframe, timestamp) {
+                if (!this.supported) {
+                    // 无 WebCodecs 无法解码 WS H.264，此时应降级到图片模式。
+                    // 到达这里说明 WebRTC 未能建立（否则帧走 RTP，不会经 WS 0x01/0x02 到达），
+                    // 故请求 image 兜底。
+                    if (!this.imageRequested) {
+                        this.imageRequested = true;
+                        send({ type: 'set_mode', mode: 'image' });
+                    }
+                    return;
+                }
+                if (!this.decoder) return;
+
                 if (!this.configured && isKeyframe) {
                     // Annex B 格式含内联 SPS/PPS，无需 extradata
                     this.configured = true;

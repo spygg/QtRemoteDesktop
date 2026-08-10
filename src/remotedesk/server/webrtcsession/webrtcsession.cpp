@@ -76,12 +76,16 @@ void WebRtcSession::handleAnswer(const QString& sdp)
 
 void WebRtcSession::handleIce(const QString& candidate, const QString& mid)
 {
-    Q_UNUSED(mid)
     if (!pc_ || candidate.isEmpty())
         return;
-    QByteArray ba = candidate.toUtf8();
+    // metaRTC 的 addIceCandidate 期望 JSON 对象:{"candidate":"candidate:...","sdpMid":"0",...}
+    // 前端只会发送裸 candidate 字符串,这里包装成 JSON 让 metaRTC 能解析
+    QByteArray ba = QStringLiteral("{\"candidate\":%1,\"sdpMid\":%2}")
+            .arg(QString::fromUtf8(QByteArray().append('"').append(candidate.toUtf8()).append('"')))
+            .arg(QString::fromUtf8(QByteArray().append('"').append(mid.toUtf8()).append('"')))
+            .toUtf8();
     if (pc_->addIceCandidate(ba.data()) != 0) {
-        qWarning() << "WebRtcSession: addIceCandidate failed";
+        qWarning() << "WebRtcSession: addIceCandidate failed" << candidate.left(60);
     }
 }
 
