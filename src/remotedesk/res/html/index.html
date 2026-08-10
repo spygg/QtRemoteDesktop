@@ -767,7 +767,7 @@
             return div.innerHTML;
         }
         const CONFIG = {
-            wsUrl: `ws://${location.hostname}:websocketPort${sessionToken ? '?token=' + sessionToken : ''}`,
+            wsUrl: `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.hostname}:websocketPort${sessionToken ? '?token=' + sessionToken : ''}`,
             targetFps: 30,
             keyframeInterval: 1000, // 请求关键帧间隔
         };
@@ -935,8 +935,18 @@
                 if (!this.decoder) return;
 
                 if (!this.configured && isKeyframe) {
-                    // Annex B 格式含内联 SPS/PPS，无需 extradata
-                    this.configured = true;
+                    // 关键帧：即使服务端未发 codec_config，也需真实 configure。
+                    // Annex B 格式含内联 SPS/PPS，缺省 description 可解析。
+                    try {
+                        this.decoder.configure({
+                            codec: 'avc1.42001f', // H264 Baseline
+                            optimizeForLatency: true,
+                            hardwareAcceleration: 'prefer-hardware'
+                        });
+                        this.configured = true;
+                    } catch (e) {
+                        console.error('VideoDecoder configure @ keyframe failed:', e);
+                    }
                 }
 
                 if (!this.configured) return;
