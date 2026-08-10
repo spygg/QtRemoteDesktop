@@ -96,3 +96,9 @@ endif()
 if(TARGET metartc8)
     add_dependencies(metartc8 openh264_ep)
 endif()
+
+# ---- 旧版 OpenSSL 1.0.2u（Linux，供 Qt 5.9 QSslSocket dlopen）----
+add_subdirectory(openssl)
+if(TARGET metartccore8 AND TARGET openssl102_ep)
+    add_dependencies(metartccore8 openssl102_ep)
+endif()
