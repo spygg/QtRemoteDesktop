@@ -1,101 +1,62 @@
-# - Try to find FFmpeg (avcodec, avutil, swscale)
+# Custom FindFFmpeg module for QtRemoteDesktop.
+# Locates the locally-built FFmpeg 3.4.8 static libs (libavcodec/libavutil/libswscale)
+# under <src>/remotedesk/thridparty/ffmpeg/install.
 #
-# Once done this will define:
-#  FFMPEG_FOUND        - System has FFmpeg
-#  FFMPEG_INCLUDE_DIRS - Include directories
-#  FFMPEG_LIBRARIES    - Libraries to link
-#
-# Usage:
-#   find_package(FFmpeg)            # auto-detect
-#   cmake .. -DFFMPEG_ROOT=/path    # manual override (Windows/MSYS2/vcpkg)
+# Output variables:
+#   FFMPEG_FOUND
+#   FFMPEG_INCLUDE_DIRS
+#   FFMPEG_LIBRARIES
 
-if(FFMPEG_ROOT)
-    set(_ffmpeg_paths ${FFMPEG_ROOT})
-else()
-    set(_ffmpeg_paths)
+if(NOT DEFINED FFMPEG_ROOT)
+    set(FFMPEG_ROOT "${BUILD_OUTPUT_DIR}/ffmpeg_install" CACHE PATH "FFmpeg install prefix")
 endif()
 
-# Common install prefixes (Linux, macOS, MSYS2, vcpkg, Homebrew)
-list(APPEND _ffmpeg_paths
-    /usr /usr/local /opt/homebrew /opt/local
-    "C:/msys64/mingw32" "C:/msys64/mingw64"
-    "C:/msys32/mingw32" "C:/tools/msys64/mingw32" "C:/tools/msys64/mingw64"
-    "$ENV{VCPKG_ROOT}/installed/x86-windows"
-    "$ENV{VCPKG_ROOT}/installed/x64-windows"
-)
+set(FFMPEG_INCLUDE_DIR "${FFMPEG_ROOT}/include")
 
-# ---- 1. pkg-config (Linux, macOS, MSYS2/MinGW) ----
-find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(_AVCODEC libavcodec)
-    pkg_check_modules(_AVUTIL libavutil)
-    pkg_check_modules(_SWSCALE libswscale)
-    if(_AVCODEC_FOUND AND _AVUTIL_FOUND AND _SWSCALE_FOUND)
+set(FFMPEG_AVCODEC_LIBRARY "${FFMPEG_ROOT}/lib/libavcodec.a")
+set(FFMPEG_AVUTIL_LIBRARY "${FFMPEG_ROOT}/lib/libavutil.a")
+set(FFMPEG_SWSCALE_LIBRARY "${FFMPEG_ROOT}/lib/libswscale.a")
+
+set(FFMPEG_FOUND FALSE)
+if(EXISTS "${FFMPEG_ROOT}/include/libavcodec/avcodec.h"
+   AND EXISTS "${FFMPEG_ROOT}/include/libavutil/avutil.h"
+   AND EXISTS "${FFMPEG_ROOT}/include/libswscale/swscale.h")
+    if(EXISTS "${FFMPEG_AVCODEC_LIBRARY}"
+       AND EXISTS "${FFMPEG_AVUTIL_LIBRARY}"
+       AND EXISTS "${FFMPEG_SWSCALE_LIBRARY}")
         set(FFMPEG_FOUND TRUE)
-        set(FFMPEG_INCLUDE_DIRS ${_AVCODEC_INCLUDE_DIRS})
-        set(FFMPEG_LIBRARIES ${_AVCODEC_LIBRARIES} ${_AVUTIL_LIBRARIES} ${_SWSCALE_LIBRARIES})
-        list(REMOVE_DUPLICATES FFMPEG_INCLUDE_DIRS)
-        list(REMOVE_DUPLICATES FFMPEG_LIBRARIES)
     endif()
 endif()
 
-# Also try pkg-config with mingw prefix (cross-compile scenarios)
-if(NOT FFMPEG_FOUND AND PKG_CONFIG_FOUND AND WIN32)
-    pkg_check_modules(_AVCODEC libavcodec)
-    pkg_check_modules(_AVUTIL libavutil)
-    pkg_check_modules(_SWSCALE libswscale)
-    if(_AVCODEC_FOUND AND _AVUTIL_FOUND AND _SWSCALE_FOUND)
-        set(FFMPEG_FOUND TRUE)
-        set(FFMPEG_INCLUDE_DIRS ${_AVCODEC_INCLUDE_DIRS})
-        set(FFMPEG_LIBRARIES ${_AVCODEC_LIBRARIES} ${_AVUTIL_LIBRARIES} ${_SWSCALE_LIBRARIES})
-        list(REMOVE_DUPLICATES FFMPEG_INCLUDE_DIRS)
-        list(REMOVE_DUPLICATES FFMPEG_LIBRARIES)
-    endif()
-endif()
-
-# ---- 2. Manual search (fallback for Windows/MinGW without pkg-config) ----
-if(NOT FFMPEG_FOUND)
-    find_path(FFMPEG_AVCODEC_INCLUDE_DIR libavcodec/avcodec.h
-        PATHS ${_ffmpeg_paths}
-        PATH_SUFFIXES include
-        NO_DEFAULT_PATH
-    )
-    if(NOT FFMPEG_AVCODEC_INCLUDE_DIR)
-        find_path(FFMPEG_AVCODEC_INCLUDE_DIR libavcodec/avcodec.h
-            PATHS ${_ffmpeg_paths}
-            PATH_SUFFIXES include
-        )
-    endif()
-
-    find_library(FFMPEG_AVCODEC_LIBRARY avcodec
-        PATHS ${_ffmpeg_paths}
-        PATH_SUFFIXES lib
-    )
-    find_library(FFMPEG_AVUTIL_LIBRARY avutil
-        PATHS ${_ffmpeg_paths}
-        PATH_SUFFIXES lib
-    )
-    find_library(FFMPEG_SWSCALE_LIBRARY swscale
-        PATHS ${_ffmpeg_paths}
-        PATH_SUFFIXES lib
-    )
-
-    if(FFMPEG_AVCODEC_INCLUDE_DIR AND FFMPEG_AVCODEC_LIBRARY
-       AND FFMPEG_AVUTIL_LIBRARY AND FFMPEG_SWSCALE_LIBRARY)
-        set(FFMPEG_FOUND TRUE)
-        set(FFMPEG_INCLUDE_DIRS ${FFMPEG_AVCODEC_INCLUDE_DIR})
-        set(FFMPEG_LIBRARIES ${FFMPEG_AVCODEC_LIBRARY} ${FFMPEG_AVUTIL_LIBRARY} ${FFMPEG_SWSCALE_LIBRARY})
-    endif()
-endif()
-
-# ---- 3. Report ----
 if(FFMPEG_FOUND)
-    message(STATUS "Found FFmpeg: ${FFMPEG_INCLUDE_DIRS}")
-    message(STATUS "  Libraries: ${FFMPEG_LIBRARIES}")
+    set(FFMPEG_INCLUDE_DIRS "${FFMPEG_INCLUDE_DIR}")
+    set(FFMPEG_LIBRARIES
+        "${FFMPEG_AVCODEC_LIBRARY}"
+        "${FFMPEG_SWSCALE_LIBRARY}"
+        "${FFMPEG_AVUTIL_LIBRARY}")
+    # FFmpeg's avcodec.pc links openh264 + system libs; pull them in here
+    # so consumers (VideoEncoder / rdpserver) link cleanly.
+    # openh264 static lib is built by Openh264_ep and installed to BUILD_OUTPUT_DIR/openh264_install
+    set(_OPENH264_LIB "${BUILD_OUTPUT_DIR}/openh264_install/lib/libopenh264.a")
+    if(WIN32)
+        set(FFMPEG_EXTRA_LIBS
+            "${_OPENH264_LIB}"
+            ws2_32 user32 vfw32 secur32 psapi advapi32 shell32 ole32 iconv)
+    else()
+        set(FFMPEG_EXTRA_LIBS
+            "${_OPENH264_LIB}"
+            pthread dl m)
+    endif()
 else()
-    message(STATUS "FFmpeg not found (optional) — JPEG fallback mode")
-    message(STATUS "  Install via MSYS2: pacman -S mingw-w64-i686-ffmpeg")
-    message(STATUS "  Or set: cmake .. -DFFMPEG_ROOT=C:/path/to/ffmpeg")
+    set(FFMPEG_INCLUDE_DIRS "")
+    set(FFMPEG_LIBRARIES "")
+    set(FFMPEG_EXTRA_LIBS "")
+    if(FFmpeg_FIND_REQUIRED)
+        message(FATAL_ERROR "FFmpeg not found under ${FFMPEG_ROOT}")
+    endif()
 endif()
 
-mark_as_advanced(FFMPEG_INCLUDE_DIRS FFMPEG_LIBRARIES FFMPEG_ROOT)
+mark_as_advanced(FFMPEG_INCLUDE_DIR
+                 FFMPEG_AVCODEC_LIBRARY
+                 FFMPEG_AVUTIL_LIBRARY
+                 FFMPEG_SWSCALE_LIBRARY)

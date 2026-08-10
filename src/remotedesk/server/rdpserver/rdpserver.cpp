@@ -11,6 +11,11 @@
 #include "videoencoder.h"
 #endif
 
+#ifdef USE_WEBRTC
+#include "webrtcsession.h"
+#include <QSet>
+#endif
+
 #include <QBuffer>
 #include <QCoreApplication>
 #include <QDir>
@@ -1319,6 +1324,9 @@ void RDPServer::start()
 {
     if (serviceMode_) {
         isRunning_ = true;
+        // 服务模式初始为图片模式；Linux 本地捕获可用时前端会发起 WebRTC，
+        // startWebRtcSession 内部再切到视频模式
+        currentMode_ = ServerMode::Image;
         qInfo() << "RDP Server started in service mode (waiting for helper connection)";
         return;
     }
@@ -1423,6 +1431,20 @@ bool RDPServer::startCapture()
     if (wsServer_->clients().isEmpty())
         screenCapturer_->suspend();
     qInfo() << "startCapture: screen capturer started";
+
+    // 捕获变为可用（如 Linux 服务进程启动后 DISPLAY 才出现），通知已连接客户端
+    // 重新评估模式：捕获可用 + 编码器 → webrtc=true，客户端随即升级到 WebRTC
+    if (captureAvailable_) {
+        QJsonObject mode;
+        mode["type"] = "mode_changed";
+        mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
+#if defined(USE_WEBRTC) && defined(USE_FFMPEG)
+        mode["webrtc"] = true;
+#else
+        mode["webrtc"] = false;
+#endif
+        wsServer_->broadcastJson(mode);
+    }
     return true;
 }
 
@@ -1528,6 +1550,16 @@ void RDPServer::onClientConnected(const QString& clientId)
     QJsonObject mode;
     mode["type"] = "mode_changed";
     mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
+#if defined(USE_WEBRTC) && defined(USE_FFMPEG)
+    // WebRTC 需要 H.264 编码器和本地原始帧源。
+    // 直接模式自身捕获即可；服务模式若 Linux 本地捕获（非 helper JPEG）同样可用；
+    // Windows 服务模式只有 helper JPEG、无原始帧，则不支持（前端据此降级为视频/图片）。
+    bool rawCaptureSupported = screenCapturer_ && captureAvailable_
+            && screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
+    mode["webrtc"] = rawCaptureSupported;
+#else
+    mode["webrtc"] = false;
+#endif
     wsServer_->sendJson(clientId, mode);
 
     // 发送当前锁屏状态（客户端可能在屏幕已锁时连接/重连）
@@ -1542,6 +1574,12 @@ void RDPServer::onClientConnected(const QString& clientId)
 void RDPServer::onClientDisconnected(const QString& clientId)
 {
     qInfo() << "Client disconnected:" << clientId;
+
+#ifdef USE_WEBRTC
+    // 清理该客户端的 WebRTC 会话（并退出 WS 帧广播排除列表）
+    if (webrtcSessions_.contains(clientId))
+        stopWebRtcSession(clientId);
+#endif
 
     // 没有客户端了 → 暂停屏幕捕获，降低 CPU
     if (wsServer_->clients().isEmpty()) {
@@ -1560,6 +1598,25 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 {
     // config 和 set_resolution 需要在 service mode 转发前先本地处理
     QString type = input["type"].toString();
+
+#ifdef USE_WEBRTC
+    // WebRTC 信令（signal_*）：服务模式下仅当本地捕获可用（Linux 服务进程自身
+    // 通过 X11 捕获原始帧，可初始化 H.264 编码器）时才允许；Windows 服务模式
+    // 只有 helper JPEG、无本地帧，拒绝并让前端降级为视频/图片
+    if (type.startsWith("signal_")) {
+        bool rawCaptureSupported = screenCapturer_ && captureAvailable_
+                && screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
+        if (serviceMode_ && !rawCaptureSupported) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "signal_state" },
+                { "state", "unsupported" },
+            });
+        } else {
+            onWebRtcMessage(clientId, input);
+        }
+        return;
+    }
+#endif
 
     if (type == "clipboard") {
         if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
@@ -1854,7 +1911,14 @@ void RDPServer::onJpegCompressed(const QByteArray& jpegData)
 
 void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp)
 {
-    // 广播给所有客户端
+#ifdef USE_WEBRTC
+    // 通过 RTP 发给所有已连通的 WebRTC 客户端
+    for (auto it = webrtcSessions_.constBegin(); it != webrtcSessions_.constEnd(); ++it) {
+        if (it.value())
+            it.value()->sendFrame(data, isKeyframe);
+    }
+#endif
+    // WS 客户端（排除列表中的走 RTP，不再收 WS 帧）
     wsServer_->broadcastFrame(data, isKeyframe, timestamp);
 }
 
@@ -1862,6 +1926,14 @@ void RDPServer::switchToImageMode()
 {
     if (currentMode_ == ServerMode::Image)
         return;
+
+#ifdef USE_WEBRTC
+    // WebRTC 依赖 H.264 编码器，有 WebRTC 客户端时不能退回图片模式
+    if (!webrtcSessions_.isEmpty()) {
+        qWarning() << "Cannot switch to image mode while WebRTC clients are connected";
+        return;
+    }
+#endif
 
     // 释放视频编码器（会调用析构，析构中调用 shutdown）
 #ifdef USE_FFMPEG
@@ -1887,6 +1959,12 @@ bool RDPServer::switchToVideoMode()
 {
     if (currentMode_ == ServerMode::Video)
         return true;
+
+    if (!screenCapturer_ || screenCapturer_->width() <= 0 || screenCapturer_->height() <= 0) {
+        // Windows 服务模式只有 helper JPEG、无本地捕获源，无法编码 H.264
+        qWarning() << "Cannot switch to video mode: no local raw frame source";
+        return false;
+    }
 
 #ifdef USE_FFMPEG
     // 如果编码器已被释放，重新创建
@@ -1921,3 +1999,114 @@ bool RDPServer::switchToVideoMode()
     return false;
 #endif
 }
+
+#ifdef USE_WEBRTC
+
+void RDPServer::startWebRtcSession(const QString& clientId)
+{
+    if (webrtcSessions_.contains(clientId))
+        return;
+
+#ifndef USE_FFMPEG
+    // WebRTC 依赖 FFmpeg H.264 编码器
+    wsServer_->sendJson(clientId, QJsonObject {
+        { "type", "signal_state" },
+        { "state", "failed" },
+        { "reason", "no_encoder" },
+    });
+    return;
+#endif
+
+    // WebRTC 依赖 H.264 编码器，先确保处于视频模式
+    if (!switchToVideoMode()) {
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "signal_state" },
+            { "state", "failed" },
+            { "reason", "no_encoder" },
+        });
+        return;
+    }
+
+    WebRtcSession* session = new WebRtcSession(this);
+    webrtcSessions_.insert(clientId, session);
+
+    connect(session, &WebRtcSession::localOffer, this, [this, clientId](const QString& sdp) {
+        sendWebRtcToClient(clientId, QJsonObject {
+            { "type", "signal_offer" },
+            { "sdp", sdp },
+        });
+    });
+
+    connect(session, &WebRtcSession::localIce, this, [this, clientId](const QString& candidate, const QString& mid) {
+        sendWebRtcToClient(clientId, QJsonObject {
+            { "type", "signal_ice" },
+            { "candidate", candidate },
+            { "mid", mid },
+        });
+    });
+
+    connect(session, &WebRtcSession::connected, this, [this, clientId]() {
+        // 该客户端走 RTP 收流，从 WS 帧广播中排除
+        webrtcExcluded_.insert(clientId);
+        wsServer_->setMediaExcludedClients(webrtcExcluded_);
+        sendWebRtcToClient(clientId, QJsonObject {
+            { "type", "signal_state" },
+            { "state", "connected" },
+        });
+    });
+
+    connect(session, &WebRtcSession::keyframeRequested, this, [this]() {
+#ifdef USE_FFMPEG
+        if (videoEncoder_)
+            videoEncoder_->requestKeyframe();
+#endif
+    });
+
+    connect(session, &WebRtcSession::failed, this, [this, clientId]() {
+        stopWebRtcSession(clientId);
+    });
+    connect(session, &WebRtcSession::closed, this, [this, clientId]() {
+        stopWebRtcSession(clientId);
+    });
+
+    // 信令经过内网 WebSocket，无需 STUN；加一个公共 STUN 以便防火墙穿透兜底
+    webrtcIceServers_ = QVector<QString> {
+        QStringLiteral("stun:stun.l.google.com:19302")
+    };
+
+    if (!session->create(webrtcIceServers_))
+        stopWebRtcSession(clientId);
+}
+
+void RDPServer::stopWebRtcSession(const QString& clientId)
+{
+    WebRtcSession* session = webrtcSessions_.take(clientId);
+    webrtcExcluded_.remove(clientId);
+    wsServer_->setMediaExcludedClients(webrtcExcluded_);
+    if (session) {
+        session->close();
+        session->deleteLater();
+    }
+}
+
+void RDPServer::sendWebRtcToClient(const QString& clientId, const QJsonObject& data)
+{
+    wsServer_->sendJson(clientId, data);
+}
+
+void RDPServer::onWebRtcMessage(const QString& clientId, const QJsonObject& msg)
+{
+    const QString type = msg["type"].toString();
+
+    if (type == "signal_start") {
+        startWebRtcSession(clientId);
+    } else if (type == "signal_answer") {
+        if (WebRtcSession* s = webrtcSessions_.value(clientId))
+            s->handleAnswer(msg["sdp"].toString());
+    } else if (type == "signal_ice") {
+        if (WebRtcSession* s = webrtcSessions_.value(clientId))
+            s->handleIce(msg["candidate"].toString(), msg["mid"].toString());
+    }
+}
+
+#endif // USE_WEBRTC

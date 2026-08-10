@@ -38,6 +38,11 @@ public:
     void encode(const QImage& frame);
     void shutdown();
 
+    // WebRTC：浏览器请求关键帧（PLI）时强制下一帧为 IDR
+    void requestKeyframe();
+    // WebRTC：浏览器码率反馈（REMB）时调整编码码率
+    void setBitrate(int bitrate);
+
 signals:
     void encodedFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp);
     void codecConfigChanged(const QByteArray& extradata); // 用于发送 H.264 SPS/PPS 等
@@ -65,6 +70,8 @@ private:
 
     CodecType currentCodec_;
     QString codecName_;
+    std::atomic<bool> forceKeyframe_{ false };
+    std::atomic<int> pendingBitrate_{ 0 };
 };
 
 #endif // VIDEOENCODER_H

@@ -51,6 +51,7 @@ static AVPixelFormat encoderPixFmt(const AVCodec* codec, const char* hwName)
 
 bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, int bitrate)
 {
+    avcodec_register_all();
     currentCodec_ = type;
     fps_ = fps;
 
@@ -202,6 +203,13 @@ void VideoEncoder::encodingLoop()
         sws_scale(swsCtx_, srcData, srcLinesize, 0, image.height(),
             frame_->data, frame_->linesize);
 
+        // 应用 WebRTC 反馈：REMB 码率调整 / PLI 强制关键帧
+        int br = pendingBitrate_.exchange(0);
+        if (br > 0 && codecCtx_->bit_rate != br)
+            codecCtx_->bit_rate = br;
+        if (forceKeyframe_.exchange(false))
+            codecCtx_->gop_size = 1; // 下一帧强制为 IDR
+
         frame_->pts = frameCount_++;
 
         int ret = avcodec_send_frame(codecCtx_, frame_);
@@ -225,7 +233,22 @@ void VideoEncoder::encodingLoop()
             av_packet_unref(packet);
         }
         av_packet_free(&packet);
+
+        // 恢复正常 GOP 间隔
+        if (codecCtx_->gop_size == 1)
+            codecCtx_->gop_size = fps_;
     }
+}
+
+void VideoEncoder::requestKeyframe()
+{
+    forceKeyframe_.store(true);
+}
+
+void VideoEncoder::setBitrate(int bitrate)
+{
+    if (bitrate > 0)
+        pendingBitrate_.store(bitrate);
 }
 
 void VideoEncoder::shutdown()

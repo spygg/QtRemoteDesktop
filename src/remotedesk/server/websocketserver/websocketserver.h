@@ -5,6 +5,7 @@
 #include <QMap>
 #include <QJsonObject>
 #include <QObject>
+#include <QSet>
 #include <QUuid>
 #include <QWebSocket>
 #include <QWebSocketServer>
@@ -31,6 +32,9 @@ public:
     void setSslConfiguration(const QSslConfiguration& config);
 
     void broadcastBinary(const QByteArray& data);
+
+    // 指定走 WebRTC 视频的客户端（跳过 WS 视频帧广播，避免重复传流）
+    void setMediaExcludedClients(const QSet<QString>& clients);
 
     // 发送二进制数据给指定客户端
     void sendBinaryToClient(const QString& clientId, const QByteArray& data);
@@ -68,6 +72,7 @@ private slots:
 private:
     QWebSocketServer* server_;
     QMap<QString, QWebSocket*> clients_;
+    QSet<QString> mediaExcludedClients_;
     QMap<QWebSocket*, QString> socketToId_;
     QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;

@@ -8,6 +8,7 @@
 #include <QMutex>
 #include <QObject>
 #include <QQueue>
+#include <QSet>
 #include <QSslKey>
 #include <QSslSocket>
 #include <QTcpServer>
@@ -27,6 +28,10 @@ class ClipboardService;
 
 #ifdef USE_FFMPEG
 class VideoEncoder;
+#endif
+
+#ifdef USE_WEBRTC
+class WebRtcSession;
 #endif
 
 class InputManager;
@@ -89,6 +94,9 @@ private slots:
 
     void onModeChangeRequested(const QString& mode);
     void onShellConnected(QWebSocket* socket);
+#ifdef USE_WEBRTC
+    void onWebRtcMessage(const QString& clientId, const QJsonObject& msg);
+#endif
 
 signals:
     void requestFileList(const QString& clientId, const QString& path);
@@ -180,6 +188,15 @@ private:
     void startSecureInputProcess();
     void stopSecureInputProcess();
     void injectPasteShortcut();
+
+#ifdef USE_WEBRTC
+    void startWebRtcSession(const QString& clientId);
+    void stopWebRtcSession(const QString& clientId);
+    void sendWebRtcToClient(const QString& clientId, const QJsonObject& data);
+    QMap<QString, WebRtcSession*> webrtcSessions_;
+    QSet<QString> webrtcExcluded_;
+    QVector<QString> webrtcIceServers_;
+#endif
 
 public:
     static QStringList getLocalIpAddr();

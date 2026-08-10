@@ -35,6 +35,19 @@
             box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
         }
 
+        /* WebRTC H.264 视频（libdatachannel → RTP），叠加在 canvas 之上 */
+        #webrtc-video {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            max-width: 100%;
+            max-height: 100%;
+            display: none;
+            background: #000;
+            z-index: 1;
+        }
+
         #status {
             position: fixed;
             bottom: 10px;
@@ -677,6 +690,7 @@
 
     <div id="container">
         <canvas id="screen"></canvas>
+        <video id="webrtc-video" autoplay playsinline muted></video>
     </div>
 
     <img id="remote-cursor"
@@ -778,6 +792,96 @@
             clip: { remoteText: '', lastLocalSent: '', lastOsWritten: '', pendingLocalWrite: false },
         };
 
+        // ==================== WebRTC 视频（libdatachannel → H.264 RTP） ====================
+        // 服务端通过现有 WebSocket 通道做信令，连接建立后用 <video> 播放 RTP H.264 流。
+        const webrtcState = {
+            supported: false,
+            active: false,
+            pc: null,
+            pendingIce: [],
+            videoEl: document.getElementById('webrtc-video'),
+        };
+
+        function initWebRTC() {
+            if (!window.RTCPeerConnection || webrtcState.active || webrtcState.pc) return;
+            const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            webrtcState.pc = pc;
+
+            pc.onicecandidate = (e) => {
+                if (e.candidate) {
+                    send({ type: 'signal_ice', candidate: e.candidate.candidate, mid: e.candidate.sdpMid || '' });
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                const st = pc.connectionState;
+                if (st === 'connected') {
+                    webrtcState.active = true;
+                    webrtcState.videoEl.style.display = 'block';
+                    webrtcState.videoEl.play?.().catch(() => {});
+                    showTransferStatus('WebRTC 已连接', 2000);
+                } else if (st === 'failed' || st === 'closed' || st === 'disconnected') {
+                    webrtcClose();
+                }
+            };
+
+            pc.ontrack = (e) => {
+                const stream = e.streams[0] || new MediaStream([e.track]);
+                webrtcState.videoEl.srcObject = stream;
+            };
+
+            // 视频帧到达时统计 FPS
+            const rvfc = webrtcState.videoEl.requestVideoFrameCallback ||
+                (cb => { setTimeout(() => cb(0), 1000); return 0; });
+            const countFrames = (now, meta) => {
+                updateFps();
+                rvfc.call(webrtcState.videoEl, countFrames);
+            };
+            rvfc.call(webrtcState.videoEl, countFrames);
+
+            // 通知服务端发起 WebRTC（服务端生成 offer 后经 WS 回传）
+            send({ type: 'signal_start' });
+        }
+
+        function onWebRtcOffer(sdp) {
+            const pc = webrtcState.pc;
+            if (!pc) return;
+            pc.setRemoteDescription({ type: 'offer', sdp }).then(async () => {
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                send({ type: 'signal_answer', sdp: pc.localDescription.sdp });
+                // 已获得远端描述，补发排队中的 ICE
+                for (const ic of webrtcState.pendingIce) {
+                    pc.addIceCandidate({ candidate: ic.candidate, sdpMid: ic.mid }).catch(() => {});
+                }
+                webrtcState.pendingIce = [];
+            }).catch((e) => {
+                console.error('WebRTC answer failed:', e);
+                webrtcClose();
+            });
+        }
+
+        function onWebRtcIce(candidate, mid) {
+            const pc = webrtcState.pc;
+            if (!candidate) return;
+            if (pc && pc.remoteDescription) {
+                pc.addIceCandidate({ candidate, sdpMid: mid }).catch(() => {});
+            } else if (pc) {
+                webrtcState.pendingIce.push({ candidate, mid });
+            }
+        }
+
+        function webrtcClose() {
+            webrtcState.active = false;
+            webrtcState.videoEl.style.display = 'none';
+            webrtcState.videoEl.srcObject = null;
+            webrtcState.pendingIce = [];
+            if (webrtcState.pc) {
+                webrtcState.pc.close();
+                webrtcState.pc = null;
+            }
+        }
+
         // ==================== WebCodecs 解码器 ====================
         class H264Decoder {
             constructor() {
@@ -873,6 +977,7 @@
 
             state.ws.onclose = () => {
                 state.connected = false;
+                webrtcClose();
                 if (!wsStable) {
                     wsReconnectCount++;
                 } else {
@@ -906,6 +1011,10 @@
         function handleBinary(data) {
             const view = new DataView(data.buffer);
             const frameType = data[0]; // 第一个字节
+
+            // WebRTC 已连接：视频帧走 RTP，忽略 WS 视频/图片帧，文件传输等仍正常处理
+            if (webrtcState.active && (frameType === 0x01 || frameType === 0x02 || frameType === 0x03))
+                return;
 
             if (frameType === 0x03) {
                 // 图片模式：JPEG 帧
@@ -1087,6 +1196,25 @@
                     buildResolutionOptions();
                     updateDropdownActive();
                     updateQualityLabel();
+                    break;
+                case 'mode_changed':
+                    // 服务端支持 WebRTC 且当前未激活 → 尝试发起（服务端会自动切到视频模式）
+                    if (msg.webrtc === true) {
+                        if (!webrtcState.active && !webrtcState.pc)
+                            setTimeout(initWebRTC, 500); // 等 WS 稳定后再发起
+                    } else if (msg.webrtc === false) {
+                        webrtcClose();
+                    }
+                    break;
+                case 'signal_offer':
+                    onWebRtcOffer(msg.sdp);
+                    break;
+                case 'signal_ice':
+                    onWebRtcIce(msg.candidate, msg.mid);
+                    break;
+                case 'signal_state':
+                    if (msg.state === 'failed' || msg.state === 'unsupported')
+                        webrtcClose();
                     break;
                 case 'error':
                     alert('错误: ' + (msg.message || '未知错误'));
@@ -1315,6 +1443,11 @@
             const rect = state.canvas.getBoundingClientRect();
             state.scaleX = state.canvas.width / rect.width;
             state.scaleY = state.canvas.height / rect.height;
+            // WebRTC 视频元素与 canvas 保持同尺寸，叠加显示
+            if (webrtcState.videoEl) {
+                webrtcState.videoEl.width = state.canvas.width;
+                webrtcState.videoEl.height = state.canvas.height;
+            }
         }
 
         function updateStatus(text) {

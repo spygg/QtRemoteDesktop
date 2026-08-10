@@ -353,6 +353,27 @@
             }
 
             // ----- xterm.js 终端 -----
+            // Windows 下 cmd 走匿名管道无回显，需按服务端 config 通知做前端本地回显
+            let localEcho = false;
+            let echoBuf = '';
+            function echoLocal(d) {
+                if (!localEcho || !term) return;
+                if (d === '\r' || d === '\n') {
+                    term.write('\r\n');
+                    echoBuf = '';
+                } else if (d === '\x7f' || d === '\b') {
+                    if (echoBuf.length > 0) {
+                        echoBuf = echoBuf.slice(0, -1);
+                        term.write('\b \b');
+                    }
+                } else if (d.charAt(0) === '\x1b') {
+                    // 转义序列（方向键等）不做本地回显
+                } else {
+                    term.write(d);
+                    echoBuf += d;
+                }
+            }
+
             function createTerminal() {
                 if (term) { try { term.dispose(); } catch(_) {}
                     term = null;
@@ -387,7 +408,7 @@
                 try { if (fitAddon) fitAddon.fit(); } catch(_) {}
 
                 // 用户输入 → 服务端
-                term.onData(function(d) { wsSend(d); });
+                term.onData(function(d) { echoLocal(d); wsSend(d); });
                 // 终端尺寸变化 → 服务端 PTY
                 term.onResize(function(size) { sendResize(size.cols || term.cols, size.rows || term.rows); });
 
@@ -441,7 +462,11 @@
                         if (e.data.charAt(0) === '{') {
                             try {
                                 const cfg = JSON.parse(e.data);
-                                if (cfg.type === 'config') return; // 服务端配置消息，前端由 xterm 处理回显
+                                if (cfg.type === 'config') {
+                                    // 服务端通知：Windows 无远程回显，需要在本地回显
+                                    localEcho = !!cfg.localEcho;
+                                    return;
+                                }
                             } catch(_) {}
                             return;
                         }
@@ -485,7 +510,7 @@
                 // 粘贴发生在 xterm 自带的输入元素内时，xterm.js 已自行处理，避免重复发送
                 if (term && termHost.contains(e.target)) return;
                 const text = e.clipboardData.getData('text/plain');
-                if (text) wsSend(text);
+                if (text) { wsSend(text); echoLocal(text); }
             });
 
             // ---------- one-shot 命令执行 ----------
@@ -555,6 +580,7 @@
                 if (!text) return;
                 if (mode === 'interactive' && ws && ws.readyState === WebSocket.OPEN) {
                     wsSend(text);
+                    echoLocal(text);
                 } else if (mode === 'oneshot') {
                     const inputEl = input;
                     const start = inputEl.selectionStart;

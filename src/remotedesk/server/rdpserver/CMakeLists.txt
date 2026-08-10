@@ -19,3 +19,8 @@ target_link_libraries(${RDP_SERVER} PUBLIC
     FileTransferService
     Clipboardservice
 )
+
+if(FFMPEG_FOUND)
+    target_link_libraries(${RDP_SERVER} PUBLIC WebRtcSession)
+    target_compile_definitions(${RDP_SERVER} PUBLIC USE_WEBRTC)
+endif()

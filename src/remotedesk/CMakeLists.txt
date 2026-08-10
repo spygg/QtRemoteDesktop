@@ -1,6 +1,10 @@
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
+if(POLICY CMP0079)
+    cmake_policy(SET CMP0079 NEW)
+endif()
+
 if(FFMPEG_FOUND)
     include_directories(${FFMPEG_INCLUDE_DIRS})
 endif()
@@ -37,6 +41,15 @@ add_subdirectory(server/secure_input_process)
 add_subdirectory(server/service)
 # add_subdirectory(thridparty/startup)
 add_subdirectory(thridparty/systemsleepblocker)
+
+# ---- WebRTC session (optional, needs FFmpeg) ----
+if(BUILD_THIRDPARTY)
+    add_subdirectory(thridparty/third_party_src)
+endif()
+
+if(FFMPEG_FOUND)
+    add_subdirectory(server/webrtcsession)
+endif()
 
 # ---- Video encoder (optional) ----
 if(FFMPEG_FOUND)
@@ -83,12 +96,14 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 if(FFMPEG_FOUND)
     target_compile_definitions(${PROJECT_NAME} PRIVATE USE_FFMPEG)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_WEBRTC)
+    # USE_FFMPEG 需传播到使用 FFmpeg API 的静态库（静态库编译定义不自动传播）
+    target_compile_definitions(Rdpserver PUBLIC USE_FFMPEG)
+    target_compile_definitions(VideoEncoder PUBLIC USE_FFMPEG)
+    target_link_libraries(Rdpserver PUBLIC VideoEncoder)
+    target_link_libraries(${PROJECT_NAME} PRIVATE WebRtcSession)
     target_link_libraries(${PROJECT_NAME} PRIVATE VideoEncoder)
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES})
-endif()
-
-if(POLICY CMP0079)
-    cmake_policy(SET CMP0079 NEW)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES} ${FFMPEG_EXTRA_LIBS})
 endif()
 
 # ---- Platform libraries for modules ----

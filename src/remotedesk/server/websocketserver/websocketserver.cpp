@@ -227,6 +227,11 @@ void WebSocketServer::dropClient(const QString& clientId)
     }
 }
 
+void WebSocketServer::setMediaExcludedClients(const QSet<QString>& clients)
+{
+    mediaExcludedClients_ = clients;
+}
+
 void WebSocketServer::closeSecureInput()
 {
     if (secureInputSource_) {
@@ -274,7 +279,10 @@ void WebSocketServer::broadcastFrame(const QByteArray& data, bool isKeyframe, qi
     stream << qint64(timestamp);
     packet.append(data);
 
-    for (QWebSocket* socket : clients_.values()) {
+    for (auto it = clients_.constBegin(); it != clients_.constEnd(); ++it) {
+        if (mediaExcludedClients_.contains(it.key()))
+            continue; // 走 WebRTC 的客户端由 RTP 收流，跳过 WS 视频帧
+        QWebSocket* socket = it.value();
         if (socket->state() == QAbstractSocket::ConnectedState) {
             socket->sendBinaryMessage(packet);
         }
