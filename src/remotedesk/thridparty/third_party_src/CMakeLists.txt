@@ -47,13 +47,21 @@ if(WIN32)
 "cp -r '${OPENH264_SRC_DIR}'/. ./\n"
 "make OS=mingw_nt ARCH=x86 CC=gcc AR=ar PREFIX='${OPENH264_INSTALL_DIR}' DESTDIR='' all install\n")
 else()
+    # Linux / macOS 构建脚本（mac 用 OS=darwin，BSD sed 需 -i ''）
+    if(APPLE)
+        set(OPENH264_OS "darwin")
+        set(OPENH264_SED "sed -i ''")
+    else()
+        set(OPENH264_OS "linux")
+        set(OPENH264_SED "sed -i")
+    endif()
     file(WRITE "${OPENH264_BUILD_SH}"
 "#!/bin/sh\n"
 "cd '${OPENH264_BUILD_DIR}'\n"
 "rm -rf ./*\n"
 "cp -r '${OPENH264_SRC_DIR}'/. ./\n"
-"find . -type f -exec sed -i 's/\\r$//' {} +\n"
-"make OS=linux PREFIX='${OPENH264_INSTALL_DIR}' DESTDIR='' all install\n")
+"find . -type f -exec ${OPENH264_SED} 's/\\r$//' {} +\n"
+"make OS=${OPENH264_OS} PREFIX='${OPENH264_INSTALL_DIR}' DESTDIR='' all install\n")
 endif()
 
 if(WIN32)

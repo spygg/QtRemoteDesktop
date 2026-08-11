@@ -11,8 +11,8 @@
 # 默认部署到 ${OPENSSL102_DEPLOY_DIR}（Qt 的 lib 目录，供 RPATH 命中）。
 # ---------------------------------------------------------------
 
-if(NOT UNIX)
-    message(STATUS "OpenSSL 1.0.2u legacy build skipped (only supported on Linux)")
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(STATUS "OpenSSL 1.0.2u legacy build skipped (Linux only; macOS uses system OpenSSL 1.1)")
     return()
 endif()
 
