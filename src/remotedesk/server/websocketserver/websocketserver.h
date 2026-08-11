@@ -73,6 +73,7 @@ private:
     QWebSocketServer* server_;
     QMap<QString, QWebSocket*> clients_;
     QSet<QString> mediaExcludedClients_;
+    QSet<QString> videoStarted_;
     QMap<QWebSocket*, QString> socketToId_;
     QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;

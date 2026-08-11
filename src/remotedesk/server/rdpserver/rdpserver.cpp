@@ -528,6 +528,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
 // 例如在 VideoEncoder 发出 codecConfigChanged 信号的槽中
 void RDPServer::onCodecConfigChanged(const QByteArray& extradata)
 {
+    lastCodecExtra_ = extradata;
     QJsonObject obj;
     obj["type"] = "codec_config";
     obj["extradata"] = QString::fromLatin1(extradata.toBase64());
@@ -1562,6 +1563,21 @@ void RDPServer::onClientConnected(const QString& clientId)
 #endif
     wsServer_->sendJson(clientId, mode);
 
+    // 新客户端从 GOP 中间加入：补充 SPS/PPS 配置并强制下一个 IDR，
+    // 否则解码器会等下一个关键帧(最长 ~1s)才出画面(黑屏)，或从中间帧解码出花屏。
+    if (currentMode_ == ServerMode::Video) {
+        if (!lastCodecExtra_.isEmpty()) {
+            QJsonObject cfg;
+            cfg["type"] = "codec_config";
+            cfg["extradata"] = QString::fromLatin1(lastCodecExtra_.toBase64());
+            wsServer_->sendJson(clientId, cfg);
+        }
+#ifdef USE_FFMPEG
+        if (videoEncoder_)
+            videoEncoder_->requestKeyframe();
+#endif
+    }
+
     // 发送当前锁屏状态（客户端可能在屏幕已锁时连接/重连）
     if (screenLocked_) {
         QJsonObject lock;
@@ -1650,7 +1666,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     if (serviceMode_) {
         if (wsServer_->isCaptureSourceConnected()) {
             if (type != "mousemove"){
-                //qInfo() << "Service: forwarding input to helper, type =" << type;
+                qDebug() << "Service: forwarding input to helper, type =" << type;
             }
             
             if (type != "config")
@@ -1659,7 +1675,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 wsServer_->sendToSecureInput(input);
             // config/set_resolution 跳过转发，由下面的本地逻辑处理
         } else {
-            //qInfo() << "Service: no helper, handling input directly, type =" << type;
+            qDebug() << "Service: no helper, handling input directly, type =" << type;
             // 没有 helper（如 Linux 无头模式），直接在本地注入输入
             if (type == "mousemove") {
                 int x = input["x"].toInt();

@@ -175,6 +175,7 @@ private:
     int secureInputPid_ = 0;
 #endif
     QSslConfiguration* sslConfiguration_;
+    QByteArray lastCodecExtra_;
 
     enum class ServerMode { Video,
         Image };

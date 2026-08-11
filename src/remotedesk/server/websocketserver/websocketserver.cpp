@@ -150,6 +150,7 @@ void WebSocketServer::onSocketDisconnected()
 
     QString clientId = socketToId_.take(socket);
     clients_.remove(clientId);
+    videoStarted_.remove(clientId);
     socket->deleteLater();
 
     emit clientDisconnected(clientId);
@@ -283,9 +284,17 @@ void WebSocketServer::broadcastFrame(const QByteArray& data, bool isKeyframe, qi
         if (mediaExcludedClients_.contains(it.key()))
             continue; // 走 WebRTC 的客户端由 RTP 收流，跳过 WS 视频帧
         QWebSocket* socket = it.value();
-        if (socket->state() == QAbstractSocket::ConnectedState) {
-            socket->sendBinaryMessage(packet);
+        if (socket->state() != QAbstractSocket::ConnectedState)
+            continue;
+
+        // 每客户端从关键帧起点开始收流：
+        // 在收到下一个 IDR 之前丢弃 P 帧，避免从 GOP 中间加入导致黑屏/花屏。
+        if (!videoStarted_.contains(it.key())) {
+            if (!isKeyframe)
+                continue; // 还没到关键帧，跳过纯增量帧
+            videoStarted_.insert(it.key());
         }
+        socket->sendBinaryMessage(packet);
     }
 }
 
