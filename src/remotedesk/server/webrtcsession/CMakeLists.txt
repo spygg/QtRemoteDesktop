@@ -36,11 +36,29 @@ if(WIN32)
     # 编译每个源文件时前置 include windows.h，解决 OpenSSL 1.0.2 X509_NAME 宏冲突
     target_compile_options(${WEBRTC_SESSION} PRIVATE -include windows.h)
 else()
-    # ---- Linux/macOS: 系统 OpenSSL + zlib + POSIX 系统库 ----
-    find_package(OpenSSL REQUIRED)
+    # ---- Linux/macOS: 系统 OpenSSL(1.1) + zlib + POSIX 系统库 ----
+    # 注意：Qt 5.9 的 RPATH 目录 /opt/Qt*/.../lib 里可能有旧版 OpenSSL(1.0) 符号链接，
+    # find_package(OpenSSL) 默认会优先找到它们，导致 metaRTC 需要的 OpenSSL 1.1 符号
+    # (SSL_set_options/HMAC_CTX_new/X509_getm_notBefore 等) 链接失败。
+    # 这里直接链接系统 OpenSSL 1.1 库"文件"，彻底绕过 CMake 的 OpenSSL imported target 缓存。
     find_package(ZLIB REQUIRED)
+    if(EXISTS "/usr/lib64/libssl.so.1.1")
+        set(SYS_OPENSSL_SSL "/usr/lib64/libssl.so.1.1")
+        set(SYS_OPENSSL_CRYPTO "/usr/lib64/libcrypto.so.1.1")
+    elseif(EXISTS "/usr/lib/x86_64-linux-gnu/libssl.so")
+        set(SYS_OPENSSL_SSL "/usr/lib/x86_64-linux-gnu/libssl.so")
+        set(SYS_OPENSSL_CRYPTO "/usr/lib/x86_64-linux-gnu/libcrypto.so")
+    elseif(EXISTS "/usr/lib/aarch64-linux-gnu/libssl.so")
+        set(SYS_OPENSSL_SSL "/usr/lib/aarch64-linux-gnu/libssl.so")
+        set(SYS_OPENSSL_CRYPTO "/usr/lib/aarch64-linux-gnu/libcrypto.so")
+    else()
+        find_library(SYS_OPENSSL_SSL NAMES ssl REQUIRED)
+        find_library(SYS_OPENSSL_CRYPTO NAMES crypto REQUIRED)
+    endif()
+    target_include_directories(${WEBRTC_SESSION} PUBLIC "/usr/include/openssl")
     target_link_libraries(${WEBRTC_SESSION} PUBLIC
-        OpenSSL::SSL OpenSSL::Crypto
+        "${SYS_OPENSSL_SSL}"
+        "${SYS_OPENSSL_CRYPTO}"
         ZLIB::ZLIB
         m pthread dl
     )

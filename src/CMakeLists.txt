@@ -8,6 +8,25 @@ project(QtRemoteDesktop CXX)
 
 set(PROJECT_VERSION 1.0.0)
 
+# ---- 强制 OpenSSL 使用系统 1.1，防止 find_package 误吞 Qt RPATH 目录里的旧版 1.0 ----
+# 说明：Qt 5.9 的 RPATH 目录 /opt/Qt*/.../lib 放有旧版 OpenSSL 1.0 符号链接（供 QSslSocket
+# dlopen），而 metaRTC/libsrtp（WebRTC DTLS）需要系统 OpenSSL 1.1 的符号
+# (SSL_set_options/HMAC_CTX_new/X509_getm_notBefore 等)。这里让 CMakeFindOpenSSL 固定走系统库。
+if(UNIX AND NOT APPLE)
+    if(EXISTS "/usr/lib64/libssl.so.1.1")
+        set(OPENSSL_SSL_LIBRARY "/usr/lib64/libssl.so.1.1" CACHE FILEPATH "System OpenSSL 1.1" FORCE)
+        set(OPENSSL_CRYPTO_LIBRARY "/usr/lib64/libcrypto.so.1.1" CACHE FILEPATH "System OpenSSL 1.1" FORCE)
+    elseif(EXISTS "/usr/lib/x86_64-linux-gnu/libssl.so")
+        set(OPENSSL_SSL_LIBRARY "/usr/lib/x86_64-linux-gnu/libssl.so" CACHE FILEPATH "System OpenSSL" FORCE)
+        set(OPENSSL_CRYPTO_LIBRARY "/usr/lib/x86_64-linux-gnu/libcrypto.so" CACHE FILEPATH "System OpenSSL" FORCE)
+    elseif(EXISTS "/usr/lib/aarch64-linux-gnu/libssl.so")
+        set(OPENSSL_SSL_LIBRARY "/usr/lib/aarch64-linux-gnu/libssl.so" CACHE FILEPATH "System OpenSSL" FORCE)
+        set(OPENSSL_CRYPTO_LIBRARY "/usr/lib/aarch64-linux-gnu/libcrypto.so" CACHE FILEPATH "System OpenSSL" FORCE)
+    endif()
+    set(OPENSSL_INCLUDE_DIR "/usr/include" CACHE PATH "System OpenSSL headers" FORCE)
+    set(OPENSSL_ROOT_DIR "/usr" CACHE PATH "System OpenSSL root" FORCE)
+endif()
+
 # ---- 编译输出目录 (独立根目录, 默认在 src 之外: <repo>/build_output) ----
 set(BUILD_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/../build_output" CACHE PATH
     "Root folder for all build artifacts (exe/libs), kept outside src/")
