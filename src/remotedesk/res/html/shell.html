@@ -8,7 +8,8 @@
     <style>
         /* ====== 样式完全保留（与之前一致） ====== */
         * { margin:0; padding:0; box-sizing:border-box; }
-        body { background:#1a1a1a; color:#eee; font-family:'Consolas','Courier New',monospace; min-height:100vh; position:relative; }
+        html, body { height:100%; overflow:hidden; }
+        body { background:#1a1a1a; color:#eee; font-family:'Consolas','Courier New',monospace; position:relative; }
         #toolbar { position:fixed; top:0; left:50%; transform:translateX(-50%) translateY(0); display:flex; flex-wrap:nowrap; justify-content:center; gap:2px; z-index:4000; background:rgba(30,30,30,0.92); border-radius:0 0 10px 10px; padding:6px 10px; transition:transform 0.3s cubic-bezier(0.4,0,0.2,1); box-shadow:0 2px 12px rgba(0,0,0,0.4); backdrop-filter:blur(8px); max-width:100vw; overflow-x:auto; -webkit-overflow-scrolling:touch; }
         #toolbar.hidden { transform:translateX(-50%) translateY(-100%); }
         #toolbar-trigger { position:fixed; top:0; left:0; right:0; height:6px; z-index:3999; }
@@ -31,12 +32,13 @@
         .dropdown-options button.active { background:rgba(0,102,204,0.5); border-color:#4a9eff; color:#fff; }
         .dropdown-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; z-index:1000; }
         .dropdown-overlay.open { display:block; top:44px; }
-        /* 交互式终端宿主（xterm.js 渲染区） */
-        #term-host { position:absolute; top:44px; bottom:52px; left:0; right:0; background:#111; overflow:hidden; }
+        /* 交互式终端宿主（xterm.js 渲染区）——占满整个可视区域，工具栏悬浮其上 */
+        #term-host { position:fixed; top:0; bottom:0; left:0; right:0; background:#111; overflow:hidden; }
         #term-host.hidden { display:none; }
         #term-host .xterm { height:100%; width:100%; }
-        /* one-shot 模式输出区 */
-        #output { position:absolute; top:44px; bottom:52px; left:0; right:0; overflow-y:auto; padding:12px 16px; font-size:13px; line-height:1.4; white-space:pre-wrap; word-break:break-all; background:#111; font-family:'Consolas','Courier New',monospace; }
+        #term-host .xterm-screen { height:100%; }
+        /* one-shot 模式输出区——同样占满可视区域 */
+        #output { position:fixed; top:0; bottom:0; left:0; right:0; overflow-y:auto; padding:48px 16px 12px; font-size:13px; line-height:1.4; white-space:pre-wrap; word-break:break-all; background:#111; font-family:'Consolas','Courier New',monospace; }
         #output.hidden { display:none; }
         #output .stdout { color:#ccc; }
         #output .stderr { color:#f55; }
@@ -268,7 +270,6 @@
             let mode = 'connecting';       // 'connecting' | 'interactive' | 'oneshot'
             let ws = null;
             let term = null;
-            let fitAddon = null;
             let interactiveStarted = false;
 
             const termHost = document.getElementById('term-host');
@@ -379,7 +380,6 @@
                     term = null;
                 }
                 const TerminalCtor = (typeof Terminal === 'function') ? Terminal : (Terminal && Terminal.Terminal);
-                const FitCtor = (typeof FitAddon === 'function') ? FitAddon : (FitAddon && FitAddon.FitAddon);
 
                 if (typeof TerminalCtor !== 'function') {
                     appendOutput('xterm.js 加载失败，切换到 one-shot 模式', 'error');
@@ -398,14 +398,9 @@
                     theme: { background:'#111111', foreground:'#cccccc', cursor:'#4a9eff', cursorAccent:'#111111', selection:'#4a9eff55' }
                 });
 
-                if (FitCtor) {
-                    fitAddon = new FitCtor();
-                    try { term.loadAddon(fitAddon); } catch(_) { fitAddon = null; }
-                }
-
                 termHost.innerHTML = '';
                 term.open(termHost);
-                try { if (fitAddon) fitAddon.fit(); } catch(_) {}
+                window.__term = term; // 调试用
 
                 // 用户输入 → 服务端
                 term.onData(function(d) { echoLocal(d); wsSend(d); });
@@ -417,10 +412,72 @@
 
                 // 等布局稳定后重新适配并下发尺寸
                 requestAnimationFrame(function() {
-                    try { if (fitAddon) fitAddon.fit(); } catch(_) {}
+                    fitTerm();
                     sendResize(term.cols, term.rows);
+                    watchHostSize();
                 });
+                // 字体加载完成后再次校准（字体未就绪时字符尺寸不准，列数会算错）
+                if (document.fonts && document.fonts.ready) {
+                    document.fonts.ready.then(function() {
+                        fitTerm();
+                        sendResize(term.cols, term.rows);
+                    });
+                }
                 return term;
+            }
+
+            // 自适应终端尺寸：按宿主容器实际可用宽高与字符格尺寸计算 cols/rows。
+            // 不用 xterm-fit addon（与 xterm 5.x 的 dimensions API 不匹配，fit 会静默失效）。
+            function fitTerm() {
+                if (!term || !term.element) return;
+                const host = term.element.parentElement;
+                if (!host) return;
+                const availableW = host.clientWidth;
+                const availableH = host.clientHeight;
+                if (!availableW || !availableH) return;
+
+                let cellW = 0, cellH = 0;
+                // xterm 5.x: 私有但稳定的渲染尺寸
+                try {
+                    const dims = term._core && term._core._renderService
+                        ? term._core._renderService.dimensions : null;
+                    if (dims) {
+                        cellW = dims.actualCellWidth || dims.css.cell.width || 0;
+                        cellH = dims.actualCellHeight || dims.css.cell.height || 0;
+                    }
+                } catch(_) {}
+
+                // 若内部尺寸拿不到，退化为 DOM 实测：
+                // 在一个宽行后读取单行/单格的实际像素。xterm 每行是独立 div，
+                // 行高即 cellH；cellW 用 canvas 宽度/cols 反推。
+                if (!cellW || !cellH) {
+                    try {
+                        const rowsEl = term.element.querySelector('.xterm-rows');
+                        const screenEl = term.element.querySelector('.xterm-screen');
+                        const canvasEl = term.element.querySelector('.xterm-canvas');
+                        if (rowsEl && rowsEl.firstElementChild) {
+                            cellH = rowsEl.firstElementChild.clientHeight;
+                        }
+                        if (screenEl && canvasEl && canvasEl.width && term.cols) {
+                            cellW = canvasEl.width / term.cols;
+                        }
+                    } catch(_) {}
+                }
+                if (!cellW || !cellH) return;
+
+                // 滚动条宽度
+                let scrollW = 0;
+                try {
+                    const vp = term.element.querySelector('.xterm-viewport');
+                    if (vp) scrollW = vp.offsetWidth - vp.clientWidth;
+                } catch(_) {}
+                const usableW = availableW - scrollW;
+
+                const cols = Math.max(2, Math.floor(usableW / cellW));
+                const rows = Math.max(1, Math.floor(availableH / cellH));
+                if (cols !== term.cols || rows !== term.rows) {
+                    term.resize(cols, rows);
+                }
             }
 
             function sendResize(cols, rows) {
@@ -435,8 +492,19 @@
 
             function syncTerminalSize() {
                 if (!term) return;
-                try { if (fitAddon) fitAddon.fit(); } catch(_) {}
+                fitTerm();
                 sendResize(term.cols, term.rows);
+            }
+
+            // 监听宿主尺寸变化（工具栏显隐/全屏/缩放），自动重新适配
+            let hostObserver = null;
+            function watchHostSize() {
+                if (!termHost || !term) return;
+                try {
+                    if (hostObserver) hostObserver.disconnect();
+                    hostObserver = new ResizeObserver(function() { syncTerminalSize(); });
+                    hostObserver.observe(termHost);
+                } catch(_) {}
             }
 
             // ----- WebSocket 连接 -----
