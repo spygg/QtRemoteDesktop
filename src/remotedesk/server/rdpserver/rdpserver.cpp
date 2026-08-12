@@ -1675,7 +1675,9 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 wsServer_->sendToSecureInput(input);
             // config/set_resolution 跳过转发，由下面的本地逻辑处理
         } else {
-            qDebug() << "Service: no helper, handling input directly, type =" << type;
+            // 直接处理分支：mousemove 高频，不写日志（避免同步文件 I/O 占用主线程 CPU）
+            if (type != "mousemove")
+                qDebug() << "Service: no helper, handling input directly, type =" << type;
             // 没有 helper（如 Linux 无头模式），直接在本地注入输入
             if (type == "mousemove") {
                 int x = input["x"].toInt();

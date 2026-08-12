@@ -84,9 +84,10 @@ public:
             return false;
         }
 
-        // BGRA -> RGB888 (使用 Qt 内置 SIMD 优化转换)
+        // BGRA 直通输出 RGB32（小端=BGRA），与 X11 捕获一致。
+        // 全帧 RGB888 转换已移到编码线程，避免主线程每帧全帧转换。
         QImage rawImg(buffer_.data(), width_, height_, width_ * 4, QImage::Format_RGB32);
-        outImage = rawImg.convertToFormat(QImage::Format_RGB888);
+        outImage = rawImg.copy();
         return true;
     }
 
@@ -272,11 +273,12 @@ public:
             return false;
         }
 
-        // DXGI 输出 BGRA -> RGB888 (使用 Qt 内置 SIMD 优化转换)
+        // BGRA 直通输出 RGB32（小端=BGRA），与 X11 捕获一致。
+        // 全帧 RGB888 转换已移到编码线程，避免主线程每帧全帧转换。
         const uchar* src = static_cast<const uchar*>(mapped.pData);
         const int srcStep = mapped.RowPitch;
         QImage rawImg(src, width_, height_, srcStep, QImage::Format_RGB32);
-        outImage = rawImg.convertToFormat(QImage::Format_RGB888);
+        outImage = rawImg.copy();
 
         context_->Unmap(stagingTexture_, 0);
         // stagingTexture_ 复用，不释放
@@ -338,6 +340,7 @@ static bool isFrameBlack(const QImage& frame)
 {
     if (frame.isNull() || frame.width() < 10 || frame.height() < 10)
         return true;
+    const int bpp = (frame.format() == QImage::Format_RGB32 || frame.format() == QImage::Format_ARGB32) ? 4 : 3;
     int sampleCount = 0;
     int darkCount = 0;
     int step = qMax(1, qMin(frame.width(), frame.height()) / 10);
@@ -345,7 +348,7 @@ static bool isFrameBlack(const QImage& frame)
         const uchar* line = frame.constScanLine(y);
         for (int x = 0; x < frame.width(); x += step) {
             sampleCount++;
-            if (line[x * 3] + line[x * 3 + 1] + line[x * 3 + 2] < 18)
+            if (line[x * bpp] + line[x * bpp + 1] + line[x * bpp + 2] < 18)
                 darkCount++;
         }
     }
@@ -379,6 +382,13 @@ void ScreenCapturer::captureFrame()
             }
             if (updated)
                 emit frameCaptured(frame);
+            else {
+                // 无新帧（DXGI 无桌面更新）：同样递增 idle 计数并降频，
+                // 避免静止时 capture timer 保持全帧率空转消耗 CPU。
+                idleCount_++;
+                if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+                    captureTimer_->setInterval(1000);
+            }
             return;
         }
 

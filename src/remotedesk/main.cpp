@@ -55,20 +55,29 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
     fprintf(stderr, "%s\n", content.toUtf8().constData());
     fflush(stderr);
 
+    // 持久打开日志文件，避免每条消息都 open/close（高频日志下会显著占用主线程 CPU）
+    static QFile s_log;
+    static QString s_logDate;
     QDateTime dt = QDateTime::currentDateTime();
+    QString date = dt.toString("yyyyMMdd");
+    QString logFile = QString("%1/logs/%2.txt").arg(QCoreApplication::applicationDirPath() /*QDir::currentPath()*/).arg(date);
+    if (!s_log.isOpen() || date != s_logDate) {
+        if (s_log.isOpen())
+            s_log.close();
+        s_log.setFileName(logFile);
+        if (!s_log.open(QIODevice::WriteOnly | QIODevice::Append | QFile::Text))
+            return;
+        s_logDate = date;
+    }
 
-    QString logFile = QString("%1/logs/%2.txt").arg(QCoreApplication::applicationDirPath() /*QDir::currentPath()*/).arg(dt.toString("yyyyMMdd"));
-
-    QFile log(logFile);
-    if (log.open(QIODevice::WriteOnly | QIODevice::Append | QFile::Text)) {
-        QTextStream logStream(&log);
+    QTextStream logStream(&s_log);
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
-        logStream.setCodec("utf-8");
+    logStream.setCodec("utf-8");
 #endif
 
-        QString tm = QDateTime::currentDateTime().toString("[yyyy/MM/dd hh:mm:ss.zzz] ");
-        logStream << tm << content << "\n";
-    }
+    QString tm = dt.toString("[yyyy/MM/dd hh:mm:ss.zzz] ");
+    logStream << tm << content << "\n";
+    logStream.flush();
 }
 
 int main(int argc, char* argv[])

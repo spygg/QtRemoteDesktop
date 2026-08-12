@@ -62,6 +62,9 @@ public:
     virtual void resetDamage() {}
     virtual int width() const { return 0; }
     virtual int height() const { return 0; }
+    // 区域抓取实现（如 X11 Damage）可返回 true，表示本次捕获已知有变化，
+    // 上层可跳过全帧校验和以省 CPU
+    virtual bool regionDirty() const { return false; }
 };
 
 class ScreenCapturer : public QObject {

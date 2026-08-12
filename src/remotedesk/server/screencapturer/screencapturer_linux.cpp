@@ -6,6 +6,7 @@
 #include <QPixmap>
 #include <QSet>
 #include <QProcess>
+#include <chrono>
 
 static bool isFrameBlack(const QImage& frame)
 {
@@ -51,6 +52,8 @@ class X11Capturer : public PlatformCapturer {
     XserverRegion region_;
     bool damageSupported_ = false;
     int emptyDamageCount_ = 0; // 连续空 damage 计数，用于 xrdp 等驱动无 damage 时回退全量捕获
+    QImage fullFrame_;         // 全屏持久缓冲（RGB32），区域抓取时在其上原地更新
+    bool regionDirty_ = false; // 本次捕获走了区域抓取（已知有变化），无需再做全帧校验和
 
 public:
     bool initialize() override
@@ -67,6 +70,8 @@ public:
         Screen* screen = DefaultScreenOfDisplay(display_);
         width_ = WidthOfScreen(screen);
         height_ = HeightOfScreen(screen);
+
+        fullFrame_ = QImage(width_, height_, QImage::Format_RGB32);
 
         // 检查并初始化 Damage 扩展
         int damageEvent, damageError;
@@ -99,21 +104,76 @@ public:
                         break;
                     }
                 }
-                XFree(rects);
             }
+            if (!empty && rectCount > 0) {
+                // 只抓取变化区域，更新到全屏缓冲（大幅降低 XGetImage 的传输与拷贝量）
+                for (int i = 0; i < rectCount; ++i) {
+                    XRectangle& r = rects[i];
+                    if (r.width <= 0 || r.height <= 0)
+                        continue;
+                    // 限制在屏幕范围内
+                    if (r.x < 0) r.width += r.x, r.x = 0;
+                    if (r.y < 0) r.height += r.y, r.y = 0;
+                    if (r.x + r.width > width_) r.width = width_ - r.x;
+                    if (r.y + r.height > height_) r.height = height_ - r.y;
+                    if (r.width <= 0 || r.height <= 0)
+                        continue;
+                    XImage* ximage = XGetImage(display_, rootWindow_, r.x, r.y,
+                        r.width, r.height, AllPlanes, ZPixmap);
+                    if (!ximage)
+                        continue;
+                    if (ximage->bits_per_pixel == 32) {
+                        const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
+                        int srcStride = ximage->bytes_per_line;
+                        for (int yy = 0; yy < r.height; ++yy) {
+                            memcpy(fullFrame_.scanLine(r.y + yy) + r.x * 4,
+                                   src + yy * srcStride,
+                                   static_cast<size_t>(r.width) * 4);
+                        }
+                    } else {
+                        // 非 32bpp 兜底：整行转换
+                        const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
+                        int srcStride = ximage->bytes_per_line;
+                        for (int yy = 0; yy < r.height; ++yy) {
+                            const uchar* s = src + yy * srcStride;
+                            QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(r.y + yy)) + r.x;
+                            for (int xx = 0; xx < r.width; ++xx) {
+                                d[xx] = qRgb(s[xx * 3], s[xx * 3 + 1], s[xx * 3 + 2]);
+                            }
+                        }
+                    }
+                    XDestroyImage(ximage);
+                }
+                XFree(rects);
+                XFixesDestroyRegion(display_, region);
+                if (updated) *updated = true;
+                outImage = fullFrame_.copy();
+                emptyDamageCount_ = 0;
+                regionDirty_ = true;
+                return true;
+            }
+            if (rects)
+                XFree(rects);
             XFixesDestroyRegion(display_, region);
             if (empty) {
-                // xrdp 等部分 Xorg 驱动不会通过 Damage 报告变化，连续空 damage 时回退到全量捕获
-                if (++emptyDamageCount_ < 3) {
+                // 真实 Xorg 下 Damage 可靠。静止时不做全量抓取，避免主线程空转。
+                // 仅每 ~2 秒试探一次全量抓取（兼容 xrdp 等不报告 Damage 的驱动），
+                // 同时上层在 updated=false 时会降低采样率到 1fps，试探成本可忽略。
+                static auto s_lastProbe = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
+                if (now - s_lastProbe < std::chrono::seconds(2)) {
                     if (updated) *updated = false;
                     return true;
                 }
+                s_lastProbe = now;
+                emptyDamageCount_ = 0;
             } else {
                 emptyDamageCount_ = 0;
             }
         }
 
         if (updated) *updated = true;
+        regionDirty_ = false; // 全屏抓取，仍用校验和判断是否有变化
 
         XImage* ximage = XGetImage(display_, rootWindow_, 0, 0, width_, height_, AllPlanes, ZPixmap);
         if (!ximage) {
@@ -124,7 +184,10 @@ public:
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
                           width_, height_, ximage->bytes_per_line,
                           QImage::Format_RGB32);
-            outImage = rawImg.convertToFormat(QImage::Format_RGB888);
+            // 直接输出 RGB32（小端=BGRA），不再转换到 RGB888。
+            // 视频编码线程的 sws_scale 直接以 BGRA 为输入，把转换从主线程移走，
+            // 显著降低主线程 CPU（X11 捕获本机数据就是 32bpp）。
+            outImage = rawImg.copy();
         } else {
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
                           width_, height_, ximage->bytes_per_line,
@@ -140,6 +203,8 @@ public:
     {
         // Damage already subtracted in captureFrame(), no-op
     }
+
+    bool regionDirty() const { return regionDirty_; }
 
     int width() const { return width_; }
     int height() const { return height_; }
@@ -196,8 +261,14 @@ void ScreenCapturer::captureFrame()
         }
         captureFailCount_ = 0;
 
-        if (!updated)
+        if (!updated) {
+            // 无新帧（如静止时 Damage 为空）：同样递增 idle 计数并降频，
+            // 避免 capture timer 在无变化时保持全帧率空转消耗 CPU。
+            idleCount_++;
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+                captureTimer_->setInterval(1000);
             return;
+        }
 
         if (isFrameBlack(frame)) {
             if (!screenLocked_) {
@@ -209,6 +280,16 @@ void ScreenCapturer::captureFrame()
         if (screenLocked_) {
             screenLocked_ = false;
             emit screenLocked(false);
+        }
+
+        bool regionKnownDirty = (useX11_ && x11Capturer_ && x11Capturer_->regionDirty());
+        if (regionKnownDirty) {
+            // 区域抓取已知有变化（XDamage 非空），跳过全帧校验和以省 CPU
+            idleCount_ = 0;
+            if (captureTimer_->interval() != 1000 / fps_)
+                captureTimer_->setInterval(1000 / fps_);
+            emit frameCaptured(frame);
+            return;
         }
 
         quint16 checksum = quickFrameChecksum(frame);

@@ -109,7 +109,12 @@ bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, in
 
     switch (type) {
     case CodecType::H264:
-        if (hwName_.isEmpty()) {
+        if (hwName_.isEmpty() && codec->name &&
+            (qstrcmp(codec->name, "libopenh264") == 0 || qstrcmp(codec->name, "h264_openh264") == 0)) {
+            // libopenh264（FFmpeg 3.4.8 封装）：减少实时桌面的 CPU 占用
+            av_dict_set(&opts, "allow_skip_frames", "1", 0); // 码率超限时允许跳帧，避免积压
+            av_dict_set(&opts, "loopfilter", "0", 0);        // 禁用环内滤波，省 CPU（桌面画面可接受）
+        } else if (hwName_.isEmpty()) {
             av_dict_set(&opts, "preset", "ultrafast", 0);
             av_dict_set(&opts, "tune", "zerolatency", 0);
         } else {
@@ -159,7 +164,8 @@ bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, in
     frame_->height = codecCtx_->height;
     av_frame_get_buffer(frame_, 0);
 
-    swsCtx_ = sws_getContext(width, height, AV_PIX_FMT_RGB24,
+    // AV_PIX_FMT_RGB32 在小端系统上即 BGRA，与 QImage::Format_RGB32 内存布局一致
+    swsCtx_ = sws_getContext(width, height, AV_PIX_FMT_RGB32,
         width, height, codecCtx_->pix_fmt,
         SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!swsCtx_) {
@@ -188,20 +194,26 @@ void VideoEncoder::encode(const QImage& frame)
 void VideoEncoder::encodingLoop()
 {
     while (!abort_) {
-        QImage image;
-        {
-            QMutexLocker locker(&mutex_);
-            while (frameQueue_.isEmpty() && !abort_)
-                condition_.wait(&mutex_);
-            if (abort_)
-                break;
-            image = frameQueue_.dequeue();
-        }
+    QImage image;
+    {
+        QMutexLocker locker(&mutex_);
+        while (frameQueue_.isEmpty() && !abort_)
+            condition_.wait(&mutex_);
+        if (abort_)
+            break;
+        image = frameQueue_.dequeue();
+    }
 
-        const uint8_t* srcData[1] = { image.bits() };
-        int srcLinesize[1] = { static_cast<int>(image.bytesPerLine()) };
-        sws_scale(swsCtx_, srcData, srcLinesize, 0, image.height(),
-            frame_->data, frame_->linesize);
+    // 统一输入到 sws：X11 捕获直接给 RGB32（小端=BGRA），其他平台给 RGB888。
+    // 转换放到编码线程（原本空闲），把主线程从全帧 convertToFormat 中解放。
+    if (image.format() != QImage::Format_RGB32 && image.format() != QImage::Format_ARGB32) {
+        image = image.convertToFormat(QImage::Format_RGB32);
+    }
+
+    const uint8_t* srcData[1] = { image.bits() };
+    int srcLinesize[1] = { static_cast<int>(image.bytesPerLine()) };
+    sws_scale(swsCtx_, srcData, srcLinesize, 0, image.height(),
+        frame_->data, frame_->linesize);
 
         // 应用 WebRTC 反馈：REMB 码率调整 / PLI 强制关键帧
         int br = pendingBitrate_.exchange(0);
