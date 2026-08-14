@@ -22,6 +22,7 @@
 #include <QTimer>
 
 #include <QCursor>
+#include <QDateTime>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -454,13 +455,14 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 if (locked) {
                     qInfo() << "Screen locked";
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
-                    if (!inputManager_->initUinput())
+                    if (inputManager_ && !inputManager_->initUinput())
                         qWarning() << "uinput unavailable, XTest fallback";
 #endif
                 } else {
                     qInfo() << "Screen unlocked, restoring normal input";
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
-                    inputManager_->destroyUinput();
+                    if (inputManager_)
+                        inputManager_->destroyUinput();
 #endif
                 }
             });
@@ -750,8 +752,7 @@ void RDPServer::handleLoginPost(QTcpSocket* socket, const QByteArray& body)
 }
 
 QString RDPServer::extractSessionToken(const QByteArray& request)
-{
-    QString req = QString::fromUtf8(request);
+{    QString req = QString::fromUtf8(request);
     // Check Cookie header
     int cookieIdx = req.indexOf("Cookie:", 0, Qt::CaseInsensitive);
     if (cookieIdx >= 0) {
@@ -807,6 +808,13 @@ void RDPServer::onHttpRequest()
         if (bodyLen > 1048576) { // 1MB limit
             qWarning() << "POST body too large:" << bodyLen;
             return QByteArray();
+        }
+        // TCP 分片时 body 可能未到齐：短等待重试（HTTP 请求低频，最多阻塞 1s 仅在数据不完整时）
+        int attempts = 0;
+        while (socket->bytesAvailable() < bodyLen && attempts < 5) {
+            if (!socket->waitForReadyRead(200))
+                break;
+            ++attempts;
         }
         if (socket->bytesAvailable() < bodyLen)
             return QByteArray();
@@ -1343,16 +1351,19 @@ void RDPServer::start()
         return;
     }
 
-    // 尝试初始化视频编码器（按缩放档位编码）
+    // 尝试初始化视频编码器（按缩放档位编码，缩放由编码线程 sws 完成）
 #ifdef USE_FFMPEG
     {
-        int ew = screenCapturer_->width(), eh = screenCapturer_->height();
+        int sw = screenCapturer_->width(), sh = screenCapturer_->height();
+        int ew = sw, eh = sh;
         if (configScale_ < 100) {
             int tw = ew * configScale_ / 100, th = eh * configScale_ / 100;
             if (tw > 0 && th > 0) { ew = tw; eh = th; }
         }
-        if (videoEncoder_->initialize(CodecType::H264, ew, eh, 30, 2000000)) {
+        if (videoEncoder_->initialize(CodecType::H264, sw, sh, ew, eh,
+                configFps_, videoBitrateFor(ew, eh, configFps_))) {
             currentMode_ = ServerMode::Video;
+            videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_);
 
             qInfo() << "Video encoder initialized, using video mode.";
         } else
@@ -1422,13 +1433,14 @@ bool RDPServer::startCapture()
                 if (locked) {
                     qInfo() << "Screen locked";
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
-                    if (!inputManager_->initUinput())
+                    if (inputManager_ && !inputManager_->initUinput())
                         qWarning() << "uinput unavailable, XTest fallback";
 #endif
                 } else {
                     qInfo() << "Screen unlocked, restoring normal input";
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
-                    inputManager_->destroyUinput();
+                    if (inputManager_)
+                        inputManager_->destroyUinput();
 #endif
                 }
             });
@@ -1706,6 +1718,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             if (type != "mousemove")
                 qDebug() << "Service: no helper, handling input directly, type =" << type;
             // 没有 helper（如 Linux 无头模式），直接在本地注入输入
+            if (!inputManager_)
+                return;
             if (type == "mousemove") {
                 int x = input["x"].toInt();
                 int y = input["y"].toInt();
@@ -1829,6 +1843,12 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             if (screenCapturer_)
                 screenCapturer_->setFps(newFps);
             saveServerConfig(QString());
+#ifdef USE_FFMPEG
+            // 帧率改变需按新 fps 重建编码器，否则 time_base/gop_size 仍是旧值，
+            // 导致 IDR 间隔与捕获帧率不匹配
+            if (currentMode_ == ServerMode::Video && videoEncoder_)
+                reinitVideoEncoderForScale();
+#endif
         }
         int newScale = input["scale"].toInt();
         if (newScale >= 10 && newScale <= 100) {
@@ -1914,15 +1934,9 @@ void RDPServer::onFrameCaptured(const QImage& frame)
         return;
 
 #ifdef USE_FFMPEG
-    if (currentMode_ == ServerMode::Video) {
-        QImage encodeFrame = frame;
-        if (configScale_ < 100) {
-            int newW = frame.width() * configScale_ / 100;
-            int newH = frame.height() * configScale_ / 100;
-            if (newW > 0 && newH > 0)
-                encodeFrame = frame.scaled(newW, newH, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        }
-        videoEncoder_->encode(encodeFrame);
+    if (currentMode_ == ServerMode::Video && videoEncoder_) {
+        // 缩放已在编码线程 sws_scale 完成，主线程不再做全帧缩放（避免阻塞输入处理）
+        videoEncoder_->encode(frame);
     } else
 #endif
     {
@@ -1932,6 +1946,11 @@ void RDPServer::onFrameCaptured(const QImage& frame)
     }
 
     // 鼠标光标位置广播（仅在位置变化时发送，避免每帧无意义传输）
+    // X11 下 QCursor::pos() 是 XQueryPointer 同步往返，节流到 ~20Hz 避免拖慢主线程
+    qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (nowMs - lastCursorQueryMs_ < 50)
+        return;
+    lastCursorQueryMs_ = nowMs;
     QPoint cursorPos = QCursor::pos();
     int relativeX = cursorPos.x() - screenGeometry_.x();
     int relativeY = cursorPos.y() - screenGeometry_.y();
@@ -1944,10 +1963,8 @@ void RDPServer::onFrameCaptured(const QImage& frame)
         cursorInfo["x"] = relativeX;
         cursorInfo["y"] = relativeY;
 
-        QStringList clientList = wsServer_->clients();
-        if (!clientList.isEmpty()) {
-            wsServer_->sendJson(clientList.first(), cursorInfo);
-        }
+        // 多客户端时每个查看端都需看到远端光标位置
+        wsServer_->broadcastJson(cursorInfo);
     }
 }
 
@@ -2033,11 +2050,25 @@ bool RDPServer::switchToVideoMode()
             this, &RDPServer::onEncodedFrame);
         connect(videoEncoder_.get(), &VideoEncoder::codecConfigChanged,
             this, &RDPServer::onCodecConfigChanged);
+        connect(videoEncoder_.get(), &VideoEncoder::encoderOverload,
+            this, [this](bool overloaded) {
+                if (!videoEncoder_) return;
+                if (overloaded) {
+                    int cur = videoEncoder_->currentBitrate();
+                    int reduced = qMax(150000, static_cast<int>(cur * 0.6));
+                    videoEncoder_->setBitrate(reduced);
+                    qWarning() << "Video encoder overload: reducing bitrate to" << reduced;
+                } else if (videoBaseBitrate_ > 0) {
+                    videoEncoder_->setBitrate(videoBaseBitrate_);
+                    qInfo() << "Video encoder recovered: restoring bitrate to" << videoBaseBitrate_;
+                }
+            });
     }
 
     // 尝试重新初始化视频编码器（按当前缩放档位编码，避免始终全分辨率软编导致 CPU 高）
-    int encW = screenCapturer_->width();
-    int encH = screenCapturer_->height();
+    int sw = screenCapturer_->width();
+    int sh = screenCapturer_->height();
+    int encW = sw, encH = sh;
     if (configScale_ < 100) {
         int tw = encW * configScale_ / 100;
         int th = encH * configScale_ / 100;
@@ -2046,10 +2077,12 @@ bool RDPServer::switchToVideoMode()
             encH = th;
         }
     }
-    if (!videoEncoder_->initialize(CodecType::H264, encW, encH, 30, 2000000)) {
+    if (!videoEncoder_->initialize(CodecType::H264, sw, sh, encW, encH,
+            configFps_, videoBitrateFor(encW, encH, configFps_))) {
         qWarning() << "Failed to initialize video encoder, staying in image mode";
         return false;
     }
+    videoBaseBitrate_ = videoBitrateFor(encW, encH, configFps_);
 
     currentMode_ = ServerMode::Video;
 
@@ -2072,14 +2105,17 @@ void RDPServer::reinitVideoEncoderForScale()
     if (!videoEncoder_ || !screenCapturer_)
         return;
 
-    int ew = screenCapturer_->width(), eh = screenCapturer_->height();
+    int sw = screenCapturer_->width(), sh = screenCapturer_->height();
+    int ew = sw, eh = sh;
     if (configScale_ < 100) {
         int tw = ew * configScale_ / 100, th = eh * configScale_ / 100;
         if (tw > 0 && th > 0) { ew = tw; eh = th; }
     }
 
     videoEncoder_->shutdown();
-    if (videoEncoder_->initialize(CodecType::H264, ew, eh, 30, 2000000)) {
+    if (videoEncoder_->initialize(CodecType::H264, sw, sh, ew, eh,
+            configFps_, videoBitrateFor(ew, eh, configFps_))) {
+        videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_);
         videoEncoder_->requestKeyframe();
         qInfo() << "Video encoder re-initialized for scale" << configScale_ << "at" << ew << "x" << eh;
     } else {
@@ -2094,6 +2130,25 @@ bool RDPServer::hwEncodeAvailable() const
 #else
     return false;
 #endif
+}
+
+// 依据编码分辨率、帧率与画质档位估算 H.264 码率，
+// 低分辨率/低画质下自动降低码率以节省单板 CPU，高分辨率下保证可用画质。
+int RDPServer::videoBitrateFor(int encW, int encH, int fps) const
+{
+    double bitsPerPixel;
+    switch (configQuality_) {
+    case 80: bitsPerPixel = 0.15; break; // high
+    case 60: bitsPerPixel = 0.11; break; // medium
+    case 35: bitsPerPixel = 0.08; break; // low / verylow
+    default: bitsPerPixel = 0.10; break;
+    }
+    qint64 pixels = static_cast<qint64>(encW) * encH;
+    qint64 bitrate = static_cast<qint64>(pixels * bitsPerPixel * qMax(1, fps));
+    // 实际范围：150kbps ~ 10Mbps
+    if (bitrate < 150000) bitrate = 150000;
+    if (bitrate > 10000000) bitrate = 10000000;
+    return static_cast<int>(bitrate);
 }
 
 #ifdef USE_WEBRTC

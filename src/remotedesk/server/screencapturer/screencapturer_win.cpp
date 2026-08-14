@@ -50,8 +50,8 @@ public:
             return false;
         }
 
-        // 选入位图到内存 DC
-        SelectObject(hdcMem_, hBitmap_);
+        // 选入位图到内存 DC（保存旧对象，析构时先还原再删除位图）
+        hBitmapOld_ = static_cast<HBITMAP>(SelectObject(hdcMem_, hBitmap_));
 
         // 获取位图信息，用于后续转换
         bitmapInfo_.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -69,13 +69,10 @@ public:
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
         if (updated) *updated = true;
-        ShowCursor(FALSE);
-        // 复制屏幕到内存 DC
+        // BitBlt(SRCCOPY) 不会把硬件光标画进位图，ShowCursor 隐藏/显示是徒劳且会闪屏，已移除
         if (!BitBlt(hdcMem_, 0, 0, width_, height_, hdcScreen_, 0, 0, SRCCOPY)) {
-            ShowCursor(TRUE);
             return false;
         }
-        ShowCursor(TRUE);
 
         // 获取位图数据（复用预分配缓冲区）
         buffer_.resize(width_ * height_ * 4);
@@ -93,6 +90,9 @@ public:
 
     ~GdiCapturer()
     {
+        // 先把旧对象还原回 DC，否则被选入 DC 的位图 DeleteObject 会失败（GDI 资源泄漏）
+        if (hdcMem_ && hBitmapOld_)
+            SelectObject(hdcMem_, hBitmapOld_);
         if (hBitmap_)
             DeleteObject(hBitmap_);
         if (hdcMem_)
@@ -105,6 +105,7 @@ private:
     HDC hdcScreen_ = nullptr;
     HDC hdcMem_ = nullptr;
     HBITMAP hBitmap_ = nullptr;
+    HBITMAP hBitmapOld_ = nullptr;
     int width_ = 0, height_ = 0;
     BITMAPINFO bitmapInfo_;
     std::vector<uchar> buffer_; // 复用像素缓冲区
@@ -122,7 +123,7 @@ class DXGICapturer : public PlatformCapturer {
     int height_ = 0;
 
     UINT64 lastFrameNumber_ = 0; // 添加帧序号追踪
-    LARGE_INTEGER lastTimestamp_;
+    LARGE_INTEGER lastTimestamp_ = { 0, 0 };
     ID3D11Texture2D* stagingTexture_ = nullptr;
 
 public:
@@ -198,6 +199,13 @@ public:
 
         IDXGIResource* desktopResource = nullptr;
         DXGI_OUTDUPL_FRAME_INFO frameInfo;
+
+        // resetDuplication 重建失败时 deskDupl_ 为空，必须先重建再取帧，否则空指针崩溃
+        if (!deskDupl_) {
+            resetDuplication();
+            if (!deskDupl_)
+                return true; // 跳过本帧，下次再试
+        }
 
         // 增加超时时间，Win11 可能需要更长时间
         HRESULT hr = deskDupl_->AcquireNextFrame(100, &frameInfo, &desktopResource);
@@ -312,7 +320,12 @@ public:
         }
         IDXGIOutput1* output1 = nullptr;
         if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1)) && output1) {
-            output1->DuplicateOutput(device_, &deskDupl_);
+            // Win10 1903+ 桌面复制失效后 DWM 需要短暂恢复时间，立即重建常失败，做有限重试
+            for (int attempt = 0; attempt < 5 && !deskDupl_; ++attempt) {
+                output1->DuplicateOutput(device_, &deskDupl_);
+                if (!deskDupl_)
+                    Sleep(10);
+            }
             output1->Release();
         }
         output->Release();

@@ -54,7 +54,7 @@ bool VideoEncoder::isHwAcceleratedAvailable()
     return findHwEncoder() != nullptr;
 }
 
-bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, int bitrate)
+bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int encH, int fps, int bitrate)
 {
     // 支持 shutdown() 后重新初始化（缩放档位改变时按新尺寸重建编码器）
     abort_ = false;
@@ -62,12 +62,17 @@ bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, in
     startTime_ = 0;
     pendingBitrate_.store(0);
     forceKeyframe_.store(false);
+    encodeEmaMs_ = 0;
+    lastOverloadLogMs_ = 0;
+    overloaded_ = false;
     {
         QMutexLocker locker(&mutex_);
         frameQueue_.clear();
     }
 
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 0, 0)
     avcodec_register_all();
+#endif
     currentCodec_ = type;
     fps_ = fps;
 
@@ -111,15 +116,16 @@ bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, in
     }
 
     codecCtx_ = avcodec_alloc_context3(codec);
-    codecCtx_->width = width;
-    codecCtx_->height = height;
+    codecCtx_->width = encW;
+    codecCtx_->height = encH;
     codecCtx_->time_base = { 1, fps };
     codecCtx_->framerate = { fps, 1 };
     codecCtx_->bit_rate = bitrate;
     codecCtx_->gop_size = fps;
     codecCtx_->max_b_frames = 0;
     codecCtx_->pix_fmt = pixFmt_;
-    codecCtx_->thread_count = 2;
+    codecCtx_->thread_count = qMax(1, qMin(QThread::idealThreadCount(), 4));
+    appliedBitrate_.store(bitrate);
 
     AVDictionary* opts = nullptr;
 
@@ -178,12 +184,19 @@ bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, in
     frame_->format = codecCtx_->pix_fmt;
     frame_->width = codecCtx_->width;
     frame_->height = codecCtx_->height;
-    av_frame_get_buffer(frame_, 0);
+    if (av_frame_get_buffer(frame_, 0) < 0) {
+        qCritical() << "Failed to allocate frame buffer";
+        av_frame_free(&frame_);
+        avcodec_free_context(&codecCtx_);
+        codecCtx_ = nullptr;
+        return false;
+    }
 
+    // 缩放移入编码线程：源为完整捕获帧，目标为编码分辨率（按缩放档位）
     // AV_PIX_FMT_RGB32 在小端系统上即 BGRA，与 QImage::Format_RGB32 内存布局一致
-    swsCtx_ = sws_getContext(width, height, AV_PIX_FMT_RGB32,
-        width, height, codecCtx_->pix_fmt,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
+    swsCtx_ = sws_getContext(srcW, srcH, AV_PIX_FMT_RGB32,
+        encW, encH, codecCtx_->pix_fmt,
+        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
     if (!swsCtx_) {
         qCritical() << "sws_getContext failed";
         av_frame_free(&frame_);
@@ -194,7 +207,8 @@ bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, in
 
     startTime_ = QDateTime::currentMSecsSinceEpoch();
     encoderThread_.start(QThread::HighPriority);
-    qInfo() << codecName_ << "encoder initialized" << width << "x" << height << "@" << fps << "fps";
+    qInfo() << codecName_ << "encoder initialized" << encW << "x" << encH
+            << "@" << fps << "fps (sws " << srcW << "x" << srcH << " -> " << encW << "x" << encH << ")";
     return true;
 }
 
@@ -233,16 +247,26 @@ void VideoEncoder::encodingLoop()
 
         // 应用 WebRTC 反馈：REMB 码率调整 / PLI 强制关键帧
         int br = pendingBitrate_.exchange(0);
-        if (br > 0 && codecCtx_->bit_rate != br)
+        if (br > 0 && codecCtx_->bit_rate != br) {
             codecCtx_->bit_rate = br;
+            appliedBitrate_.store(br);
+        }
         if (forceKeyframe_.exchange(false))
             codecCtx_->gop_size = 1; // 下一帧强制为 IDR
 
         frame_->pts = frameCount_++;
 
+        // 编码耗时监控（EMA）：
+        // 平均耗时超过帧间隔的 80% 视为过载，每 5 秒最多告警一次，便于定位单板 CPU 压力
+        qint64 encodeStart = QDateTime::currentMSecsSinceEpoch();
         int ret = avcodec_send_frame(codecCtx_, frame_);
-        if (ret < 0)
+        if (ret < 0) {
+            // 失败路径也必须恢复 GOP：否则强制关键帧后 gop_size 一直为 1，
+            // 导致后续每一帧都被强制为 IDR（码率暴增、CPU 过载）
+            if (codecCtx_->gop_size == 1)
+                codecCtx_->gop_size = fps_;
             continue;
+        }
 
         AVPacket* packet = av_packet_alloc();
         while (ret >= 0) {
@@ -262,6 +286,34 @@ void VideoEncoder::encodingLoop()
         }
         av_packet_free(&packet);
 
+        qint64 encodeMs = QDateTime::currentMSecsSinceEpoch() - encodeStart;
+        encodeEmaMs_ = (encodeEmaMs_ == 0) ? encodeMs : (encodeEmaMs_ * 0.8 + encodeMs * 0.2);
+        double frameIntervalMs = fps_ > 0 ? 1000.0 / fps_ : 33.0;
+        // 冷启动前几帧含编码器预热（首帧必然慢），跳过过载判定避免启动时误降码率
+        if (frameCount_ <= 5) {
+            if (codecCtx_->gop_size == 1)
+                codecCtx_->gop_size = fps_;
+            continue;
+        }
+        bool overloadedNow = encodeEmaMs_ > frameIntervalMs * 0.8;
+        // 过载状态变化时通知上层（带滞回：<50% 才算恢复，避免频繁抖动）
+        if (overloadedNow && !overloaded_) {
+            overloaded_ = true;
+            emit encoderOverload(true);
+        } else if (!overloadedNow && overloaded_ && encodeEmaMs_ < frameIntervalMs * 0.5) {
+            overloaded_ = false;
+            emit encoderOverload(false);
+        }
+        if (overloadedNow) {
+            qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            if (nowMs - lastOverloadLogMs_ > 5000) {
+                lastOverloadLogMs_ = nowMs;
+                qWarning() << "VideoEncoder: overloaded, encode EMA"
+                           << QString::number(encodeEmaMs_, 'f', 1) << "ms / frame interval"
+                           << QString::number(frameIntervalMs, 'f', 1) << "ms";
+            }
+        }
+
         // 恢复正常 GOP 间隔
         if (codecCtx_->gop_size == 1)
             codecCtx_->gop_size = fps_;
@@ -277,6 +329,11 @@ void VideoEncoder::setBitrate(int bitrate)
 {
     if (bitrate > 0)
         pendingBitrate_.store(bitrate);
+}
+
+int VideoEncoder::currentBitrate() const
+{
+    return appliedBitrate_.load();
 }
 
 void VideoEncoder::shutdown()
@@ -307,9 +364,5 @@ void VideoEncoder::shutdown()
     if (codecCtx_) {
         avcodec_free_context(&codecCtx_);
         codecCtx_ = nullptr;
-    }
-    if (hwDeviceCtx_) {
-        av_buffer_unref(&hwDeviceCtx_);
-        hwDeviceCtx_ = nullptr;
     }
 }

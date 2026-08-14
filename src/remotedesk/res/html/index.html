@@ -845,7 +845,7 @@
             };
 
             pc.ontrack = (e) => {
-                const stream = e.streams[0] || new MediaStream([e.track]);
+                const stream = e.streams.length > 0 ? e.streams[0] : new MediaStream([e.track]);
                 webrtcState.videoEl.srcObject = stream;
             };
 
@@ -954,6 +954,8 @@
         class H264Decoder {
             constructor() {
                 this.decoder = null;
+                this.supported = false;
+                this.configured = false;
                 this.init();
             }
 
@@ -977,9 +979,9 @@
             }
 
             configure(extraData) {
-                // 从关键帧提取 codec string (如 avc1.42001f)
+                // codec 按 baseline、level 5.2 声明（覆盖最高 1080p60 编码），实际级别由 SPS 决定
                 this.decoder.configure({
-                    codec: 'avc1.42001f', // H264 Baseline
+                    codec: 'avc1.420034',
                     optimizeForLatency: true,
                     hardwareAcceleration: 'prefer-hardware',
                     description: extraData // SPS/PPS
@@ -1005,7 +1007,7 @@
                     // Annex B 格式含内联 SPS/PPS，缺省 description 可解析。
                     try {
                         this.decoder.configure({
-                            codec: 'avc1.42001f', // H264 Baseline
+                            codec: 'avc1.420034',
                             optimizeForLatency: true,
                             hardwareAcceleration: 'prefer-hardware'
                         });
@@ -1030,8 +1032,8 @@
                 // canvas 固定为物理分辨率（scale 只影响编码分辨率），
                 // 帧统一拉伸绘制，保证各缩放档位下画面铺满且与图片模式行为一致。
                 if (state.screenWidth === 0) {
-                    state.canvas.width = frame.displayWidth;
-                    state.canvas.height = frame.displayHeight;
+                    state.canvas.width = frame.displayWidth || 1920;
+                    state.canvas.height = frame.displayHeight || 1080;
                     updateScale();
                 } else if (state.canvas.width !== state.screenWidth ||
                            state.canvas.height !== state.screenHeight) {
@@ -1101,7 +1103,11 @@
                 if (event.data instanceof ArrayBuffer) {
                     handleBinary(new Uint8Array(event.data));
                 } else {
-                    handleJson(JSON.parse(event.data));
+                    try {
+                        handleJson(JSON.parse(event.data));
+                    } catch (e) {
+                        console.error('WS: invalid JSON message ignored:', e);
+                    }
                 }
             };
         }
@@ -1130,7 +1136,7 @@
                 const chunkData = new Uint8Array(data.slice(pos, pos + chunkLen));
 
                 const entry = downloadBuffers[pathStr];
-                if (entry) {
+                if (entry && offset + chunkLen <= entry.data.length) {
                     entry.data.set(chunkData, offset);
                     entry.received += chunkLen;
                 }
@@ -1173,13 +1179,17 @@
             const img = new Image();
             img.onload = () => {
                 if (state.screenWidth === 0) {
-                    state.canvas.width = 1920;
-                    state.canvas.height = 1080;
+                    // 未收到 screen_info 前用 JPEG 实际尺寸兜底，避免拉伸变形
+                    state.canvas.width = img.naturalWidth || 1920;
+                    state.canvas.height = img.naturalHeight || 1080;
                     updateScale();
                 }
                 state.ctx.drawImage(img, 0, 0, state.canvas.width, state.canvas.height);
                 URL.revokeObjectURL(url);
                 updateFps();
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
             };
             img.src = url;
         }
@@ -1214,7 +1224,11 @@
                     }
                     break;
                 case 'file_download_start':
-                    // 初始化分块下载缓冲区
+                    // 初始化分块下载缓冲区（限 2GB，防止异常/恶意 totalSize 一次性分配超大数组导致浏览器 OOM）
+                    if (!(msg.totalSize > 0 && msg.totalSize <= 2 * 1024 * 1024 * 1024)) {
+                        showTransferStatus('下载失败：文件大小异常(' + (msg.totalSize || '未知') + '字节)', 4000);
+                        break;
+                    }
                     downloadBuffers[msg.path] = {
                         data: new Uint8Array(msg.totalSize),
                         received: 0,

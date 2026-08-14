@@ -54,6 +54,7 @@ class X11Capturer : public PlatformCapturer {
     int emptyDamageCount_ = 0; // 连续空 damage 计数，用于 xrdp 等驱动无 damage 时回退全量捕获
     QImage fullFrame_;         // 全屏持久缓冲（RGB32），区域抓取时在其上原地更新
     bool regionDirty_ = false; // 本次捕获走了区域抓取（已知有变化），无需再做全帧校验和
+    std::chrono::steady_clock::time_point lastProbe_ = std::chrono::steady_clock::now();
 
 public:
     bool initialize() override
@@ -134,8 +135,8 @@ public:
                                    src + yy * srcStride,
                                    static_cast<size_t>(r.width) * 4);
                         }
-                    } else {
-                        // 非 32bpp 兜底：整行转换
+                    } else if (ximage->bits_per_pixel == 24) {
+                        // 24bpp 整行转换（3 字节连续像素）
                         const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
                         int srcStride = ximage->bytes_per_line;
                         for (int yy = 0; yy < r.height; ++yy) {
@@ -143,6 +144,15 @@ public:
                             QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(r.y + yy)) + r.x;
                             for (int xx = 0; xx < r.width; ++xx) {
                                 d[xx] = qRgb(s[xx * 3], s[xx * 3 + 1], s[xx * 3 + 2]);
+                            }
+                        }
+                    } else {
+                        // 其他 bpp（如 16bpp）：用 XGetPixel 逐像素转换（安全，兜底慢路径）
+                        for (int yy = 0; yy < r.height; ++yy) {
+                            QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(r.y + yy)) + r.x;
+                            for (int xx = 0; xx < r.width; ++xx) {
+                                unsigned long px = XGetPixel(ximage, xx, yy);
+                                d[xx] = qRgb((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
                             }
                         }
                     }
@@ -163,13 +173,12 @@ public:
                 // 真实 Xorg 下 Damage 可靠。静止时不做全量抓取，避免主线程空转。
                 // 仅每 ~2 秒试探一次全量抓取（兼容 xrdp 等不报告 Damage 的驱动），
                 // 同时上层在 updated=false 时会降低采样率到 1fps，试探成本可忽略。
-                static auto s_lastProbe = std::chrono::steady_clock::now();
                 auto now = std::chrono::steady_clock::now();
-                if (now - s_lastProbe < std::chrono::seconds(2)) {
+                if (now - lastProbe_ < std::chrono::seconds(2)) {
                     if (updated) *updated = false;
                     return true;
                 }
-                s_lastProbe = now;
+                lastProbe_ = now;
                 emptyDamageCount_ = 0;
             } else {
                 emptyDamageCount_ = 0;

@@ -62,8 +62,8 @@ private:
     QWaitCondition cond_;
     QQueue<QImage> queue_;
     std::atomic<bool> abort_ { false };
-    int quality_ = 35;
-    int scalePercent_ = 100;
+    std::atomic<int> quality_ { 35 };
+    std::atomic<int> scalePercent_ { 100 };
     enum { kMaxQueueSize = 5 };
 };
 
@@ -118,6 +118,7 @@ private:
     void handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body);
     void handleShellExec(QTcpSocket* socket, const QByteArray& body);
     QString extractSessionToken(const QByteArray& request);
+    int videoBitrateFor(int encW, int encH, int fps) const;
     QByteArray buildHttpResponse(int statusCode, const QString& statusText,
         const QString& contentType, const QByteArray& body,
         const QString& extraHeaders = QString());
@@ -162,6 +163,8 @@ private:
 
     QRect screenGeometry_;
     QPoint lastCursorPos_ { -1, -1 };
+    qint64 lastCursorQueryMs_ = 0;
+    int videoBaseBitrate_ = 0; // 视频模式目标码率（过载降质后用于恢复）
     QJsonObject lastScreenInfo_;
 
     bool useSsl_ = false;

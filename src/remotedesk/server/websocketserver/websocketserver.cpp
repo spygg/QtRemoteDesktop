@@ -161,7 +161,10 @@ void WebSocketServer::onTextMessageReceived(const QString& message)
     QWebSocket* socket = qobject_cast<QWebSocket*>(sender());
     if (!socket)
         return;
-    QString clientId = socketToId_[socket];
+    // 用 value() 而非 operator[]，避免已移除（dropClient）的 socket 往 QMap 里插入空 key
+    QString clientId = socketToId_.value(socket);
+    if (clientId.isEmpty())
+        return;
 
     QJsonParseError error;
     QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
@@ -201,7 +204,9 @@ void WebSocketServer::onBinaryMessageReceived(const QByteArray& message)
         quint32 pathLen, dataLen;
         stream >> pathLen >> dataLen;
 
-        if (message.size() < (int)(9 + pathLen + dataLen)) return;
+        // 用 64 位累加避免 pathLen+dataLen 溢出绕过长度检查（恶意消息可越界读）
+        quint64 total = 9ULL + static_cast<quint64>(pathLen) + static_cast<quint64>(dataLen);
+        if (message.size() < (qint64)total) return;
 
         QString path = QString::fromUtf8(message.constData() + 9, pathLen);
         QByteArray data(message.constData() + 9 + pathLen, dataLen);
@@ -218,14 +223,16 @@ QString WebSocketServer::clientToken(const QString& clientId) const
 
 void WebSocketServer::dropClient(const QString& clientId)
 {
-    QWebSocket* socket = clients_.value(clientId);
-    if (socket) {
-        socket->close(QWebSocketProtocol::CloseCodeNormal, "Authentication failed");
-        socket->deleteLater();
-        clients_.remove(clientId);
-        socketToId_.remove(socket);
-        clientTokens_.remove(clientId);
-    }
+    QWebSocket* socket = clients_.take(clientId);
+    if (!socket) return;
+    // 断开信号连接，避免 close() 触发的 disconnected 再次走 onSocketDisconnected 造成重复处理
+    disconnect(socket, nullptr, this, nullptr);
+    socketToId_.remove(socket);
+    clientTokens_.remove(clientId);
+    videoStarted_.remove(clientId);
+    socket->close(QWebSocketProtocol::CloseCodeNormal, "Authentication failed");
+    socket->deleteLater();
+    emit clientDisconnected(clientId);
 }
 
 void WebSocketServer::setMediaExcludedClients(const QSet<QString>& clients)
@@ -236,8 +243,10 @@ void WebSocketServer::setMediaExcludedClients(const QSet<QString>& clients)
 void WebSocketServer::closeSecureInput()
 {
     if (secureInputSource_) {
-        secureInputSource_->close();
+        QWebSocket* s = secureInputSource_;
         secureInputSource_ = nullptr;
+        s->close();
+        s->deleteLater(); // close() 异步，disconnected lambda 因已置空不会再执行，需显式释放
     }
 }
 
@@ -315,7 +324,8 @@ void WebSocketServer::broadcastJson(const QJsonObject& data)
     QJsonDocument doc(data);
     QByteArray message = doc.toJson(QJsonDocument::Compact);
 
-    for (QWebSocket* socket : clients_.values()) {
+    for (auto it = clients_.constBegin(); it != clients_.constEnd(); ++it) {
+        QWebSocket* socket = it.value();
         if (socket->state() == QAbstractSocket::ConnectedState) {
             socket->sendTextMessage(QString::fromUtf8(message));
         }
@@ -327,7 +337,8 @@ void WebSocketServer::broadcastBinary(const QByteArray& data)
     if (clients_.isEmpty())
         return;
 
-    for (QWebSocket* socket : clients_.values()) {
+    for (auto it = clients_.constBegin(); it != clients_.constEnd(); ++it) {
+        QWebSocket* socket = it.value();
         if (socket->state() == QAbstractSocket::ConnectedState) {
             socket->sendBinaryMessage(data);
         }
