@@ -1,6 +1,7 @@
 #include "inputmanager.h"
 #include <QCursor>
 #include <QDebug>
+#include <QDateTime>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -157,21 +158,37 @@ void InputManager::injectWheel(int delta) {
     XFlush(xdisp(xDisplay_));
 }
 
+void InputManager::primeFocusWindow() {
+    if (xDisplay_)
+        focusLockScreenWindow(xdisp(xDisplay_));
+}
+
 void InputManager::focusLockScreenWindow(void* dpy)
 {
     Display* display = static_cast<Display*>(dpy);
 
-    // Debug: dump current focus and root properties
+    // 焦点管理带 2 秒节流：已成功处理过且短时间内无需再校验，
+    // 后续按键直接走 XTest（无 X 同步往返，QEMU/软渲染下首次按键不再明显卡顿）。
+    // 窗口变化（锁屏/解锁）时通过 lockScreenWindow_ 置 0 强制重新处理。
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (lockScreenWindow_ != None && (now - focusCheckedMs_) < 2000)
+        return;
+
     Window curFocus = None; int revert = 0;
     XGetInputFocus(display, &curFocus, &revert);
-    //qInfo() << "InputManager: current focus window" << curFocus;
+
+    // 焦点未变化：直接复用缓存窗口，避免整棵窗口树遍历
+    // + 多次同步 X 往返（QEMU/无 GPU 环境下按键延迟明显）。
+    if (lockScreenWindow_ != None && curFocus == lockScreenWindow_) {
+        focusCheckedMs_ = now;
+        return;
+    }
 
     Window found = findLockScreenWindow(display);
     if (found == None) {
         // Try a simpler approach: just try the current focus window
         if (curFocus != None && curFocus != DefaultRootWindow(display)) {
             found = curFocus;
-            //qInfo() << "InputManager: using current focus window as fallback";
         }
     }
 
@@ -192,28 +209,8 @@ void InputManager::focusLockScreenWindow(void* dpy)
         }
         XSetInputFocus(display, found, RevertToPointerRoot, CurrentTime);
         XFlush(display);
-    } else {
-        // Fallback: try the current focus window
-        if (curFocus != None && curFocus != DefaultRootWindow(display)) {
-            found = curFocus;
-            lockScreenWindow_ = found;
-            Atom netActiveWindow = XInternAtom(display, "_NET_ACTIVE_WINDOW", False);
-            if (netActiveWindow != None) {
-                XEvent ev = {};
-                ev.type = ClientMessage;
-                ev.xclient.window = found;
-                ev.xclient.message_type = netActiveWindow;
-                ev.xclient.format = 32;
-                ev.xclient.data.l[0] = 1;
-                ev.xclient.data.l[1] = CurrentTime;
-                ev.xclient.data.l[2] = 0;
-                XSendEvent(display, DefaultRootWindow(display), False,
-                           SubstructureNotifyMask | SubstructureRedirectMask, &ev);
-            }
-            XSetInputFocus(display, found, RevertToPointerRoot, CurrentTime);
-            XFlush(display);
-        }
     }
+    focusCheckedMs_ = now;
 }
 
 void InputManager::sendXModifier(X11KeySym ks, bool isDown) {
@@ -237,6 +234,9 @@ bool InputManager::initUinput()
 {
     if (uinputFd_ >= 0)
         return true;
+
+    // 锁屏切换：清空缓存的窗口，切回 XTest 时重新查找
+    lockScreenWindow_ = 0;
 
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
@@ -300,6 +300,7 @@ void InputManager::destroyUinput()
     ioctl(uinputFd_, UI_DEV_DESTROY);
     close(uinputFd_);
     uinputFd_ = -1;
+    lockScreenWindow_ = 0; // 解锁：清空缓存，下次按键重新查找当前焦点窗口
     qInfo() << "InputManager: uinput device destroyed";
 }
 

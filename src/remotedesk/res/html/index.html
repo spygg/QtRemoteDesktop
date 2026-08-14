@@ -29,20 +29,21 @@
         }
 
         #screen {
-            max-width: 100%;
-            max-height: 100%;
+            width: 100%;
+            height: 100%;
+            display: block;
             background: #000;
             box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
         }
 
-        /* WebRTC H.264 视频（libdatachannel → RTP），叠加在 canvas 之上 */
+        /* WebRTC H.264 视频（libdatachannel → RTP），叠加在 canvas 之上，铺满窗口 */
         #webrtc-video {
             position: absolute;
-            left: 50%;
-            top: 50%;
-            transform: translate(-50%, -50%);
-            max-width: 100%;
-            max-height: 100%;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: fill;
             display: none;
             background: #000;
             z-index: 1;
@@ -690,6 +691,7 @@
             <div class="dropdown-title">视频模式</div>
             <div class="dropdown-note">WebRTC/FFmpeg 需服务端支持 H.264 编码；图片为 JPEG 帧</div>
             <div class="dropdown-options" data-key="videomode">
+                <button data-value="auto" id="mode-auto-btn">auto</button>
                 <button data-value="webrtc">WebRTC</button>
                 <button data-value="ffmpeg">FFmpeg</button>
                 <button data-value="image">图片</button>
@@ -795,6 +797,7 @@
             resolutions: [],
             currentConfig: { quality: 'medium', fps: 30, scale: 75, resolution: '', videomode: 'auto' },
             displayStreamMode: 'ffmpeg', // 配置菜单高亮用的当前生效模式（webrtc/ffmpeg/image）
+            hwEncode: false, // 服务端是否有 H.264 硬件编码（auto 模式据此选路）
             showFps: false,
             mouseX: 0,
             mouseY: 0,
@@ -924,6 +927,25 @@
                 // 图片模式：JPEG 帧
                 webrtcClose();
                 send({ type: 'set_mode', mode: 'image' });
+            } else if (mode === 'auto') {
+                // auto：按服务端硬件能力自动选路
+                if (state.hwEncode) {
+                    if (!webrtcState.active && !webrtcState.pc) {
+                        webrtcClose();
+                        send({ type: 'set_mode', mode: 'webrtc' });
+                        setTimeout(() => {
+                            if (!webrtcState.active && !webrtcState.pc) initWebRTC();
+                        }, 400);
+                        state.displayStreamMode = 'ffmpeg';
+                    } else {
+                        state.displayStreamMode = webrtcState.active ? 'webrtc' : 'ffmpeg';
+                    }
+                } else {
+                    // 无硬件加速 → 图片模式(JPEG)
+                    webrtcClose();
+                    send({ type: 'set_mode', mode: 'image' });
+                    state.displayStreamMode = 'image';
+                }
             }
             updateDropdownActive();
         }
@@ -1274,17 +1296,26 @@
                     updateQualityLabel();
                     break;
                 case 'mode_changed':
+                    if (typeof msg.hwEncode === 'boolean')
+                        state.hwEncode = msg.hwEncode;
                     // 自动模式时，按服务端实际模式更新配置菜单高亮
                     if (state.currentConfig.videomode === 'auto') {
                         state.displayStreamMode = (msg.mode === 'image') ? 'image' : (webrtcState.active ? 'webrtc' : 'ffmpeg');
                         updateDropdownActive();
                     }
-                    // 服务端支持 WebRTC 且当前未激活 → 尝试发起（服务端会自动切到视频模式）
                     if (msg.webrtc === true) {
                         const pref = state.currentConfig.videomode;
-                        // 用户显式选择 FFmpeg/图片 时不自动发起 WebRTC
-                        if (pref !== 'ffmpeg' && pref !== 'image' && !webrtcState.active && !webrtcState.pc)
+                        if (pref === 'auto') {
+                            // 无硬件视频加速 → 用图片模式(JPEG)，避免软编 H.264 高 CPU
+                            if (!state.hwEncode) {
+                                if (msg.mode !== 'image')
+                                    send({ type: 'set_mode', mode: 'image' });
+                            } else if (!webrtcState.active && !webrtcState.pc) {
+                                setTimeout(initWebRTC, 500); // 硬件加速可用 → 自动升级 WebRTC
+                            }
+                        } else if (pref !== 'ffmpeg' && pref !== 'image' && !webrtcState.active && !webrtcState.pc) {
                             setTimeout(initWebRTC, 500); // 等 WS 稳定后再发起
+                        }
                     } else if (msg.webrtc === false) {
                         webrtcClose();
                     }
@@ -1580,11 +1611,21 @@
 
         function updateDropdownActive() {
             const cfg = state.currentConfig;
+            // auto 按钮标签：auto(当前生效模式)
+            const modeBtn = document.getElementById('mode-auto-btn');
+            if (modeBtn) {
+                const map = { webrtc: 'WebRTC', ffmpeg: 'FFmpeg', image: '图片' };
+                modeBtn.textContent = cfg.videomode === 'auto'
+                    ? 'auto(' + (map[state.displayStreamMode] || '') + ')'
+                    : 'auto';
+            }
             document.querySelectorAll('#config-dropdown .dropdown-options').forEach(group => {
                 const key = group.dataset.key;
                 if (!key) return;
-                // 视频模式按“当前生效模式”高亮；其余按配置值
-                const val = (key === 'videomode') ? state.displayStreamMode : String(cfg[key]);
+                // 视频模式：选了 auto 高亮 auto 按钮，否则按“当前生效模式”高亮；其余按配置值
+                const val = (key === 'videomode')
+                    ? (cfg.videomode === 'auto' ? 'auto' : state.displayStreamMode)
+                    : String(cfg[key]);
                 group.querySelectorAll('button').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.value === val);
                 });

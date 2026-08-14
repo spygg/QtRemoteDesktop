@@ -47,6 +47,8 @@ public:
     void enqueue(const QImage& frame);
     void shutdown();
     void setQuality(int q) { quality_ = q; }
+    // 缩放档位：JPEG 线程内先缩放再压缩，避免全帧缩放占用主线程
+    void setScalePercent(int p) { scalePercent_ = p; }
 
 signals:
     void jpegCompressed(const QByteArray& data);
@@ -61,6 +63,7 @@ private:
     QQueue<QImage> queue_;
     std::atomic<bool> abort_ { false };
     int quality_ = 35;
+    int scalePercent_ = 100;
     enum { kMaxQueueSize = 5 };
 };
 
@@ -183,6 +186,8 @@ private:
 
     void switchToImageMode();
     bool switchToVideoMode();
+    void reinitVideoEncoderForScale();
+    bool hwEncodeAvailable() const;
 
     void loadServerConfig(const QString& configPath);
     void saveServerConfig(const QString& configPath);

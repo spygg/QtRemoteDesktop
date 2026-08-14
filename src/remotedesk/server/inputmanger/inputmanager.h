@@ -32,6 +32,8 @@ public:
     bool initUinput();
     void destroyUinput();
     bool isUinputActive() const { return uinputFd_ >= 0; }
+    // 捕获启动后预热焦点窗口，避免首次按键才做窗口树遍历（造成明显首键延迟）
+    void primeFocusWindow();
 #endif
 
 private:
@@ -46,6 +48,7 @@ private:
     bool sendUinputKey(unsigned short linuxKeycode, bool isDown);
     unsigned short keysymToLinuxKeycode(unsigned long ks);
     unsigned long lockScreenWindow_ = 0;
+    qint64 focusCheckedMs_ = 0;
     void focusLockScreenWindow(void* dpy);
 #endif
 

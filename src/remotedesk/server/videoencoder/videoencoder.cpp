@@ -49,8 +49,24 @@ static AVPixelFormat encoderPixFmt(const AVCodec* codec, const char* hwName)
     return AV_PIX_FMT_YUV420P;
 }
 
+bool VideoEncoder::isHwAcceleratedAvailable()
+{
+    return findHwEncoder() != nullptr;
+}
+
 bool VideoEncoder::initialize(CodecType type, int width, int height, int fps, int bitrate)
 {
+    // 支持 shutdown() 后重新初始化（缩放档位改变时按新尺寸重建编码器）
+    abort_ = false;
+    frameCount_ = 0;
+    startTime_ = 0;
+    pendingBitrate_.store(0);
+    forceKeyframe_.store(false);
+    {
+        QMutexLocker locker(&mutex_);
+        frameQueue_.clear();
+    }
+
     avcodec_register_all();
     currentCodec_ = type;
     fps_ = fps;

@@ -90,6 +90,15 @@ void JpegCompressor::processLoop()
         QByteArray jpegData;
         QBuffer buffer(&jpegData);
         buffer.open(QIODevice::WriteOnly);
+
+        // JPEG 线程内先缩放再压缩，主线程只需入队（避免全帧缩放阻塞输入处理）
+        if (scalePercent_ < 100) {
+            int sw = image.width() * scalePercent_ / 100;
+            int sh = image.height() * scalePercent_ / 100;
+            if (sw > 0 && sh > 0)
+                image = image.scaled(sw, sh, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+
         if (!image.save(&buffer, "JPEG", quality_)) {
             qWarning() << "JpegCompressor: failed to compress frame";
             continue;
@@ -467,6 +476,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         // 初始化 JPEG 压缩器（独立线程）
         jpegCompressor_ = std::unique_ptr<JpegCompressor>(new JpegCompressor(nullptr));
         jpegCompressor_->setQuality(configQuality_);
+        jpegCompressor_->setScalePercent(configScale_);
         connect(jpegCompressor_.get(), &JpegCompressor::jpegCompressed,
             this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
         jpegCompressor_->start();
@@ -1333,18 +1343,27 @@ void RDPServer::start()
         return;
     }
 
-    // 尝试初始化视频编码器
+    // 尝试初始化视频编码器（按缩放档位编码）
 #ifdef USE_FFMPEG
-    if (videoEncoder_->initialize(CodecType::H264, screenCapturer_->width(), screenCapturer_->height(), 30, 2000000)) {
-        currentMode_ = ServerMode::Video;
-
-        qInfo() << "Video encoder initialized, using video mode.";
-    } else
-#endif
     {
-        qWarning() << "Video encoder initialization failed, falling back to image mode.";
-        switchToImageMode();
+        int ew = screenCapturer_->width(), eh = screenCapturer_->height();
+        if (configScale_ < 100) {
+            int tw = ew * configScale_ / 100, th = eh * configScale_ / 100;
+            if (tw > 0 && th > 0) { ew = tw; eh = th; }
+        }
+        if (videoEncoder_->initialize(CodecType::H264, ew, eh, 30, 2000000)) {
+            currentMode_ = ServerMode::Video;
+
+            qInfo() << "Video encoder initialized, using video mode.";
+        } else
+#endif
+        {
+            qWarning() << "Video encoder initialization failed, falling back to image mode.";
+            switchToImageMode();
+        }
+#ifdef USE_FFMPEG
     }
+#endif
 
     // 启动屏幕捕获（使用配置文件中的 fps）
     if (!screenCapturer_->start(configFps_)) {
@@ -1416,6 +1435,7 @@ bool RDPServer::startCapture()
 
         jpegCompressor_ = std::unique_ptr<JpegCompressor>(new JpegCompressor(nullptr));
         jpegCompressor_->setQuality(configQuality_);
+        jpegCompressor_->setScalePercent(configScale_);
         connect(jpegCompressor_.get(), &JpegCompressor::jpegCompressed,
             this, &RDPServer::onJpegCompressed, Qt::QueuedConnection);
         jpegCompressor_->start();
@@ -1427,6 +1447,10 @@ bool RDPServer::startCapture()
         captureAvailable_ = false;
         return false;
     }
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+    // 预热焦点窗口：首次按键不再触发 X 窗口树遍历，降低首键延迟
+    inputManager_->primeFocusWindow();
+#endif
     captureAvailable_ = screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
     if (!captureAvailable_)
         qWarning() << "startCapture: screen capture unavailable";
@@ -1440,6 +1464,7 @@ bool RDPServer::startCapture()
         QJsonObject mode;
         mode["type"] = "mode_changed";
         mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
+        mode["hwEncode"] = hwEncodeAvailable();
 #if defined(USE_WEBRTC) && defined(USE_FFMPEG)
         mode["webrtc"] = true;
 #else
@@ -1552,6 +1577,7 @@ void RDPServer::onClientConnected(const QString& clientId)
     QJsonObject mode;
     mode["type"] = "mode_changed";
     mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
+    mode["hwEncode"] = hwEncodeAvailable();
 #if defined(USE_WEBRTC) && defined(USE_FFMPEG)
     // WebRTC 需要 H.264 编码器和本地原始帧源。
     // 直接模式自身捕获即可；服务模式若 Linux 本地捕获（非 helper JPEG）同样可用；
@@ -1795,6 +1821,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         if (jpegQ > 0 && jpegCompressor_) {
             configQuality_ = jpegQ;
             jpegCompressor_->setQuality(jpegQ);
+            jpegCompressor_->setScalePercent(configScale_);
         }
         int newFps = input["fps"].toInt();
         if (newFps >= 1) {
@@ -1807,7 +1834,15 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         if (newScale >= 10 && newScale <= 100) {
             userScale_ = newScale;
             configScale_ = newScale;
+            if (jpegCompressor_)
+                jpegCompressor_->setScalePercent(newScale);
             saveServerConfig(QString());
+#ifdef USE_FFMPEG
+            // 视频模式下缩放档位改变需按新尺寸重建编码器，
+            // 否则始终全分辨率 H.264 软编（CPU 高且 scale 无效）
+            if (currentMode_ == ServerMode::Video && videoEncoder_)
+                reinitVideoEncoderForScale();
+#endif
         }
     } else if (type == "file_list") {
         emit requestFileList(clientId, input["path"].toString());
@@ -1878,23 +1913,22 @@ void RDPServer::onFrameCaptured(const QImage& frame)
     if (wsServer_->clients().isEmpty())
         return;
 
-    QImage encodeFrame = frame;
-    if (configScale_ < 100) {
-        int newW = frame.width() * configScale_ / 100;
-        int newH = frame.height() * configScale_ / 100;
-        if (newW > 0 && newH > 0)
-            encodeFrame = frame.scaled(newW, newH, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    }
-
 #ifdef USE_FFMPEG
     if (currentMode_ == ServerMode::Video) {
+        QImage encodeFrame = frame;
+        if (configScale_ < 100) {
+            int newW = frame.width() * configScale_ / 100;
+            int newH = frame.height() * configScale_ / 100;
+            if (newW > 0 && newH > 0)
+                encodeFrame = frame.scaled(newW, newH, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
         videoEncoder_->encode(encodeFrame);
     } else
 #endif
     {
-        // 将帧交给独立线程进行 JPEG 压缩，不阻塞主线程
+        // 图片模式：缩放移到 JPEG 压缩线程，避免全帧缩放占用主线程阻塞输入处理
         if (jpegCompressor_)
-            jpegCompressor_->enqueue(encodeFrame);
+            jpegCompressor_->enqueue(frame);
     }
 
     // 鼠标光标位置广播（仅在位置变化时发送，避免每帧无意义传输）
@@ -1974,6 +2008,7 @@ void RDPServer::switchToImageMode()
     QJsonObject notification;
     notification["type"] = "mode_changed";
     notification["mode"] = "image";
+    notification["hwEncode"] = hwEncodeAvailable();
     wsServer_->broadcastJson(notification);
 
     qInfo() << "Switched to image mode";
@@ -2000,11 +2035,18 @@ bool RDPServer::switchToVideoMode()
             this, &RDPServer::onCodecConfigChanged);
     }
 
-    // 尝试重新初始化视频编码器
-    if (!videoEncoder_->initialize(CodecType::H264,
-            screenCapturer_->width(),
-            screenCapturer_->height(),
-            30, 2000000)) {
+    // 尝试重新初始化视频编码器（按当前缩放档位编码，避免始终全分辨率软编导致 CPU 高）
+    int encW = screenCapturer_->width();
+    int encH = screenCapturer_->height();
+    if (configScale_ < 100) {
+        int tw = encW * configScale_ / 100;
+        int th = encH * configScale_ / 100;
+        if (tw > 0 && th > 0) {
+            encW = tw;
+            encH = th;
+        }
+    }
+    if (!videoEncoder_->initialize(CodecType::H264, encW, encH, 30, 2000000)) {
         qWarning() << "Failed to initialize video encoder, staying in image mode";
         return false;
     }
@@ -2015,10 +2057,40 @@ bool RDPServer::switchToVideoMode()
     QJsonObject notification;
     notification["type"] = "mode_changed";
     notification["mode"] = "video";
+    notification["hwEncode"] = hwEncodeAvailable();
     wsServer_->broadcastJson(notification);
 
     qInfo() << "Switched to video mode";
     return true;
+#else
+    return false;
+#endif
+}
+
+void RDPServer::reinitVideoEncoderForScale()
+{
+    if (!videoEncoder_ || !screenCapturer_)
+        return;
+
+    int ew = screenCapturer_->width(), eh = screenCapturer_->height();
+    if (configScale_ < 100) {
+        int tw = ew * configScale_ / 100, th = eh * configScale_ / 100;
+        if (tw > 0 && th > 0) { ew = tw; eh = th; }
+    }
+
+    videoEncoder_->shutdown();
+    if (videoEncoder_->initialize(CodecType::H264, ew, eh, 30, 2000000)) {
+        videoEncoder_->requestKeyframe();
+        qInfo() << "Video encoder re-initialized for scale" << configScale_ << "at" << ew << "x" << eh;
+    } else {
+        qWarning() << "Failed to re-initialize video encoder for scale" << configScale_;
+    }
+}
+
+bool RDPServer::hwEncodeAvailable() const
+{
+#ifdef USE_FFMPEG
+    return VideoEncoder::isHwAcceleratedAvailable();
 #else
     return false;
 #endif

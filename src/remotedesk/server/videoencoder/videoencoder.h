@@ -38,6 +38,9 @@ public:
     void encode(const QImage& frame);
     void shutdown();
 
+    // 探测当前系统是否可用 H.264 硬件编码（用于前端 auto 模式选路）
+    static bool isHwAcceleratedAvailable();
+
     // WebRTC：浏览器请求关键帧（PLI）时强制下一帧为 IDR
     void requestKeyframe();
     // WebRTC：浏览器码率反馈（REMB）时调整编码码率
