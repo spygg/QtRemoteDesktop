@@ -686,6 +686,15 @@
             <div class="dropdown-note">按物理分辨率等比例缩放，非实际改变设备分辨率</div>
             <div class="dropdown-options" id="resolution-options" data-key="resolution"></div>
         </div>
+        <div class="dropdown-section">
+            <div class="dropdown-title">视频模式</div>
+            <div class="dropdown-note">WebRTC/FFmpeg 需服务端支持 H.264 编码；图片为 JPEG 帧</div>
+            <div class="dropdown-options" data-key="videomode">
+                <button data-value="webrtc">WebRTC</button>
+                <button data-value="ffmpeg">FFmpeg</button>
+                <button data-value="image">图片</button>
+            </div>
+        </div>
     </div>
 
     <div id="container">
@@ -784,7 +793,8 @@
             scaleX: 1,
             scaleY: 1,
             resolutions: [],
-            currentConfig: { quality: 'medium', fps: 30, scale: 75, resolution: '' },
+            currentConfig: { quality: 'medium', fps: 30, scale: 75, resolution: '', videomode: 'auto' },
+            displayStreamMode: 'ffmpeg', // 配置菜单高亮用的当前生效模式（webrtc/ffmpeg/image）
             showFps: false,
             mouseX: 0,
             mouseY: 0,
@@ -821,6 +831,10 @@
                     webrtcState.active = true;
                     webrtcState.videoEl.style.display = 'block';
                     webrtcState.videoEl.play?.().catch(() => {});
+                    if (state.currentConfig.videomode === 'auto') {
+                        state.displayStreamMode = 'webrtc';
+                        updateDropdownActive();
+                    }
                     showTransferStatus('WebRTC 已连接', 2000);
                 } else if (st === 'failed' || st === 'closed' || st === 'disconnected') {
                     webrtcClose();
@@ -882,6 +896,36 @@
                 webrtcState.pc.close();
                 webrtcState.pc = null;
             }
+            // 自动模式下 WebRTC 断开后按服务端视频模式高亮 FFmpeg（WS H.264）
+            if (state.currentConfig.videomode === 'auto' && state.displayStreamMode === 'webrtc') {
+                state.displayStreamMode = 'ffmpeg';
+                updateDropdownActive();
+            }
+        }
+
+        // ==================== 视频模式切换（WebRTC / FFmpeg / 图片） ====================
+        function applyStreamMode(mode) {
+            state.currentConfig.videomode = mode;
+            state.displayStreamMode = mode;
+            if (mode === 'webrtc') {
+                // 切到视频模式并显式发起 WebRTC 会话（服务端回传 offer 后由浏览器原生解码）
+                webrtcClose();
+                if (state.decoder) state.decoder.imageRequested = false;
+                send({ type: 'set_mode', mode: 'webrtc' });
+                setTimeout(() => {
+                    if (!webrtcState.active && !webrtcState.pc) initWebRTC();
+                }, 400);
+            } else if (mode === 'ffmpeg') {
+                // 视频模式但不发起 WebRTC：H.264 帧经 WS 传输，用 WebCodecs 解码
+                webrtcClose();
+                if (state.decoder) state.decoder.imageRequested = false;
+                send({ type: 'set_mode', mode: 'video' });
+            } else if (mode === 'image') {
+                // 图片模式：JPEG 帧
+                webrtcClose();
+                send({ type: 'set_mode', mode: 'image' });
+            }
+            updateDropdownActive();
         }
 
         // ==================== WebCodecs 解码器 ====================
@@ -961,16 +1005,21 @@
             }
 
             handleFrame(frame) {
-                // 自适应画布尺寸
-                if (state.canvas.width !== frame.displayWidth ||
-                    state.canvas.height !== frame.displayHeight) {
+                // canvas 固定为物理分辨率（scale 只影响编码分辨率），
+                // 帧统一拉伸绘制，保证各缩放档位下画面铺满且与图片模式行为一致。
+                if (state.screenWidth === 0) {
                     state.canvas.width = frame.displayWidth;
                     state.canvas.height = frame.displayHeight;
+                    updateScale();
+                } else if (state.canvas.width !== state.screenWidth ||
+                           state.canvas.height !== state.screenHeight) {
+                    state.canvas.width = state.screenWidth;
+                    state.canvas.height = state.screenHeight;
                     updateScale();
                 }
 
                 // 高性能渲染
-                state.ctx.drawImage(frame, 0, 0);
+                state.ctx.drawImage(frame, 0, 0, state.canvas.width, state.canvas.height);
                 frame.close();
 
                 updateFps();
@@ -1225,9 +1274,16 @@
                     updateQualityLabel();
                     break;
                 case 'mode_changed':
+                    // 自动模式时，按服务端实际模式更新配置菜单高亮
+                    if (state.currentConfig.videomode === 'auto') {
+                        state.displayStreamMode = (msg.mode === 'image') ? 'image' : (webrtcState.active ? 'webrtc' : 'ffmpeg');
+                        updateDropdownActive();
+                    }
                     // 服务端支持 WebRTC 且当前未激活 → 尝试发起（服务端会自动切到视频模式）
                     if (msg.webrtc === true) {
-                        if (!webrtcState.active && !webrtcState.pc)
+                        const pref = state.currentConfig.videomode;
+                        // 用户显式选择 FFmpeg/图片 时不自动发起 WebRTC
+                        if (pref !== 'ffmpeg' && pref !== 'image' && !webrtcState.active && !webrtcState.pc)
                             setTimeout(initWebRTC, 500); // 等 WS 稳定后再发起
                     } else if (msg.webrtc === false) {
                         webrtcClose();
@@ -1527,7 +1583,8 @@
             document.querySelectorAll('#config-dropdown .dropdown-options').forEach(group => {
                 const key = group.dataset.key;
                 if (!key) return;
-                const val = String(cfg[key]);
+                // 视频模式按“当前生效模式”高亮；其余按配置值
+                const val = (key === 'videomode') ? state.displayStreamMode : String(cfg[key]);
                 group.querySelectorAll('button').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.value === val);
                 });
@@ -1571,6 +1628,8 @@
                     send({ type: 'set_resolution', width: resW, height: resH });
                 }
                 buildResolutionOptions();
+            } else if (key === 'videomode') {
+                applyStreamMode(val);
             }
             updateDropdownActive();
             updateQualityLabel();

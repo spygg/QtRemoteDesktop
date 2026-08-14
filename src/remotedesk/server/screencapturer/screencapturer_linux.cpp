@@ -78,7 +78,11 @@ public:
         if (!XDamageQueryExtension(display_, &damageEvent, &damageError)) {
             damageSupported_ = false;
         } else {
-            damage_ = XDamageCreate(display_, rootWindow_, XDamageReportRawRectangles);
+            // 注意：必须用 ReportNonEmpty。ReportRawRectangles 在部分 Xorg 配置
+        // （如 QEMU 虚拟显示、部分无加速驱动）下不产生有效矩形，导致区域抓取失效、
+        // 画面只能靠低频全屏试探更新 → 操作反应极慢。NonEmpty 由 X server 合并
+        // 损伤区域，可靠性更高，抓取区域仍远小于全屏。
+        damage_ = XDamageCreate(display_, rootWindow_, XDamageReportNonEmpty);
             damageSupported_ = true;
         }
 

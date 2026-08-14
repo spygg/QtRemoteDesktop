@@ -276,7 +276,8 @@ void RDPServer::onModeChangeRequested(const QString& mode)
 {
     if (mode == "image") {
         switchToImageMode();
-    } else if (mode == "video") {
+    } else if (mode == "video" || mode == "webrtc") {
+        // webrtc/video 都切到视频模式；是否建立 RTP 会话由前端 signal_start 发起
         switchToVideoMode();
     }
 }
