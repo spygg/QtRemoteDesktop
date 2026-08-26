@@ -2,6 +2,8 @@
 #include <QCursor>
 #include <QDebug>
 #include <QDateTime>
+#include <QGuiApplication>
+#include <QScreen>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -132,6 +134,13 @@ namespace {
 }
 
 void InputManager::injectMouseMove(int x, int y) {
+    // Wayland 下无 X：走 uinput 绝对定位
+    if (uinputMouseFd_ < 0 && waylandMode_)
+        initUinputMouse();
+    if (uinputMouseFd_ >= 0) {
+        sendUinputMouseMove(x, y);
+        return;
+    }
     if (!xDisplay_) return;
     XWarpPointer(xdisp(xDisplay_), None, DefaultRootWindow(xdisp(xDisplay_)), 0, 0, 0, 0, x, y);
     XFlush(xdisp(xDisplay_));
@@ -139,6 +148,10 @@ void InputManager::injectMouseMove(int x, int y) {
 
 void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
     injectMouseMove(x, y);
+    if (uinputMouseFd_ >= 0) {
+        sendUinputMouseButton(button, isDown);
+        return;
+    }
     if (!xDisplay_) return;
     focusLockScreenWindow(xdisp(xDisplay_));
     int xButton = (button == 0 ? 1 : button == 1 ? 2 : 3);
@@ -149,6 +162,12 @@ void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
 }
 
 void InputManager::injectWheel(int delta) {
+    if (uinputWheelFd_ < 0 && waylandMode_)
+        initUinputMouse();
+    if (uinputWheelFd_ >= 0) {
+        sendUinputWheel(delta);
+        return;
+    }
     if (!xDisplay_) return;
     int button = delta > 0 ? 4 : 5;
     XTestGrabControl(xdisp(xDisplay_), True);
@@ -290,18 +309,168 @@ bool InputManager::initUinput()
 
     uinputFd_ = fd;
     qInfo() << "InputManager: uinput device created";
+
+    // 键盘设备就绪后，一并创建鼠标（绝对定位）与滚轮设备（Wayland 需要）
+    initUinputMouse();
     return true;
+}
+
+bool InputManager::initUinputMouse()
+{
+    if (uinputMouseFd_ >= 0 && uinputWheelFd_ >= 0)
+        return true;
+
+    int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        fd = open("/dev/input/uinput", O_WRONLY | O_NONBLOCK);
+        if (fd < 0) {
+            qWarning() << "InputManager: cannot open uinput for mouse (need /dev/uinput access)";
+            return false;
+        }
+    }
+
+    // ---- 绝对定位指针设备（ABS_X/ABS_Y 0..65535，mutter/libinput 识别为绝对指针）----
+    ioctl(fd, UI_SET_EVBIT, EV_KEY);
+    ioctl(fd, UI_SET_EVBIT, EV_ABS);
+    ioctl(fd, UI_SET_EVBIT, EV_SYN);
+    ioctl(fd, UI_SET_KEYBIT, BTN_LEFT);
+    ioctl(fd, UI_SET_KEYBIT, BTN_RIGHT);
+    ioctl(fd, UI_SET_KEYBIT, BTN_MIDDLE);
+    ioctl(fd, UI_SET_ABSBIT, ABS_X);
+    ioctl(fd, UI_SET_ABSBIT, ABS_Y);
+
+#ifdef UI_DEV_SETUP
+    struct uinput_setup usetup = {};
+    usetup.id.bustype = BUS_USB;
+    usetup.id.vendor = 0x1234;
+    usetup.id.product = 0x5679;
+    snprintf(usetup.name, sizeof(usetup.name), "QtRemoteDesktop Virtual Pointer");
+    if (ioctl(fd, UI_DEV_SETUP, &usetup) < 0) {
+        qWarning() << "InputManager: pointer UI_DEV_SETUP failed";
+        close(fd);
+        return false;
+    }
+#endif
+
+#ifdef UI_ABS_SETUP
+    struct uinput_abs_setup absx = {};
+    absx.code = ABS_X;
+    absx.absinfo.minimum = 0;
+    absx.absinfo.maximum = 65535;
+    absx.absinfo.fuzz = 0;
+    absx.absinfo.flat = 0;
+    ioctl(fd, UI_ABS_SETUP, &absx);
+    struct uinput_abs_setup absy = {};
+    absy.code = ABS_Y;
+    absy.absinfo.minimum = 0;
+    absy.absinfo.maximum = 65535;
+    absy.absinfo.fuzz = 0;
+    absy.absinfo.flat = 0;
+    ioctl(fd, UI_ABS_SETUP, &absy);
+#endif
+
+    if (ioctl(fd, UI_DEV_CREATE) < 0) {
+        qWarning() << "InputManager: pointer UI_DEV_CREATE failed";
+        close(fd);
+        return false;
+    }
+    uinputMouseFd_ = fd;
+
+    // ---- 滚轮设备（EV_REL，独立设备避免与绝对定位冲突）----
+    int wfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (wfd < 0)
+        wfd = open("/dev/input/uinput", O_WRONLY | O_NONBLOCK);
+    if (wfd >= 0) {
+        ioctl(wfd, UI_SET_EVBIT, EV_REL);
+        ioctl(wfd, UI_SET_EVBIT, EV_SYN);
+        ioctl(wfd, UI_SET_RELBIT, REL_WHEEL);
+        ioctl(wfd, UI_SET_RELBIT, REL_HWHEEL);
+#ifdef UI_DEV_SETUP
+        struct uinput_setup wsetup = {};
+        wsetup.id.bustype = BUS_USB;
+        wsetup.id.vendor = 0x1234;
+        wsetup.id.product = 0x567A;
+        snprintf(wsetup.name, sizeof(wsetup.name), "QtRemoteDesktop Virtual Wheel");
+        ioctl(wfd, UI_DEV_SETUP, &wsetup);
+#endif
+        if (ioctl(wfd, UI_DEV_CREATE) < 0) {
+            close(wfd);
+            wfd = -1;
+        }
+        uinputWheelFd_ = wfd;
+    }
+
+    qInfo() << "InputManager: uinput mouse devices created (pointer" << uinputMouseFd_
+            << "wheel" << uinputWheelFd_ << ")";
+    return true;
+}
+
+bool InputManager::sendUinputMouseMove(int x, int y)
+{
+    if (uinputMouseFd_ < 0)
+        return false;
+    // offscreen 平台下 primaryScreen 尺寸不可靠：优先用 WaylandCapturer 共享的真实分辨率
+    int sw = qEnvironmentVariableIntValue("QTRD_WAYLAND_WIDTH");
+    int sh = qEnvironmentVariableIntValue("QTRD_WAYLAND_HEIGHT");
+    if (sw <= 0 || sh <= 0) {
+        QSize sz = QGuiApplication::primaryScreen()
+            ? QGuiApplication::primaryScreen()->size() : QSize(1920, 1080);
+        sw = sz.width();
+        sh = sz.height();
+    }
+    int ax = sw > 0 ? qBound(0, x * 65535 / sw, 65535) : 0;
+    int ay = sh > 0 ? qBound(0, y * 65535 / sh, 65535) : 0;
+
+    struct input_event ev[3] = {};
+    ev[0].type = EV_ABS; ev[0].code = ABS_X; ev[0].value = ax;
+    ev[1].type = EV_ABS; ev[1].code = ABS_Y; ev[1].value = ay;
+    ev[2].type = EV_SYN; ev[2].code = SYN_REPORT; ev[2].value = 0;
+    return write(uinputMouseFd_, ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
+}
+
+bool InputManager::sendUinputMouseButton(int button, bool isDown)
+{
+    if (uinputMouseFd_ < 0)
+        return false;
+    unsigned short code = (button == 0) ? BTN_LEFT
+                        : (button == 1) ? BTN_RIGHT : BTN_MIDDLE;
+    struct input_event ev[2] = {};
+    ev[0].type = EV_KEY; ev[0].code = code; ev[0].value = isDown ? 1 : 0;
+    ev[1].type = EV_SYN; ev[1].code = SYN_REPORT; ev[1].value = 0;
+    return write(uinputMouseFd_, ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
+}
+
+bool InputManager::sendUinputWheel(int delta)
+{
+    if (uinputWheelFd_ < 0)
+        return false;
+    struct input_event ev[2] = {};
+    ev[0].type = EV_REL; ev[0].code = REL_WHEEL; ev[0].value = delta > 0 ? 1 : -1;
+    ev[1].type = EV_SYN; ev[1].code = SYN_REPORT; ev[1].value = 0;
+    return write(uinputWheelFd_, ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
 }
 
 void InputManager::destroyUinput()
 {
-    if (uinputFd_ < 0)
+    if (uinputFd_ < 0 && uinputMouseFd_ < 0 && uinputWheelFd_ < 0)
         return;
-    ioctl(uinputFd_, UI_DEV_DESTROY);
-    close(uinputFd_);
-    uinputFd_ = -1;
+    if (uinputFd_ >= 0) {
+        ioctl(uinputFd_, UI_DEV_DESTROY);
+        close(uinputFd_);
+        uinputFd_ = -1;
+    }
+    if (uinputMouseFd_ >= 0) {
+        ioctl(uinputMouseFd_, UI_DEV_DESTROY);
+        close(uinputMouseFd_);
+        uinputMouseFd_ = -1;
+    }
+    if (uinputWheelFd_ >= 0) {
+        ioctl(uinputWheelFd_, UI_DEV_DESTROY);
+        close(uinputWheelFd_);
+        uinputWheelFd_ = -1;
+    }
     lockScreenWindow_ = 0; // 解锁：清空缓存，下次按键重新查找当前焦点窗口
-    qInfo() << "InputManager: uinput device destroyed";
+    qInfo() << "InputManager: uinput devices destroyed";
 }
 
 bool InputManager::sendUinputKey(unsigned short linuxKeycode, bool isDown)

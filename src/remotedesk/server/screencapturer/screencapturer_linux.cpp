@@ -8,6 +8,10 @@
 #include <QProcess>
 #include <chrono>
 
+#ifdef HAVE_PIPEWIRE
+#include "screencapturer_wayland.h"
+#endif
+
 static bool isFrameBlack(const QImage& frame)
 {
     // 该启发式函数原用于检测锁屏/黑屏界面，但深色桌面主题会误判。
@@ -21,6 +25,11 @@ void ScreenCapturer::cleanupPlatform()
     delete x11Capturer_;
     x11Capturer_ = nullptr;
     useX11_ = false;
+#ifdef HAVE_PIPEWIRE
+    delete waylandCapturer_;
+    waylandCapturer_ = nullptr;
+    useWayland_ = false;
+#endif
 }
 
 // sudo apt install libx11-dev libxtst-dev libxdamage-dev libxcomposite-dev libxrender-dev
@@ -245,12 +254,22 @@ bool ScreenCapturer::start(int fps)
     if (useX11_) {
         qInfo() << "Using X11 optimized capture";
     } else {
-        // X11 不可用且 DISPLAY 为空 → 无头模式，无法捕获
-        if (qEnvironmentVariableIsEmpty("DISPLAY")) {
-            qWarning() << "No X11 display, screen capture disabled (headless mode)";
-            delete x11Capturer_;
-            x11Capturer_ = nullptr;
-            return false;
+#ifdef HAVE_PIPEWIRE
+        // X11 不可用 → 尝试 Wayland（PipeWire + ScreenCast portal）
+        waylandCapturer_ = new WaylandCapturer();
+        useWayland_ = waylandCapturer_->initialize();
+        if (useWayland_) {
+            qInfo() << "Using Wayland capture (PipeWire ScreenCast)";
+        } else
+#endif
+        {
+            // 两者都不可用且无显示环境 → 无头模式
+            if (qEnvironmentVariableIsEmpty("DISPLAY") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
+                qWarning() << "No X11/Wayland display, screen capture disabled (headless mode)";
+                delete x11Capturer_;
+                x11Capturer_ = nullptr;
+                return false;
+            }
         }
     }
 
@@ -321,6 +340,57 @@ void ScreenCapturer::captureFrame()
         emit frameCaptured(frame);
         return;
     }
+
+#ifdef HAVE_PIPEWIRE
+    // Wayland：PipeWire 帧（无区域损伤信息，用校验和判变化）
+    if (useWayland_ && waylandCapturer_) {
+        QImage frame;
+        bool updated = true;
+        if (!waylandCapturer_->captureFrame(frame, &updated)) {
+            captureFailCount_++;
+            if (captureFailCount_ >= 5 && !screenLocked_) {
+                screenLocked_ = true;
+                emit screenLocked(true);
+            }
+            return;
+        }
+        captureFailCount_ = 0;
+
+        if (!updated) {
+            idleCount_++;
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+                captureTimer_->setInterval(1000);
+            return;
+        }
+
+        if (isFrameBlack(frame)) {
+            if (!screenLocked_) {
+                screenLocked_ = true;
+                emit screenLocked(true);
+            }
+            return;
+        }
+        if (screenLocked_) {
+            screenLocked_ = false;
+            emit screenLocked(false);
+        }
+
+        quint16 checksum = quickFrameChecksum(frame);
+        if (checksum == lastFrameChecksum_) {
+            idleCount_++;
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+                captureTimer_->setInterval(1000);
+            return;
+        }
+        idleCount_ = 0;
+        if (captureTimer_->interval() != 1000 / fps_)
+            captureTimer_->setInterval(1000 / fps_);
+        lastFrameChecksum_ = checksum;
+
+        emit frameCaptured(frame);
+        return;
+    }
+#endif
 
     // 回退到Qt抓屏
     if (!screen_) return;

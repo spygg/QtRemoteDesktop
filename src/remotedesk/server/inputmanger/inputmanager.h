@@ -44,12 +44,19 @@ private:
 #ifdef Q_OS_LINUX
     void* xDisplay_ = nullptr;
     void sendXModifier(X11KeySym ks, bool isDown);
-    int uinputFd_ = -1;
+    int uinputFd_ = -1;         // 键盘 uinput 设备
+    int uinputMouseFd_ = -1;    // 绝对定位鼠标 uinput 设备（Wayland）
+    int uinputWheelFd_ = -1;    // 滚轮 uinput 设备（Wayland）
     bool sendUinputKey(unsigned short linuxKeycode, bool isDown);
+    bool sendUinputMouseMove(int x, int y);
+    bool sendUinputMouseButton(int button, bool isDown);
+    bool sendUinputWheel(int delta);
+    bool initUinputMouse();
     unsigned short keysymToLinuxKeycode(unsigned long ks);
     unsigned long lockScreenWindow_ = 0;
     qint64 focusCheckedMs_ = 0;
     void focusLockScreenWindow(void* dpy);
+    bool waylandMode_ = false;  // 无 X Display（Wayland）时输入走 uinput
 #endif
 
     bool ctrlDown_  = false;

@@ -10,7 +10,8 @@ InputManager::InputManager(QObject *parent) : QObject(parent)
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     xDisplay_ = XOpenDisplay(nullptr);
     if (!xDisplay_) {
-        qCritical() << "InputManager: Failed to open X Display";
+        qCritical() << "InputManager: Failed to open X Display (Wayland headless mode?)";
+        waylandMode_ = true;
     }
 #endif
 }

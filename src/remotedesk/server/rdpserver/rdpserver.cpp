@@ -2100,6 +2100,7 @@ bool RDPServer::switchToVideoMode()
 #endif
 }
 
+#ifdef USE_FFMPEG
 void RDPServer::reinitVideoEncoderForScale()
 {
     if (!videoEncoder_ || !screenCapturer_)
@@ -2122,6 +2123,7 @@ void RDPServer::reinitVideoEncoderForScale()
         qWarning() << "Failed to re-initialize video encoder for scale" << configScale_;
     }
 }
+#endif
 
 bool RDPServer::hwEncodeAvailable() const
 {

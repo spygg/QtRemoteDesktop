@@ -84,6 +84,8 @@ public:
 #ifdef Q_OS_LINUX
         if (useX11_ && x11Capturer_)
             return x11Capturer_->width();
+        if (useWayland_ && waylandCapturer_)
+            return waylandCapturer_->width();
 #endif
         return screen_ ? screen_->size().width() : 0;
     }
@@ -91,6 +93,8 @@ public:
 #ifdef Q_OS_LINUX
         if (useX11_ && x11Capturer_)
             return x11Capturer_->height();
+        if (useWayland_ && waylandCapturer_)
+            return waylandCapturer_->height();
 #endif
         return screen_ ? screen_->size().height() : 0;
     }
@@ -133,6 +137,8 @@ private:
 #ifdef Q_OS_LINUX
     PlatformCapturer* x11Capturer_ = nullptr;
     bool useX11_ = false;
+    PlatformCapturer* waylandCapturer_ = nullptr;
+    bool useWayland_ = false;
     int captureFailCount_ = 0;
 #endif
 };
