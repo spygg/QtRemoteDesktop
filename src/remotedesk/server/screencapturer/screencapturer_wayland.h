@@ -18,6 +18,7 @@ struct pw_context;
 struct pw_core;
 struct pw_stream;
 struct spa_hook;
+struct pw_proxy;
 
 class WaylandCapturer : public QObject, public PlatformCapturer {
     Q_OBJECT
@@ -34,6 +35,7 @@ public:
     // PipeWire process 回调入口（pw_stream_events 需要函数指针）
     void streamProcess();
     void parseFormatParam(const struct spa_pod* param);
+    void onStreamStateChanged(int oldState, int newState, const char* error);
 
 private slots:
     void onPipeWireStreamAdded(uint nodeId);
@@ -49,6 +51,7 @@ private:
     // PipeWire 抓帧
     bool setupPipewire(int fd, uint32_t nodeId);
     bool createStream(uint32_t nodeId); // 在已连接 core 上建流（调用方持锁）
+    bool createLink(uint32_t outputNode, uint32_t outputPort, uint32_t inputNode, uint32_t inputPort);
     void teardownPipewire();
 
     int width_ = 0;
@@ -71,9 +74,15 @@ private:
     pw_core* core_ = nullptr;
     pw_stream* stream_ = nullptr;
     spa_hook* streamListener_ = nullptr;
+    spa_hook* linkListener_ = nullptr;
+    pw_proxy* linkProxy_ = nullptr;
     uint32_t nodeId_ = 0;
+    uint32_t sourceNodeId_ = 0;
+    uint32_t inputPortId_ = 0;
+    bool linkCreated_ = false;
+    bool activated_ = false;
     bool streamReady_ = false;
-    bool mutterMode_ = false;   // true: 通过 PipeWireStreamAdded 信号获取 node id
+    bool mutterMode_ = false;
 };
 
 #endif // SCREENCAPTURER_WAYLAND_H

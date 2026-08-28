@@ -13,6 +13,11 @@
 // 快速帧校验和：每隔 N 行采样一行做 CRC，大幅减少计算量
 inline quint16 quickFrameChecksum(const QImage& frame)
 {
+    // 空帧 / 0 尺寸帧保护：避免后续 seed % h 除零崩溃（Wayland 流初始化中
+    // 可能提交 0 宽高帧导致 hasFrame_ 置位），并避免无意义计算
+    if (frame.isNull() || frame.width() <= 0 || frame.height() <= 0)
+        return 0;
+
     const uchar* bits = frame.constBits();
     int stride = frame.bytesPerLine();
     int w = frame.width();

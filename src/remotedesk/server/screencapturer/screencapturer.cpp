@@ -25,11 +25,14 @@ void ScreenCapturer::stop()
 
 void ScreenCapturer::suspend()
 {
+    qInfo() << "ScreenCapturer: suspend (timer active=" << captureTimer_->isActive() << ")";
     captureTimer_->stop();
 }
 
 void ScreenCapturer::resume()
 {
+    qInfo() << "ScreenCapturer: resume (timer active=" << captureTimer_->isActive()
+            << "interval=" << captureTimer_->interval() << ")";
     if (!captureTimer_->isActive())
         captureTimer_->start(1000 / fps_);
 }

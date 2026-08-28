@@ -15,8 +15,42 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusObjectPath>
+#include <QDBusPendingCall>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#include <QVariantMap>
+
+static const QString PORTAL_SERVICE = QStringLiteral("org.freedesktop.portal.Desktop");
+static const QString PORTAL_PATH    = QStringLiteral("/org/freedesktop/portal/desktop");
+static const QString PORTAL_IFACE   = QStringLiteral("org.freedesktop.portal.RemoteDesktop");
+static const QString REQUEST_IFACE  = QStringLiteral("org.freedesktop.portal.Request");
+
+// 说明：QtDBus 原生支持将 QVariantMap 直接序列化为 D-Bus a{sv} 参数，
+// 因此门户方法的 options 参数一律直接传 QVariantMap，不要再包装成 QDBusArgument
+// （包装后 QDBusMarshaller 会因类型未注册而报错 "type QVariant is not registered"）。
+
 namespace {
     Display* xdisp(void* p) { return static_cast<Display*>(p); }
+
+    // 查询根窗口下光标的绝对坐标。服务模式(QCoreApplication)下 QCursor::pos()
+    // 不可用，必须走 XQueryPointer。失败时返回 (-1,-1) 表示“位置未知”。
+    bool queryPointer(void* dpy, int* x, int* y)
+    {
+        if (!dpy) return false;
+        Display* display = static_cast<Display*>(dpy);
+        Window root = DefaultRootWindow(display);
+        Window rootRet, childRet;
+        int rx, ry, wx, wy;
+        unsigned int mask;
+        if (!XQueryPointer(display, root, &rootRet, &childRet, &rx, &ry, &wx, &wy, &mask))
+            return false;
+        if (x) *x = rx;
+        if (y) *y = ry;
+        return true;
+    }
 
     Window findLockScreenWindowRecursive(Display* dpy, Window root, Window target)
     {
@@ -134,6 +168,21 @@ namespace {
 }
 
 void InputManager::injectMouseMove(int x, int y) {
+    // Wayland 门户模式：通过 RemoteDesktop D-Bus 注入
+    if (waylandPortalMode_ && portalReady_) {
+        // NotifyPointerMotionAbsolute(session, options, stream, x, y)
+        // stream=0 表示使用默认流
+        QDBusMessage msg = QDBusMessage::createMethodCall(
+            PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE,
+            QStringLiteral("NotifyPointerMotionAbsolute"));
+        msg << QVariant::fromValue(QDBusObjectPath(portalSessionPath_));
+        msg << QVariantMap();
+        msg << 0u;  // stream node id (0 = default)
+        msg << static_cast<double>(x);
+        msg << static_cast<double>(y);
+        QDBusConnection::sessionBus().asyncCall(msg);
+        return;
+    }
     // Wayland 下无 X：走 uinput 绝对定位
     if (uinputMouseFd_ < 0 && waylandMode_)
         initUinputMouse();
@@ -146,7 +195,32 @@ void InputManager::injectMouseMove(int x, int y) {
     XFlush(xdisp(xDisplay_));
 }
 
+QPoint InputManager::cursorPosition() const
+{
+    int x = -1, y = -1;
+    if (queryPointer(xDisplay_, &x, &y) && x >= 0 && y >= 0)
+        return QPoint(x, y);
+    return QCursor::pos();
+}
+
 void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
+    // Wayland 门户模式
+    if (waylandPortalMode_ && portalReady_) {
+        injectMouseMove(x, y);
+        // NotifyPointerButton(session, options, button_code, state)
+        // button_code: Linux evdev button codes (0x110=LEFT, 0x111=RIGHT, 0x112=MIDDLE)
+        uint btnCode = (button == 0) ? 0x110 : (button == 1) ? 0x111 : 0x112;
+        uint state = isDown ? 1u : 0u;
+        QDBusMessage msg = QDBusMessage::createMethodCall(
+            PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE,
+            QStringLiteral("NotifyPointerButton"));
+        msg << QVariant::fromValue(QDBusObjectPath(portalSessionPath_));
+        msg << QVariantMap();
+        msg << static_cast<int>(btnCode);
+        msg << state;
+        QDBusConnection::sessionBus().asyncCall(msg);
+        return;
+    }
     injectMouseMove(x, y);
     if (uinputMouseFd_ >= 0) {
         sendUinputMouseButton(button, isDown);
@@ -162,6 +236,18 @@ void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
 }
 
 void InputManager::injectWheel(int delta) {
+    // Wayland 门户模式：NotifyPointerAxisDiscrete(session, options, axis, steps)
+    if (waylandPortalMode_ && portalReady_) {
+        QDBusMessage msg = QDBusMessage::createMethodCall(
+            PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE,
+            QStringLiteral("NotifyPointerAxisDiscrete"));
+        msg << QVariant::fromValue(QDBusObjectPath(portalSessionPath_));
+        msg << QVariantMap();
+        msg << 0u;  // axis: 0=vertical
+        msg << static_cast<int>(delta > 0 ? 1 : -1);
+        QDBusConnection::sessionBus().asyncCall(msg);
+        return;
+    }
     if (uinputWheelFd_ < 0 && waylandMode_)
         initUinputMouse();
     if (uinputWheelFd_ >= 0) {
@@ -233,13 +319,23 @@ void InputManager::focusLockScreenWindow(void* dpy)
 }
 
 void InputManager::sendXModifier(X11KeySym ks, bool isDown) {
-    if (!xDisplay_) return;
-    if (uinputFd_ >= 0) {
+    // Wayland 门户优先
+    if (waylandPortalMode_ && portalReady_) {
+        unsigned short lkc = keysymToLinuxKeycode(static_cast<unsigned long>(ks));
+        if (lkc != 0)
+            sendPortalKey(lkc, isDown);
+        return;
+    }
+    // uinput 优先（Wayland 会话无门户时也自动初始化）
+    if (uinputFd_ >= 0 || waylandMode_) {
+        if (uinputFd_ < 0 && !initUinput())
+            return;
         unsigned short lkc = keysymToLinuxKeycode(static_cast<unsigned long>(ks));
         if (lkc != 0)
             sendUinputKey(lkc, isDown);
         return;
     }
+    if (!xDisplay_) return;
     KeyCode kc = XKeysymToKeycode(xdisp(xDisplay_), static_cast<KeySym>(ks));
     if (kc != 0) {
         focusLockScreenWindow(xdisp(xDisplay_));
@@ -421,11 +517,16 @@ bool InputManager::sendUinputMouseMove(int x, int y)
     int ax = sw > 0 ? qBound(0, x * 65535 / sw, 65535) : 0;
     int ay = sh > 0 ? qBound(0, y * 65535 / sh, 65535) : 0;
 
-    struct input_event ev[3] = {};
-    ev[0].type = EV_ABS; ev[0].code = ABS_X; ev[0].value = ax;
-    ev[1].type = EV_ABS; ev[1].code = ABS_Y; ev[1].value = ay;
-    ev[2].type = EV_SYN; ev[2].code = SYN_REPORT; ev[2].value = 0;
-    return write(uinputMouseFd_, ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
+    // 每个事件单独 write：同一 struct 覆写再写只发最后一个 SYN，指针不会移动
+    struct input_event ev = {};
+    ev.type = EV_ABS; ev.code = ABS_X; ev.value = ax;
+    if (write(uinputMouseFd_, &ev, sizeof(ev)) != static_cast<ssize_t>(sizeof(ev)))
+        return false;
+    ev.type = EV_ABS; ev.code = ABS_Y; ev.value = ay;
+    if (write(uinputMouseFd_, &ev, sizeof(ev)) != static_cast<ssize_t>(sizeof(ev)))
+        return false;
+    ev.type = EV_SYN; ev.code = SYN_REPORT; ev.value = 0;
+    return write(uinputMouseFd_, &ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
 }
 
 bool InputManager::sendUinputMouseButton(int button, bool isDown)
@@ -434,20 +535,24 @@ bool InputManager::sendUinputMouseButton(int button, bool isDown)
         return false;
     unsigned short code = (button == 0) ? BTN_LEFT
                         : (button == 1) ? BTN_RIGHT : BTN_MIDDLE;
-    struct input_event ev[2] = {};
-    ev[0].type = EV_KEY; ev[0].code = code; ev[0].value = isDown ? 1 : 0;
-    ev[1].type = EV_SYN; ev[1].code = SYN_REPORT; ev[1].value = 0;
-    return write(uinputMouseFd_, ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
+    struct input_event ev = {};
+    ev.type = EV_KEY; ev.code = code; ev.value = isDown ? 1 : 0;
+    if (write(uinputMouseFd_, &ev, sizeof(ev)) != static_cast<ssize_t>(sizeof(ev)))
+        return false;
+    ev.type = EV_SYN; ev.code = SYN_REPORT; ev.value = 0;
+    return write(uinputMouseFd_, &ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
 }
 
 bool InputManager::sendUinputWheel(int delta)
 {
     if (uinputWheelFd_ < 0)
         return false;
-    struct input_event ev[2] = {};
-    ev[0].type = EV_REL; ev[0].code = REL_WHEEL; ev[0].value = delta > 0 ? 1 : -1;
-    ev[1].type = EV_SYN; ev[1].code = SYN_REPORT; ev[1].value = 0;
-    return write(uinputWheelFd_, ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
+    struct input_event ev = {};
+    ev.type = EV_REL; ev.code = REL_WHEEL; ev.value = delta > 0 ? 1 : -1;
+    if (write(uinputWheelFd_, &ev, sizeof(ev)) != static_cast<ssize_t>(sizeof(ev)))
+        return false;
+    ev.type = EV_SYN; ev.code = SYN_REPORT; ev.value = 0;
+    return write(uinputWheelFd_, &ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev));
 }
 
 void InputManager::destroyUinput()
@@ -590,8 +695,63 @@ unsigned short InputManager::keysymToLinuxKeycode(unsigned long ks)
 
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar) {
     Q_UNUSED(useVkFallback);
+
+    // Wayland 门户模式：通过 D-Bus 注入键盘
+    if (waylandPortalMode_ && portalReady_) {
+        // 先同步修饰键状态（Ctrl/Alt/Shift），保证组合键（Ctrl+C 等）生效
+        updateModifiers(ctrl, alt, shift);
+        // 修饰键本身已由 updateModifiers 注入
+        if (code == "ControlLeft" || code == "ControlRight" ||
+            code == "ShiftLeft" || code == "ShiftRight" ||
+            code == "AltLeft" || code == "AltRight" ||
+            code == "MetaLeft" || code == "MetaRight") {
+            return;
+        }
+        // 通过 code 字符串映射到 Linux evdev keycode
+        unsigned int lk = keysymToLinuxKeycode(
+            [code]() -> unsigned long {
+                if (code == "Backspace") return XK_BackSpace;
+                if (code == "Enter")    return XK_Return;
+                if (code == "Tab")      return XK_Tab;
+                if (code == "Escape")   return XK_Escape;
+                if (code == "Space")    return XK_space;
+                if (code == "Delete")   return XK_Delete;
+                if (code == "ArrowUp")  return XK_Up;
+                if (code == "ArrowDown") return XK_Down;
+                if (code == "ArrowLeft") return XK_Left;
+                if (code == "ArrowRight") return XK_Right;
+                if (code.startsWith("Key") && code.length() == 4) {
+                    QByteArray str(1, code[3].toLower().toLatin1());
+                    return XStringToKeysym(str.constData());
+                }
+                if (code.startsWith("Digit") && code.length() == 6) {
+                    QByteArray str(1, code[5].toLatin1());
+                    return XStringToKeysym(str.constData());
+                }
+                if (code == "ControlLeft")  return XK_Control_L;
+                if (code == "ControlRight") return XK_Control_R;
+                if (code == "ShiftLeft")    return XK_Shift_L;
+                if (code == "ShiftRight")   return XK_Shift_R;
+                if (code == "AltLeft")      return XK_Alt_L;
+                if (code == "AltRight")     return XK_Alt_R;
+                if (code == "MetaLeft")     return XK_Meta_L;
+                if (code == "MetaRight")    return XK_Meta_R;
+                return 0;
+            }());
+        // 兜底：code 为空且 isChar 时，把 JS keycode 视作 ASCII 码点映射
+        if (lk == 0 && isChar && keycode > 0) {
+            unsigned long ks = 0;
+            if (keycode >= 'A' && keycode <= 'Z') ks = XK_A + (keycode - 'A');
+            else if (keycode >= 'a' && keycode <= 'z') ks = XK_a + (keycode - 'a');
+            else if (keycode >= '0' && keycode <= '9') ks = XK_0 + (keycode - '0');
+            if (ks) lk = keysymToLinuxKeycode(ks);
+        }
+        if (lk != 0)
+            sendPortalKey(lk, isDown);
+        return;
+    }
+    Q_UNUSED(code);
     Q_UNUSED(isChar);
-    if (!xDisplay_) return;
 
     KeySym keySym = NoSymbol;
 
@@ -682,19 +842,26 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         return;
     }
 
-    if (uinputFd_ >= 0) {
-        unsigned short lkc = keysymToLinuxKeycode(static_cast<unsigned long>(keySym));
-        if (lkc != 0)
-            sendUinputKey(lkc, isDown);
-    } else {
-        focusLockScreenWindow(xdisp(xDisplay_));
-        KeyCode xKeyCode = XKeysymToKeycode(xdisp(xDisplay_), keySym);
-        if (xKeyCode != 0) {
-            XTestGrabControl(xdisp(xDisplay_), True);
-            XTestFakeKeyEvent(xdisp(xDisplay_), xKeyCode, isDown, CurrentTime);
-            XTestGrabControl(xdisp(xDisplay_), False);
-            XFlush(xdisp(xDisplay_));
+    if (uinputFd_ >= 0 || waylandMode_) {
+        // Wayland 会话（无门户授权时）优先走 uinput：无 X 也可注入
+        if (uinputFd_ < 0 && !initUinput())
+            qWarning() << "InputManager: uinput unavailable, falling back to XTest";
+        if (uinputFd_ >= 0) {
+            unsigned short lkc = keysymToLinuxKeycode(static_cast<unsigned long>(keySym));
+            if (lkc != 0)
+                sendUinputKey(lkc, isDown);
+            return;
         }
+    }
+    if (!xDisplay_)
+        return;
+    focusLockScreenWindow(xdisp(xDisplay_));
+    KeyCode xKeyCode = XKeysymToKeycode(xdisp(xDisplay_), keySym);
+    if (xKeyCode != 0) {
+        XTestGrabControl(xdisp(xDisplay_), True);
+        XTestFakeKeyEvent(xdisp(xDisplay_), xKeyCode, isDown, CurrentTime);
+        XTestGrabControl(xdisp(xDisplay_), False);
+        XFlush(xdisp(xDisplay_));
     }
 }
 
@@ -715,7 +882,236 @@ void InputManager::updateModifiers(bool ctrl, bool alt, bool shift) {
         shiftDown_ = shift;
         needFlush = true;
     }
-    if (needFlush) {
+    if (needFlush && xDisplay_) {
         XFlush(xdisp(xDisplay_));
+    }
+}
+
+// ── Wayland RemoteDesktop 门户输入 ──────────────────────────────────────────
+// GNOME Wayland 通过 org.freedesktop.portal.RemoteDesktop 提供输入注入：
+//   CreateSession → SelectDevices → Start（显示 consent 对话框）
+//   → NotifyPointerMotionAbsolute / NotifyKeyboardKeycode
+// 这是 GNOME 官方的远程桌面输入路径（rustdesk 也用类似方案）。
+
+void InputManager::sendPortalKey(unsigned int linuxKeycode, bool isDown)
+{
+    if (!waylandPortalMode_ || !portalReady_ || linuxKeycode == 0)
+        return;
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE,
+        QStringLiteral("NotifyKeyboardKeycode"));
+    msg << QVariant::fromValue(QDBusObjectPath(portalSessionPath_));
+    msg << QVariantMap();
+    msg << static_cast<int>(linuxKeycode);
+    msg << (isDown ? 1u : 0u);
+    QDBusConnection::sessionBus().asyncCall(msg);
+}
+
+void InputManager::initWaylandPortal()
+{
+    if (waylandPortalMode_)
+        return;
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected()) {
+        qWarning() << "InputManager: Cannot connect to session D-Bus for Wayland portal";
+        return;
+    }
+
+    qInfo() << "InputManager: Initializing Wayland RemoteDesktop portal...";
+    waylandPortalMode_ = true;
+
+    // 唯一 token（防重连/重启时 session/request 路径冲突）。
+    // 注意：rdpserver 的 startCapture() 会重建 InputManager，两个实例可能在同一
+    // 毫秒内构造——若只用 pid+ms 会生成相同 token，导致两个 CreateSession 用同一个
+    // session_handle_token 而互相顶掉（SelectDevices 报 "Invalid session"）。
+    // 因此叠加一个进程内递增序号，保证跨实例唯一。
+    static int s_portalInitSeq = 0;
+    const QString uniqueTok = QStringLiteral("qtrd_%1_%2_%3")
+        .arg(QCoreApplication::applicationPid())
+        .arg(s_portalInitSeq++)
+        .arg(QDateTime::currentMSecsSinceEpoch());
+
+    // portal 1.12.6 (Anolis) 的 CreateSession 检查 session_handle_token 与
+    // handle_token（缺则报 "Missing token"）。
+    QVariantMap opts;
+    opts[QStringLiteral("handle_token")] = uniqueTok + QStringLiteral("_c");
+    opts[QStringLiteral("session_handle_token")] = uniqueTok;
+
+    // 预连接 CreateSession 的 Request.Response（基于 handle_token 预测路径，
+    // 避免 portal 立即返回的定向 Response 因晚 connect 而丢失）。
+    portalRequestPath_ = portalConnectResponse(uniqueTok + QStringLiteral("_c"));
+    portalStage_ = 0;
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE,
+        QStringLiteral("CreateSession"));
+    msg << opts;
+
+    QDBusPendingCall pending = bus.asyncCall(msg);
+    auto *watcher = new QDBusPendingCallWatcher(pending, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished,
+            this, &InputManager::onPortalCreateSessionReply);
+}
+
+// 基于 handle_token 预测 portal Request 对象路径并预连接 Response 信号。
+// 返回预测路径（用于 onPortalXXXReply 校验）；baseService 不可用时返回空。
+QString InputManager::portalConnectResponse(const QString &token)
+{
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QString sender = bus.baseService();
+    QString path;
+    if (!sender.isEmpty()) {
+        sender.remove(QLatin1Char(':'));
+        sender.replace(QLatin1Char('.'), QLatin1Char('_'));
+        path = QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2").arg(sender, token);
+        bool ok = bus.connect(PORTAL_SERVICE, path, REQUEST_IFACE,
+                              QStringLiteral("Response"), this,
+                              SLOT(onPortalResponseSignal(QDBusMessage)));
+        qInfo() << "InputManager: portalConnectResponse" << path << "connect=" << ok;
+    }
+    return path;
+}
+
+void InputManager::onPortalCreateSessionReply(QDBusPendingCallWatcher *call)
+{
+    call->deleteLater();
+    QDBusPendingReply<QDBusObjectPath> reply = *call;
+    if (reply.isError()) {
+        qWarning() << "InputManager: Portal CreateSession failed:" << reply.error().message();
+        waylandPortalMode_ = false;
+        return;
+    }
+
+    // CreateSession 返回的是 Request 对象路径（非 session 路径）。
+    // 真正的 session_handle 通过该 Request 的 Response 信号返回。
+    if (portalRequestPath_.isEmpty()) {
+        // 预连接失败（baseService 为空等），此处补连
+        portalRequestPath_ = reply.value().path();
+        QDBusConnection bus = QDBusConnection::sessionBus();
+        bus.connect(PORTAL_SERVICE, portalRequestPath_, REQUEST_IFACE,
+                    QStringLiteral("Response"), this,
+                    SLOT(onPortalResponseSignal(QDBusMessage)));
+    }
+    qInfo() << "InputManager: Portal CreateSession request:" << portalRequestPath_;
+}
+
+void InputManager::onPortalSelectDevicesReply(QDBusPendingCallWatcher *call)
+{
+    call->deleteLater();
+    QDBusPendingReply<QDBusObjectPath> reply = *call;
+    if (reply.isError()) {
+        qWarning() << "InputManager: Portal SelectDevices failed:" << reply.error().message();
+        waylandPortalMode_ = false;
+        return;
+    }
+    // SelectDevices 返回的是本次请求的 Request 对象路径，监听其 Response
+    if (portalRequestPath_.isEmpty()) {
+        portalRequestPath_ = reply.value().path();
+        QDBusConnection bus = QDBusConnection::sessionBus();
+        bus.connect(PORTAL_SERVICE, portalRequestPath_, REQUEST_IFACE,
+                    QStringLiteral("Response"), this,
+                    SLOT(onPortalResponseSignal(QDBusMessage)));
+    }
+    qInfo() << "InputManager: Portal SelectDevices request:" << portalRequestPath_;
+}
+
+void InputManager::onPortalStartReply(QDBusPendingCallWatcher *call)
+{
+    call->deleteLater();
+    QDBusPendingReply<QDBusObjectPath> reply = *call;
+    if (reply.isError()) {
+        qWarning() << "InputManager: Portal Start failed:" << reply.error().message();
+        waylandPortalMode_ = false;
+        return;
+    }
+    if (portalRequestPath_.isEmpty()) {
+        portalRequestPath_ = reply.value().path();
+        QDBusConnection bus = QDBusConnection::sessionBus();
+        bus.connect(PORTAL_SERVICE, portalRequestPath_, REQUEST_IFACE,
+                    QStringLiteral("Response"), this,
+                    SLOT(onPortalResponseSignal(QDBusMessage)));
+    }
+    qInfo() << "InputManager: Portal Start sent, waiting for user consent...";
+}
+
+void InputManager::onPortalResponseSignal(const QDBusMessage &msg)
+{
+    // Response(uint response_code, a{sv} results)
+    //   response_code == 0 表示成功/用户同意
+    if (msg.arguments().size() < 2) {
+        qWarning() << "InputManager: Portal Response signal malformed";
+        return;
+    }
+    uint code = msg.arguments().at(0).toUInt();
+    QVariant resultsVar = msg.arguments().at(1);
+    QVariantMap results = qdbus_cast<QVariantMap>(resultsVar);
+    qInfo() << "InputManager: Portal Response results type:" << resultsVar.typeName()
+            << "keys:" << results.keys();
+    if (code != 0) {
+        qWarning() << "InputManager: Portal consent denied (code" << code << ") stage" << portalStage_;
+        waylandPortalMode_ = false;
+        portalStage_ = -1;
+        return;
+    }
+
+    if (portalStage_ == 0) {
+        // CreateSession Response：提取 session_handle。
+        // 实测该 portal 版本 results 里 session_handle 是 string 类型
+        // （a{sv} 的值经 QtDBus 解包后也可能是 QDBusObjectPath），两种都兼容。
+        QVariant sh = results.value(QStringLiteral("session_handle"));
+        QString sessionPath;
+        if (sh.userType() == qMetaTypeId<QDBusObjectPath>())
+            sessionPath = sh.value<QDBusObjectPath>().path();
+        else if (sh.isValid())
+            sessionPath = sh.toString();
+        qInfo() << "InputManager: Portal session_handle variant:" << sh.typeName()
+                << "valid=" << sh.isValid() << "value=\"" << sh.toString() << "\"";
+        portalSessionPath_ = sessionPath;
+        qInfo() << "InputManager: Portal session established:" << portalSessionPath_;
+
+        // Step 2: SelectDevices —— 键盘(1) + 鼠标(2) = 3
+        const QString selTok = QStringLiteral("qtrd_s_%1_%2")
+            .arg(QCoreApplication::applicationPid())
+            .arg(QDateTime::currentMSecsSinceEpoch());
+        QVariantMap selOpts;
+        selOpts[QStringLiteral("handle_token")] = selTok;
+        selOpts[QStringLiteral("types")] = 3u;  // KEYBOARD | POINTER
+        // 预连接 SelectDevices 的 Response
+        portalRequestPath_ = portalConnectResponse(selTok);
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE, QStringLiteral("SelectDevices"));
+        m << QVariant::fromValue(QDBusObjectPath(portalSessionPath_));
+        m << selOpts;
+        QDBusPendingCall pending = QDBusConnection::sessionBus().asyncCall(m);
+        auto *watcher = new QDBusPendingCallWatcher(pending, this);
+        connect(watcher, &QDBusPendingCallWatcher::finished,
+                this, &InputManager::onPortalSelectDevicesReply);
+        portalStage_ = 1;
+    } else if (portalStage_ == 1) {
+        // SelectDevices Response：发起 Start（弹出 consent 对话框）
+        const QString startTok = QStringLiteral("qtrd_t_%1_%2")
+            .arg(QCoreApplication::applicationPid())
+            .arg(QDateTime::currentMSecsSinceEpoch());
+        QVariantMap startOpts;
+        startOpts[QStringLiteral("handle_token")] = startTok;
+        portalRequestPath_ = portalConnectResponse(startTok);
+        QDBusMessage m = QDBusMessage::createMethodCall(
+            PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE, QStringLiteral("Start"));
+        m << QVariant::fromValue(QDBusObjectPath(portalSessionPath_));
+        m << QString();  // parent_window
+        m << startOpts;
+        QDBusPendingCall pending = QDBusConnection::sessionBus().asyncCall(m);
+        auto *watcher = new QDBusPendingCallWatcher(pending, this);
+        connect(watcher, &QDBusPendingCallWatcher::finished,
+                this, &InputManager::onPortalStartReply);
+        portalStage_ = 2;
+    } else if (portalStage_ == 2) {
+        // Start Response：门户输入就绪
+        portalReady_ = true;
+        qInfo() << "InputManager: Wayland portal READY — input injection active!";
+        if (results.contains(QStringLiteral("streams")))
+            qInfo() << "InputManager: Portal streams available";
+        portalStage_ = -1;
     }
 }

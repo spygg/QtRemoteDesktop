@@ -1624,6 +1624,11 @@ void RDPServer::onClientConnected(const QString& clientId)
         lock["locked"] = true;
         wsServer_->sendJson(clientId, lock);
     }
+
+    // 发送当前帧给新客户端（静态屏幕时 checksum 过滤会跳过广播）
+    if (currentMode_ == ServerMode::Image && jpegCompressor_ && !lastCapturedFrame_.isNull()) {
+        jpegCompressor_->enqueue(lastCapturedFrame_);
+    }
 }
 
 void RDPServer::onClientDisconnected(const QString& clientId)
@@ -1930,6 +1935,8 @@ void RDPServer::injectPasteShortcut()
 
 void RDPServer::onFrameCaptured(const QImage& frame)
 {
+    lastCapturedFrame_ = frame;
+
     if (wsServer_->clients().isEmpty())
         return;
 
@@ -1951,7 +1958,11 @@ void RDPServer::onFrameCaptured(const QImage& frame)
     if (nowMs - lastCursorQueryMs_ < 50)
         return;
     lastCursorQueryMs_ = nowMs;
-    QPoint cursorPos = QCursor::pos();
+    // Linux 服务模式为 QCoreApplication，QCursor::pos() 恒为 (0,0)；
+    // 由 InputManager 用 XQueryPointer 提供真实光标位置
+    QPoint cursorPos = inputManager_ ? inputManager_->cursorPosition() : QCursor::pos();
+    if (cursorPos.x() < 0 || cursorPos.y() < 0)
+        return;
     int relativeX = cursorPos.x() - screenGeometry_.x();
     int relativeY = cursorPos.y() - screenGeometry_.y();
 

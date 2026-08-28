@@ -1,8 +1,15 @@
 #include "inputmanager.h"
 #include <QDebug>
+#include <QCursor>
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+
+QPoint InputManager::cursorPosition() const
+{
+    // Windows 下 QCursor::pos() 正常可用
+    return QCursor::pos();
+}
 
 static bool sendInputChecked(UINT count, LPINPUT inputs, int cbSize)
 {

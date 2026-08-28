@@ -248,28 +248,33 @@ bool ScreenCapturer::start(int fps)
 {
     fps_ = fps;
 
-    // 尝试初始化 Linux X11 捕获
+#ifdef HAVE_PIPEWIRE
+    // 当 WAYLAND_DISPLAY 存在时优先使用 Wayland PipeWire 捕获
+    if (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
+        waylandCapturer_ = new WaylandCapturer();
+        useWayland_ = waylandCapturer_->initialize();
+        if (useWayland_) {
+            qInfo() << "Using Wayland capture (PipeWire ScreenCast)";
+            captureTimer_->start(1000 / fps);
+            qInfo() << "Screen capture started:" << width() << "x" << height() << "@" << fps << "fps";
+            return true;
+        }
+        qWarning() << "Wayland PipeWire init failed, falling back to X11";
+    }
+#endif
+
+    // X11 捕获
     x11Capturer_ = new X11Capturer();
     useX11_ = x11Capturer_->initialize();
     if (useX11_) {
         qInfo() << "Using X11 optimized capture";
     } else {
-#ifdef HAVE_PIPEWIRE
-        // X11 不可用 → 尝试 Wayland（PipeWire + ScreenCast portal）
-        waylandCapturer_ = new WaylandCapturer();
-        useWayland_ = waylandCapturer_->initialize();
-        if (useWayland_) {
-            qInfo() << "Using Wayland capture (PipeWire ScreenCast)";
-        } else
-#endif
-        {
-            // 两者都不可用且无显示环境 → 无头模式
-            if (qEnvironmentVariableIsEmpty("DISPLAY") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
-                qWarning() << "No X11/Wayland display, screen capture disabled (headless mode)";
-                delete x11Capturer_;
-                x11Capturer_ = nullptr;
-                return false;
-            }
+        // 两者都不可用且无显示环境 → 无头模式
+        if (qEnvironmentVariableIsEmpty("DISPLAY") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
+            qWarning() << "No X11/Wayland display, screen capture disabled (headless mode)";
+            delete x11Capturer_;
+            x11Capturer_ = nullptr;
+            return false;
         }
     }
 
@@ -348,12 +353,20 @@ void ScreenCapturer::captureFrame()
         bool updated = true;
         if (!waylandCapturer_->captureFrame(frame, &updated)) {
             captureFailCount_++;
+            if (captureFailCount_ <= 5 || captureFailCount_ % 20 == 0)
+                qWarning() << "ScreenCapturer: wayland captureFrame FAIL #" << captureFailCount_
+                           << "screenLocked_=" << screenLocked_
+                           << "timerActive=" << captureTimer_->isActive()
+                           << "interval=" << captureTimer_->interval();
             if (captureFailCount_ >= 5 && !screenLocked_) {
                 screenLocked_ = true;
                 emit screenLocked(true);
+                qWarning() << "ScreenCapturer: EMIT screenLocked(true) after" << captureFailCount_ << "fails";
             }
             return;
         }
+        if (captureFailCount_ > 0)
+            qWarning() << "ScreenCapturer: wayland capture OK, clearing fail count" << captureFailCount_;
         captureFailCount_ = 0;
 
         if (!updated) {
@@ -373,6 +386,14 @@ void ScreenCapturer::captureFrame()
         if (screenLocked_) {
             screenLocked_ = false;
             emit screenLocked(false);
+        }
+
+        // 空帧 / 0 尺寸帧保护（Wayland 流初始化中可能提交 0 宽高帧）
+        if (frame.isNull() || frame.width() <= 0 || frame.height() <= 0) {
+            idleCount_++;
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
+                captureTimer_->setInterval(1000);
+            return;
         }
 
         quint16 checksum = quickFrameChecksum(frame);

@@ -162,6 +162,7 @@ private:
     quint16 wsPort_;
 
     QRect screenGeometry_;
+    QImage lastCapturedFrame_;
     QPoint lastCursorPos_ { -1, -1 };
     qint64 lastCursorQueryMs_ = 0;
     int videoBaseBitrate_ = 0; // 视频模式目标码率（过载降质后用于恢复）

@@ -20,6 +20,8 @@
 #include <QVariantMap>
 
 #include <pipewire/pipewire.h>
+#include <pipewire/proxy.h>
+#include <pipewire/link.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/video/raw.h>
 #include <spa/param/video/raw-utils.h>
@@ -28,14 +30,56 @@
 #include <spa/pod/vararg.h>
 #include <spa/utils/result.h>
 
+#include <unistd.h>
+#include <cstdio>
+#include <string>
+
 // ---------------------------------------------------------------------------
 // PipeWire 事件回调
 // ---------------------------------------------------------------------------
 namespace {
 
+void onLinkDestroyed(void* data) {
+    qInfo() << "WaylandCapturer: link destroyed";
+}
+
+void onLinkDone(void* data, int result) {
+    qInfo() << "WaylandCapturer: link done, result" << result;
+}
+
+void onLinkError(void* data, int seq, int res, const char* message) {
+    qWarning() << "WaylandCapturer: link error, seq" << seq << "res" << res << "msg:" << (message ? message : "none");
+}
+
+void onLinkRemoved(void* data) {
+    qInfo() << "WaylandCapturer: link removed";
+}
+
+void onLinkBound(void* data, uint32_t global_id) {
+    qInfo() << "WaylandCapturer: link bound, global_id" << global_id;
+}
+
+const pw_proxy_events g_linkEvents = {
+    .version = PW_VERSION_PROXY_EVENTS,
+    .destroy = onLinkDestroyed,
+    .bound = onLinkBound,
+    .removed = onLinkRemoved,
+    .done = onLinkDone,
+    .error = onLinkError,
+    .bound_props = nullptr,
+};
+
 void onStreamProcess(void* data)
 {
     static_cast<WaylandCapturer*>(data)->streamProcess();
+}
+
+void onStreamAddBuffer(void* data, struct pw_buffer* buffer)
+{
+}
+
+void onStreamRemoveBuffer(void* data, struct pw_buffer* buffer)
+{
 }
 
 void onStreamParamChanged(void* data, uint32_t id, const struct spa_pod* param)
@@ -44,20 +88,14 @@ void onStreamParamChanged(void* data, uint32_t id, const struct spa_pod* param)
     if (id == SPA_PARAM_Format) {
         if (param) {
             self->parseFormatParam(param);
-            qInfo() << "WaylandCapturer: param_changed Format, size" << self->width() << "x" << self->height();
-        } else {
-            qInfo() << "WaylandCapturer: param_changed Format (cleared)";
+            qInfo() << "WaylandCapturer: format negotiated:" << self->width() << "x" << self->height();
         }
-    } else {
-        qInfo() << "WaylandCapturer: param_changed id" << id;
     }
 }
 
 void onStreamStateChanged(void* data, enum pw_stream_state old, enum pw_stream_state state, const char* error)
 {
-    Q_UNUSED(data)
-    Q_UNUSED(old)
-    qInfo() << "WaylandCapturer: stream state" << state << "error:" << (error ? error : "none");
+    static_cast<WaylandCapturer*>(data)->onStreamStateChanged((int)old, (int)state, error);
 }
 
 const pw_stream_events g_streamEvents = {
@@ -67,8 +105,8 @@ const pw_stream_events g_streamEvents = {
     .control_info = nullptr,
     .io_changed = nullptr,
     .param_changed = onStreamParamChanged,
-    .add_buffer = nullptr,
-    .remove_buffer = nullptr,
+    .add_buffer = onStreamAddBuffer,
+    .remove_buffer = onStreamRemoveBuffer,
     .process = onStreamProcess,
     .drained = nullptr,
 };
@@ -85,6 +123,32 @@ spa_pod* buildVideoFormat(struct spa_pod_builder* b, uint32_t format, int w, int
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// WaylandCapturer
+// ---------------------------------------------------------------------------
+void WaylandCapturer::onStreamStateChanged(int oldState, int newState, const char* error)
+{
+    const char* stateNames[] = {"UNCONNECTED","CONNECTING","IDLE","PAUSED","STREAMING"};
+    const char* oldName = (oldState >= 0 && oldState <= 4) ? stateNames[oldState] : "UNKNOWN";
+    const char* newName = (newState >= 0 && newState <= 4) ? stateNames[newState] : "UNKNOWN";
+    qInfo() << "WaylandCapturer:" << oldName << "->" << newName
+            << "error:" << (error ? error : "none")
+            << "activated:" << activated_ << "frameCount:" << frameCount_;
+
+    if (newState == 2 /*IDLE*/ && mutterMode_ && !linkCreated_) {
+        uint32_t myNodeId = pw_stream_get_node_id(stream_);
+        qInfo() << "WaylandCapturer: stream IDLE, node" << myNodeId;
+        linkCreated_ = true;
+    }
+
+    if (newState == 3 /*PAUSED*/ && !activated_) {
+        activated_ = true;
+        qInfo() << "WaylandCapturer: stream PAUSED, calling pw_stream_set_active(true)";
+        int res = pw_stream_set_active(stream_, true);
+        qInfo() << "WaylandCapturer: pw_stream_set_active returned" << res;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // WaylandCapturer
@@ -227,10 +291,18 @@ bool WaylandCapturer::setupMutterScreenCast()
         return false;
     }
 
-    // TODO(临时验证): mutter 需要显式 size 才能协商，先硬编码实际分辨率
+    // 尺寸兜底：优先用 QScreen（xcb 平台可拿到真实分辨率）；
+    // 若仍拿不到则用 1080p 默认值。协商完成后 parseFormatParam 会用
+    // 实际尺寸覆盖并同步 QTRD_WAYLAND_* 环境变量，因此这里只是初始值。
     if (width_ <= 0 || height_ <= 0) {
-        width_ = 1714;
-        height_ = 918;
+        if (QGuiApplication::primaryScreen()) {
+            width_ = QGuiApplication::primaryScreen()->size().width();
+            height_ = QGuiApplication::primaryScreen()->size().height();
+            qInfo() << "WaylandCapturer: using QScreen size" << width_ << "x" << height_;
+        } else {
+            width_ = 1920;
+            height_ = 1080;
+        }
     }
 
     // 连接默认 PipeWire remote 建流
@@ -247,24 +319,24 @@ bool WaylandCapturer::setupPipewireMutter()
     context_ = pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0);
     if (!context_) { qWarning() << "WaylandCapturer: pw_context_new failed"; return false; }
 
-    // 先启动 loop（core 连接是异步的，需要 loop 处理事件）
+    // 先启动 loop 线程，确保事件能被处理（和 portal 路径一致）
     if (pw_thread_loop_start(loop_) < 0) {
         qWarning() << "WaylandCapturer: pw_thread_loop_start failed";
         return false;
     }
 
     pw_thread_loop_lock(loop_);
-    core_ = pw_context_connect(context_, nullptr, 0);  // 默认 PipeWire socket
+    core_ = pw_context_connect(context_, nullptr, 0);
     if (!core_) {
         pw_thread_loop_unlock(loop_);
         qWarning() << "WaylandCapturer: pw_context_connect failed";
         return false;
     }
-    // core 连接为异步；pw_stream_connect 的请求会在 core 就绪后由 loop 处理
     bool ok = createStream(nodeId_);
     pw_thread_loop_unlock(loop_);
     if (!ok)
         return false;
+
     qInfo() << "WaylandCapturer: PipeWire capture started (mutter), node" << nodeId_
             << "size" << width_ << "x" << height_;
     return true;
@@ -429,18 +501,37 @@ bool WaylandCapturer::setupPipewire(int fd, uint32_t nodeId)
 bool WaylandCapturer::createStream(uint32_t nodeId)
 {
     // 调用方须持有 loop 锁（pw_thread_loop_lock）
-    // mutter ScreenCast 输出 BGRx（与 QImage::Format_RGB32 小端布局一致）
+    // 不约束分辨率，让 PipeWire 自动协商（compositor 会返回实际分辨率）
     uint8_t buffer[1024];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-    const spa_pod* params[2];
-    params[0] = buildVideoFormat(&b, SPA_VIDEO_FORMAT_BGRx, width_, height_);
-    params[1] = buildVideoFormat(&b, SPA_VIDEO_FORMAT_BGRA, width_, height_);
+    const spa_pod* params[3];
 
+    // 枚举格式：不约束 size，只约束 format
+    params[0] = static_cast<spa_pod*>(spa_pod_builder_add_object(&b,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx)));
+    params[1] = static_cast<spa_pod*>(spa_pod_builder_add_object(&b,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRA)));
+    params[2] = static_cast<spa_pod*>(spa_pod_builder_add_object(&b,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_RGBx)));
+
+    char targetStr[32];
+    snprintf(targetStr, sizeof(targetStr), "%u", nodeId);
     stream_ = pw_stream_new(core_, "QtRemoteDesktop-capture",
                             pw_properties_new(
                                 PW_KEY_MEDIA_TYPE, "Video",
                                 PW_KEY_MEDIA_CATEGORY, "Capture",
                                 PW_KEY_MEDIA_ROLE, "Screen",
+                                PW_KEY_NODE_TARGET, targetStr,
+                                PW_KEY_NODE_ALWAYS_PROCESS, "true",
                                 NULL));
     if (!stream_) {
         qWarning() << "WaylandCapturer: pw_stream_new failed";
@@ -450,17 +541,55 @@ bool WaylandCapturer::createStream(uint32_t nodeId)
     streamListener_ = new spa_hook;
     pw_stream_add_listener(stream_, streamListener_, &g_streamEvents, this);
 
+    // AUTOCONNECT + target for proper node registration with PipeWire daemon
     int res = pw_stream_connect(stream_, PW_DIRECTION_INPUT, nodeId,
                                 static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT |
                                                              PW_STREAM_FLAG_MAP_BUFFERS),
-                                params, 2);
+                                params, 3);
     if (res < 0) {
         qWarning() << "WaylandCapturer: pw_stream_connect failed:" << spa_strerror(res);
         return false;
     }
-    // 激活 stream：否则停留在 paused，不会触发格式协商
-    pw_stream_set_active(stream_, true);
+
+    qInfo() << "WaylandCapturer: createStream ok, target node" << nodeId
+            << "stream state" << pw_stream_get_state(stream_, nullptr);
     streamReady_ = true;
+    return true;
+}
+
+bool WaylandCapturer::createLink(uint32_t outputNode, uint32_t outputPort, uint32_t inputNode, uint32_t inputPort)
+{
+    // 调用方须持有 loop 锁
+    // 通过 link-factory 手动创建 link（无 WirePlumber 时 AUTOCONNECT 不自动建 link）
+    struct pw_properties* props = pw_properties_new(
+        PW_KEY_LINK_OUTPUT_NODE, std::to_string(outputNode).c_str(),
+        PW_KEY_LINK_INPUT_NODE, std::to_string(inputNode).c_str(),
+        "object.linger", "1",
+        nullptr);
+
+    if (outputPort != 0) {
+        pw_properties_set(props, PW_KEY_LINK_OUTPUT_PORT, std::to_string(outputPort).c_str());
+    }
+    if (inputPort != 0) {
+        pw_properties_set(props, PW_KEY_LINK_INPUT_PORT, std::to_string(inputPort).c_str());
+    }
+
+    struct pw_proxy* linkProxy = static_cast<pw_proxy*>(
+        pw_core_create_object(core_, "link-factory",
+                              PW_TYPE_INTERFACE_Link, PW_VERSION_LINK,
+                              &props->dict, 0));
+    pw_properties_free(props);
+
+    if (!linkProxy) {
+        qWarning() << "WaylandCapturer: pw_core_create_object link-factory failed";
+        return false;
+    }
+    linkProxy_ = linkProxy;
+
+    linkListener_ = new spa_hook;
+    pw_proxy_add_listener(linkProxy_, linkListener_, &g_linkEvents, this);
+
+    qInfo() << "WaylandCapturer: created link" << outputNode << "->" << inputNode;
     return true;
 }
 
@@ -478,6 +607,15 @@ void WaylandCapturer::teardownPipewire()
             }
             pw_stream_destroy(stream_);
             stream_ = nullptr;
+        }
+        if (linkProxy_) {
+            if (linkListener_) {
+                spa_hook_remove(linkListener_);
+                delete linkListener_;
+                linkListener_ = nullptr;
+            }
+            pw_proxy_destroy(linkProxy_);
+            linkProxy_ = nullptr;
         }
         if (core_) {
             pw_core_disconnect(core_);
@@ -515,7 +653,7 @@ void WaylandCapturer::streamProcess()
 {
     if (!stream_)
         return;
-    // 等 format 协商完成拿到尺寸后再取帧
+
     if (width_ <= 0 || height_ <= 0)
         return;
     pw_buffer* buf = pw_stream_dequeue_buffer(stream_);
@@ -524,17 +662,56 @@ void WaylandCapturer::streamProcess()
     struct spa_buffer* sbuf = buf->buffer;
     struct spa_data* d = &sbuf->datas[0];
     if (d && d->data) {
-        // 32bpp：BGRA/RGBx 均可按 Format_RGB32（小端 BGRA）包装；
-        // 若实际为 RGBx，颜色通道会是反的，但布局安全（4 字节/像素）。
         int stride = (d->chunk && d->chunk->stride > 0) ? d->chunk->stride : width_ * 4;
+        // 实际尺寸自适应：mutter 实际输出的 stride/尺寸可能与我们记录的 width_/height_
+        // 不一致（例如协商为 1714x918 而 width_ 仍是 1920x1080）。若用错误的 width_
+        // 构造 QImage，stride < width_*4 会导致 QImage 为空图，进而被上层误判为锁屏。
+        // 以 chunk 的 stride/size 反推实际像素宽高（格式为 BGRx/BGRA/RGBx，32bpp）。
+        int realW = width_;
+        int realH = height_;
+        if (stride > 0 && (stride % 4) == 0)
+            realW = stride / 4;
+        if (d->chunk && d->chunk->size > 0 && stride > 0) {
+            int h = d->chunk->size / stride;
+            if (h > 0 && h <= 4096)
+                realH = h;
+        }
+        if (realW <= 0 || realH <= 0 || stride < realW * 4) {
+            qWarning() << "WaylandCapturer: invalid frame geometry w" << realW
+                       << "h" << realH << "stride" << stride << ", skip";
+            pw_stream_queue_buffer(stream_, buf);
+            return;
+        }
+        // 尺寸变化时同步内部宽高与共享环境变量（供 InputManager 坐标映射）
+        if (realW != width_ || realH != height_) {
+            qInfo() << "WaylandCapturer: adopt actual size" << realW << "x" << realH
+                    << "(was" << width_ << "x" << height_ << ") stride" << stride;
+            width_ = realW;
+            height_ = realH;
+            qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
+            qputenv("QTRD_WAYLAND_HEIGHT", QByteArray::number(height_));
+        }
         QImage img(static_cast<const uchar*>(d->data),
-                   width_, height_,
+                   realW, realH,
                    stride,
                    QImage::Format_RGB32);
+        if (img.isNull()) {
+            qWarning() << "WaylandCapturer: QImage construct failed, skip frame (w" << realW
+                       << "h" << realH << "stride" << stride << ")";
+            pw_stream_queue_buffer(stream_, buf);
+            return;
+        }
         QMutexLocker lk(&frameMutex_);
         frame_ = img.copy();
         hasFrame_ = true;
         frameCount_++;
+        // 周期性打印（每 300 帧一次），避免高频日志刷爆日志文件
+        if (frameCount_ <= 3 || (frameCount_ % 300) == 1) {
+            qInfo() << "WaylandCapturer: frame" << frameCount_
+                    << "size" << realW << "x" << realH
+                    << "stride" << stride
+                    << "state" << pw_stream_get_state(stream_, nullptr);
+        }
     }
     pw_stream_queue_buffer(stream_, buf);
 }
@@ -550,13 +727,28 @@ void WaylandCapturer::parseFormatParam(const struct spa_pod* param)
         width_ = info.info.raw.size.width;
         height_ = info.info.raw.size.height;
         qInfo() << "WaylandCapturer: negotiated format" << width_ << "x" << height_;
+        // 协商后的实际尺寸同步给 InputManager 做坐标映射（offscreen 平台无 QScreen）
+        qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
+        qputenv("QTRD_WAYLAND_HEIGHT", QByteArray::number(height_));
     }
 }
 
 bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
 {
     QMutexLocker lk(&frameMutex_);
-    if (!hasFrame_) {
+    // 空帧 / 0 尺寸帧保护：流初始化或格式重协商中可能提交 0 宽高缓冲，
+    // 此时不视为有效帧（避免上层 quickFrameChecksum 除零崩溃）
+    if (!hasFrame_ || frame_.isNull() || frame_.width() <= 0 || frame_.height() <= 0) {
+        static int dbg = 0;
+        if (dbg < 10) {
+            dbg++;
+            qWarning() << "WaylandCapturer::captureFrame FAIL hasFrame_=" << hasFrame_
+                       << "isNull=" << frame_.isNull()
+                       << "w=" << frame_.width() << "h=" << frame_.height()
+                       << "streamReady_=" << streamReady_
+                       << "activated_=" << activated_
+                       << "frameCount_=" << frameCount_;
+        }
         if (updated) *updated = false;
         return false;
     }
