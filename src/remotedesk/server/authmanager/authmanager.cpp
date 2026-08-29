@@ -15,6 +15,14 @@
 static qint64 currentSecsSinceEpoch() { return QDateTime::currentDateTime().toTime_t(); }
 static QByteArray randomBytes(int count)
 {
+    // qrand 未播种时每次进程启动生成相同序列，token 可预测（安全弱点）。
+    // 用时间 + 进程号播种一次，保证每次启动序列不同。
+    static bool seeded = false;
+    if (!seeded) {
+        qsrand(static_cast<uint>(QDateTime::currentDateTime().toTime_t())
+               ^ static_cast<uint>(QCoreApplication::applicationPid()));
+        seeded = true;
+    }
     QByteArray data;
     data.resize(count);
     for (int i = 0; i < count; i++)

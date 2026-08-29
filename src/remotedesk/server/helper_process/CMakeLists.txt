@@ -13,3 +13,5 @@ target_link_libraries(${TARGET} PUBLIC
     ScreenCapturer
     InputManager
 )
+# 崩溃转储（helper 进程入口也调用 Breakpad::CrashHandler::Init）
+target_link_libraries(${TARGET} PUBLIC radiometer_breakpad)

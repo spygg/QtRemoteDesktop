@@ -4,6 +4,7 @@
 #include "service/service.h"
 #include "singleapplication.h"
 // #include "startup.h"
+#include "crashhandler.h"
 #include "systemsleepblocker.h"
 
 #include <QCommandLineParser>
@@ -82,6 +83,7 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
 
 int main(int argc, char* argv[])
 {
+
     int ret = platformMain(argc, argv);
     if (ret >= 0)
         return ret;
@@ -116,6 +118,7 @@ int main(int argc, char* argv[])
     }
 
     qInstallMessageHandler(logToFile);
+    Breakpad::CrashHandler::instance()->Init(QCoreApplication::applicationDirPath());
 
     SystemSleepBlocker blocker;
     if (!blocker.start()) {

@@ -3,6 +3,7 @@
 #define RDP_SERVER_H
 
 #include <QHostAddress>
+#include <QHash>
 #include <QImage>
 #include <QJsonObject>
 #include <QMutex>
@@ -25,6 +26,7 @@ class ScreenCapturer;
 class AuthManager;
 class FileTransferService;
 class ClipboardService;
+class QProcess;
 
 #ifdef USE_FFMPEG
 class VideoEncoder;
@@ -35,6 +37,15 @@ class WebRtcSession;
 #endif
 
 class InputManager;
+
+// HTTP 请求解析状态：将请求头与 POST body 在多次 readyRead 之间累积，
+// 避免在主线程用 waitForReadyRead 同步阻塞等待 TCP 分片的 body 到齐。
+struct HttpParseState {
+    bool headerDone = false;     // 请求头是否已解析（含 Content-Length）
+    int contentLength = 0;       // 期望的 POST body 字节数
+    QString headerText;          // 已解析的请求头文本（用于路径/方法/鉴权提取）
+    QByteArray buffer;           // 累积的原始字节（请求头 + 已到 body 片段）
+};
 
 // 独立线程 JPEG 压缩器：捕获帧不经主线程阻塞，直接在后台压缩
 class JpegCompressor : public QObject {
@@ -97,6 +108,8 @@ private slots:
 
     void onModeChangeRequested(const QString& mode);
     void onShellConnected(QWebSocket* socket);
+    // logind PrepareForSleep（Linux）：挂起前暂停捕获、恢复后重建捕获流
+    void onPrepareForSleep(bool sleeping);
 #ifdef USE_WEBRTC
     void onWebRtcMessage(const QString& clientId, const QJsonObject& msg);
 #endif
@@ -178,6 +191,9 @@ private:
     bool secureInputRunning_ = false;
     bool captureAvailable_ = true;
     QString shellCurrentDir_;
+
+    // 每个 HTTP 连接的请求解析状态（跨 readyRead 累积，避免主线程阻塞）
+    QHash<QTcpSocket*, HttpParseState> httpParseState_;
 #ifdef _WIN32
     int secureInputPid_ = 0;
 #endif
@@ -198,6 +214,27 @@ private:
     void startSecureInputProcess();
     void stopSecureInputProcess();
     void injectPasteShortcut();
+
+    // ---- 防睡眠 / 休眠恢复 ----
+    // 首个客户端连接时阻止被控端睡眠/熄屏，全部断开时释放
+    void updateSleepInhibit(bool active);
+    // Linux：订阅 logind PrepareForSleep 信号（幂等，可在 start() 调用）
+    void connectSleepSignals();
+
+    // ---- 系统操作（快捷键面板） ----
+    // 执行被控端系统动作：lock/show_desktop/task_manager/logout/reboot/poweroff
+    void handleSystemAction(const QString& action, const QString& clientId);
+
+    bool sleepSignalsConnected_ = false;
+    bool sleepInhibitActive_ = false;
+    bool preparedForSleep_ = false;
+#ifdef Q_OS_LINUX
+    enum class InhibitBackend { None, SessionManager, ScreenSaver, Login1 };
+    InhibitBackend sleepInhibitBackend_ = InhibitBackend::None;
+    quint32 sleepInhibitCookie_ = 0; // org.gnome.SessionManager / ScreenSaver 返回的 cookie
+    int sleepInhibitFd_ = -1;        // login1 Inhibit 返回的 fd（最后手段），关闭即释放
+#endif
+    QProcess* sleepInhibitProcess_ = nullptr; // macOS: caffeinate 子进程
 
 #ifdef USE_WEBRTC
     void startWebRtcSession(const QString& clientId);

@@ -508,12 +508,17 @@
             }
 
             // ----- WebSocket 连接 -----
+                        function getCookie(name) {
+                const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+                return m ? decodeURIComponent(m[1]) : '';
+            }
             function tryConnectWS() {
                 const loc = window.location;
                 const httpPort = parseInt(loc.port) || (loc.protocol === 'https:' ? 443 : 80);
                 const wsPort = httpPort + 1;
                 const proto = loc.protocol === 'https:' ? 'wss://' : 'ws://';
-                const url = proto + loc.hostname + ':' + wsPort + '/api/shell/ws';
+                                const sessionToken = getCookie('session') || '';
+                const url = proto + loc.hostname + ':' + wsPort + '/api/shell/ws' + (sessionToken ? '?token=' + encodeURIComponent(sessionToken) : '');
 
                 ws = new WebSocket(url);
                 ws.binaryType = 'arraybuffer';

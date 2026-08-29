@@ -1,4 +1,5 @@
 #include "helper_process.h"
+#include "crashhandler.h"
 #include "inputmanager.h"
 #include "rdpserver.h"
 #include "screencapturer.h"
@@ -12,8 +13,10 @@
 #include <QIODevice>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QThread>
 #include <QTimer>
 #include <QWebSocket>
+#include <memory>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -29,6 +32,10 @@ int HelperProcess::run(int argc, char* argv[])
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 #endif
     QGuiApplication app(argc, argv);
+
+    // helper 进程启用崩溃转储：main.cpp 的 platformMain 在 --helper 分支提前
+    // return，breakpad 不会初始化，崩溃时将无 .dmp 可分析。
+    Breakpad::CrashHandler::instance()->Init(QGuiApplication::applicationDirPath());
 
     QDir::setCurrent(QGuiApplication::applicationDirPath());
 
@@ -52,11 +59,21 @@ int HelperProcess::run(int argc, char* argv[])
 
     QString wsScheme = useSsl ? "wss" : "ws";
 
-    ScreenCapturer capturer(nullptr);
-    JpegCompressor compressor(nullptr);
-
+    // 声明顺序 = 析构的逆序（后构造者先析构），必须与数据流方向相反：
+    //   capturer(采帧) -> compressor(编码线程) -> ws(发送)
+    // ws 必须最先构造、最后析构：编码线程通过 Qt::QueuedConnection 把 jpegCompressed
+    // 投递给 ws，若 ws 先析构而线程仍在 emit，QMetaObject::activate 会访问已析构的
+    // QObjectData（d_ptr=0）-> 0xC0000005。让 compressor 最后构造，其析构
+    // （shutdown + 等待线程退出）必定先于 ws 析构，从而消除该竞态。
     QWebSocket ws;
+    ScreenCapturer capturer(nullptr);
+    // compressor 改为堆分配：它在 worker 线程里通过 Qt::QueuedConnection 向 ws 投递
+    // jpegCompressed，且曾作为主线程栈对象与 capturer 栈相邻。为使其脱离（ASLR 关闭时）
+    // 固定的主线程栈地址、避免被捕获路径的越界写命中，改为堆分配。
+    std::unique_ptr<JpegCompressor> compressor(new JpegCompressor(nullptr));
+
     bool screenInfoSent = false;
+    bool quitting = false;   // 退出标志：退出流程启动后禁止再访问/重连栈对象
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
@@ -74,9 +91,11 @@ int HelperProcess::run(int argc, char* argv[])
             qWarning() << "Helper: WS error" << err << ws.errorString();
         });
     QObject::connect(&ws, &QWebSocket::disconnected, &app, [&]() {
+        if (quitting) return;
         qWarning() << "Helper WS disconnected (helper may have crashed), retrying in 3s...";
         SetThreadExecutionState(ES_CONTINUOUS);
         QTimer::singleShot(3000, [&]() {
+            if (quitting) return;
             ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
         });
     });
@@ -88,9 +107,15 @@ int HelperProcess::run(int argc, char* argv[])
     ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
 
     QObject::connect(&capturer, &ScreenCapturer::frameCaptured,
-        &app, [&](const QImage& frame) { compressor.enqueue(frame); });
-    QObject::connect(&compressor, &JpegCompressor::jpegCompressed,
+        &app, [&](const QImage& frame) {
+            // 退出流程启动后（栈对象已开始析构）不再访问 compressor，
+            // 避免队列中延迟投递的事件访问已析构对象
+            if (quitting) return;
+            compressor->enqueue(frame);
+        });
+    QObject::connect(compressor.get(), &JpegCompressor::jpegCompressed,
         &ws, [&](const QByteArray& jpegData) {
+            if (quitting) return;
             if (ws.state() != QAbstractSocket::ConnectedState)
                 return;
             QByteArray packet;
@@ -115,6 +140,8 @@ int HelperProcess::run(int argc, char* argv[])
     qInfo() << "Helper: starting desktop polling, isWin7 =" << isWin7 << "isWinXP =" << isWinXP;
 
     InputManager inputMgr;
+    // 输入坐标归一化基准与上报前端的 screen_info 一致（高 DPI 缩放）
+    inputMgr.setScreenSize(capturer.width(), capturer.height());
 
     // 共享剪贴板：监听用户会话剪贴板变化，去抖后上报给服务端（服务端广播给所有客户端）
     QString lastClipText;
@@ -341,9 +368,10 @@ int HelperProcess::run(int argc, char* argv[])
     });
     desktopCheckTimer->start(2000);
 
-    compressor.start();
+    compressor->start();
     if (!capturer.start(30)) {
         qCritical("Helper: failed to start screen capturer");
+        compressor->shutdown();
         return 1;
     }
 
@@ -366,6 +394,18 @@ int HelperProcess::run(int argc, char* argv[])
 
     QObject::connect(&app, &QGuiApplication::aboutToQuit, [&]() {
         SetThreadExecutionState(ES_CONTINUOUS);
+        quitting = true;
+        // 退出前显式停止后台线程，避免 run() 返回时逆序析构栈对象
+        // （compressor->capturer->ws）与编码线程/采集线程并发竞态导致 use-after-free：
+        // 编码线程在 JpegCompressor 析构后仍 emit jpegCompressed -> activate 访问
+        // 已析构的 QObjectData（d_ptr=0）-> EXCEPTION_ACCESS_VIOLATION。
+        // 停止顺序须逆数据流：先停采集（不再产生新帧）→ 排空已排队但尚未投递的
+        // frameCaptured（这些排队事件会访问 compressor，必须在 compressor 析构前消化）
+        // → 再停编码线程 → 最后关闭 ws（此时已无任何 emit）。
+        capturer.stop();
+        QCoreApplication::processEvents();
+        compressor->shutdown();
+        ws.close();
     });
     return app.exec();
 #else

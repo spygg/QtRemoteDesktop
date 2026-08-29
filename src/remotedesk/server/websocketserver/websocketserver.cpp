@@ -65,7 +65,22 @@ void WebSocketServer::onNewConnection()
 
     QUrl url = socket->requestUrl();
     qInfo() << "WS new connection, path:" << url.path() << "URL:" << url.toString();
+
+    // 内部通道（helper / secure-input）必须来自本机回环地址：
+    // 服务端监听 0.0.0.0，若不加限制，局域网内任意主机可连 /capture 伪造
+    // 画面、劫持捕获控制，或连 /secure-input 混入锁屏输入。
+    auto rejectIfRemote = [](QWebSocket* s, const char* what) {
+        qWarning() << "WS rejected (non-loopback peer):" << what
+                   << "peer=" << s->peerAddress().toString();
+        s->close(QWebSocketProtocol::CloseCodePolicyViolated, QStringLiteral("loopback required"));
+        s->deleteLater();
+    };
+
     if (url.path() == "/capture") {
+        if (!socket->peerAddress().isLoopback()) {
+            rejectIfRemote(socket, "/capture");
+            return;
+        }
         qInfo() << "Helper connected to service WS via /capture";
         if (captureSource_) {
             qInfo() << "Replacing existing capture source";
@@ -105,6 +120,10 @@ void WebSocketServer::onNewConnection()
     }
 
     if (url.path() == "/secure-input") {
+        if (!socket->peerAddress().isLoopback()) {
+            rejectIfRemote(socket, "/secure-input");
+            return;
+        }
         qInfo() << "Secure input helper connected";
         if (secureInputSource_) {
             secureInputSource_->deleteLater();

@@ -22,6 +22,10 @@ public:
     ~InputManager();
 
     void injectMouseMove(int x, int y);
+    // 高 DPI 缩放下前端坐标基于 Qt 逻辑像素（上报给前端的 screen_info），
+    // 而 Windows SendInput 用物理像素归一化，两者不一致会错位。
+    // 设置与前端一致的逻辑屏幕尺寸作为归一化基准（0 = 回退系统物理尺寸）。
+    void setScreenSize(int w, int h);
     void injectMouseButton(int x, int y, int button, bool isDown);
     void injectWheel(int delta);
     void injectKeyboard(int keycode, const QString &code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback = false, bool isChar = false);
@@ -84,6 +88,8 @@ private slots:
 #endif
 
 private:
+    int screenW_ = 0;   // 与前端一致的逻辑屏幕尺寸（归一化基准）
+    int screenH_ = 0;
     bool ctrlDown_  = false;
     bool altDown_   = false;
     bool shiftDown_ = false;

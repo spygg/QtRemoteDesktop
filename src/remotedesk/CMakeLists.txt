@@ -20,6 +20,12 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CX
     endif()
 endif()
 
+# Release 默认不内嵌调试信息（不再加 -g），以减小发布体积。
+# 改为在构建后把 DWARF 调试符号拆到独立的 QtRemoteDesktop.debug 文件，并对主程序
+# strip。崩溃转储仍可用 addr2line -e QtRemoteDesktop.debug <addr>（或借助 .gnu_debuglink
+# 自动定位）解析调用栈，不损失线上排障能力。Debug 构建保留内嵌符号，便于本地调试。
+# （实际拆分动作见下方 add_executable 之后的 POST_BUILD 步骤）
+
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_add_resources(RESOURCES resources.qrc)
 else()
@@ -41,6 +47,8 @@ add_subdirectory(server/secure_input_process)
 add_subdirectory(server/service)
 # add_subdirectory(thridparty/startup)
 add_subdirectory(thridparty/systemsleepblocker)
+# Google Breakpad 崩溃转储（crashhandler.h / Breakpad::CrashHandler）
+add_subdirectory(thridparty/breakpad)
 
 # ---- WebRTC session (optional, needs FFmpeg) ----
 if(BUILD_THIRDPARTY)
@@ -87,7 +95,23 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     # StartUp
     SystemSleepBlocker
     Service
+    radiometer_breakpad
 )
+
+# Release 构建后拆分调试符号：生成 QtRemoteDesktop.debug 并 strip 主程序。
+# Debug 构建跳过（保留内嵌符号）。
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} --only-keep-debug
+                $<TARGET_FILE:${PROJECT_NAME}>
+                $<TARGET_FILE:${PROJECT_NAME}>.debug
+        COMMAND ${CMAKE_OBJCOPY} --strip-debug
+                $<TARGET_FILE:${PROJECT_NAME}>
+        COMMAND ${CMAKE_OBJCOPY} --add-gnu-debuglink=$<TARGET_FILE:${PROJECT_NAME}>.debug
+                $<TARGET_FILE:${PROJECT_NAME}>
+        COMMENT "Split debug symbols into .debug and strip executable"
+    )
+endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

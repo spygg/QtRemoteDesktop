@@ -2,6 +2,20 @@
 #include <QDebug>
 #include <QPixmap>
 #include <CoreGraphics/CoreGraphics.h>
+#include <dlfcn.h>
+
+// macOS 10.15+ 屏幕录制权限检测（动态加载以兼容旧系统）
+static bool macScreenCaptureAuthorized()
+{
+    typedef bool (*PreflightFn)();
+    void* h = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY);
+    if (!h)
+        return true; // 旧系统无该权限模型
+    PreflightFn fn = reinterpret_cast<PreflightFn>(dlsym(h, "CGPreflightScreenCaptureAccess"));
+    if (!fn)
+        return true;
+    return fn();
+}
 
 static bool isFrameBlack(const QImage& frame)
 {
@@ -32,6 +46,9 @@ public:
         displayID_ = CGMainDisplayID();
         width_ = static_cast<int>(CGDisplayPixelsWide(displayID_));
         height_ = static_cast<int>(CGDisplayPixelsHigh(displayID_));
+        if (!macScreenCaptureAuthorized())
+            qWarning() << "macOS: 无屏幕录制权限，画面将无法捕获。"
+                          "请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权本应用";
         return displayID_ != 0;
     }
 

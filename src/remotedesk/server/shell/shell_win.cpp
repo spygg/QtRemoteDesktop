@@ -44,12 +44,16 @@ void WinInteractiveShell::start()
     });
     connect(proc_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this]() { ws_->close(); });
+    // 启动失败（如 cmd.exe 缺失）异步处理，避免在主线程同步阻塞（waitForStarted 最长 5s）
+    connect(proc_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
+        if (err == QProcess::FailedToStart) {
+            qWarning() << "InteractiveShell: failed to start cmd.exe";
+            ws_->close();
+        }
+    });
 
+    // 异步启动：不调用 waitForStarted，避免阻塞主线程（屏幕捕获/WebSocket 全卡）
     proc_->start("cmd.exe", QStringList() << "/Q");
-    if (!proc_->waitForStarted(5000)) {
-        qWarning() << "InteractiveShell: failed to start cmd.exe";
-        ws_->close();
-    }
 }
 
 void WinInteractiveShell::write(const QByteArray& data)
@@ -118,8 +122,10 @@ void WinInteractiveShell::write(const QByteArray& data)
 void WinInteractiveShell::stop()
 {
     if (proc_) {
+        // kill 后交由 finished 信号异步清理（ws_->close 已在 finished 里处理），
+        // 不用 waitForFinished 在主线程阻塞等待进程退出
         proc_->kill();
-        proc_->waitForFinished(3000);
+        proc_->deleteLater();
         proc_ = nullptr;
     }
     InteractiveShell::stop();

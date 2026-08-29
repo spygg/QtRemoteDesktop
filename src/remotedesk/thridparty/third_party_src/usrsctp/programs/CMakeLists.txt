@@ -59,9 +59,10 @@ endif ()
 if (MSYS OR MINGW)
 	message(STATUS "MSYS / MINGW")
 	add_definitions(-D__USE_MINGW_ANSI_STDIO)
-	# 0x0601 = Windows 7 API
-	add_definitions(-DWINVER=0x0601)
-	add_definitions(-D_WIN32_WINNT=0x0601)
+	# Windows XP 兼容：必须 < 0x0600，否则 sctp_process_lock.h 使用 SRWLock
+	# (AcquireSRWLockExclusive 等，XP 的 kernel32 不存在该导出)
+	add_definitions(-DWINVER=0x0501)
+	add_definitions(-D_WIN32_WINNT=0x0501)
 
 	if (CMAKE_C_COMPILER_ID MATCHES "GNU")
 		message(STATUS "MSYS / MINGW + GCC")

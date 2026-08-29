@@ -248,6 +248,11 @@ bool ScreenCapturer::start(int fps)
 {
     fps_ = fps;
 
+    // 先释放可能已存在的捕获器（X11Capturer 持有 Display*/Damage 资源，
+    // WaylandCapturer 持有 PipeWire 流），防止在 stop() 之外二次调用
+    // start() 时泄漏旧实例（与 Windows 版保持对等）。
+    cleanupPlatform();
+
 #ifdef HAVE_PIPEWIRE
     // 当 WAYLAND_DISPLAY 存在时优先使用 Wayland PipeWire 捕获
     if (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {

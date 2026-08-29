@@ -133,6 +133,59 @@
             gap: 6px;
         }
 
+        /* 系统操作下拉菜单（快捷键面板） */
+        #sys-wrap {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+        #sys-menu {
+            /* fixed 定位：脱离外层 #toolbar 的 overflow-x:auto（该容器会把溢出的
+               下拉菜单裁剪/限高），由 JS 依据系统按钮坐标在按钮正下方弹出。 */
+            position: fixed;
+            display: none;
+            flex-direction: column;
+            min-width: 200px;
+            background: rgba(24, 24, 28, 0.97);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 6px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+            backdrop-filter: blur(10px);
+            z-index: 4100;
+        }
+        #sys-menu.open { display: flex; }
+        #sys-menu button {
+            background: none;
+            border: none;
+            color: #eee;
+            text-align: left;
+            padding: 10px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1.4;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            white-space: nowrap;
+            transition: background 0.15s;
+        }
+        #sys-menu button .sys-icon {
+            width: 20px;
+            text-align: center;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+        #sys-menu button:hover { background: rgba(255, 255, 255, 0.12); }
+        #sys-menu .sep {
+            height: 1px;
+            margin: 5px 8px;
+            background: rgba(255, 255, 255, 0.12);
+        }
+        #sys-menu button.danger { color: #ffb4b4; }
+        #sys-menu button.danger:hover { background: rgba(220, 60, 60, 0.28); color: #fff; }
+
         @media (max-width: 600px) {
             #toolbar {
                 padding: 4px 6px;
@@ -645,11 +698,29 @@
                 class="btn-icon">👤</span><span class="btn-text">用户</span></button>
         <a class="btn" id="btn-shell" href="/shell" target="_blank"><span class="btn-icon">🔧</span><span
                 class="btn-text">Shell</span></a>
+        <div id="sys-wrap">
+            <button class="btn" id="btn-sys" onclick="toggleSysMenu(event)">
+                <span class="btn-icon">⏻</span>
+                <span class="btn-text">系统</span>
+            </button>
+        </div>
         <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">
             <span class="btn-icon">⛶</span>
             <span class="btn-text">全屏</span>
             <span class="shortcut">F11</span>
         </button>
+    </div>
+
+    <!-- 系统操作下拉菜单：置于 toolbar 之外（toolbar 带 transform/overflow，
+         会裁剪内部 fixed 子元素），由 toggleSysMenu 依据按钮坐标在按钮下方弹出 -->
+    <div id="sys-menu">
+        <button onclick="systemAction('lock')"><span class="sys-icon">🔒</span>锁屏</button>
+        <button onclick="systemAction('show_desktop')"><span class="sys-icon">🖥️</span>显示桌面</button>
+        <button onclick="systemAction('task_manager')"><span class="sys-icon">⚙️</span>任务管理器</button>
+        <button onclick="systemAction('logout')"><span class="sys-icon">🚪</span>注销</button>
+        <div class="sep"></div>
+        <button class="danger" onclick="systemAction('reboot')"><span class="sys-icon">🔄</span>重启</button>
+        <button class="danger" onclick="systemAction('poweroff')"><span class="sys-icon">⏻</span>关机</button>
     </div>
 
     <!-- 配置下拉菜单遮罩 -->
@@ -1355,6 +1426,45 @@
                 state.ws.send(JSON.stringify(data));
             }
         }
+
+        // ---- 系统操作（快捷键面板）：锁屏/显示桌面/任务管理器/注销/重启/关机 ----
+        function toggleSysMenu(e) {
+            if (e) e.stopPropagation();
+            const m = document.getElementById('sys-menu');
+            const btn = document.getElementById('btn-sys');
+            const opened = m.classList.toggle('open');
+            if (opened && btn) {
+                const r = btn.getBoundingClientRect();
+                // 先开再测：display:flex 后才有实际宽高
+                const mw = m.offsetWidth;
+                const mh = m.offsetHeight;
+                let left = r.left;
+                let top = r.bottom + 8;
+                // 水平不超视口右/左缘
+                if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+                if (left < 8) left = 8;
+                // 垂直：底部放不下则上翻到按钮上方
+                if (top + mh > window.innerHeight - 8) top = r.top - mh - 8;
+                if (top < 8) top = 8;
+                m.style.left = left + 'px';
+                m.style.top = top + 'px';
+            }
+        }
+        function systemAction(action) {
+            const names = { lock: '锁屏', show_desktop: '显示桌面', task_manager: '任务管理器',
+                logout: '注销', reboot: '重启', poweroff: '关机' };
+            const destructive = ['reboot', 'poweroff', 'logout'];
+            if (destructive.includes(action) && !confirm('确定要对被控端执行「' + (names[action] || action) + '」吗？'))
+                return;
+            send({ type: 'system_action', action: action });
+            document.getElementById('sys-menu').classList.remove('open');
+        }
+        // 点击页面其它位置关闭系统菜单
+        document.addEventListener('click', function (ev) {
+            const wrap = document.getElementById('sys-wrap');
+            const m = document.getElementById('sys-menu');
+            if (wrap && m && !wrap.contains(ev.target) && !m.contains(ev.target)) m.classList.remove('open');
+        });
 
         // 锁定密码输入
         function sendChar(char, isDown) {

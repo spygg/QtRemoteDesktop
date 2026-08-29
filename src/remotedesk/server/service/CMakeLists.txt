@@ -18,6 +18,7 @@ if(WIN32)
         SecureInputProcess
         Rdpserver
         wtsapi32
+        radiometer_breakpad
     )
 endif()
 if(UNIX AND NOT APPLE AND NOT ANDROID)

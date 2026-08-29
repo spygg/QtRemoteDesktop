@@ -104,8 +104,19 @@ void MacInteractiveShell::stop()
     if (notifier_) { notifier_->setEnabled(false); }
     if (childPid_ > 0) {
         kill(childPid_, SIGTERM);
-        waitpid(childPid_, nullptr, WNOHANG);
-        childPid_ = 0;
+        // 有限等待子进程退出并回收（WNOHANG 只回收已退出的，会残留僵尸）
+        for (int i = 0; i < 20; ++i) {
+            if (waitpid(childPid_, nullptr, WNOHANG) == childPid_) {
+                childPid_ = 0;
+                break;
+            }
+            usleep(50 * 1000);
+        }
+        if (childPid_ != 0) {
+            kill(childPid_, SIGKILL);
+            waitpid(childPid_, nullptr, 0);
+            childPid_ = 0;
+        }
     }
     if (masterFd_ >= 0) { close(masterFd_); masterFd_ = -1; }
     InteractiveShell::stop();

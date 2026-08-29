@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+﻿cmake_minimum_required(VERSION 3.5)
 project(libyangutil8 C)
 
 set(CMAKE_C_STANDARD 11)
@@ -46,6 +46,7 @@ set(SOURCES
     src/yangutil/sys/YangMath.c
     src/yangutil/sys/YangSocket.c
     src/yangutil/sys/YangSocketIP.c
+    src/yangutil/sys/YangSocketCompat.c
     src/yangutil/sys/YangSsrc.c
     src/yangutil/sys/YangThread.c
     src/yangutil/sys/YangTime.c

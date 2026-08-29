@@ -1,5 +1,6 @@
 #include "windows_service.h"
 #include "rdpserver.h"
+#include "crashhandler.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -7,6 +8,7 @@
 #include <QTimer>
 
 #include <string>
+#include <wchar.h>
 #include <winsvc.h>
 #include <wtsapi32.h>
 
@@ -38,19 +40,51 @@ DWORD WindowsService::launchHelperProcess()
         return 0;
     }
 
-    HANDLE hProcToken = NULL;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &hProcToken)) {
-        qWarning() << "LaunchHelper: OpenProcessToken failed, error:" << GetLastError();
-        return 0;
+    // Find user's process (explorer.exe) in target session to get the real user token.
+    // Using SYSTEM token causes DXGI Desktop Duplication to crash in the helper process.
+    DWORD targetPid = 0;
+    PWTS_PROCESS_INFO pProcessInfo = NULL;
+    DWORD processCount = 0;
+    if (WTSEnumerateProcesses(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pProcessInfo, &processCount)) {
+        for (DWORD i = 0; i < processCount; i++) {
+            if (pProcessInfo[i].SessionId == sessionId &&
+                pProcessInfo[i].pProcessName &&
+                strcmp(pProcessInfo[i].pProcessName, "explorer.exe") == 0) {
+                targetPid = pProcessInfo[i].ProcessId;
+                break;
+            }
+        }
+        WTSFreeMemory(pProcessInfo);
+    }
+
+    HANDLE hUserToken = NULL;
+    if (targetPid != 0) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, targetPid);
+        if (hProc) {
+            if (!OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_QUERY, &hUserToken)) {
+                qWarning() << "LaunchHelper: OpenProcessToken (user) failed, error:" << GetLastError();
+                hUserToken = NULL;
+            }
+            CloseHandle(hProc);
+        }
+    }
+
+    // Fallback: use service's own token (SYSTEM)
+    if (!hUserToken) {
+        qInfo() << "LaunchHelper: user process not found in session" << sessionId << "- using SYSTEM token";
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &hUserToken)) {
+            qWarning() << "LaunchHelper: OpenProcessToken (SYSTEM) failed, error:" << GetLastError();
+            return 0;
+        }
     }
 
     HANDLE hDupToken = NULL;
-    if (!DuplicateTokenEx(hProcToken, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &hDupToken)) {
+    if (!DuplicateTokenEx(hUserToken, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &hDupToken)) {
         qWarning() << "LaunchHelper: DuplicateTokenEx failed, error:" << GetLastError();
-        CloseHandle(hProcToken);
+        CloseHandle(hUserToken);
         return 0;
     }
-    CloseHandle(hProcToken);
+    CloseHandle(hUserToken);
 
     if (!SetTokenInformation(hDupToken, TokenSessionId, &sessionId, sizeof(sessionId))) {
         qWarning() << "LaunchHelper: SetTokenInformation failed, error:" << GetLastError();
@@ -76,7 +110,8 @@ DWORD WindowsService::launchHelperProcess()
     CloseHandle(hDupToken);
 
     if (ok) {
-        qInfo() << "LaunchHelper: helper process started, PID:" << pi.dwProcessId;
+        qInfo() << "LaunchHelper: helper process started, PID:" << pi.dwProcessId
+                << "token: user (explorer.exe in session" << sessionId << ")";
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         return pi.dwProcessId;
@@ -112,6 +147,10 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
         char* qtArgv[] = { const_cast<char*>("QtRemoteDesktop"), NULL };
         QCoreApplication app(qtArgc, qtArgv);
 
+        // 服务进程启用崩溃转储：main.cpp 的 platformMain 在 --service 分支提前
+        // return，breakpad 不会初始化，崩溃时将无 .dmp 可分析。
+        Breakpad::CrashHandler::instance()->Init(QCoreApplication::applicationDirPath());
+
         s_status.dwCurrentState = SERVICE_RUNNING;
         SetServiceStatus(s_statusHandle, &s_status);
 
@@ -138,7 +177,9 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
             DWORD helperPid = 0;
             QObject::connect(&helperTimer, &QTimer::timeout, [&]() {
                 if (server.isCaptureSourceConnected()) {
-                    helperTimer.stop();
+                    // 不 stop()：helper 崩溃/断开后需要继续监视并自动重启。
+                    // 原实现在此 stop()，导致 helper 崩溃后 timer 永久停止、
+                    // 远程桌面无法恢复（服务只挂着不重建 helper）。
                     return;
                 }
                 if (helperPid != 0) {

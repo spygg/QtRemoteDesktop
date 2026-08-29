@@ -194,6 +194,13 @@ target_link_libraries(usrsctp ${CMAKE_THREAD_LIBS_INIT})
 
 if (WIN32)
 	message(STATUS "link library: ws2_32")
+	# Windows XP 兼容：强制 Vista 以下 API 级别。
+	# sctp_process_lock.h 中 WINVER >= 0x0600 时走 SRWLock
+	# (AcquireSRWLockExclusive/ReleaseSRWLockExclusive)，这些导出在 XP 的
+	# kernel32.dll 中不存在，加载时直接报"无法定位程序输入点"。
+	# WINVER < 0x0600 时 usrsctp 使用 CRITICAL_SECTION，XP 完全支持。
+	add_definitions(-DWINVER=0x0501)
+	add_definitions(-D_WIN32_WINNT=0x0501)
 	target_link_libraries(usrsctp ws2_32 iphlpapi)
 endif ()
 

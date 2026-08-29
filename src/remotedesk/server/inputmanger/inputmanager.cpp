@@ -27,6 +27,12 @@ InputManager::InputManager(QObject *parent) : QObject(parent)
 #endif
 }
 
+void InputManager::setScreenSize(int w, int h)
+{
+    screenW_ = w;
+    screenH_ = h;
+}
+
 InputManager::~InputManager()
 {
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)

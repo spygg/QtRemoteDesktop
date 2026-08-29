@@ -199,19 +199,18 @@ SingleApplication::SingleApplication(int& argc, char** argv)
         qDebug() << "Running single instance" << strArg;
     } else {
         if (!m_pServer) {
-            QLocalServer::removeServer(strServerName);
-            // 如果不能连接到服务器,则创建
+            // 注意：不要在 listen 之前无条件 removeServer —— 若另一实例正在启动
+            // （尚未监听成功），本进程会把它的服务器名删掉导致双实例。先直接 listen，
+            // 仅在 AddressInUse（上次异常退出残留）时清理后重试一次。
             m_pServer = new QLocalServer(this);
             connect(m_pServer, SIGNAL(newConnection()), this, SLOT(newLocalConnection()));
 
-            if (m_pServer->listen(strServerName)) {
-                // 防止程序崩溃,残留进程服务,直接移除
-                if ((m_pServer->serverError() == QAbstractSocket::AddressInUseError)
-                    && QFile::exists(m_pServer->serverName())) {
-                    QFile::remove(m_pServer->serverName());
-                    m_pServer->listen(strServerName);
-                }
-            } else {
+            if (!m_pServer->listen(strServerName)
+                && m_pServer->serverError() == QAbstractSocket::AddressInUseError) {
+                QLocalServer::removeServer(strServerName);
+                m_pServer->listen(strServerName);
+            }
+            if (!m_pServer->isListening()) {
                 qDebug() << m_pServer->errorString() << m_pServer->serverName();
             }
         } else {

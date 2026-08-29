@@ -23,8 +23,12 @@ void InputManager::injectMouseMove(int x, int y)
 {
     INPUT input = {};
     input.type = INPUT_MOUSE;
-    input.mi.dx = x * 65535 / GetSystemMetrics(SM_CXSCREEN);
-    input.mi.dy = y * 65535 / GetSystemMetrics(SM_CYSCREEN);
+    // 高 DPI 缩放下 GetSystemMetrics 返回物理像素，前端坐标基于逻辑像素，
+    // 若未设置 screenW_/screenH_（与前端一致），回退物理尺寸。
+    int sw = screenW_ > 0 ? screenW_ : GetSystemMetrics(SM_CXSCREEN);
+    int sh = screenH_ > 0 ? screenH_ : GetSystemMetrics(SM_CYSCREEN);
+    input.mi.dx = x * 65535 / sw;
+    input.mi.dy = y * 65535 / sh;
     input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
     sendInputChecked(1, &input, sizeof(INPUT));
 }

@@ -16,6 +16,10 @@
 #include <netinet/tcp.h>
 #endif
 
+#if Yang_OS_WIN
+#include <yangutil/sys/YangSocketCompat.h>
+#endif
+
 #include <fcntl.h>
 
 #define yang_sockaddr(x) x->familyType==Yang_IpFamilyType_IPV4?(const struct sockaddr*)(&x->addr4):(const struct sockaddr*)(&x->addr6)
@@ -39,7 +43,7 @@ void yang_addr_set(YangIpAddress* addr,char* ip,int32_t port,YangIpFamilyType fa
 	}else{
 		addr->addr6.sin6_family = AF_INET6;
 		addr->addr6.sin6_port = yang_htons(addr->port);
-		yang_inet_pton(AF_INET6, ip, &addr->addr6.sin6_addr);
+		yang_pton(AF_INET6, ip, &addr->addr6.sin6_addr);
 
 	}
 }
@@ -125,9 +129,9 @@ void yang_addr_updatePort(YangIpAddress* addr,int32_t port){
 
 void yang_addr_getIPStr(YangIpAddress* addr,char* addrstr,int32_t strLen){
 	if(addr->familyType == Yang_IpFamilyType_IPV4 )
-		inet_ntop(AF_INET,&addr->addr4.sin_addr.s_addr, addrstr, strLen);
+		yang_ntop(AF_INET,&addr->addr4.sin_addr.s_addr, addrstr, strLen);
 	else
-        inet_ntop(AF_INET6,&addr->addr6.sin6_addr, addrstr, strLen);
+        yang_ntop(AF_INET6,&addr->addr6.sin6_addr, addrstr, strLen);
 }
 
 uint32_t yang_addr_getIP(YangIpAddress* addr){

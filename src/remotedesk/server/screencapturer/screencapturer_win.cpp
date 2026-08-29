@@ -20,16 +20,25 @@ public:
     bool initialize() override
     {
         // 获取屏幕尺寸（使用 EnumDisplaySettings 查询当前活动模式，比 GetSystemMetrics 更可靠）
+        // 防御性加固：EnumDisplaySettings 会按 dmDriverExtra 在 DEVMODE 之后写入驱动私有数据。
+        // 若仅给裸 DEVMODE 栈变量，多出的字节会越界写坏相邻栈内存；这里在 DEVMODE 后预留
+        // 驱动额外数据缓冲并显式置 dmDriverExtra = 0。注意：08-29 实测日志 [CK3] 已证明
+        // enumerate 后 JpegCompressor.d_ptr 仍有效，故"DEVMODE 越界写坏 d_ptr"并非本次崩溃
+        // 根因；该缓冲仅为防御性加固，崩溃问题通过将 compressor 改为堆分配规避。
         hdcScreen_ = GetDC(nullptr);
         if (!hdcScreen_)
             return false;
 
-        DEVMODE dm;
-        ZeroMemory(&dm, sizeof(dm));
-        dm.dmSize = sizeof(dm);
-        if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
-            width_ = dm.dmPelsWidth;
-            height_ = dm.dmPelsHeight;
+        struct DevmodeBuffer {
+            DEVMODE dm;
+            char    extra[1024];
+        } dmBuf;
+        ZeroMemory(&dmBuf, sizeof(dmBuf));
+        dmBuf.dm.dmSize = sizeof(DEVMODE);
+        dmBuf.dm.dmDriverExtra = 0;
+        if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &dmBuf.dm)) {
+            width_ = dmBuf.dm.dmPelsWidth;
+            height_ = dmBuf.dm.dmPelsHeight;
         } else {
             width_ = GetSystemMetrics(SM_CXSCREEN);
             height_ = GetSystemMetrics(SM_CYSCREEN);
@@ -277,7 +286,15 @@ public:
         // 映射数据
         D3D11_MAPPED_SUBRESOURCE mapped;
         hr = context_->Map(stagingTexture_, 0, D3D11_MAP_READ, 0, &mapped);
+
         if (FAILED(hr)) {
+            // 注意两点（此前在此处误加 Unmap / 重复 Release，导致登录后崩溃）：
+            // 1) Map 失败时绝不能 Unmap —— D3D11 只对成功映射的资源允许 Unmap，
+            //    对未映射资源 Unmap 是未定义行为，会破坏设备状态，使后续 DXGI/D3D
+            //    调用乃至无关操作随机崩溃（崩溃点会漂移，难以定位）。
+            // 2) 帧已在上方 ReleaseFrame() 释放过，不能重复释放。
+            // 正确恢复动作：重建 Desktop Duplication。
+            resetDuplication();
             return false;
         }
 
@@ -494,6 +511,10 @@ bool ScreenCapturer::start(int fps)
 {
     fps_ = fps;
 
+    // 先释放可能已存在的捕获器（DXGI 持有 D3D COM 资源，GDI 持有 HDC/位图），
+    // 防止在 stop() 之外二次调用 start() 时泄漏旧实例。
+    cleanupPlatform();
+
 #if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
     if (IsWindows8OrGreater()) {
         dxgiCapturer_ = new DXGICapturer();
@@ -541,11 +562,26 @@ bool ScreenCapturer::changeDisplayResolution(int w, int h)
 QJsonArray ScreenCapturer::enumerateSupportedResolutions()
 {
     QList<QJsonObject> list;
-    DEVMODE dm;
-    ZeroMemory(&dm, sizeof(dm));
-    dm.dmSize = sizeof(dm);
+    // 防御性：EnumDisplaySettings 会按 dmDriverExtra 在 DEVMODE 之后写入驱动私有数据，
+    // 裸 DEVMODE 栈变量可能越界写坏相邻栈内存。这里 DEVMODE 后预留驱动额外数据缓冲，
+    // 且每次迭代重置 dmDriverExtra（同类修复也应用于 GdiCapturer::initialize）。
+    // 注意：08-29 实测日志 [CK3] 证明 enumerate 后 JpegCompressor.d_ptr 仍有效，
+    // 因此“DEVMODE 越界写坏 d_ptr”并非本次崩溃根因；真正的野指针单字写（0/1，命中
+    // compressor+4）发生在首个 captureFrame（主线程），根因点仍在排查，目前通过将
+    // compressor 改为堆分配（脱离主线程固定栈地址）规避其命中。
+    struct DevmodeBuffer {
+        DEVMODE dm;
+        char    extra[1024];
+    } dmBuf;
+
     int modeNum = 0;
-    while (EnumDisplaySettings(NULL, modeNum, &dm)) {
+    while (true) {
+        ZeroMemory(&dmBuf, sizeof(dmBuf));
+        dmBuf.dm.dmSize = sizeof(DEVMODE);
+        dmBuf.dm.dmDriverExtra = 0;
+        if (!EnumDisplaySettings(NULL, modeNum, &dmBuf.dm))
+            break;
+        const DEVMODE& dm = dmBuf.dm;
         int w = static_cast<int>(dm.dmPelsWidth);
         int h = static_cast<int>(dm.dmPelsHeight);
         if (w < 800 || h < 600) {
