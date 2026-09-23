@@ -13,6 +13,10 @@
 #if Yang_OS_WIN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,5 +27,4 @@ int yang_pton(int af, const char* src, void* dst);
 }
 #endif
 
-#endif /* Yang_OS_WIN */
 #endif /* YANGSOCKETCOMPAT_H_ */

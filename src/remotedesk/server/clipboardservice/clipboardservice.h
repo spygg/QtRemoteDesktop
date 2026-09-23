@@ -34,6 +34,12 @@ private:
     QString lastText_;      // 上次已推送/已写入的文本，用于去重，避免回声循环
     QString pendingText_;   // 待广播文本（去抖缓冲）
     QTimer* debounceTimer_ = nullptr;
+
+#ifdef Q_OS_LINUX
+    bool cliMode_ = false;    // 无 QGuiApplication 时用 xclip/xsel 走 X11 CLIPBOARD
+    QString clipBin_;         // xclip 或 xsel 的绝对路径
+    void ensureCliMode();     // 惰性启用 CLI 后端（DISPLAY 出现后自动初始化）
+#endif
 };
 
 #endif // CLIPBOARD_SERVICE_H

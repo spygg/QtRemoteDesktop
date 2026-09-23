@@ -21,6 +21,14 @@
 #include <QDir>
 #include <QTimer>
 
+// 高频输入事件（鼠标移动/点击/滚轮/按键）逐条打日志会刷爆日志文件，
+// 只对 auth 等低频事件保留日志，便于排查连接/认证问题。
+static bool isInputEventLogged(const QString& type)
+{
+    return type != "mousemove" && type != "mousedown" && type != "mouseup"
+        && type != "wheel" && type != "keydown" && type != "keyup";
+}
+
 #include <QCursor>
 #include <QDateTime>
 #include <QFile>
@@ -28,6 +36,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QStandardPaths>
 #include <QNetworkInterface>
 #include <QScreen>
 #include <QThread>
@@ -1813,29 +1822,104 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
 {
     qInfo() << "System action requested:" << action << "from" << clientId.left(8);
 
+    // 服务模式（有 helper，如 Windows）：系统操作必须在用户会话执行。
+    // 服务进程运行在 Session 0（Windows）或独立会话，直接执行只会作用于
+    // 不可见的服务会话（显示桌面/任务管理器/注销均无效）。转发 helper。
+    if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
+        wsServer_->sendToCaptureSource(QJsonObject {
+            { "type", "system_action" },
+            { "action", action },
+        });
+        return;
+    }
+
 #ifdef Q_OS_LINUX
+    // ================= Linux 系统操作：多环境通用处理 =================
+    // 不硬编码单一桌面环境。按“可用命令 → 桌面环境 → X11/Wayland”逐级探测，
+    // 覆盖 LXDE / GNOME / XFCE / KDE / MATE 与 X11 / Wayland。
+    // 子进程继承服务进程的 DISPLAY/XAUTHORITY（detectUserX11Env 已设置），GUI 工具可正常弹出。
+    auto findBin = [](const char* name) -> QString {
+        return QStandardPaths::findExecutable(QString::fromLatin1(name));
+    };
+    auto firstOf = [](std::initializer_list<const char*> names) -> QString {
+        for (const char* n : names) {
+            QString b = QStandardPaths::findExecutable(QString::fromLatin1(n));
+            if (!b.isEmpty())
+                return b;
+        }
+        return QString();
+    };
+    auto launch = [](const QString& bin, const QStringList& args = {}) {
+        if (!bin.isEmpty())
+            QProcess::startDetached(bin, args);
+    };
+
     if (action == "lock") {
-        // 锁屏：loginctl 走 system bus，与桌面会话无关，Wayland/X11 通用
-        QProcess::startDetached(QStringLiteral("loginctl"), { QStringLiteral("lock-session") });
+        // 锁屏链：xdg-screensaver（DE 无关）→ gnome-screensaver-command → loginctl（Wayland/X11 通用）
+        QString lock = firstOf({ "xdg-screensaver", "gnome-screensaver-command", "loginctl" });
+        if (lock.endsWith(QStringLiteral("xdg-screensaver")))
+            launch(lock, { "lock" });
+        else if (lock.endsWith(QStringLiteral("gnome-screensaver-command")))
+            launch(lock, { "-l" });
+        else
+            launch(lock, { "lock-session" });
     } else if (action == "show_desktop") {
-        // 显示桌面：GNOME Wayland 下无公开 D-Bus API，用 Shell Eval 切换概览（尽力而为）
-        QProcess::startDetached(QStringLiteral("gdbus"), {
-            QStringLiteral("call"), QStringLiteral("--session"),
-            QStringLiteral("--dest"), QStringLiteral("org.gnome.Shell"),
-            QStringLiteral("--object-path"), QStringLiteral("/org/gnome/Shell"),
-            QStringLiteral("--method"), QStringLiteral("org.gnome.Shell.Eval"),
-            QStringLiteral("Main.overview.toggle()") });
+        // 显示桌面链：
+        //  1) wmctrl -k on —— EWMH 标准，openbox/LXDE、GNOME、XFCE、KDE 的 X11 会话均支持；
+        //  2) xdotool 模拟 Super+D（GNOME/XFCE/KDE 快捷键；openbox 若未绑定可改 Ctrl+Alt+D）；
+        //  3) GNOME Wayland（无 EWMH）→ Shell D-Bus 显示桌面。
+        QString sh = findBin("wmctrl");
+        if (!sh.isEmpty()) {
+            launch(sh, { "-k", "on" });
+        } else if (!(sh = findBin("xdotool")).isEmpty()) {
+            launch(sh, { "key", "--clearmodifiers", "super+d" });
+        } else if (!(sh = findBin("gdbus")).isEmpty()) {
+            launch(sh, { "call", "--session", "--dest", "org.gnome.Shell",
+                         "--object-path", "/org/gnome/Shell",
+                         "--method", "org.gnome.Shell.Eval",
+                         "global.activate_action('show-desktop', null)" });
+        } else {
+            qWarning() << "show_desktop: no wmctrl/xdotool/gdbus available on this system";
+        }
     } else if (action == "task_manager") {
-        QProcess::startDetached(QStringLiteral("gnome-system-monitor"));
+        // 任务管理器链：按 DE 依次探测（LXDE/XFCE/MATE/GNOME/KDE）
+        QString tm = firstOf({ "lxtask", "xfce4-taskmanager", "mate-system-monitor",
+                               "gnome-system-monitor", "ksysguard", "plasma-systemmonitor" });
+        if (!tm.isEmpty())
+            launch(tm);
+        else
+            qWarning() << "task_manager: no supported task manager found";
     } else if (action == "logout") {
-        // 注销：GNOME 会话管理器，带 --no-prompt 免确认
-        QProcess::startDetached(QStringLiteral("gnome-session-quit"), {
-            QStringLiteral("--logout"), QStringLiteral("--force"), QStringLiteral("--no-prompt") });
+        // 注销链：lxsession/lxde → gnome-session-quit → xfce4-session-logout → KDE qdbus
+        QString lo = firstOf({ "lxsession-logout", "lxde-logout", "gnome-session-quit",
+                               "xfce4-session-logout" });
+        if (lo.endsWith(QStringLiteral("gnome-session-quit")))
+            launch(lo, { "--logout", "--force", "--no-prompt" });
+        else if (lo.endsWith(QStringLiteral("xfce4-session-logout")))
+            launch(lo, { "--logout" });
+        else if (!lo.isEmpty())
+            launch(lo);
+        else {
+            QString q = firstOf({ "qdbus6", "qdbus" });
+            if (!q.isEmpty())
+                launch(q, { "org.kde.ksmserver", "/KSMServer",
+                            "org.kde.KSMServerInterface.logout", "0", "0", "0" });
+            else
+                qWarning() << "logout: no supported session manager found";
+        }
     } else if (action == "reboot") {
-        // 重启：走 polkit，被控端桌面会弹出认证确认
-        QProcess::startDetached(QStringLiteral("systemctl"), { QStringLiteral("reboot") });
+        // systemd → 传统 shutdown
+        QString b = findBin("systemctl");
+        if (!b.isEmpty())
+            launch(b, { "reboot" });
+        else
+            launch(findBin("shutdown"), { "-r", "now" });
     } else if (action == "poweroff") {
-        QProcess::startDetached(QStringLiteral("systemctl"), { QStringLiteral("poweroff") });
+        QString b = findBin("systemctl");
+        if (!b.isEmpty())
+            launch(b, { "poweroff" });
+        else
+            launch(findBin("shutdown"), { "-h", "now" });
     } else {
         qWarning() << "Unknown system action:" << action;
     }
@@ -1843,11 +1927,24 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
     if (action == "lock") {
         QProcess::startDetached(QStringLiteral("rundll32.exe"), { QStringLiteral("user32.dll,LockWorkStation") });
     } else if (action == "show_desktop") {
-        // 显示桌面：通过 Shell COM 接口 ToggleDesktop，兼容 Win7+
-        QProcess::startDetached(QStringLiteral("powershell.exe"), {
-            QStringLiteral("-NoProfile"), QStringLiteral("-WindowStyle"), QStringLiteral("Hidden"),
-            QStringLiteral("-Command"),
-            QStringLiteral("(New-Object -ComObject Shell.Application).ToggleDesktop()") });
+        // 显示桌面：Shell COM 接口 ToggleDesktop（Win2000+ 的 Shell.Application 均有）。
+        // Win7+ 用 PowerShell；WinXP 无 powershell.exe → 用 cscript 执行同款 COM 调用。
+        QString ps = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
+        if (!ps.isEmpty()) {
+            QProcess::startDetached(ps, {
+                QStringLiteral("-NoProfile"), QStringLiteral("-WindowStyle"), QStringLiteral("Hidden"),
+                QStringLiteral("-Command"),
+                QStringLiteral("(New-Object -ComObject Shell.Application).ToggleDesktop()") });
+        } else {
+            QString vbs = QDir::tempPath() + QStringLiteral("/rd_toggle_desktop.vbs");
+            QFile f(vbs);
+            if (f.open(QIODevice::WriteOnly)) {
+                f.write("Set sh = CreateObject(\"Shell.Application\")\r\nsh.ToggleDesktop\r\n");
+                f.close();
+                QProcess::startDetached(QStringLiteral("cscript.exe"),
+                    { QStringLiteral("//nologo"), vbs });
+            }
+        }
     } else if (action == "task_manager") {
         QProcess::startDetached(QStringLiteral("taskmgr"));
     } else if (action == "logout") {
@@ -1948,6 +2045,10 @@ void RDPServer::onClientConnected(const QString& clientId)
             cfg["currentResolution"] = QString("%1x%2")
                 .arg(screenCapturer_->width())
                 .arg(screenCapturer_->height());
+            // 连接时刷新一次输出列表（热插拔感知），再随配置下发
+            screenCapturer_->refreshOutputs();
+            cfg["outputs"] = screenCapturer_->enumerateOutputs();
+            cfg["currentOutput"] = screenCapturer_->currentOutputIndex();
         } else {
             // 服务模式：从配置文件读取（由 helper 写入）
             QFile file(QCoreApplication::applicationDirPath() + "/server_config.json");
@@ -2098,9 +2199,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 
     if (serviceMode_) {
         if (wsServer_->isCaptureSourceConnected()) {
-            if (type != "mousemove"){
+            if (isInputEventLogged(type))
                 qDebug() << "Service: forwarding input to helper, type =" << type;
-            }
             
             if (type != "config")
                 wsServer_->sendToCaptureSource(input);
@@ -2108,8 +2208,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 wsServer_->sendToSecureInput(input);
             // config/set_resolution 跳过转发，由下面的本地逻辑处理
         } else {
-            // 直接处理分支：mousemove 高频，不写日志（避免同步文件 I/O 占用主线程 CPU）
-            if (type != "mousemove")
+            // 直接处理分支：鼠标/键盘等高频事件不写日志（避免同步文件 I/O 占用主线程 CPU）
+            if (isInputEventLogged(type))
                 qDebug() << "Service: no helper, handling input directly, type =" << type;
             // 没有 helper（如 Linux 无头模式），直接在本地注入输入
             if (!inputManager_)
@@ -2286,6 +2386,26 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             err["message"] = QString("分辨率 %1x%2 切换失败").arg(w).arg(h);
             wsServer_->sendJson(clientId, err);
         }
+    } else if (type == "set_output") {
+        // 多屏切换（Linux X11）：切换捕获目标输出
+        int index = input["index"].toInt();
+        if (screenCapturer_ && screenCapturer_->refreshOutputs()
+                && screenCapturer_->switchOutput(index)) {
+            QJsonObject info;
+            info["type"] = "screen_info";
+            info["width"] = screenCapturer_->width();
+            info["height"] = screenCapturer_->height();
+            wsServer_->broadcastJson(info);
+
+            QJsonObject cfg;
+            cfg["type"] = "server_config";
+            cfg["outputs"] = screenCapturer_->enumerateOutputs();
+            cfg["currentOutput"] = screenCapturer_->currentOutputIndex();
+            wsServer_->broadcastJson(cfg);
+
+            qInfo() << "Switched capture output to" << info["width"].toInt()
+                    << "x" << info["height"].toInt();
+        }
     }
 }
 
@@ -2309,13 +2429,21 @@ void RDPServer::injectPasteShortcut()
     };
 
     if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
-        // 服务模式：由 helper 进程注入
+        // 服务模式（有 helper，如 Windows）：由 helper 进程注入
         wsServer_->sendToCaptureSource(down);
         wsServer_->sendToCaptureSource(up);
         if (screenLocked_ && secureInputRunning_)
             wsServer_->sendToSecureInput(down);
-    } else if (!serviceMode_ && inputManager_) {
-        // 直接模式：本进程注入
+    } else if (inputManager_) {
+#ifdef Q_OS_LINUX
+        // Linux 服务模式无 helper：本进程注入（inputManager_ 在 startCapture 时已按
+        // detectUserX11Env 设置的 DISPLAY 重建，XTest 可用）
+#else
+        // 其他平台服务模式由 helper 在用户会话注入；服务进程（Session 0）SendInput
+        // 无法作用于交互桌面，直接注入无效
+        if (serviceMode_)
+            return;
+#endif
         inputManager_->injectKeyboard(86, "KeyV", true, true, false, false, false, false);
         inputManager_->injectKeyboard(86, "KeyV", false, true, false, false, false, false);
         inputManager_->updateModifiers(false, false, false); // 释放 Ctrl

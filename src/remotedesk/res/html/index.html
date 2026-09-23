@@ -759,6 +759,11 @@
             <div class="dropdown-options" id="resolution-options" data-key="resolution"></div>
         </div>
         <div class="dropdown-section">
+            <div class="dropdown-title">屏幕</div>
+            <div class="dropdown-note" id="screen-note"></div>
+            <div class="dropdown-options" id="screen-options" data-key="screen"></div>
+        </div>
+        <div class="dropdown-section">
             <div class="dropdown-title">视频模式</div>
             <div class="dropdown-note">WebRTC/FFmpeg 需服务端支持 H.264 编码；图片为 JPEG 帧</div>
             <div class="dropdown-options" data-key="videomode">
@@ -866,8 +871,14 @@
             scaleX: 1,
             scaleY: 1,
             resolutions: [],
-            currentConfig: { quality: 'medium', fps: 30, scale: 75, resolution: '', videomode: 'auto' },
+            outputs: [],
+            currentConfig: {
+                quality: 'medium', fps: 30, scale: 75, resolution: '',
+                videomode: (localStorage.getItem('rd_videomode') || 'auto'),
+                screen: -1,
+            },
             displayStreamMode: 'ffmpeg', // 配置菜单高亮用的当前生效模式（webrtc/ffmpeg/image）
+            modeRestored: false, // 刷新后是否已按持久化模式恢复过一次
             hwEncode: false, // 服务端是否有 H.264 硬件编码（auto 模式据此选路）
             showFps: false,
             mouseX: 0,
@@ -981,6 +992,9 @@
         function applyStreamMode(mode) {
             state.currentConfig.videomode = mode;
             state.displayStreamMode = mode;
+            // 持久化用户选择，刷新后恢复（auto 也存，等价清除）
+            try { localStorage.setItem('rd_videomode', mode); } catch (e) {}
+            state.modeRestored = true;
             if (mode === 'webrtc') {
                 // 切到视频模式并显式发起 WebRTC 会话（服务端回传 offer 后由浏览器原生解码）
                 webrtcClose();
@@ -1135,6 +1149,7 @@
 
             state.ws.onopen = () => {
                 state.connected = true;
+                state.modeRestored = false;
                 if (state.showFps) updateStatus('🟢 已连接');
                 else updateStatus('');
                 overlay.classList.remove('active');
@@ -1376,6 +1391,11 @@
                     } else if (state.screenWidth > 0) {
                         state.currentConfig.resolution = state.screenWidth + 'x' + state.screenHeight;
                     }
+                    if (msg.outputs)
+                        state.outputs = msg.outputs;
+                    if (typeof msg.currentOutput === 'number')
+                        state.currentConfig.screen = msg.currentOutput;
+                    buildScreenOptions();
                     buildResolutionOptions();
                     updateDropdownActive();
                     updateQualityLabel();
@@ -1383,6 +1403,29 @@
                 case 'mode_changed':
                     if (typeof msg.hwEncode === 'boolean')
                         state.hwEncode = msg.hwEncode;
+                    // 刷新/重连后按持久化模式恢复一次（服务端重启后默认回到 image）
+                    if (!state.modeRestored && state.currentConfig.videomode !== 'auto') {
+                        state.modeRestored = true;
+                        const pref = state.currentConfig.videomode;
+                        const wantSrv = pref === 'image' ? 'image' : 'video';
+                        if (wantSrv !== msg.mode) {
+                            applyStreamMode(pref);
+                            return;
+                        }
+                        // 服务端模式已符合用户选择：同步菜单高亮（displayStreamMode 初始值不可靠），
+                        // 否则刷新后高亮会错误地落到初始 'ffmpeg'
+                        if (pref === 'webrtc' && msg.webrtc !== false) {
+                            state.displayStreamMode = 'webrtc';
+                            updateDropdownActive();
+                            if (!webrtcState.active && !webrtcState.pc) {
+                                setTimeout(initWebRTC, 500);
+                                return;
+                            }
+                        } else {
+                            state.displayStreamMode = pref;
+                            updateDropdownActive();
+                        }
+                    }
                     // 自动模式时，按服务端实际模式更新配置菜单高亮
                     if (state.currentConfig.videomode === 'auto') {
                         state.displayStreamMode = (msg.mode === 'image') ? 'image' : (webrtcState.active ? 'webrtc' : 'ffmpeg');
@@ -1746,10 +1789,13 @@
             document.querySelectorAll('#config-dropdown .dropdown-options').forEach(group => {
                 const key = group.dataset.key;
                 if (!key) return;
-                // 视频模式：选了 auto 高亮 auto 按钮，否则按“当前生效模式”高亮；其余按配置值
+                // 视频模式：选了 auto 高亮 auto 按钮，否则按“当前生效模式”高亮；
+                // 屏幕：高亮当前输出索引；其余按配置值
                 const val = (key === 'videomode')
                     ? (cfg.videomode === 'auto' ? 'auto' : state.displayStreamMode)
-                    : String(cfg[key]);
+                    : (key === 'screen')
+                        ? String(cfg.screen)
+                        : String(cfg[key]);
                 group.querySelectorAll('button').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.value === val);
                 });
@@ -1795,9 +1841,37 @@
                 buildResolutionOptions();
             } else if (key === 'videomode') {
                 applyStreamMode(val);
+            } else if (key === 'screen') {
+                const idx = parseInt(val);
+                if (isNaN(idx) || idx < 0) return;
+                state.currentConfig.screen = idx;
+                send({ type: 'set_output', index: idx });
             }
             updateDropdownActive();
             updateQualityLabel();
+        }
+
+        function buildScreenOptions() {
+            const container = document.getElementById('screen-options');
+            if (!container) return;
+            container.innerHTML = '';
+            const note = document.getElementById('screen-note');
+            const outs = state.outputs || [];
+            if (outs.length <= 1) {
+                if (note) note.textContent = outs.length === 1
+                    ? '当前: ' + outs[0].name + (outs[0].primary ? ' (主)' : '')
+                    : '当前: 主屏';
+                return;
+            }
+            if (note) note.textContent = '多屏显示：选择捕获目标';
+            for (const o of outs) {
+                const btn = document.createElement('button');
+                btn.dataset.value = String(o.index);
+                btn.textContent = (o.name || ('屏幕' + o.index)) + ' · ' + o.width + '×' + o.height
+                    + (o.primary ? ' (主)' : '');
+                container.appendChild(btn);
+            }
+            // 当前输出不在列表时（如 -1），不强制高亮
         }
 
         function buildResolutionOptions() {

@@ -13,6 +13,8 @@
 #include <QIODevice>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QThread>
 #include <QTimer>
 #include <QWebSocket>
@@ -242,6 +244,135 @@ int HelperProcess::run(int argc, char* argv[])
                     inputMgr.injectKeyboard(86, "KeyV", false, true, false, false, false, false);
                     inputMgr.updateModifiers(false, false, false);
                 }
+                return;
+            }
+
+            if (type == "system_action") {
+                // 系统操作必须在用户会话执行（服务进程在 Session 0 无法操作交互桌面）。
+                // 与服务端 handleSystemAction 保持同一套平台探测逻辑。
+                QString action = obj["action"].toString();
+                qInfo() << "Helper: system action requested:" << action;
+#ifdef _WIN32
+                if (action == "lock") {
+                    QProcess::startDetached(QStringLiteral("rundll32.exe"),
+                        { QStringLiteral("user32.dll,LockWorkStation") });
+                } else if (action == "show_desktop") {
+                    // Win7+ 用 PowerShell；WinXP 无 powershell → cscript 同款 COM 调用
+                    QString ps = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
+                    if (!ps.isEmpty()) {
+                        QProcess::startDetached(ps, {
+                            QStringLiteral("-NoProfile"), QStringLiteral("-WindowStyle"), QStringLiteral("Hidden"),
+                            QStringLiteral("-Command"),
+                            QStringLiteral("(New-Object -ComObject Shell.Application).ToggleDesktop()") });
+                    } else {
+                        QString vbs = QDir::tempPath() + QStringLiteral("/rd_toggle_desktop.vbs");
+                        QFile f(vbs);
+                        if (f.open(QIODevice::WriteOnly)) {
+                            f.write("Set sh = CreateObject(\"Shell.Application\")\r\nsh.ToggleDesktop\r\n");
+                            f.close();
+                            QProcess::startDetached(QStringLiteral("cscript.exe"),
+                                { QStringLiteral("//nologo"), vbs });
+                        }
+                    }
+                } else if (action == "task_manager") {
+                    QProcess::startDetached(QStringLiteral("taskmgr"));
+                } else if (action == "logout") {
+                    QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/l"), QStringLiteral("/f") });
+                } else if (action == "reboot") {
+                    QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/r"), QStringLiteral("/t"), QStringLiteral("0") });
+                } else if (action == "poweroff") {
+                    QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/s"), QStringLiteral("/t"), QStringLiteral("0") });
+                }
+#elif defined(Q_OS_LINUX)
+                auto findBin = [](const char* name) -> QString {
+                    return QStandardPaths::findExecutable(QString::fromLatin1(name));
+                };
+                auto firstOf = [](std::initializer_list<const char*> names) -> QString {
+                    for (const char* n : names) {
+                        QString b = QStandardPaths::findExecutable(QString::fromLatin1(n));
+                        if (!b.isEmpty())
+                            return b;
+                    }
+                    return QString();
+                };
+                auto launch = [](const QString& bin, const QStringList& args = {}) {
+                    if (!bin.isEmpty())
+                        QProcess::startDetached(bin, args);
+                };
+                if (action == "lock") {
+                    QString lock = firstOf({ "xdg-screensaver", "gnome-screensaver-command", "loginctl" });
+                    if (lock.endsWith(QStringLiteral("xdg-screensaver")))
+                        launch(lock, { "lock" });
+                    else if (lock.endsWith(QStringLiteral("gnome-screensaver-command")))
+                        launch(lock, { "-l" });
+                    else
+                        launch(lock, { "lock-session" });
+                } else if (action == "show_desktop") {
+                    QString sh = findBin("wmctrl");
+                    if (!sh.isEmpty())
+                        launch(sh, { "-k", "on" });
+                    else if (!(sh = findBin("xdotool")).isEmpty())
+                        launch(sh, { "key", "--clearmodifiers", "super+d" });
+                    else if (!(sh = findBin("gdbus")).isEmpty())
+                        launch(sh, { "call", "--session", "--dest", "org.gnome.Shell",
+                                     "--object-path", "/org/gnome/Shell",
+                                     "--method", "org.gnome.Shell.Eval",
+                                     "global.activate_action('show-desktop', null)" });
+                } else if (action == "task_manager") {
+                    QString tm = firstOf({ "lxtask", "xfce4-taskmanager", "mate-system-monitor",
+                                           "gnome-system-monitor", "ksysguard", "plasma-systemmonitor" });
+                    if (!tm.isEmpty())
+                        launch(tm);
+                } else if (action == "logout") {
+                    QString lo = firstOf({ "lxsession-logout", "lxde-logout", "gnome-session-quit",
+                                           "xfce4-session-logout" });
+                    if (lo.endsWith(QStringLiteral("gnome-session-quit")))
+                        launch(lo, { "--logout", "--force", "--no-prompt" });
+                    else if (lo.endsWith(QStringLiteral("xfce4-session-logout")))
+                        launch(lo, { "--logout" });
+                    else if (!lo.isEmpty())
+                        launch(lo);
+                    else {
+                        QString q = firstOf({ "qdbus6", "qdbus" });
+                        if (!q.isEmpty())
+                            launch(q, { "org.kde.ksmserver", "/KSMServer",
+                                        "org.kde.KSMServerInterface.logout", "0", "0", "0" });
+                    }
+                } else if (action == "reboot") {
+                    QString b = findBin("systemctl");
+                    if (!b.isEmpty())
+                        launch(b, { "reboot" });
+                    else
+                        launch(findBin("shutdown"), { "-r", "now" });
+                } else if (action == "poweroff") {
+                    QString b = findBin("systemctl");
+                    if (!b.isEmpty())
+                        launch(b, { "poweroff" });
+                    else
+                        launch(findBin("shutdown"), { "-h", "now" });
+                }
+#elif defined(Q_OS_MACOS)
+                if (action == "lock") {
+                    QProcess::startDetached(QStringLiteral(
+                        "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession"),
+                        { QStringLiteral("-suspend") });
+                } else if (action == "show_desktop") {
+                    QProcess::startDetached(QStringLiteral("osascript"), { QStringLiteral("-e"),
+                        QStringLiteral("tell application \"System Events\" to key code 103") });
+                } else if (action == "task_manager") {
+                    QProcess::startDetached(QStringLiteral("open"),
+                        { QStringLiteral("-a"), QStringLiteral("Activity Monitor") });
+                } else if (action == "logout") {
+                    QProcess::startDetached(QStringLiteral("osascript"), { QStringLiteral("-e"),
+                        QStringLiteral("tell app \"System Events\" to log out") });
+                } else if (action == "reboot") {
+                    QProcess::startDetached(QStringLiteral("osascript"), { QStringLiteral("-e"),
+                        QStringLiteral("tell app \"System Events\" to restart") });
+                } else if (action == "poweroff") {
+                    QProcess::startDetached(QStringLiteral("osascript"), { QStringLiteral("-e"),
+                        QStringLiteral("tell app \"System Events\" to shut down") });
+                }
+#endif
                 return;
             }
 

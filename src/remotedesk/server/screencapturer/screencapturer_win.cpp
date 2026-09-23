@@ -17,6 +17,9 @@
 // 在 Windows 平台下添加 GDI 截屏类
 class GdiCapturer : public PlatformCapturer {
 public:
+    // capX/capY/capW/capH：捕获区域（虚拟屏坐标）；capW/capH<=0 时回退主屏（旧行为）
+    GdiCapturer(int capX, int capY, int capW, int capH)
+        : capX_(capX), capY_(capY), capW_(capW), capH_(capH) {}
     bool initialize() override
     {
         // 获取屏幕尺寸（使用 EnumDisplaySettings 查询当前活动模式，比 GetSystemMetrics 更可靠）
@@ -36,7 +39,11 @@ public:
         ZeroMemory(&dmBuf, sizeof(dmBuf));
         dmBuf.dm.dmSize = sizeof(DEVMODE);
         dmBuf.dm.dmDriverExtra = 0;
-        if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &dmBuf.dm)) {
+        if (capW_ > 0 && capH_ > 0) {
+            // 多屏切换：捕获指定输出区域（capX_/capY_ 为虚拟屏偏移）
+            width_ = capW_;
+            height_ = capH_;
+        } else if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &dmBuf.dm)) {
             width_ = dmBuf.dm.dmPelsWidth;
             height_ = dmBuf.dm.dmPelsHeight;
         } else {
@@ -79,7 +86,7 @@ public:
     {
         if (updated) *updated = true;
         // BitBlt(SRCCOPY) 不会把硬件光标画进位图，ShowCursor 隐藏/显示是徒劳且会闪屏，已移除
-        if (!BitBlt(hdcMem_, 0, 0, width_, height_, hdcScreen_, 0, 0, SRCCOPY)) {
+        if (!BitBlt(hdcMem_, 0, 0, width_, height_, hdcScreen_, capX_, capY_, SRCCOPY)) {
             return false;
         }
 
@@ -116,6 +123,7 @@ private:
     HBITMAP hBitmap_ = nullptr;
     HBITMAP hBitmapOld_ = nullptr;
     int width_ = 0, height_ = 0;
+    int capX_ = 0, capY_ = 0, capW_ = 0, capH_ = 0; // 捕获区域（虚拟屏坐标）
     BITMAPINFO bitmapInfo_;
     std::vector<uchar> buffer_; // 复用像素缓冲区
 };
@@ -130,12 +138,14 @@ class DXGICapturer : public PlatformCapturer {
 
     int width_ = 0;
     int height_ = 0;
+    int outputIndex_ = 0; // 捕获的输出序号（EnumOutputs 顺序，通常 0 = 主输出）
 
     UINT64 lastFrameNumber_ = 0; // 添加帧序号追踪
     LARGE_INTEGER lastTimestamp_ = { 0, 0 };
     ID3D11Texture2D* stagingTexture_ = nullptr;
 
 public:
+    explicit DXGICapturer(int outputIndex = 0) : outputIndex_(outputIndex) {}
     bool initialize() override
     {
 
@@ -159,10 +169,13 @@ public:
             return false;
         }
         IDXGIOutput* output = nullptr;
-        if (FAILED(adapter->EnumOutputs(0, &output)) || !output) {
-            adapter->Release();
-            dxgiDevice->Release();
-            return false;
+        if (FAILED(adapter->EnumOutputs(outputIndex_, &output)) || !output) {
+            // 输出序号不可用时回退 0（主输出），保持捕获可用
+            if (outputIndex_ != 0 && FAILED(adapter->EnumOutputs(0, &output)) || !output) {
+                adapter->Release();
+                dxgiDevice->Release();
+                return false;
+            }
         }
 
         // 获取输出描述（主显示器尺寸）
@@ -330,10 +343,12 @@ public:
             return;
         }
         IDXGIOutput* output = nullptr;
-        if (FAILED(adapter->EnumOutputs(0, &output)) || !output) {
-            adapter->Release();
-            dxgiDevice->Release();
-            return;
+        if (FAILED(adapter->EnumOutputs(outputIndex_, &output)) || !output) {
+            if (outputIndex_ != 0 && FAILED(adapter->EnumOutputs(0, &output)) || !output) {
+                adapter->Release();
+                dxgiDevice->Release();
+                return;
+            }
         }
         IDXGIOutput1* output1 = nullptr;
         if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1)) && output1) {
@@ -507,6 +522,9 @@ void ScreenCapturer::captureFrame()
     emit frameCaptured(frame);
 }
 
+// Windows 多屏：文件级枚举函数前置声明（实现在文件末尾）
+static QList<ScreenCapturer::WinOutput> winEnumMonitors();
+
 bool ScreenCapturer::start(int fps)
 {
     fps_ = fps;
@@ -515,22 +533,39 @@ bool ScreenCapturer::start(int fps)
     // 防止在 stop() 之外二次调用 start() 时泄漏旧实例。
     cleanupPlatform();
 
+    // 多屏：确保已枚举输出并选中有效目标（默认主输出）
+    if (winOutputs_.isEmpty())
+        winOutputs_ = winEnumMonitors();
+    if (winCurrentIndex_ < 0 || winCurrentIndex_ >= winOutputs_.size()) {
+        winCurrentIndex_ = 0;
+        for (int i = 0; i < winOutputs_.size(); ++i) {
+            if (winOutputs_[i].primary) { winCurrentIndex_ = i; break; }
+        }
+    }
+    const int outIdx = (winCurrentIndex_ >= 0) ? winCurrentIndex_ : 0;
+    int capX = 0, capY = 0, capW = 0, capH = 0;
+    if (outIdx >= 0 && outIdx < winOutputs_.size()) {
+        const WinOutput& o = winOutputs_[outIdx];
+        capX = o.x; capY = o.y; capW = o.w; capH = o.h;
+    }
+
 #if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
     if (IsWindows8OrGreater()) {
-        dxgiCapturer_ = new DXGICapturer();
+        dxgiCapturer_ = new DXGICapturer(outIdx);
         if (dxgiCapturer_->initialize()) {
             useDXGI_ = true;
-            qInfo() << "Using DXGI capture";
+            qInfo() << "Using DXGI capture, output" << outIdx;
         }
     }
 #endif
 
     // 如果 DXGI 不可用，尝试 GDI
     if (!useDXGI_) {
-        gdiCapturer_ = new GdiCapturer();
+        gdiCapturer_ = new GdiCapturer(capX, capY, capW, capH);
         if (gdiCapturer_->initialize()) {
             useGDI_ = true;
-            qInfo() << "Using GDI capture as backup";
+            qInfo() << "Using GDI capture as backup, region" << capW << "x" << capH
+                    << "@" << capX << "," << capY;
         } else {
             delete gdiCapturer_;
             gdiCapturer_ = nullptr;
@@ -613,4 +648,121 @@ QJsonArray ScreenCapturer::enumerateSupportedResolutions()
         arr.append(obj);
     qInfo() << "Enumerated" << arr.size() << "supported resolutions";
     return arr;
+}
+
+// ==================== Windows 多屏 ====================
+struct MonEnumCtx { QList<ScreenCapturer::WinOutput>* out; };
+
+static BOOL CALLBACK winMonitorEnumProc(HMONITOR hMon, HDC, LPRECT, LPARAM lp)
+{
+    MonEnumCtx* ctx = reinterpret_cast<MonEnumCtx*>(lp);
+    if (!ctx || !ctx->out)
+        return TRUE;
+    MONITORINFOEXW mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(hMon, &mi)) {
+        ScreenCapturer::WinOutput o;
+        o.x = mi.rcMonitor.left;
+        o.y = mi.rcMonitor.top;
+        o.w = mi.rcMonitor.right - mi.rcMonitor.left;
+        o.h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        o.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+        // 友好名称（设备串），如 "DELL U2720Q"
+        DISPLAY_DEVICEW dd;
+        ZeroMemory(&dd, sizeof(dd));
+        dd.cb = sizeof(dd);
+        if (EnumDisplayDevicesW(mi.szDevice, 0, &dd, 0) && dd.DeviceString[0])
+            o.name = QString::fromWCharArray(dd.DeviceString);
+        else
+            o.name = QString::fromWCharArray(mi.szDevice);
+        if (o.w > 0 && o.h > 0)
+            ctx->out->append(o);
+    }
+    return TRUE;
+}
+
+static QList<ScreenCapturer::WinOutput> winEnumMonitors()
+{
+    QList<ScreenCapturer::WinOutput> list;
+    MonEnumCtx ctx;
+    ctx.out = &list;
+    EnumDisplayMonitors(nullptr, nullptr, winMonitorEnumProc, reinterpret_cast<LPARAM>(&ctx));
+    return list;
+}
+
+QJsonArray ScreenCapturer::enumerateOutputs() const
+{
+    QJsonArray arr;
+    for (int i = 0; i < winOutputs_.size(); ++i) {
+        const WinOutput& g = winOutputs_[i];
+        QJsonObject o;
+        o["index"] = i;
+        o["name"] = g.name;
+        o["width"] = g.w;
+        o["height"] = g.h;
+        o["x"] = g.x;
+        o["y"] = g.y;
+        o["primary"] = g.primary;
+        o["current"] = (i == winCurrentIndex_);
+        arr.append(o);
+    }
+    return arr;
+}
+
+bool ScreenCapturer::refreshOutputs()
+{
+    QList<WinOutput> fresh = winEnumMonitors();
+    if (fresh.isEmpty())
+        return false;
+    const int oldIdx = winCurrentIndex_;
+    QList<WinOutput> old = winOutputs_;
+    winOutputs_ = fresh;
+
+    if (oldIdx >= 0 && oldIdx < fresh.size()) {
+        // 当前选择仍有效：仅当几何/位置变化时重建（热插拔后显示器移动等）
+        bool geomChanged = (oldIdx >= old.size());
+        if (!geomChanged) {
+            const WinOutput& a = old[oldIdx];
+            const WinOutput& b = fresh[oldIdx];
+            geomChanged = (a.x != b.x || a.y != b.y || a.w != b.w || a.h != b.h);
+        }
+        if (geomChanged)
+            return winApplyOutput(oldIdx);
+        return true;
+    }
+    // 当前选择失效（拔线）：回退 primary / 首个
+    int idx = 0;
+    for (int i = 0; i < fresh.size(); ++i) {
+        if (fresh[i].primary) { idx = i; break; }
+    }
+    return winApplyOutput(idx);
+}
+
+bool ScreenCapturer::winApplyOutput(int index)
+{
+    if (index < 0 || index >= winOutputs_.size())
+        return false;
+    winCurrentIndex_ = index;
+    if (captureTimer_->isActive()) {
+        int oldFps = fps_;
+        start(oldFps);   // cleanup + 按新输出重建捕获器（GDI 区域 / DXGI 输出号）
+    }
+    forceSendNextFrame_ = true;
+    lastFrameChecksum_ = 0;
+    idleCount_ = 0;
+    if (captureTimer_->interval() != 1000 / fps_)
+        captureTimer_->setInterval(1000 / fps_);
+    qInfo() << "ScreenCapturer: switched to output" << index;
+    return true;
+}
+
+bool ScreenCapturer::switchOutput(int index)
+{
+    return winApplyOutput(index);
+}
+
+int ScreenCapturer::currentOutputIndex() const
+{
+    return winCurrentIndex_;
 }

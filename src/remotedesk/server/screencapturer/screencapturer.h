@@ -5,9 +5,11 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
+#include <QList>
 #include <QObject>
 #include <QPoint>
 #include <QScreen>
+#include <QString>
 #include <QTimer>
 
 // 快速帧校验和：每隔 N 行采样一行做 CRC，大幅减少计算量
@@ -107,6 +109,21 @@ public:
     static bool changeDisplayResolution(int w, int h);
     static QJsonArray enumerateSupportedResolutions();
 
+    // 多屏切换（Linux X11）：枚举输出 / 切换捕获目标 / 当前输出索引
+    QJsonArray enumerateOutputs() const;
+    bool refreshOutputs();   // 热插拔感知：重新枚举并保持/回退当前选择
+    bool switchOutput(int index);
+    int currentOutputIndex() const;
+
+#ifdef Q_OS_WIN
+    // Windows 多屏输出描述（screencapturer_win.cpp 维护；public 供文件级枚举函数使用）
+    struct WinOutput {
+        QString name;
+        int x = 0, y = 0, w = 0, h = 0;
+        bool primary = false;
+    };
+#endif
+
 signals:
     void frameCaptured(const QImage& frame);
     void screenLocked(bool locked);
@@ -122,12 +139,18 @@ private:
     int fps_ = 30;
 
     quint16 lastFrameChecksum_ = 0;
+    bool forceSendNextFrame_ = false; // 切屏后强制发送下一帧（旧校验和语义失效）
     bool screenLocked_ = false;
     int dxgiRetryCount_ = 0;
 
 #ifdef Q_OS_WIN
     PlatformCapturer* gdiCapturer_ = nullptr;
     bool useGDI_ = false;
+
+    // Windows 多屏选择状态（screencapturer_win.cpp 维护）
+    QList<WinOutput> winOutputs_;
+    int winCurrentIndex_ = -1;
+    bool winApplyOutput(int index);   // 应用到指定输出（GDI 区域 / DXGI 输出号）并重建捕获器
 #endif
 
 #if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)

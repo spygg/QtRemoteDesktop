@@ -2,10 +2,12 @@
 #include "screencapturer.h"
 #include <QColor>
 #include <QDebug>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QProcess>
 #include <QPixmap>
 #include <QSet>
-#include <QProcess>
+#include <QRegularExpression>
 #include <chrono>
 
 #ifdef HAVE_PIPEWIRE
@@ -63,9 +65,24 @@ class X11Capturer : public PlatformCapturer {
     int emptyDamageCount_ = 0; // 连续空 damage 计数，用于 xrdp 等驱动无 damage 时回退全量捕获
     QImage fullFrame_;         // 全屏持久缓冲（RGB32），区域抓取时在其上原地更新
     bool regionDirty_ = false; // 本次捕获走了区域抓取（已知有变化），无需再做全帧校验和
+    bool forceFull_ = false;   // 切换输出后强制下一帧全量抓取（陈旧 damage 区域不适用新输出）
+    // 主输出（primary）捕获区域：多屏拼接时虚拟屏大于主屏，
+    // 只捕获主输出避免整条 5120x1080 超宽画面被压缩显示。
+    int offsetX_ = 0;
+    int offsetY_ = 0;
+    int primaryW_ = 0;
+    int primaryH_ = 0;
     std::chrono::steady_clock::time_point lastProbe_ = std::chrono::steady_clock::now();
 
 public:
+    // 输出枚举（多屏切换）
+    struct OutputGeom {
+        QString name;
+        int x = 0, y = 0, w = 0, h = 0;
+        bool primary = false;
+    };
+    QList<OutputGeom> outputs_;
+    int currentOutputIndex_ = -1;
     bool initialize() override
     {
         // 安装自定义错误处理，防止 XGetImage 等失败时崩溃
@@ -81,7 +98,21 @@ public:
         width_ = WidthOfScreen(screen);
         height_ = HeightOfScreen(screen);
 
-        fullFrame_ = QImage(width_, height_, QImage::Format_RGB32);
+        // 默认捕获整个虚拟屏；若存在 primary 输出（多屏拼接），只捕获主输出
+        offsetX_ = 0; offsetY_ = 0;
+        primaryW_ = width_; primaryH_ = height_;
+        resolvePrimaryOutput();
+        if (primaryW_ > 0 && primaryH_ > 0
+            && offsetX_ + primaryW_ <= width_ && offsetY_ + primaryH_ <= height_) {
+            qInfo() << "X11Capturer: capturing primary output" << primaryW_ << "x" << primaryH_
+                    << "at offset" << offsetX_ << "," << offsetY_
+                    << "(virtual screen" << width_ << "x" << height_ << ")";
+        } else {
+            primaryW_ = width_; primaryH_ = height_;
+            offsetX_ = 0; offsetY_ = 0;
+        }
+
+        fullFrame_ = QImage(primaryW_, primaryH_, QImage::Format_RGB32);
 
         // 检查并初始化 Damage 扩展
         int damageEvent, damageError;
@@ -105,7 +136,7 @@ public:
 
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
-        if (damageSupported_) {
+        if (damageSupported_ && !forceFull_) {
             XserverRegion region = XFixesCreateRegion(display_, nullptr, 0);
             XDamageSubtract(display_, damage_, None, region);
             int rectCount = 0;
@@ -121,59 +152,69 @@ public:
             }
             if (!empty && rectCount > 0) {
                 // 只抓取变化区域，更新到全屏缓冲（大幅降低 XGetImage 的传输与拷贝量）
+                int copied = 0;
                 for (int i = 0; i < rectCount; ++i) {
                     XRectangle& r = rects[i];
                     if (r.width <= 0 || r.height <= 0)
                         continue;
-                    // 限制在屏幕范围内
-                    if (r.x < 0) r.width += r.x, r.x = 0;
-                    if (r.y < 0) r.height += r.y, r.y = 0;
-                    if (r.x + r.width > width_) r.width = width_ - r.x;
-                    if (r.y + r.height > height_) r.height = height_ - r.y;
-                    if (r.width <= 0 || r.height <= 0)
+                    // 裁剪到主输出区域（rect 为虚拟屏坐标）
+                    int x0 = qMax<int>(r.x, offsetX_);
+                    int y0 = qMax<int>(r.y, offsetY_);
+                    int x1 = qMin<int>(r.x + r.width, offsetX_ + primaryW_);
+                    int y1 = qMin<int>(r.y + r.height, offsetY_ + primaryH_);
+                    if (x1 <= x0 || y1 <= y0)
                         continue;
-                    XImage* ximage = XGetImage(display_, rootWindow_, r.x, r.y,
-                        r.width, r.height, AllPlanes, ZPixmap);
+                    int dstX = x0 - offsetX_;
+                    int dstY = y0 - offsetY_;
+                    int cw = x1 - x0;
+                    int ch = y1 - y0;
+                    XImage* ximage = XGetImage(display_, rootWindow_, x0, y0,
+                        cw, ch, AllPlanes, ZPixmap);
                     if (!ximage)
                         continue;
                     if (ximage->bits_per_pixel == 32) {
                         const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
                         int srcStride = ximage->bytes_per_line;
-                        for (int yy = 0; yy < r.height; ++yy) {
-                            memcpy(fullFrame_.scanLine(r.y + yy) + r.x * 4,
+                        for (int yy = 0; yy < ch; ++yy) {
+                            memcpy(fullFrame_.scanLine(dstY + yy) + dstX * 4,
                                    src + yy * srcStride,
-                                   static_cast<size_t>(r.width) * 4);
+                                   static_cast<size_t>(cw) * 4);
                         }
                     } else if (ximage->bits_per_pixel == 24) {
                         // 24bpp 整行转换（3 字节连续像素）
                         const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
                         int srcStride = ximage->bytes_per_line;
-                        for (int yy = 0; yy < r.height; ++yy) {
+                        for (int yy = 0; yy < ch; ++yy) {
                             const uchar* s = src + yy * srcStride;
-                            QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(r.y + yy)) + r.x;
-                            for (int xx = 0; xx < r.width; ++xx) {
+                            QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(dstY + yy)) + dstX;
+                            for (int xx = 0; xx < cw; ++xx) {
                                 d[xx] = qRgb(s[xx * 3], s[xx * 3 + 1], s[xx * 3 + 2]);
                             }
                         }
                     } else {
                         // 其他 bpp（如 16bpp）：用 XGetPixel 逐像素转换（安全，兜底慢路径）
-                        for (int yy = 0; yy < r.height; ++yy) {
-                            QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(r.y + yy)) + r.x;
-                            for (int xx = 0; xx < r.width; ++xx) {
+                        for (int yy = 0; yy < ch; ++yy) {
+                            QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(dstY + yy)) + dstX;
+                            for (int xx = 0; xx < cw; ++xx) {
                                 unsigned long px = XGetPixel(ximage, xx, yy);
                                 d[xx] = qRgb((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
                             }
                         }
                     }
                     XDestroyImage(ximage);
+                    ++copied;
                 }
                 XFree(rects);
                 XFixesDestroyRegion(display_, region);
-                if (updated) *updated = true;
-                outImage = fullFrame_.copy();
-                emptyDamageCount_ = 0;
-                regionDirty_ = true;
-                return true;
+                if (copied > 0) {
+                    if (updated) *updated = true;
+                    outImage = fullFrame_.copy();
+                    emptyDamageCount_ = 0;
+                    regionDirty_ = true;
+                    return true;
+                }
+                // 所有 damage 矩形都在当前输出区域之外（如切屏后的陈旧损伤）：
+                // 不得谎报 updated，落到下方全量抓取，避免发出未更新的旧缓冲
             }
             if (rects)
                 XFree(rects);
@@ -197,14 +238,16 @@ public:
         if (updated) *updated = true;
         regionDirty_ = false; // 全屏抓取，仍用校验和判断是否有变化
 
-        XImage* ximage = XGetImage(display_, rootWindow_, 0, 0, width_, height_, AllPlanes, ZPixmap);
+        XImage* ximage = XGetImage(display_, rootWindow_, offsetX_, offsetY_,
+            primaryW_, primaryH_, AllPlanes, ZPixmap);
         if (!ximage) {
             return false;
         }
+        forceFull_ = false; // 全量抓取成功，清除强制标志
 
         if (ximage->bits_per_pixel == 32) {
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
-                          width_, height_, ximage->bytes_per_line,
+                          primaryW_, primaryH_, ximage->bytes_per_line,
                           QImage::Format_RGB32);
             // 直接输出 RGB32（小端=BGRA），不再转换到 RGB888。
             // 视频编码线程的 sws_scale 直接以 BGRA 为输入，把转换从主线程移走，
@@ -212,7 +255,7 @@ public:
             outImage = rawImg.copy();
         } else {
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
-                          width_, height_, ximage->bytes_per_line,
+                          primaryW_, primaryH_, ximage->bytes_per_line,
                           QImage::Format_RGB888);
             outImage = rawImg.rgbSwapped();
         }
@@ -228,8 +271,99 @@ public:
 
     bool regionDirty() const { return regionDirty_; }
 
-    int width() const { return width_; }
-    int height() const { return height_; }
+    int width() const { return primaryW_ > 0 ? primaryW_ : width_; }
+    int height() const { return primaryH_ > 0 ? primaryH_ : height_; }
+
+    // 用 xrandr --query 枚举所有 connected 输出及其几何
+    QList<OutputGeom> enumerateOutputs()
+    {
+        QList<OutputGeom> list;
+        QProcess xrandr;
+        xrandr.start(QStringLiteral("xrandr"), QStringList() << QStringLiteral("--query"));
+        if (!xrandr.waitForFinished(3000))
+            return list;
+        QString output = QString::fromUtf8(xrandr.readAllStandardOutput());
+        const QRegularExpression reLine(
+            QStringLiteral("^(\\S+)\\s+connected\\s+(primary\\s+)?(\\d+)x(\\d+)\\+(\\d+)\\+(\\d+)"));
+        for (const QString& rawLine : output.split(QLatin1Char('\n'))) {
+            QString line = rawLine.trimmed();
+            if (line.isEmpty() || !line.contains(QStringLiteral("connected")))
+                continue;
+            QRegularExpressionMatch m = reLine.match(line);
+            if (m.hasMatch()) {
+                OutputGeom g;
+                g.name = m.captured(1);
+                g.primary = !m.captured(2).isEmpty();
+                g.w = m.captured(3).toInt();
+                g.h = m.captured(4).toInt();
+                g.x = m.captured(5).toInt();
+                g.y = m.captured(6).toInt();
+                if (g.w > 0 && g.h > 0)
+                    list.append(g);
+            }
+        }
+        return list;
+    }
+
+    void applyOutput(const OutputGeom& g)
+    {
+        offsetX_ = g.x;
+        offsetY_ = g.y;
+        primaryW_ = g.w;
+        primaryH_ = g.h;
+        // 重建缓冲并清零，避免陈旧 damage 只覆盖部分区域时泄漏未初始化内容；
+        // 同时强制下一帧全量抓取、重置区域/校验和语义
+        fullFrame_ = QImage(primaryW_, primaryH_, QImage::Format_RGB32);
+        fullFrame_.fill(0);
+        forceFull_ = true;
+        regionDirty_ = false;
+        emptyDamageCount_ = 0;
+        lastProbe_ = std::chrono::steady_clock::now();
+    }
+
+    bool resolvePrimaryOutput()
+    {
+        outputs_ = enumerateOutputs();
+        if (outputs_.isEmpty())
+            return false;
+        int idx = 0;
+        for (int i = 0; i < outputs_.size(); ++i) {
+            if (outputs_[i].primary) { idx = i; break; }
+        }
+        applyOutput(outputs_[idx]);
+        currentOutputIndex_ = idx;
+        return true;
+    }
+
+    bool setOutput(int index)
+    {
+        if (index < 0 || index >= outputs_.size())
+            return false;
+        applyOutput(outputs_[index]);
+        currentOutputIndex_ = index;
+        return true;
+    }
+    // 热插拔感知：重新枚举输出；当前选择失效（如拔线）回退 primary/首个，
+    // 仍有效则按最新几何更新捕获区域（如输出位置变化）
+    void refreshOutputs()
+    {
+        QList<OutputGeom> fresh = enumerateOutputs();
+        if (fresh.isEmpty())
+            return;
+        outputs_ = fresh;
+        if (currentOutputIndex_ < 0 || currentOutputIndex_ >= outputs_.size()) {
+            int idx = 0;
+            for (int i = 0; i < outputs_.size(); ++i) {
+                if (outputs_[i].primary) { idx = i; break; }
+            }
+            applyOutput(outputs_[idx]);
+            currentOutputIndex_ = idx;
+        } else {
+            applyOutput(outputs_[currentOutputIndex_]);
+        }
+    }
+    int currentOutput() const { return currentOutputIndex_; }
+    const QList<OutputGeom>& outputs() const { return outputs_; }
 
     ~X11Capturer()
     {
@@ -335,12 +469,13 @@ void ScreenCapturer::captureFrame()
         }
 
         quint16 checksum = quickFrameChecksum(frame);
-        if (checksum == lastFrameChecksum_) {
+        if (!forceSendNextFrame_ && checksum == lastFrameChecksum_) {
             idleCount_++;
             if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
                 captureTimer_->setInterval(1000);
             return;
         }
+        forceSendNextFrame_ = false;
         // 画面有变化，恢复全帧率
         idleCount_ = 0;
         if (captureTimer_->interval() != 1000 / fps_)
@@ -494,4 +629,57 @@ QJsonArray ScreenCapturer::enumerateSupportedResolutions()
 {
     // Linux: 可通过 xrandr 枚举，暂未实现
     return QJsonArray();
+}
+
+QJsonArray ScreenCapturer::enumerateOutputs() const
+{
+    QJsonArray arr;
+    if (!useX11_ || !x11Capturer_)
+        return arr;
+    X11Capturer* cap = static_cast<X11Capturer*>(x11Capturer_);
+    const QList<X11Capturer::OutputGeom>& outs = cap->outputs();
+    int cur = cap->currentOutput();
+    for (int i = 0; i < outs.size(); ++i) {
+        const X11Capturer::OutputGeom& g = outs[i];
+        QJsonObject o;
+        o["index"] = i;
+        o["name"] = g.name;
+        o["width"] = g.w;
+        o["height"] = g.h;
+        o["x"] = g.x;
+        o["y"] = g.y;
+        o["primary"] = g.primary;
+        o["current"] = (i == cur);
+        arr.append(o);
+    }
+    return arr;
+}
+
+bool ScreenCapturer::refreshOutputs()
+{
+    if (!useX11_ || !x11Capturer_)
+        return false;
+    static_cast<X11Capturer*>(x11Capturer_)->refreshOutputs();
+    return true;
+}
+
+bool ScreenCapturer::switchOutput(int index)
+{
+    if (!useX11_ || !x11Capturer_)
+        return false;
+    bool ok = static_cast<X11Capturer*>(x11Capturer_)->setOutput(index);
+    if (ok) {
+        // 切换目标后强制下一帧通过校验并发送（旧校验和/缓冲语义失效）
+        forceSendNextFrame_ = true;
+        lastFrameChecksum_ = 0;
+        idleCount_ = 0;
+    }
+    return ok;
+}
+
+int ScreenCapturer::currentOutputIndex() const
+{
+    if (useX11_ && x11Capturer_)
+        return static_cast<X11Capturer*>(x11Capturer_)->currentOutput();
+    return -1;
 }

@@ -1,7 +1,8 @@
 //
 // Windows XP 兼容层实现：yang_ntop / yang_pton
 // 参考 glibc inet_ntop / inet_pton 的算法移植，支持 IPv4 / IPv6（含 :: 压缩）。
-// 仅 Windows 编译；Linux/macOS 编译为空（使用系统 inet_ntop / inet_pton）。
+// Windows 使用自研实现（XP 无 inet_ntop/inet_pton）；
+// Linux/macOS 等非 Windows 平台转发系统 inet_ntop / inet_pton。
 //
 #include "YangSocketCompat.h"
 
@@ -153,4 +154,17 @@ int yang_pton(int af, const char* src, void* dst) {
     return 0;
 }
 
+#else /* 非 Windows（Linux/macOS 等）：转发系统 inet_ntop / inet_pton */
+#include <stddef.h>
+const char* yang_ntop(int af, const void* src, char* dst, int size) {
+    if (dst == NULL || src == NULL || size <= 0)
+        return NULL;
+    return inet_ntop(af, src, dst, (socklen_t)size);
+}
+
+int yang_pton(int af, const char* src, void* dst) {
+    if (src == NULL || dst == NULL)
+        return 0;
+    return inet_pton(af, src, dst);
+}
 #endif /* Yang_OS_WIN */
