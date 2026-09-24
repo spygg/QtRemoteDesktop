@@ -1,0 +1,21 @@
+/* SPDX-License-Identifier: Apache-2.0 OR MIT */
+/*
+ * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
+ */
+
+#ifndef HAL_AVS2D_VDPU383_H
+#define HAL_AVS2D_VDPU383_H
+
+#include "mpp_hal.h"
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
+extern const MppHalApi hal_avs2d_vdpu383;
+
+#ifdef  __cplusplus
+}
+#endif
+
+#endif /* HAL_AVS2D_RKV_H */

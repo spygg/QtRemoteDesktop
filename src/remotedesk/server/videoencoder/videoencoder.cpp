@@ -1,6 +1,12 @@
 #include "videoencoder.h"
+#include "mppencoder.h"
 #include <QDateTime>
+#include <cstring>
 #include <QDebug>
+#include <QFile>
+#ifdef Q_OS_LINUX
+#include <QDir>
+#endif
 
 VideoEncoder::VideoEncoder(QObject*)
     : QObject(nullptr)
@@ -14,21 +20,79 @@ VideoEncoder::~VideoEncoder()
     shutdown();
 }
 
-static const char* findHwEncoder()
+// 硬件编码器平台可用性粗筛（编码器存在 != 运行时可用；避免假阳性导致每次初始化
+// 都尝试 open 一个必然失败的编码器，从而产生无谓的延迟与告警日志）
+static bool hwPlatformAvailable(const char* encName)
 {
-    const char* candidates[] = {
-#ifdef Q_OS_WIN
-        "h264_nvenc", "h264_amf",
-#elif defined(Q_OS_LINUX)
-        "h264_nvenc",
-#elif defined(Q_OS_MACOS)
-        "h264_videotoolbox",
+#ifdef Q_OS_LINUX
+    if (strstr(encName, "vaapi")) {
+        // VAAPI 需要 DRM 渲染节点；无 /dev/dri 的板子直接跳过
+        QDir dri("/dev/dri");
+        if (!dri.exists())
+            return false;
+        if (dri.entryList(QStringList() << "renderD*", QDir::System).isEmpty())
+            return false;
+    } else if (strstr(encName, "nvenc")) {
+        // NVIDIA NVENC 需要驱动设备节点；无 NVIDIA 的机器（如 RK3588）直接跳过
+        if (!QFile::exists("/dev/nvidiactl"))
+            return false;
+    }
+    // rkmpp：FFmpeg 编译带 rkmpp 即有编码器，可用性由 avcodec_open2 验证并回退
 #endif
-        nullptr
-    };
-    for (int i = 0; candidates[i]; ++i) {
+    return true;
+}
+
+// 按编码类型 + 平台返回硬件编码器候选链（优先板载/通用方案，最后才是厂商专有）
+static const char* findHwEncoder(CodecType type, HwEncodeMode mode)
+{
+    if (mode == HwEncodeMode::Off)
+        return nullptr;
+    const char* candidates[4] = { nullptr, nullptr, nullptr, nullptr };
+    switch (type) {
+    case CodecType::H264:
+#ifdef Q_OS_WIN
+        candidates[0] = "h264_nvenc"; candidates[1] = "h264_amf";
+#elif defined(Q_OS_LINUX)
+        candidates[0] = "h264_rkmpp"; candidates[1] = "h264_vaapi"; candidates[2] = "h264_nvenc";
+#elif defined(Q_OS_MACOS)
+        candidates[0] = "h264_videotoolbox";
+#endif
+        break;
+    case CodecType::HEVC:
+#ifdef Q_OS_WIN
+        candidates[0] = "hevc_nvenc"; candidates[1] = "hevc_amf";
+#elif defined(Q_OS_LINUX)
+        candidates[0] = "hevc_rkmpp"; candidates[1] = "hevc_vaapi"; candidates[2] = "hevc_nvenc";
+#elif defined(Q_OS_MACOS)
+        candidates[0] = "hevc_videotoolbox";
+#endif
+        break;
+    case CodecType::VP8:
+#ifdef Q_OS_LINUX
+        candidates[0] = "vp8_vaapi";
+#endif
+        break;
+    case CodecType::VP9:
+#ifdef Q_OS_LINUX
+        candidates[0] = "vp9_vaapi";
+#endif
+        break;
+    case CodecType::AV1:
+#ifdef Q_OS_WIN
+        candidates[0] = "av1_nvenc"; candidates[1] = "av1_amf";
+#elif defined(Q_OS_LINUX)
+        candidates[0] = "av1_vaapi"; candidates[1] = "av1_nvenc";
+#endif
+        break;
+    default:
+        break; // MPEG4/MJPEG 无硬件编码
+    }
+    for (int i = 0; i < 4 && candidates[i]; ++i) {
         const AVCodec* c = avcodec_find_encoder_by_name(candidates[i]);
-        if (!c) continue;
+        if (!c)
+            continue;
+        if (!hwPlatformAvailable(candidates[i]))
+            continue;
         for (const AVPixelFormat* p = c->pix_fmts; p && *p != AV_PIX_FMT_NONE; ++p) {
             if (*p == AV_PIX_FMT_NV12 || *p == AV_PIX_FMT_YUV420P) {
                 return candidates[i];
@@ -49,14 +113,51 @@ static AVPixelFormat encoderPixFmt(const AVCodec* codec, const char* hwName)
     return AV_PIX_FMT_YUV420P;
 }
 
-bool VideoEncoder::isHwAcceleratedAvailable()
+// 硬件编码器私有选项：按编码器名精确匹配，避免给不认识的编码器传不存在的选项
+// 导致 avcodec_open2 失败（如 h264_amf 无 preset/tune、rkmpp/vaapi/videotoolbox 无 preset）
+static void applyHwOpts(const QString& hwName, AVDictionary** opts)
 {
-    return findHwEncoder() != nullptr;
+    if (hwName.contains("nvenc")) {
+        av_dict_set(opts, "preset", "p1", 0);
+        av_dict_set(opts, "tune", "ll", 0);
+    } else if (hwName.contains("amf")) {
+        // h264_amf/hevc_amf/av1_amf：无 preset/tune；usage=transcoding 走低延迟实时档
+        av_dict_set(opts, "usage", "transcoding", 0);
+    }
+    // videotoolbox / vaapi / rkmpp：默认参数即可，不额外设置
 }
 
-bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int encH, int fps, int bitrate)
+bool VideoEncoder::isHwAcceleratedAvailable(CodecType type)
 {
-    // 支持 shutdown() 后重新初始化（缩放档位改变时按新尺寸重建编码器）
+    // RK3588 MPP：H264/HEVC 直连硬编（非 avcodec 编码器，单独探测）
+    if ((type == CodecType::H264 || type == CodecType::HEVC) && MppEncoder::isSupported())
+        return true;
+    return findHwEncoder(type, HwEncodeMode::Auto) != nullptr;
+}
+
+QString VideoEncoder::hwEncoderName(CodecType type)
+{
+    if ((type == CodecType::H264 || type == CodecType::HEVC) && MppEncoder::isSupported())
+        return type == CodecType::HEVC ? QStringLiteral("hevc_rkmpp") : QStringLiteral("h264_rkmpp");
+    const char* n = findHwEncoder(type, HwEncodeMode::Auto);
+    return n ? QString::fromUtf8(n) : QString();
+}
+
+QString VideoEncoder::activeEncoderName() const
+{
+    return codecName_;
+}
+
+bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int encH, int fps, int bitrate,
+                              HwEncodeMode hwMode)
+{
+    // 支持 shutdown() 后重新初始化（缩放/帧率/画质/编码协议/硬件开关改变时重建编码器）
+    // 先释放旧 MPP 实例：hwMode=Off 回退软编时必须清掉残留的 MPP（否则 encodingLoop
+    // 仍会走 isActive() 的 MPP 路径，软编永不生效）
+    if (mpp_) {
+        delete mpp_;
+        mpp_ = nullptr;
+    }
     abort_ = false;
     frameCount_ = 0;
     startTime_ = 0;
@@ -75,10 +176,38 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
 #endif
     currentCodec_ = type;
     fps_ = fps;
+    hwMode_ = hwMode;
+
+    // ---- RK3588 MPP 硬编：H264/HEVC + 硬件开关非 Off 时优先走 MPP 直连 ----
+    // MPP 不是 avcodec 编码器（无编码器名可探测），需单独初始化；其他平台 isSupported()=false 自动跳过
+    if ((type == CodecType::H264 || type == CodecType::HEVC) && hwMode != HwEncodeMode::Off) {
+        mpp_ = new MppEncoder();
+        if (mpp_->initialize(static_cast<int>(type), encW, encH, fps, bitrate,
+                             hwMode == HwEncodeMode::On)) {
+            codecName_ = mpp_->name();
+            hwName_ = mpp_->hwName();
+            qInfo() << "Using MPP encoder:" << hwName_ << encW << "x" << encH << "@" << fps << "fps";
+            startTime_ = QDateTime::currentMSecsSinceEpoch();
+            encoderThread_.start(QThread::HighPriority);
+            emit encoderReady();
+            return true;
+        }
+        delete mpp_;
+        mpp_ = nullptr;
+        if (hwMode == HwEncodeMode::On) {
+            // 强制硬编但 MPP 不可用：仍回退 FFmpeg 软编保证画面可用
+            // （本设备 MPP 1.1.0 初始化成功但 encode 恒 null，强制 on 若直接失败
+            //  会让 video 模式整段停用导致黑屏，回退软编更稳妥）
+            qWarning() << "MPP encoder unavailable, hw_encode=on falling back to software encoder";
+        } else {
+            qWarning() << "MPP encoder init failed, falling back to FFmpeg encoder";
+        }
+    }
 
     AVCodecID codecId;
     switch (type) {
     case CodecType::H264: codecId = AV_CODEC_ID_H264; break;
+    case CodecType::HEVC: codecId = AV_CODEC_ID_HEVC; break;
     case CodecType::VP8:  codecId = AV_CODEC_ID_VP8;  break;
     case CodecType::VP9:  codecId = AV_CODEC_ID_VP9;  break;
     case CodecType::AV1:  codecId = AV_CODEC_ID_AV1;  break;
@@ -91,18 +220,25 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
 
     const AVCodec* codec = nullptr;
     pixFmt_ = AV_PIX_FMT_YUV420P;
-    codecName_ = avcodec_get_name(codecId);
+    codecName_ = QString::fromUtf8(avcodec_get_name(codecId));
 
-    if (type == CodecType::H264) {
-        const char* hwName = findHwEncoder();
-        if (hwName) {
-            codec = avcodec_find_encoder_by_name(hwName);
-            if (codec) {
-                pixFmt_ = encoderPixFmt(codec, hwName);
-                hwName_ = QString::fromUtf8(hwName);
-                codecName_ = QString("H.264 (%1)").arg(hwName_);
-                qInfo() << "Using HW encoder:" << hwName_ << "pix_fmt:" << av_get_pix_fmt_name(pixFmt_);
-            }
+    // 支持硬件编码的编码类型才探测（MPEG4/MJPEG 直接软编）
+    const char* hwName = nullptr;
+    switch (type) {
+    case CodecType::H264: case CodecType::HEVC:
+    case CodecType::VP8:  case CodecType::VP9: case CodecType::AV1:
+        hwName = findHwEncoder(type, hwMode);
+        break;
+    default:
+        break;
+    }
+    if (hwName) {
+        codec = avcodec_find_encoder_by_name(hwName);
+        if (codec) {
+            pixFmt_ = encoderPixFmt(codec, hwName);
+            hwName_ = QString::fromUtf8(hwName);
+            codecName_ = QString("%1 (%2)").arg(QString::fromUtf8(avcodec_get_name(codecId))).arg(hwName_);
+            qInfo() << "Using HW encoder:" << hwName_ << "pix_fmt:" << av_get_pix_fmt_name(pixFmt_);
         }
     }
 
@@ -112,67 +248,102 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
             qCritical() << "Encoder" << codecName_ << "not found";
             return false;
         }
+        hwName_.clear();
         qInfo() << "Using software encoder:" << codecName_;
     }
 
-    codecCtx_ = avcodec_alloc_context3(codec);
-    codecCtx_->width = encW;
-    codecCtx_->height = encH;
-    codecCtx_->time_base = { 1, fps };
-    codecCtx_->framerate = { fps, 1 };
-    codecCtx_->bit_rate = bitrate;
-    codecCtx_->gop_size = fps;
-    codecCtx_->max_b_frames = 0;
-    codecCtx_->pix_fmt = pixFmt_;
-    codecCtx_->thread_count = qMax(1, qMin(QThread::idealThreadCount(), 4));
-    appliedBitrate_.store(bitrate);
+    // openCodec：分配 ctx + 设置参数 + open；失败返回 false（由调用方决定回退或放弃）
+    auto openCodec = [&](const AVCodec* c) -> bool {
+        AVCodecContext* ctx = avcodec_alloc_context3(c);
+        if (!ctx)
+            return false;
+        ctx->width = encW;
+        ctx->height = encH;
+        ctx->time_base = { 1, fps };
+        ctx->framerate = { fps, 1 };
+        ctx->bit_rate = bitrate;
+        ctx->gop_size = fps;
+        ctx->max_b_frames = 0;
+        ctx->pix_fmt = pixFmt_;
+        // 硬件编码器内部自带加速与缓冲管理，线程数固定 1；多线程仅对软编有效
+        ctx->thread_count = hwName_.isEmpty() ? qMax(1, qMin(QThread::idealThreadCount(), 4)) : 1;
 
-    AVDictionary* opts = nullptr;
+        AVDictionary* opts = nullptr;
 
-    switch (type) {
-    case CodecType::H264:
-        if (hwName_.isEmpty() && codec->name &&
-            (qstrcmp(codec->name, "libopenh264") == 0 || qstrcmp(codec->name, "h264_openh264") == 0)) {
-            // libopenh264（FFmpeg 3.4.8 封装）：减少实时桌面的 CPU 占用
-            av_dict_set(&opts, "allow_skip_frames", "1", 0); // 码率超限时允许跳帧，避免积压
-            av_dict_set(&opts, "loopfilter", "0", 0);        // 禁用环内滤波，省 CPU（桌面画面可接受）
-        } else if (hwName_.isEmpty()) {
-            av_dict_set(&opts, "preset", "ultrafast", 0);
-            av_dict_set(&opts, "tune", "zerolatency", 0);
-        } else {
-            av_dict_set(&opts, "preset", "p1", 0);
-            av_dict_set(&opts, "tune", "ll", 0);
+        switch (type) {
+        case CodecType::H264:
+            if (!hwName_.isEmpty()) {
+                applyHwOpts(hwName_, &opts);
+            } else if (c->name &&
+                (qstrcmp(c->name, "libopenh264") == 0 || qstrcmp(c->name, "h264_openh264") == 0)) {
+                // libopenh264（FFmpeg 3.4.8 封装）：减少实时桌面的 CPU 占用
+                av_dict_set(&opts, "allow_skip_frames", "1", 0); // 码率超限时允许跳帧，避免积压
+                av_dict_set(&opts, "loopfilter", "0", 0);        // 禁用环内滤波，省 CPU（桌面画面可接受）
+            } else {
+                av_dict_set(&opts, "preset", "ultrafast", 0);
+                av_dict_set(&opts, "tune", "zerolatency", 0);
+            }
+            av_dict_set(&opts, "profile", "baseline", 0);
+            break;
+        case CodecType::HEVC:
+            if (!hwName_.isEmpty()) {
+                applyHwOpts(hwName_, &opts);
+            } else {
+                // libx265 等软编：ultrafast + zerolatency 保证实时桌面延迟
+                av_dict_set(&opts, "preset", "ultrafast", 0);
+                av_dict_set(&opts, "tune", "zerolatency", 0);
+            }
+            break;
+        case CodecType::VP8:
+            av_dict_set(&opts, "deadline", "realtime", 0);
+            av_dict_set(&opts, "error_resilient", "1", 0);
+            break;
+        case CodecType::VP9:
+            av_dict_set(&opts, "deadline", "realtime", 0);
+            av_dict_set(&opts, "cpu-used", "5", 0);
+            break;
+        case CodecType::AV1:
+            av_dict_set(&opts, "usage", "realtime", 0);
+            av_dict_set(&opts, "cpu-used", "6", 0);
+            break;
+        case CodecType::MPEG4:
+            av_dict_set(&opts, "qmin", "2", 0);
+            av_dict_set(&opts, "qmax", "31", 0);
+            break;
+        case CodecType::MJPEG:
+            av_dict_set(&opts, "q", "5", 0);
+            break;
         }
-        av_dict_set(&opts, "profile", "baseline", 0);
-        break;
-    case CodecType::VP8:
-        av_dict_set(&opts, "deadline", "realtime", 0);
-        av_dict_set(&opts, "error_resilient", "1", 0);
-        break;
-    case CodecType::VP9:
-        av_dict_set(&opts, "deadline", "realtime", 0);
-        av_dict_set(&opts, "cpu-used", "5", 0);
-        break;
-    case CodecType::AV1:
-        av_dict_set(&opts, "usage", "realtime", 0);
-        av_dict_set(&opts, "cpu-used", "6", 0);
-        break;
-    case CodecType::MPEG4:
-        av_dict_set(&opts, "qmin", "2", 0);
-        av_dict_set(&opts, "qmax", "31", 0);
-        break;
-    case CodecType::MJPEG:
-        av_dict_set(&opts, "q", "5", 0);
-        break;
-    }
 
-    int ret = avcodec_open2(codecCtx_, codec, &opts);
-    av_dict_free(&opts);
-    if (ret < 0) {
-        qCritical() << "Failed to open codec" << codecName_ << "error:" << ret;
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        return false;
+        int ret = avcodec_open2(ctx, c, &opts);
+        av_dict_free(&opts);
+        if (ret < 0) {
+            avcodec_free_context(&ctx);
+            qWarning() << "Failed to open encoder" << codecName_ << "error:" << ret;
+            return false;
+        }
+        codecCtx_ = ctx;
+        return true;
+    };
+
+    if (!openCodec(codec)) {
+        if (!hwName_.isEmpty()) {
+            // 探测到硬件编码器但 open 失败（无驱动/设备/选项不兼容）→ 回退软编，保证画面不中断
+            qWarning() << "HW encoder open failed, falling back to software encoder";
+            codec = avcodec_find_encoder(codecId);
+            if (!codec) {
+                qCritical() << "Software encoder" << codecName_ << "not found";
+                return false;
+            }
+            hwName_.clear();
+            codecName_ = QString::fromUtf8(avcodec_get_name(codecId));
+            pixFmt_ = AV_PIX_FMT_YUV420P;
+            qInfo() << "Using software encoder:" << codecName_;
+            if (!openCodec(codec))
+                return false;
+        } else {
+            return false;
+        }
     }
 
     if (codecCtx_->extradata && codecCtx_->extradata_size > 0) {
@@ -209,6 +380,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     encoderThread_.start(QThread::HighPriority);
     qInfo() << codecName_ << "encoder initialized" << encW << "x" << encH
             << "@" << fps << "fps (sws " << srcW << "x" << srcH << " -> " << encW << "x" << encH << ")";
+    emit encoderReady();
     return true;
 }
 
@@ -238,6 +410,61 @@ void VideoEncoder::encodingLoop()
     // 转换放到编码线程（原本空闲），把主线程从全帧 convertToFormat 中解放。
     if (image.format() != QImage::Format_RGB32 && image.format() != QImage::Format_ARGB32) {
         image = image.convertToFormat(QImage::Format_RGB32);
+    }
+
+    // ---- MPP 硬编路径（RK3588）：不经过 FFmpeg sws/编码器，MPP 内部自带 RGB32->NV12 ----
+    if (mpp_ && mpp_->isActive()) {
+        int br = pendingBitrate_.exchange(0);
+        if (br > 0) {
+            mpp_->setBitrate(br);
+            appliedBitrate_.store(br);
+        }
+        if (forceKeyframe_.exchange(false))
+            mpp_->requestKeyframe();
+
+        qint64 encodeStart = QDateTime::currentMSecsSinceEpoch();
+        QByteArray out;
+        bool key = false;
+        if (!mpp_->encode(image, out, key)) {
+            // 连续失败阈值后认为 MPP 编码器实际不可用（如设备固件/库版本不兼容，
+            // 初始化成功但 encode 始终 null），自动重建为 FFmpeg 软编，避免永久黑屏
+            if (++mppFailCount_ >= 3) {
+                qWarning() << "MPP encoder failing continuously (" << mppFailCount_
+                           << "), falling back to software encoder";
+                initialize(currentCodec_, image.width(), image.height(),
+                           image.width(), image.height(), fps_, (pendingBitrate_.load() > 0 ? pendingBitrate_.load() : 1000000), HwEncodeMode::Off);
+                mppFailCount_ = 0;
+            }
+            continue;
+        }
+        mppFailCount_ = 0;
+        qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
+        emit encodedFrame(out, key, timestamp);
+
+        // 过载监控（与 FFmpeg 路径同一套 EMA 逻辑；MPP 编码很快，通常远低于帧间隔）
+        qint64 encodeMs = QDateTime::currentMSecsSinceEpoch() - encodeStart;
+        encodeEmaMs_ = (encodeEmaMs_ == 0) ? encodeMs : (encodeEmaMs_ * 0.8 + encodeMs * 0.2);
+        double frameIntervalMs = fps_ > 0 ? 1000.0 / fps_ : 33.0;
+        if (frameCount_ > 5) {
+            bool overloadedNow = encodeEmaMs_ > frameIntervalMs * 0.8;
+            if (overloadedNow && !overloaded_) {
+                overloaded_ = true;
+                emit encoderOverload(true);
+            } else if (!overloadedNow && overloaded_ && encodeEmaMs_ < frameIntervalMs * 0.5) {
+                overloaded_ = false;
+                emit encoderOverload(false);
+            }
+            if (overloadedNow) {
+                qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                if (nowMs - lastOverloadLogMs_ > 5000) {
+                    lastOverloadLogMs_ = nowMs;
+                    qWarning() << "VideoEncoder: overloaded, encode EMA"
+                               << QString::number(encodeEmaMs_, 'f', 1) << "ms / frame interval"
+                               << QString::number(frameIntervalMs, 'f', 1) << "ms";
+                }
+            }
+        }
+        continue;
     }
 
     const uint8_t* srcData[1] = { image.bits() };
@@ -351,6 +578,12 @@ void VideoEncoder::shutdown()
             encoderThread_.terminate();
             encoderThread_.wait();
         }
+    }
+
+    if (mpp_) {
+        mpp_->shutdown();
+        delete mpp_;
+        mpp_ = nullptr;
     }
 
     if (swsCtx_) {

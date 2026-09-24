@@ -124,15 +124,23 @@ void JpegCompressor::processLoop()
         QBuffer buffer(&jpegData);
         buffer.open(QIODevice::WriteOnly);
 
-        // JPEG 线程内先缩放再压缩，主线程只需入队（避免全帧缩放阻塞输入处理）
-        if (scalePercent_ < 100) {
-            int sw = image.width() * scalePercent_ / 100;
-            int sh = image.height() * scalePercent_ / 100;
+        // JPEG 线程内先缩放再压缩，主线程只需入队（避免全帧缩放阻塞输入处理）。
+        // 图片模式编码分辨率上限 75%：全分辨率 1920x1080 的 JPEG 软编要 300-500ms，
+        // 是远程控制延迟的主瓶颈（无 WebCodecs/WebRTC 受限的浏览器只能走图片模式）。
+        // 缩到 75% 后编码耗时约减半，远程操控画质仍足够；视频模式不受此限制。
+        const int cfgScale = scalePercent_.load();
+        int effScale = cfgScale < 75 ? cfgScale : 75;
+        if (effScale < 100) {
+            int sw = image.width() * effScale / 100;
+            int sh = image.height() * effScale / 100;
             if (sw > 0 && sh > 0)
                 image = image.scaled(sw, sh, Qt::KeepAspectRatio, Qt::SmoothTransformation);
         }
 
-        if (!image.save(&buffer, "JPEG", quality_)) {
+        // 图片模式画质上限 70：q80 以上 JPEG 编码耗时急剧上升但肉眼提升有限，
+        // q70 编码快约 30%，远程操控更跟手。
+        const int q = quality_.load();
+        if (!image.save(&buffer, "JPEG", q < 70 ? q : 70)) {
             qWarning() << "JpegCompressor: failed to compress frame";
             continue;
         }
@@ -175,6 +183,27 @@ RDPServer::~RDPServer()
     }
 }
 
+// 编码协议字符串 <-> CodecType（前端 setMode/config 消息）。未知值回退 H.264（兼容性最好）
+static CodecType codecFromString(const QString& val)
+{
+    if (val == "hevc") return CodecType::HEVC;
+    if (val == "vp8") return CodecType::VP8;
+    if (val == "vp9") return CodecType::VP9;
+    if (val == "av1") return CodecType::AV1;
+    return CodecType::H264;
+}
+
+static QString codecToString(CodecType c)
+{
+    switch (c) {
+    case CodecType::HEVC: return "hevc";
+    case CodecType::VP8: return "vp8";
+    case CodecType::VP9: return "vp9";
+    case CodecType::AV1: return "av1";
+    default: return "h264";
+    }
+}
+
 void RDPServer::loadServerConfig(const QString& configPath)
 {
     QString path = configPath.isEmpty()
@@ -202,6 +231,8 @@ void RDPServer::loadServerConfig(const QString& configPath)
         root["fps"] = 30;
         root["quality"] = 60;
         root["scale"] = 75;
+        root["codec"] = "h264";
+        root["hw_encode"] = "auto";
 
         if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -236,8 +267,17 @@ void RDPServer::loadServerConfig(const QString& configPath)
         userScale_ = configScale_;
     }
 
+    if (root.contains("codec"))
+        configCodec_ = codecFromString(root["codec"].toString());
+    if (root.contains("hw_encode")) {
+        QString m = root["hw_encode"].toString();
+        configHwEncodeMode_ = (m == "on") ? HwEncodeMode::On
+                          : (m == "off") ? HwEncodeMode::Off : HwEncodeMode::Auto;
+    }
+
     qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_
-            << "fps =" << configFps_ << "quality =" << configQuality_ << "scale =" << configScale_;
+            << "fps =" << configFps_ << "quality =" << configQuality_ << "scale =" << configScale_
+            << "codec =" << codecToString(configCodec_) << "hw_encode =" << (configHwEncodeMode_ == HwEncodeMode::On ? "on" : configHwEncodeMode_ == HwEncodeMode::Off ? "off" : "auto");
 }
 
 void RDPServer::saveServerConfig(const QString& configPath)
@@ -263,6 +303,9 @@ void RDPServer::saveServerConfig(const QString& configPath)
     root["fps"] = configFps_;
     root["quality"] = configQuality_;
     root["scale"] = configScale_;
+    root["codec"] = codecToString(configCodec_);
+    root["hw_encode"] = (configHwEncodeMode_ == HwEncodeMode::On) ? "on"
+                      : (configHwEncodeMode_ == HwEncodeMode::Off) ? "off" : "auto";
 
     if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         QJsonDocument doc(root);
@@ -1492,10 +1535,10 @@ void RDPServer::start()
             int tw = ew * configScale_ / 100, th = eh * configScale_ / 100;
             if (tw > 0 && th > 0) { ew = tw; eh = th; }
         }
-        if (videoEncoder_->initialize(CodecType::H264, sw, sh, ew, eh,
-                configFps_, videoBitrateFor(ew, eh, configFps_))) {
+        if (videoEncoder_->initialize(configCodec_, sw, sh, ew, eh,
+                configFps_, videoBitrateFor(ew, eh, configFps_, configCodec_), configHwEncodeMode_)) {
             currentMode_ = ServerMode::Video;
-            videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_);
+            videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_, configCodec_);
 
             qInfo() << "Video encoder initialized, using video mode.";
         } else
@@ -1612,6 +1655,7 @@ bool RDPServer::startCapture()
         mode["type"] = "mode_changed";
         mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
         mode["hwEncode"] = hwEncodeAvailable();
+        mode["codec"] = codecToString(configCodec_);
 #if defined(USE_WEBRTC) && defined(USE_FFMPEG)
         mode["webrtc"] = true;
 #else
@@ -2218,12 +2262,14 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 int x = input["x"].toInt();
                 int y = input["y"].toInt();
                 inputManager_->injectMouseMove(x, y);
+                if (screenCapturer_) screenCapturer_->forceNextFrame();
             } else if (type == "mousedown" || type == "mouseup") {
                 int x = input["x"].toInt();
                 int y = input["y"].toInt();
                 int button = input["button"].toInt();
                 bool isDown = (type == "mousedown");
                 inputManager_->injectMouseButton(x, y, button, isDown);
+                if (screenCapturer_) screenCapturer_->forceNextFrame();
             } else if (type == "keydown" || type == "keyup") {
                 int keycode = input["keycode"].toInt();
                 QString code = input["code"].toString();
@@ -2233,9 +2279,11 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 bool shift = input["shift"].toBool();
                 bool isChar = input["isChar"].toBool();
                 inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar);
+                if (screenCapturer_) screenCapturer_->forceNextFrame();
             } else if (type == "wheel") {
                 int delta = input["delta"].toInt();
                 inputManager_->injectWheel(delta);
+                if (screenCapturer_) screenCapturer_->forceNextFrame();
             }
         }
     }
@@ -2330,6 +2378,13 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             configQuality_ = jpegQ;
             jpegCompressor_->setQuality(jpegQ);
             jpegCompressor_->setScalePercent(configScale_);
+#ifdef USE_FFMPEG
+            // 画质档位同时决定视频码率（videoBitrateFor 按 configQuality_ 估算）。
+            // 显式重建编码器让画质在视频/WebRTC 模式下即时生效，避免依赖
+            // “前端附带 fps → fps 分支重建”这条隐式链路（若前端只发 quality 则失效）。
+            if (currentMode_ == ServerMode::Video && videoEncoder_)
+                reinitVideoEncoderForScale();
+#endif
         }
         int newFps = input["fps"].toInt();
         if (newFps >= 1) {
@@ -2357,6 +2412,45 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             if (currentMode_ == ServerMode::Video && videoEncoder_)
                 reinitVideoEncoderForScale();
 #endif
+        }
+        // 编码协议（h264/hevc/vp8/vp9/av1）与硬件编码开关（auto/on/off）：
+        // 视频/FFmpeg 模式下重建编码器即时生效；WebRTC 会话激活期间忽略（WebRTC 固定 H.264）
+#ifdef USE_WEBRTC
+        bool webrtcBusy = !webrtcSessions_.isEmpty();
+#else
+        bool webrtcBusy = false;
+#endif
+        QString codecStr = input["codec"].toString();
+        if (!codecStr.isEmpty()) {
+            CodecType c = codecFromString(codecStr);
+            if (c != configCodec_) {
+                configCodec_ = c;
+                saveServerConfig(QString());
+#ifdef USE_FFMPEG
+                if (currentMode_ == ServerMode::Video && videoEncoder_ && !webrtcBusy) {
+                    reinitVideoEncoderForScale();
+                } else if (webrtcBusy) {
+                    qWarning() << "Ignoring codec switch while WebRTC active (WebRTC stays H.264)";
+                }
+#endif
+            }
+        }
+        QString hwModeStr = input["hw_encode"].toString();
+        if (!hwModeStr.isEmpty()) {
+            HwEncodeMode m = HwEncodeMode::Auto;
+            if (hwModeStr == "on") m = HwEncodeMode::On;
+            else if (hwModeStr == "off") m = HwEncodeMode::Off;
+            if (m != configHwEncodeMode_) {
+                configHwEncodeMode_ = m;
+                saveServerConfig(QString());
+#ifdef USE_FFMPEG
+                if (currentMode_ == ServerMode::Video && videoEncoder_ && !webrtcBusy) {
+                    reinitVideoEncoderForScale();
+                } else if (webrtcBusy) {
+                    qWarning() << "Ignoring hw_encode switch while WebRTC active";
+                }
+#endif
+            }
         }
     } else if (type == "file_list") {
         emit requestFileList(clientId, input["path"].toString());
@@ -2554,6 +2648,7 @@ void RDPServer::switchToImageMode()
     notification["type"] = "mode_changed";
     notification["mode"] = "image";
     notification["hwEncode"] = hwEncodeAvailable();
+    notification["codec"] = codecToString(configCodec_);
     wsServer_->broadcastJson(notification);
 
     qInfo() << "Switched to image mode";
@@ -2578,6 +2673,11 @@ bool RDPServer::switchToVideoMode()
             this, &RDPServer::onEncodedFrame);
         connect(videoEncoder_.get(), &VideoEncoder::codecConfigChanged,
             this, &RDPServer::onCodecConfigChanged);
+        connect(videoEncoder_.get(), &VideoEncoder::encoderReady,
+            this, [this]() {
+                if (screenCapturer_)
+                    screenCapturer_->forceNextFrame();
+            });
         connect(videoEncoder_.get(), &VideoEncoder::encoderOverload,
             this, [this](bool overloaded) {
                 if (!videoEncoder_) return;
@@ -2605,12 +2705,12 @@ bool RDPServer::switchToVideoMode()
             encH = th;
         }
     }
-    if (!videoEncoder_->initialize(CodecType::H264, sw, sh, encW, encH,
-            configFps_, videoBitrateFor(encW, encH, configFps_))) {
+    if (!videoEncoder_->initialize(configCodec_, sw, sh, encW, encH,
+            configFps_, videoBitrateFor(encW, encH, configFps_, configCodec_), configHwEncodeMode_)) {
         qWarning() << "Failed to initialize video encoder, staying in image mode";
         return false;
     }
-    videoBaseBitrate_ = videoBitrateFor(encW, encH, configFps_);
+    videoBaseBitrate_ = videoBitrateFor(encW, encH, configFps_, configCodec_);
 
     currentMode_ = ServerMode::Video;
 
@@ -2619,6 +2719,7 @@ bool RDPServer::switchToVideoMode()
     notification["type"] = "mode_changed";
     notification["mode"] = "video";
     notification["hwEncode"] = hwEncodeAvailable();
+    notification["codec"] = codecToString(configCodec_);
     wsServer_->broadcastJson(notification);
 
     qInfo() << "Switched to video mode";
@@ -2642,9 +2743,9 @@ void RDPServer::reinitVideoEncoderForScale()
     }
 
     videoEncoder_->shutdown();
-    if (videoEncoder_->initialize(CodecType::H264, sw, sh, ew, eh,
-            configFps_, videoBitrateFor(ew, eh, configFps_))) {
-        videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_);
+    if (videoEncoder_->initialize(configCodec_, sw, sh, ew, eh,
+            configFps_, videoBitrateFor(ew, eh, configFps_, configCodec_), configHwEncodeMode_)) {
+        videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_, configCodec_);
         videoEncoder_->requestKeyframe();
         qInfo() << "Video encoder re-initialized for scale" << configScale_ << "at" << ew << "x" << eh;
     } else {
@@ -2656,7 +2757,7 @@ void RDPServer::reinitVideoEncoderForScale()
 bool RDPServer::hwEncodeAvailable() const
 {
 #ifdef USE_FFMPEG
-    return VideoEncoder::isHwAcceleratedAvailable();
+    return VideoEncoder::isHwAcceleratedAvailable(configCodec_);
 #else
     return false;
 #endif
@@ -2664,7 +2765,7 @@ bool RDPServer::hwEncodeAvailable() const
 
 // 依据编码分辨率、帧率与画质档位估算 H.264 码率，
 // 低分辨率/低画质下自动降低码率以节省单板 CPU，高分辨率下保证可用画质。
-int RDPServer::videoBitrateFor(int encW, int encH, int fps) const
+int RDPServer::videoBitrateFor(int encW, int encH, int fps, CodecType codec) const
 {
     double bitsPerPixel;
     switch (configQuality_) {
@@ -2673,6 +2774,9 @@ int RDPServer::videoBitrateFor(int encW, int encH, int fps) const
     case 35: bitsPerPixel = 0.08; break; // low / verylow
     default: bitsPerPixel = 0.10; break;
     }
+    // HEVC/VP9/AV1 压缩效率约为 H.264 的两倍，同画质下码率减半，节省带宽
+    if (codec == CodecType::HEVC || codec == CodecType::VP9 || codec == CodecType::AV1)
+        bitsPerPixel *= 0.5;
     qint64 pixels = static_cast<qint64>(encW) * encH;
     qint64 bitrate = static_cast<qint64>(pixels * bitsPerPixel * qMax(1, fps));
     // 实际范围：150kbps ~ 10Mbps
@@ -2787,6 +2891,10 @@ void RDPServer::onWebRtcMessage(const QString& clientId, const QJsonObject& msg)
     } else if (type == "signal_ice") {
         if (WebRtcSession* s = webrtcSessions_.value(clientId))
             s->handleIce(msg["candidate"].toString(), msg["mid"].toString());
+    } else if (type == "signal_close") {
+        // 前端主动关闭 WebRTC（如切到 FFmpeg/图片模式）：销毁会话，
+        // 避免残留会话使 webrtcBusy 恒真而阻塞后续 codec/hw_encode 切换
+        stopWebRtcSession(clientId);
     }
 }
 

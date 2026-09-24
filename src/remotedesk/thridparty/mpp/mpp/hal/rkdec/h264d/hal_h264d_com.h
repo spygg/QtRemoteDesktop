@@ -1,0 +1,28 @@
+/* SPDX-License-Identifier: Apache-2.0 OR MIT */
+/*
+ * Copyright (c) 2025 Rockchip Electronics Co., Ltd.
+ */
+
+#ifndef HAL_H264D_COM_H
+#define HAL_H264D_COM_H
+
+#include "rk_mpi_cmd.h"
+#include "vdpu38x_com.h"
+#include "hal_h264d_global.h"
+
+#define H264_CTU_SIZE      16
+
+extern const RK_U32 rkv_cabac_table[928];
+
+MPP_RET vdpu3xx_h264d_deinit(void *hal);
+MPP_RET vdpu_h264d_reset(void *hal);
+MPP_RET vdpu_h264d_flush(void *hal);
+MPP_RET vdpu38x_h264d_control(void *hal, MpiCmd cmd_type, void *param);
+MPP_RET vdpu38x_h264d_prepare_spspps(H264dHalCtx_t *p_hal, RK_U64 *data, RK_U32 len);
+MPP_RET vdpu38x_h264d_prepare_scanlist(H264dHalCtx_t *p_hal, RK_U8 *data, RK_U32 len);
+void vdpu38x_h264d_rcb_setup(void *hal, HalTaskInfo *task,
+                             Vdpu38xRcbRegSet *rcb_regs, Vdpu38xRcbCalc_f func);
+void hal_h264d_explain_input_buffer(void *hal, HalDecTask *task);
+void vdpu38x_h264d_dbg_ref_frames(H264dHalCtx_t *p_hal);
+
+#endif /* HAL_H264D_COM_H */

@@ -85,6 +85,7 @@ public:
     void stop();
     void suspend();
     void resume();
+    void forceNextFrame();   // 输入注入后强制下一帧通过校验（光标移动不产生 XDamage）
     void setFps(int fps);
 
     int width() const {
@@ -139,7 +140,8 @@ private:
     int fps_ = 30;
 
     quint16 lastFrameChecksum_ = 0;
-    bool forceSendNextFrame_ = false; // 切屏后强制发送下一帧（旧校验和语义失效）
+    bool forceSendNextFrame_ = false; // 兼容保留（部分平台按 bool 判定）
+    int forceFrameCount_ = 0;         // 强制连续推送帧数（resume 后预热、切屏后重置校验）
     bool screenLocked_ = false;
     int dxgiRetryCount_ = 0;
 

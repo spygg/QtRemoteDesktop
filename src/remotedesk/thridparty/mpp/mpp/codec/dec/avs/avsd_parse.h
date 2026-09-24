@@ -1,0 +1,200 @@
+/* SPDX-License-Identifier: Apache-2.0 OR MIT */
+/*
+ * Copyright (c) 2015 Rockchip Electronics Co., Ltd.
+ */
+
+#ifndef AVSD_PARSE_H
+#define AVSD_PARSE_H
+
+#include "parser_api.h"
+#include "mpp_bitread.h"
+
+#include "avsd_debug.h"
+#include "avsd_syntax.h"
+
+#define MAX_STREAM_SIZE     (2*1024*1024)
+
+//!< NALU type
+#define SEQUENCE_DISPLAY_EXTENTION     0x00000002
+#define COPYRIGHT_EXTENTION            0x00000004
+#define PICTURE_DISPLAY_EXTENTION      0x00000007
+#define CAMERA_PARAMETERS_EXTENTION    0x0000000B
+#define SLICE_MIN_START_CODE           0x00000100
+#define SLICE_MAX_START_CODE           0x000001AF
+#define VIDEO_SEQUENCE_START_CODE      0x000001B0
+#define VIDEO_SEQUENCE_END_CODE        0x000001B1
+#define USER_DATA_CODE                 0x000001B2
+#define I_PICUTRE_START_CODE           0x000001B3
+#define EXTENSION_START_CODE           0x000001B5
+#define PB_PICUTRE_START_CODE          0x000001B6
+#define VIDEO_EDIT_CODE                0x000001B7
+#define VIDEO_TIME_CODE                0x000001E0
+
+
+#define EDGE_SIZE                     16
+#define MB_SIZE                       16
+#define YUV420                         0
+
+//!< picture type
+enum avsd_picture_type_e {
+    I_PICTURE = 0,
+    P_PICTURE = 1,
+    B_PICTURE = 2
+};
+
+typedef struct avsd_sequence_header_t {
+    RK_U8  profile_id;
+    RK_U8  level_id;
+    RK_U8  progressive_sequence;
+    RK_U8  version;
+    RK_U32 horizontal_size;
+    RK_U32 vertical_size;
+
+    RK_U8  chroma_format;
+    RK_U8  sample_precision;
+    RK_U8  aspect_ratio;
+    RK_U8  frame_rate_code;
+    RK_U32 bit_rate;
+    RK_U8  low_delay;
+    RK_U8  version_checked;
+    RK_U32 bbv_buffer_size;
+} AvsdSeqHeader_t;
+
+//!< sequence display extension header
+typedef struct avsd_seqence_extension_header_t {
+    RK_U32 video_format;
+    RK_U32 sample_range;
+    RK_U32 color_description;
+    RK_U32 color_primaries;
+    RK_U32 transfer_characteristics;
+    RK_U32 matrix_coefficients;
+    RK_U32 display_horizontalSize;
+    RK_U32 display_verticalSize;
+} AvsdSeqExtHeader_t;
+
+typedef struct avsd_picture_header {
+    RK_U16 bbv_delay;
+    RK_U16 bbv_delay_extension;
+
+    RK_U8  picture_coding_type;
+    RK_U8  time_code_flag;
+    RK_U32 time_code;
+    RK_U8  picture_distance;        // poc
+    RK_U32 bbv_check_times;
+    RK_U8  progressive_frame;
+    RK_U8  picture_structure;
+    RK_U8  advanced_pred_mode_disable;
+    RK_U8  top_field_first;
+    RK_U8  repeat_first_field;
+    RK_U8  fixed_picture_qp;
+    RK_U8  picture_qp;
+    RK_U8  picture_reference_flag;
+
+    RK_U8  no_forward_reference_flag;
+    RK_U8  pb_field_enhanced_flag;
+
+    RK_U8  skip_mode_flag;
+    RK_U8  loop_filter_disable;
+    RK_U8  loop_filter_parameter_flag;
+    RK_U32 alpha_c_offset;
+    RK_U32 beta_offset;
+
+    RK_U8  weighting_quant_flag;
+    RK_U8  chroma_quant_param_disable;
+    RK_S32 chroma_quant_param_delta_cb;
+    RK_S32 chroma_quant_param_delta_cr;
+    RK_U32 weighting_quant_param_index;
+    RK_U32 weighting_quant_model;
+    RK_S32 weighting_quant_param_delta1[6];
+    RK_S32 weighting_quant_param_delta2[6];
+    RK_S32 weighting_quant_param[6];
+    RK_U8  aec_enable;
+} AvsdPicHeader_t;
+
+typedef struct avsd_frame_t {
+    RK_U32   valid;
+    RK_U32   idx;
+
+    RK_U32   pic_type;
+    RK_U32   frame_mode; //!< set mpp frame flag
+    RK_U32   width;
+    RK_U32   height;
+    RK_U32   ver_stride;
+    RK_U32   hor_stride;
+    RK_S64   pts;
+    RK_S64   dts;
+
+    RK_S32   stream_len;
+    RK_S32   stream_offset;
+    RK_U32   had_display;
+    RK_S32   slot_idx;
+} AvsdFrame_t;
+
+typedef struct avsd_memory_t {
+    struct avsd_syntax_t       syntax;
+    struct avsd_frame_t        save[3];
+    BitReadCtx_t               bitctx;
+} AvsdMemory_t;
+
+//!< decoder parameters
+typedef struct avs_dec_ctx_t {
+    MppBufSlots              frame_slots;
+    MppBufSlots              packet_slots;
+
+    MppPacket                task_pkt;
+    RK_U32                   frame_no;
+    ParserCfg                init;
+    RK_U8                    got_eos;
+    RK_U32                   pkt_no;
+
+    struct avsd_memory_t    *mem;
+    RK_U8                   *streambuf;
+    RK_U32                   stream_len;
+    RK_U32                   stream_size;
+
+    BitReadCtx_t            *bx;
+    RK_U32                   left_length;
+
+    AvsdSeqHeader_t          vsh;
+    AvsdSeqExtHeader_t       ext;
+    AvsdPicHeader_t          ph;
+    AvsdSyntax_t            *syn;
+    AvsdFrame_t             *dpb[2]; //!<  2 refer frames or 4 refer field
+    AvsdFrame_t             *cur;    //!< for decoder field
+
+    RK_U32                   need_split;
+    RK_U32                   state;
+    RK_U32                   vop_header_found;
+    RK_U32                   got_vsh;
+    RK_U32                   got_ph;
+    RK_U32                   got_keyframe;
+    RK_U32                   mb_width;
+    RK_U32                   mb_height;
+    RK_U32                   vec_flag; //!< video_edit_code_flag
+
+    RK_U32                   disable_error;
+    RK_U32                   dis_err_clr_mark;
+} AvsdCtx_t;
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
+MPP_RET avsd_free_resource(AvsdCtx_t *p_dec);
+MPP_RET avsd_reset_parameters(AvsdCtx_t *p_dec);
+MPP_RET set_frame_output(AvsdCtx_t *p_dec, AvsdFrame_t *p);
+
+MPP_RET avsd_set_dpb(AvsdCtx_t *p_dec, HalDecTask *task);
+MPP_RET avsd_commit_syntaxs(AvsdSyntax_t *syn, HalDecTask *task);
+MPP_RET avsd_fill_parameters(AvsdCtx_t *p_dec, AvsdSyntax_t *syn);
+
+MPP_RET avsd_update_dpb(AvsdCtx_t *p_dec);
+
+MPP_RET avsd_parser_split(AvsdCtx_t *ctx, MppPacket *dst, MppPacket *src);
+MPP_RET avsd_parse_stream(AvsdCtx_t *p_dec, HalDecTask *task);
+
+#ifdef  __cplusplus
+}
+#endif
+
+#endif /* AVSD_PARSE_H */

@@ -441,8 +441,8 @@ void ScreenCapturer::captureFrame()
             // 无新帧（如静止时 Damage 为空）：同样递增 idle 计数并降频，
             // 避免 capture timer 在无变化时保持全帧率空转消耗 CPU。
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-                captureTimer_->setInterval(1000);
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
             return;
         }
 
@@ -469,13 +469,15 @@ void ScreenCapturer::captureFrame()
         }
 
         quint16 checksum = quickFrameChecksum(frame);
-        if (!forceSendNextFrame_ && checksum == lastFrameChecksum_) {
+        if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-                captureTimer_->setInterval(1000);
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
             return;
         }
         forceSendNextFrame_ = false;
+        if (forceFrameCount_ > 0)
+            forceFrameCount_--;
         // 画面有变化，恢复全帧率
         idleCount_ = 0;
         if (captureTimer_->interval() != 1000 / fps_)
@@ -511,8 +513,8 @@ void ScreenCapturer::captureFrame()
 
         if (!updated) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-                captureTimer_->setInterval(1000);
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
             return;
         }
 
@@ -531,16 +533,16 @@ void ScreenCapturer::captureFrame()
         // 空帧 / 0 尺寸帧保护（Wayland 流初始化中可能提交 0 宽高帧）
         if (frame.isNull() || frame.width() <= 0 || frame.height() <= 0) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-                captureTimer_->setInterval(1000);
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
             return;
         }
 
         quint16 checksum = quickFrameChecksum(frame);
         if (checksum == lastFrameChecksum_) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-                captureTimer_->setInterval(1000);
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
             return;
         }
         idleCount_ = 0;
@@ -573,8 +575,8 @@ void ScreenCapturer::captureFrame()
     quint16 checksum = quickFrameChecksum(frame);
     if (checksum == lastFrameChecksum_) {
         idleCount_++;
-        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-            captureTimer_->setInterval(1000);
+        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+            captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
         return;
     }
     idleCount_ = 0;

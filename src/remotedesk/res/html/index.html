@@ -765,12 +765,26 @@
         </div>
         <div class="dropdown-section">
             <div class="dropdown-title">视频模式</div>
-            <div class="dropdown-note">WebRTC/FFmpeg 需服务端支持 H.264 编码；图片为 JPEG 帧</div>
+            <div class="dropdown-note">WebRTC/FFmpeg 需服务端编码支持；图片为 JPEG 帧</div>
             <div class="dropdown-options" data-key="videomode">
                 <button data-value="auto" id="mode-auto-btn">auto</button>
                 <button data-value="webrtc">WebRTC</button>
                 <button data-value="ffmpeg">FFmpeg</button>
                 <button data-value="image">图片</button>
+            </div>
+        </div>
+        <div class="dropdown-section">
+            <div class="dropdown-title">编码协议</div>
+            <div class="dropdown-note">FFmpeg/WS 视频模式生效；WebRTC 固定 H.264。浏览器不支持的解码项自动禁用</div>
+            <div class="dropdown-options" id="codec-options" data-key="codec"></div>
+        </div>
+        <div class="dropdown-section">
+            <div class="dropdown-title">编码硬件加速</div>
+            <div class="dropdown-note">auto=优先硬编失败回退软编；on=强制硬编；off=禁用硬编</div>
+            <div class="dropdown-options" data-key="hw_encode">
+                <button data-value="auto">auto</button>
+                <button data-value="on">on</button>
+                <button data-value="off">off</button>
             </div>
         </div>
     </div>
@@ -876,6 +890,8 @@
                 quality: 'medium', fps: 30, scale: 75, resolution: '',
                 videomode: (localStorage.getItem('rd_videomode') || 'auto'),
                 screen: -1,
+                codec: (localStorage.getItem('rd_codec') === 'hevc' ? 'hevc' : 'h264'),
+                hw_encode: (localStorage.getItem('rd_hwencode') || 'auto'),
             },
             displayStreamMode: 'ffmpeg', // 配置菜单高亮用的当前生效模式（webrtc/ffmpeg/image）
             modeRestored: false, // 刷新后是否已按持久化模式恢复过一次
@@ -980,6 +996,8 @@
             if (webrtcState.pc) {
                 webrtcState.pc.close();
                 webrtcState.pc = null;
+                // 通知服务端销毁本客户端的 WebRTC 会话，避免残留会话阻塞后续 codec/hw 切换
+                send({ type: 'signal_close' });
             }
             // 自动模式下 WebRTC 断开后按服务端视频模式高亮 FFmpeg（WS H.264）
             if (state.currentConfig.videomode === 'auto' && state.displayStreamMode === 'webrtc') {
@@ -1004,44 +1022,48 @@
                     if (!webrtcState.active && !webrtcState.pc) initWebRTC();
                 }, 400);
             } else if (mode === 'ffmpeg') {
-                // 视频模式但不发起 WebRTC：H.264 帧经 WS 传输，用 WebCodecs 解码
+                // 视频模式但不发起 WebRTC：H.264/H.265 帧经 WS 传输，用 WebCodecs 解码
                 webrtcClose();
                 if (state.decoder) state.decoder.imageRequested = false;
                 send({ type: 'set_mode', mode: 'video' });
+                // 与服务端同步编码协议与硬件开关（服务端按此重建编码器）
+                send({ type: 'config', codec: state.currentConfig.codec, hw_encode: state.currentConfig.hw_encode });
             } else if (mode === 'image') {
                 // 图片模式：JPEG 帧
                 webrtcClose();
                 send({ type: 'set_mode', mode: 'image' });
             } else if (mode === 'auto') {
-                // auto：按服务端硬件能力自动选路
-                if (state.hwEncode) {
-                    if (!webrtcState.active && !webrtcState.pc) {
-                        webrtcClose();
-                        send({ type: 'set_mode', mode: 'webrtc' });
-                        setTimeout(() => {
-                            if (!webrtcState.active && !webrtcState.pc) initWebRTC();
-                        }, 400);
-                        state.displayStreamMode = 'ffmpeg';
-                    } else {
-                        state.displayStreamMode = webrtcState.active ? 'webrtc' : 'ffmpeg';
-                    }
-                } else {
-                    // 无硬件加速 → 图片模式(JPEG)
-                    webrtcClose();
-                    send({ type: 'set_mode', mode: 'image' });
-                    state.displayStreamMode = 'image';
+                // auto：优先 WebRTC——浏览器 <video> 原生 H.264 解码，不依赖 WebCodecs，
+                // 局域网 UDP 直连延迟最低；WebRTC 无法建立时退 WS 视频（WebCodecs），
+                // 两者都不可用时服务端回退图片(JPEG)。
+                webrtcClose();
+                send({ type: 'set_mode', mode: 'video' });
+                send({ type: 'config', codec: state.currentConfig.codec, hw_encode: state.currentConfig.hw_encode });
+                if (!webrtcState.active && !webrtcState.pc) {
+                    setTimeout(() => { if (!webrtcState.active && !webrtcState.pc) initWebRTC(); }, 400);
                 }
+                state.displayStreamMode = 'ffmpeg';
             }
             updateDropdownActive();
         }
 
         // ==================== WebCodecs 解码器 ====================
         class H264Decoder {
-            constructor() {
+            constructor(codec) {
+                this.codec = codec || 'h264';
                 this.decoder = null;
                 this.supported = false;
                 this.configured = false;
                 this.init();
+            }
+
+            // WebCodecs codec 字符串（H.264 baseline L5.2 / HEVC main L5.0）
+            codecString() {
+                if (this.codec === 'hevc') return 'hev1.1.6.L120.90';
+                if (this.codec === 'vp8') return 'vp8';
+                if (this.codec === 'vp9') return 'vp09.00.10.08';
+                if (this.codec === 'av1') return 'av01.0.04M.08';
+                return 'avc1.420034';
             }
 
             async init() {
@@ -1064,12 +1086,12 @@
             }
 
             configure(extraData) {
-                // codec 按 baseline、level 5.2 声明（覆盖最高 1080p60 编码），实际级别由 SPS 决定
+                // 按当前协议声明 codec（H.264 baseline L5.2 / HEVC main L5.0），实际级别由流内参数决定
                 this.decoder.configure({
-                    codec: 'avc1.420034',
+                    codec: this.codecString(),
                     optimizeForLatency: true,
                     hardwareAcceleration: 'prefer-hardware',
-                    description: extraData // SPS/PPS
+                    description: extraData // H.264 SPS/PPS；HEVC VPS/SPS/PPS
                 });
                 this.configured = true;
             }
@@ -1089,10 +1111,10 @@
 
                 if (!this.configured && isKeyframe) {
                     // 关键帧：即使服务端未发 codec_config，也需真实 configure。
-                    // Annex B 格式含内联 SPS/PPS，缺省 description 可解析。
+                    // Annex B 格式含内联 SPS/PPS（HEVC 含 VPS/SPS/PPS），缺省 description 可解析。
                     try {
                         this.decoder.configure({
-                            codec: 'avc1.420034',
+                            codec: this.codecString(),
                             optimizeForLatency: true,
                             hardwareAcceleration: 'prefer-hardware'
                         });
@@ -1154,8 +1176,9 @@
                 else updateStatus('');
                 overlay.classList.remove('active');
 
-                // 初始化解码器
-                state.decoder = new H264Decoder();
+                // 初始化解码器（按持久化的编码协议）
+                state.decoder = new H264Decoder(state.currentConfig.codec || 'h264');
+                buildCodecOptions();
 
                 // 发送认证
                 send({ type: 'auth', version: '1.0' });
@@ -1259,25 +1282,77 @@
         }
 
 
+        // 图片模式（JPEG）兜底渲染：单飞 + 最新帧缓存。
+        // 服务端按帧率推帧，若本机 Image 解码/绘制跟不上（高分辨率 JPEG 软解较慢），
+        // 旧实现每个帧都创建 Image 排队 onload，画面延迟会随队列无限累积（可达 10s+）。
+        // 这里解码绘制期间只保留最新一帧，完成后立即绘制最新，延迟恒定为一帧解码时间。
+        let jpegDecoding = false;
+        let jpegPending = null;
         function displayJpegFrame(jpegData) {
-            const blob = new Blob([jpegData], { type: 'image/jpeg' });
+            if (jpegDecoding) {
+                jpegPending = jpegData; // 只留最新
+                return;
+            }
+            jpegDecoding = true;
+            const data = jpegData;
+            const blob = new Blob([data], { type: 'image/jpeg' });
             const url = URL.createObjectURL(blob);
             const img = new Image();
-            img.onload = () => {
+            // 解码完成后的统一绘制：drawImage 直接用位图对象（Image 或 ImageBitmap）
+            const finish = (d, revoke) => {
                 if (state.screenWidth === 0) {
                     // 未收到 screen_info 前用 JPEG 实际尺寸兜底，避免拉伸变形
-                    state.canvas.width = img.naturalWidth || 1920;
-                    state.canvas.height = img.naturalHeight || 1080;
+                    state.canvas.width = d.width || 1920;
+                    state.canvas.height = d.height || 1080;
                     updateScale();
                 }
-                state.ctx.drawImage(img, 0, 0, state.canvas.width, state.canvas.height);
-                URL.revokeObjectURL(url);
+                state.ctx.drawImage(d.bmp, 0, 0, state.canvas.width, state.canvas.height);
+                if (revoke) URL.revokeObjectURL(url);
                 updateFps();
+                jpegDecoding = false;
+                if (jpegPending) {
+                    const next = jpegPending;
+                    jpegPending = null;
+                    displayJpegFrame(next);
+                }
             };
             img.onerror = () => {
                 URL.revokeObjectURL(url);
+                jpegDecoding = false;
+                if (jpegPending) {
+                    const p = jpegPending;
+                    jpegPending = null;
+                    displayJpegFrame(p);
+                }
             };
-            img.src = url;
+            // 解码降采样到 canvas 实际显示尺寸：高分辨率 JPEG 全尺寸软解慢（1s+），
+            // 按窗口内显示尺寸（约 1/4 像素）解码快 3-4 倍，图片模式延迟显著下降。
+            // 画布内部保持 1920x1080（坐标映射不变），bitmap 绘制时拉伸到画布尺寸，
+            // 再由浏览器缩放到窗口显示，画质对远程操控无感知差异。
+            if (state.screenWidth > 0 && window.createImageBitmap) {
+                let dispW = state.canvas.width, dispH = state.canvas.height;
+                try {
+                    const r = state.canvas.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
+                        dispW = Math.max(1, Math.round(r.width));
+                        dispH = Math.max(1, Math.round(r.height));
+                    }
+                } catch (e) {}
+                createImageBitmap(blob, {
+                    resizeWidth: dispW,
+                    resizeHeight: dispH,
+                    resizeQuality: 'high',
+                }).then(bmp => {
+                    finish({ bmp, width: bmp.width, height: bmp.height }, true);
+                    bmp.close();
+                }).catch(() => {
+                    img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
+                    img.src = url;
+                });
+            } else {
+                img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
+                img.src = url;
+            }
         }
 
         function handleJson(msg) {
@@ -1403,6 +1478,9 @@
                 case 'mode_changed':
                     if (typeof msg.hwEncode === 'boolean')
                         state.hwEncode = msg.hwEncode;
+                    // 记录服务端当前编码协议（供调试/回显；不强制覆盖用户选择）
+                    if (msg.codec && (msg.codec === 'h264' || msg.codec === 'hevc'))
+                        state.serverCodec = msg.codec;
                     // 刷新/重连后按持久化模式恢复一次（服务端重启后默认回到 image）
                     if (!state.modeRestored && state.currentConfig.videomode !== 'auto') {
                         state.modeRestored = true;
@@ -1434,12 +1512,10 @@
                     if (msg.webrtc === true) {
                         const pref = state.currentConfig.videomode;
                         if (pref === 'auto') {
-                            // 无硬件视频加速 → 用图片模式(JPEG)，避免软编 H.264 高 CPU
-                            if (!state.hwEncode) {
-                                if (msg.mode !== 'image')
-                                    send({ type: 'set_mode', mode: 'image' });
-                            } else if (!webrtcState.active && !webrtcState.pc) {
-                                setTimeout(initWebRTC, 500); // 硬件加速可用 → 自动升级 WebRTC
+                            // 无论是否硬件加速都尝试 WebRTC（服务端软编也可走 RTP，
+                            // 浏览器 <video> 原生解码，不依赖 WebCodecs，延迟最低）。
+                            if (!webrtcState.active && !webrtcState.pc) {
+                                setTimeout(initWebRTC, 500);
                             }
                         } else if (pref !== 'ffmpeg' && pref !== 'image' && !webrtcState.active && !webrtcState.pc) {
                             setTimeout(initWebRTC, 500); // 等 WS 稳定后再发起
@@ -1575,6 +1651,9 @@
 
             // 鼠标按钮
             canvas.addEventListener('mousedown', (e) => {
+                // 点击画面时让画布获得焦点，作为远程键盘输入的焦点载体，
+                // 避免与本地输入框（文件路径框等）混淆
+                try { state.canvas.focus({ preventScroll: true }); } catch (err) {}
                 e.preventDefault();
                 const pos = getCanvasPos(e);
                 send({
@@ -1622,6 +1701,10 @@
                 if (e.isComposing) return;
                 // 锁屏密码输入框获取焦点时，不拦截键盘事件（允许 Backspace 等原生行为）
                 if (isLockInputFocused()) return;
+                // 焦点在本地可编辑元素（文件路径框/Shell 输入框等）时不拦截、不转发，
+                // 让浏览器原生输入正常工作；否则 preventDefault 会让输入框像“失去焦点”
+                const ft = e.target;
+                if (ft && (ft.tagName === 'INPUT' || ft.tagName === 'TEXTAREA' || ft.isContentEditable)) return;
 
                 // ---- 工具栏快捷键（仅使用不冲突的键） ----
                 // F11: 全屏切换（浏览器标准快捷键）
@@ -1682,6 +1765,8 @@
             });
 
             // 防止右键菜单
+            canvas.tabIndex = 0;
+            canvas.style.outline = 'none';
             canvas.addEventListener('contextmenu', e => e.preventDefault());
 
             // ---- 共享剪贴板（无缝双向同步） ----
@@ -1786,6 +1871,13 @@
                     ? 'auto(' + (map[state.displayStreamMode] || '') + ')'
                     : 'auto';
             }
+            // 编码硬件加速 auto 按钮标签：auto(硬编/软编)，基于服务端实际可用能力
+            const hwBtn = document.querySelector('#config-dropdown .dropdown-options[data-key="hw_encode"] button[data-value="auto"]');
+            if (hwBtn) {
+                hwBtn.textContent = cfg.hw_encode === 'auto'
+                    ? 'auto(' + (state.hwEncode ? '硬编' : '软编') + ')'
+                    : 'auto';
+            }
             document.querySelectorAll('#config-dropdown .dropdown-options').forEach(group => {
                 const key = group.dataset.key;
                 if (!key) return;
@@ -1846,9 +1938,54 @@
                 if (isNaN(idx) || idx < 0) return;
                 state.currentConfig.screen = idx;
                 send({ type: 'set_output', index: idx });
+            } else if (key === 'codec') {
+                if (state.displayStreamMode === 'webrtc') {
+                    showTransferStatus('WebRTC 模式固定 H.264，请先切换到 FFmpeg 模式', 2500);
+                    return;
+                }
+                if (val !== 'h264' && val !== 'hevc') return;
+                state.currentConfig.codec = val;
+                try { localStorage.setItem('rd_codec', val); } catch (e) {}
+                // 重建解码器等待新协议的关键帧/codec_config；服务端 reinit 后发新流
+                state.decoder = new H264Decoder(val);
+                send({ type: 'config', codec: val });
+            } else if (key === 'hw_encode') {
+                if (val !== 'auto' && val !== 'on' && val !== 'off') return;
+                state.currentConfig.hw_encode = val;
+                try { localStorage.setItem('rd_hwencode', val); } catch (e) {}
+                send({ type: 'config', hw_encode: val });
             }
             updateDropdownActive();
             updateQualityLabel();
+        }
+
+        // 构建编码协议菜单：按浏览器解码能力探测启用项
+        async function buildCodecOptions() {
+            const container = document.getElementById('codec-options');
+            if (!container) return;
+            container.innerHTML = '';
+            const defs = [
+                { v: 'h264', label: 'H.264', codec: 'avc1.420034' },
+                { v: 'hevc', label: 'H.265/HEVC', codec: 'hev1.1.6.L120.90' },
+            ];
+            for (const d of defs) {
+                let ok = true;
+                if ('VideoDecoder' in window) {
+                    try {
+                        const r = await VideoDecoder.isConfigSupported({ codec: d.codec, optimizeForLatency: true });
+                        ok = !!r.supported;
+                    } catch (e) { ok = false; }
+                }
+                const btn = document.createElement('button');
+                btn.dataset.value = d.v;
+                btn.textContent = d.label;
+                if (!ok) {
+                    btn.disabled = true;
+                    btn.style.opacity = '0.4';
+                    btn.title = '浏览器不支持该编码解码';
+                }
+                container.appendChild(btn);
+            }
         }
 
         function buildScreenOptions() {

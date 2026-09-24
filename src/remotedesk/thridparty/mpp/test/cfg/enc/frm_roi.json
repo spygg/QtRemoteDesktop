@@ -1,0 +1,12 @@
+{
+    "frame_idx" : 0,
+    "userdata"  : 0,
+    "userdatas" : 0,
+    "repeat"    : -1,
+    "roi_cnt"   : 2,
+    "osd_cnt"   : 0,
+    "roi" : [
+        { "x" : 0,      "y" : 0,      "w" : 32768, "h" : 16384, "intra" : 0, "quality" : 45, "abs_qp_en" : 1 },
+        { "x" : 16384,  "y" : 16384,  "w" : 32768, "h" : 16384, "intra" : 1, "quality" : 32, "abs_qp_en" : 0 }
+    ]
+}

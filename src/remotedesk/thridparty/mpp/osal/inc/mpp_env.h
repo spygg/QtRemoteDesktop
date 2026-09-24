@@ -1,0 +1,30 @@
+/* SPDX-License-Identifier: Apache-2.0 OR MIT */
+/*
+ * Copyright (c) 2015 Rockchip Electronics Co., Ltd.
+ */
+
+#ifndef MPP_ENV_H
+#define MPP_ENV_H
+
+#include "rk_type.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern RK_U32 mpp_cfg_io_debug;
+extern RK_U32 mpp_hal_debug;
+extern RK_U32 mpp_enc_hal_debug;
+
+RK_S32 mpp_env_get_u32(const char *name, RK_U32 *value, RK_U32 default_value);
+RK_S32 mpp_env_get_str(const char *name, const char **value, const char *default_value);
+
+RK_S32 mpp_env_set_u32(const char *name, RK_U32 value);
+RK_S32 mpp_env_set_str(const char *name, char *value);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* MPP_ENV_H */
+

@@ -18,6 +18,7 @@
 #include <QWaitCondition>
 #include <atomic>
 #include <memory>
+#include "videoencoder.h"
 
 #include "shell.h"
 
@@ -75,7 +76,7 @@ private:
     std::atomic<bool> abort_ { false };
     std::atomic<int> quality_ { 35 };
     std::atomic<int> scalePercent_ { 100 };
-    enum { kMaxQueueSize = 5 };
+    enum { kMaxQueueSize = 1 }; // 只编最新帧，避免编码慢时 FIFO 队列造成画面延迟累积
 };
 
 class RDPServer : public QObject {
@@ -131,7 +132,7 @@ private:
     void handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body);
     void handleShellExec(QTcpSocket* socket, const QByteArray& body);
     QString extractSessionToken(const QByteArray& request);
-    int videoBitrateFor(int encW, int encH, int fps) const;
+    int videoBitrateFor(int encW, int encH, int fps, CodecType codec = CodecType::H264) const;
     QByteArray buildHttpResponse(int statusCode, const QString& statusText,
         const QString& contentType, const QByteArray& body,
         const QString& extraHeaders = QString());
@@ -186,6 +187,8 @@ private:
     int configFps_ = 30;
     int configQuality_ = 60;
     int configScale_ = 75;
+    CodecType configCodec_ = CodecType::H264;        // 编码协议（h264/hevc/vp8/vp9/av1）
+    HwEncodeMode configHwEncodeMode_ = HwEncodeMode::Auto; // 硬件编码开关（auto/on/off）
     int userScale_ = 75;
     bool screenLocked_ = false;
     bool secureInputRunning_ = false;

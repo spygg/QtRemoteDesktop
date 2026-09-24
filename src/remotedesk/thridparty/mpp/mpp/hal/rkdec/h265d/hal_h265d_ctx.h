@@ -1,0 +1,107 @@
+/* SPDX-License-Identifier: Apache-2.0 OR MIT */
+/*
+ * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
+ */
+
+#ifndef HAL_H265D_CTX_H
+#define HAL_H265D_CTX_H
+
+#include "mpp_device.h"
+#include "mpp_hal.h"
+#include "mpp_env.h"
+#include "hal_bufs.h"
+#include "vdpu_com.h"
+#include "hal_dbg.h"
+
+/* before vdpu383 10 buf */
+#define H265D_RCB_BUF_COUNT 11
+
+typedef struct H265dRegBuf_t {
+    RK_S32    use_flag;
+    MppBuffer scaling_list_data;
+    MppBuffer pps_data;
+    MppBuffer rps_data;
+    void      *hw_regs;
+} H265dRegBuf;
+
+typedef struct H265dRcbInfo_t {
+    RK_S32              reg;
+    RK_S32              size;
+    RK_S32              offset;
+} H265dRcbInfo;
+
+typedef struct HalH265dCtx_t {
+    /* for hardware info */
+    MppClientType   client_type;
+    RK_U32          hw_id;
+
+    MppHalCfg       *cfg;
+
+    MppBuffer       cabac_table_data;
+    MppBuffer       scaling_list_data;
+    MppBuffer       pps_data;
+    MppBuffer       rps_data;
+
+    RK_S32          width;
+    RK_S32          height;
+    void            *rcb_ctx;
+    RK_U32          rcb_buf_size;
+    H265dRcbInfo    rcb_info[H265D_RCB_BUF_COUNT];
+    MppBuffer       rcb_buf[VDPU_FAST_REG_SET_CNT];
+
+    void            *hw_regs;
+    H265dRegBuf     g_buf[VDPU_FAST_REG_SET_CNT];
+    RK_U32          fast_mode;
+    RK_U32          fast_mode_err_found;
+    void            *scaling_rk;
+    void            *scaling_qm;
+    HalBufs         cmv_bufs;
+    RK_U32          mv_size;
+    RK_S32          mv_count;
+
+    struct {
+        RK_U32           is_v341   : 1;
+        RK_U32           is_v345   : 1;
+        RK_U32           is_v34x   : 1;
+    };
+    /* rcb info */
+    RK_U32          chroma_fmt_idc;
+    RK_U8           ctu_size;
+    RK_U8           num_row_tiles;
+    RK_U8           bit_depth;
+    RK_U8           error_index[VDPU_FAST_REG_SET_CNT];
+    /* for vdpu34x */
+    MppBuffer       bufs;
+    RK_S32          bufs_fd;
+    RK_U32          offset_cabac;
+    RK_U32          offset_spspps[VDPU_FAST_REG_SET_CNT];
+    RK_U32          offset_rps[VDPU_FAST_REG_SET_CNT];
+    RK_U32          offset_sclst[VDPU_FAST_REG_SET_CNT];
+    RK_U32          spspps_offset;
+    RK_U32          rps_offset;
+    RK_U32          sclst_offset;
+    void            *pps_buf;
+    RK_U32          pps_buf_sz;
+    void            *sw_rps_buf;
+    HalBufs         origin_bufs;
+    MppBuffer       missing_ref_buf;
+    RK_U32          missing_ref_buf_size;
+
+    HalDbgCtx       *dbg_ctx;
+} HalH265dCtx;
+
+typedef struct ScalingList_t {
+    /* This is a little wasteful, since sizeID 0 only needs 8 coeffs,
+     * and size ID 3 only has 2 arrays, not 6. */
+    RK_U8 sl[4][6][64];
+    RK_U8 sl_dc[2][6];
+} scalingList_t;
+
+typedef struct ScalingFactor_Model {
+    RK_U8 scalingfactor0[1248];
+    RK_U8 scalingfactor1[96];     /*4X4 TU Rotate, total 16X4*/
+    RK_U8 scalingdc[12];          /*N1005 Vienna Meeting*/
+    RK_U8 reserverd[4];           /*16Bytes align*/
+} scalingFactor_t;
+
+#endif

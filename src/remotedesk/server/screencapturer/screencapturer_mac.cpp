@@ -135,8 +135,8 @@ void ScreenCapturer::captureFrame()
     quint16 checksum = quickFrameChecksum(frame);
     if (checksum == lastFrameChecksum_) {
         idleCount_++;
-        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-            captureTimer_->setInterval(1000);
+        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+            captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
         return;
     }
     idleCount_ = 0;

@@ -1,0 +1,19 @@
+{
+    "keep_cpb" : 0,
+    "st_cfg_cnt" : 9,
+    "lt_cfg_cnt" : 1,
+    "st_cfg" : [
+        { "is_non_ref": 0, "temporal_id": 0, "ref_mode": 4, "ref_arg": 0, "repeat": 0 },
+        { "is_non_ref": 1, "temporal_id": 3, "ref_mode": 0, "ref_arg": 0, "repeat": 0 },
+        { "is_non_ref": 0, "temporal_id": 2, "ref_mode": 0, "ref_arg": 0, "repeat": 0 },
+        { "is_non_ref": 1, "temporal_id": 3, "ref_mode": 0, "ref_arg": 0, "repeat": 0 },
+        { "is_non_ref": 0, "temporal_id": 1, "ref_mode": 2, "ref_arg": 0, "repeat": 0 },
+        { "is_non_ref": 1, "temporal_id": 3, "ref_mode": 0, "ref_arg": 0, "repeat": 0 },
+        { "is_non_ref": 0, "temporal_id": 2, "ref_mode": 0, "ref_arg": 0, "repeat": 0 },
+        { "is_non_ref": 1, "temporal_id": 3, "ref_mode": 0, "ref_arg": 0, "repeat": 0 },
+        { "is_non_ref": 0, "temporal_id": 0, "ref_mode": 4, "ref_arg": 0, "repeat": 0 }
+    ],
+    "lt_cfg" : [
+        { "lt_idx": 0, "temporal_id": 0, "ref_mode": 2, "ref_arg": 0, "lt_gap": 8, "lt_delay": 0 }
+    ]
+}

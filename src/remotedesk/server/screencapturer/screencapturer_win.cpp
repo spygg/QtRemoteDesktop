@@ -431,8 +431,8 @@ void ScreenCapturer::captureFrame()
                 // 无新帧（DXGI 无桌面更新）：同样递增 idle 计数并降频，
                 // 避免静止时 capture timer 保持全帧率空转消耗 CPU。
                 idleCount_++;
-                if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-                    captureTimer_->setInterval(1000);
+                if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+                    captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
             }
             return;
         }
@@ -474,8 +474,8 @@ void ScreenCapturer::captureFrame()
         quint16 checksum = quickFrameChecksum(frame);
         if (checksum == lastFrameChecksum_) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-                captureTimer_->setInterval(1000);
+            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
             return;
         }
         idleCount_ = 0;
@@ -510,8 +510,8 @@ void ScreenCapturer::captureFrame()
     quint16 checksum = quickFrameChecksum(frame);
     if (checksum == lastFrameChecksum_) {
         idleCount_++;
-        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 1000)
-            captureTimer_->setInterval(1000);
+        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
+            captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
         return;
     }
     idleCount_ = 0;

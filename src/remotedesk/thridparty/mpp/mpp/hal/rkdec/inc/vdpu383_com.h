@@ -1,0 +1,584 @@
+/* SPDX-License-Identifier: Apache-2.0 OR MIT */
+/*
+ * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
+ */
+
+#ifndef VDPU383_COM_H
+#define VDPU383_COM_H
+
+#include "mpp_device.h"
+#include "mpp_buf_slot.h"
+#include "vdpu_com.h"
+
+typedef struct Vdpu383RegVersion_t {
+    struct {
+        RK_U32 minor_ver                      : 8;
+        RK_U32 major_ver                      : 8;
+        RK_U32 prod_num                       : 16;
+    } reg0;
+
+} Vdpu383RegVersion;
+
+typedef struct Vdpu383CtrlReg_t {
+    /* SWREG8_DEC_MODE */
+    RK_U32 reg8_dec_mode;
+
+    struct {
+        RK_U32 fbc_e                          : 1;
+        RK_U32 tile_e                         : 1;
+        RK_U32 reserve0                       : 2;
+        RK_U32 buf_empty_en                   : 1;
+        RK_U32 scale_down_en                  : 1;
+        RK_U32 reserve1                       : 1;
+        RK_U32 pix_range_det_e                : 1;
+        RK_U32 av1_fgs_en                     : 1;
+        RK_U32 reserve2                       : 7;
+        RK_U32 line_irq_en                    : 1;
+        RK_U32 out_cbcr_swap                  : 1;
+        RK_U32 fbc_force_uncompress           : 1;
+        RK_U32 fbc_sparse_mode                : 1;
+        RK_U32 reserve3                       : 12;
+    } reg9;
+
+    struct {
+        RK_U32 strmd_auto_gating_e            : 1;
+        RK_U32 inter_auto_gating_e            : 1;
+        RK_U32 intra_auto_gating_e            : 1;
+        RK_U32 transd_auto_gating_e           : 1;
+        RK_U32 recon_auto_gating_e            : 1;
+        RK_U32 filterd_auto_gating_e          : 1;
+        RK_U32 bus_auto_gating_e              : 1;
+        RK_U32 ctrl_auto_gating_e             : 1;
+        RK_U32 rcb_auto_gating_e              : 1;
+        RK_U32 err_prc_auto_gating_e          : 1;
+        RK_U32 reserve0                       : 22;
+    } reg10;
+
+    struct {
+        RK_U32 reserve0                       : 9;
+        RK_U32 dec_timeout_dis                : 1;
+        RK_U32 reserve1                       : 22;
+    } reg11;
+
+    struct {
+        RK_U32 reserve0                       : 7;
+        RK_U32 cache_hash_mask                : 25;
+    } reg12;
+
+    /* SWREG13_CORE_TIMEOUT_THRESHOLD */
+    RK_U32 reg13_core_timeout_threshold;
+
+    struct {
+        RK_U32 dec_line_irq_step              : 16;
+        RK_U32 dec_line_offset_y_st           : 16;
+    } reg14;
+
+    /* copy from llp, media group add */
+    struct {
+        RK_U32 rkvdec_frame_rdy_sta           : 1;
+        RK_U32 rkvdec_strm_error_sta          : 1;
+        RK_U32 rkvdec_core_timeout_sta        : 1;
+        RK_U32 rkvdec_ip_timeout_sta          : 1;
+        RK_U32 rkvdec_bus_error_sta           : 1;
+        RK_U32 rkvdec_buffer_empty_sta        : 1;
+        RK_U32 rkvdec_colmv_ref_error_sta     : 1;
+        RK_U32 rkvdec_error_spread_sta        : 1;
+        RK_U32 create_core_timeout_sta        : 1;
+        RK_U32 wlast_miss_match_sta           : 1;
+        RK_U32 rkvdec_core_rst_rdy_sta        : 1;
+        RK_U32 rkvdec_ip_rst_rdy_sta          : 1;
+        RK_U32 force_busidle_rdy_sta          : 1;
+        RK_U32 ltb_pause_rdy_sta              : 1;
+        RK_U32 ltb_end_flag                   : 1;
+        RK_U32 unsupport_decmode_error_sta    : 1;
+        RK_U32 wmask_bits                     : 15;
+        RK_U32 reserve0                       : 1;
+    } reg15;
+
+    struct {
+        RK_U32 error_proc_disable             : 1;
+        RK_U32 reserve0                       : 7;
+        RK_U32 error_spread_disable           : 1;
+        RK_U32 reserve1                       : 15;
+        RK_U32 roi_error_ctu_cal_en           : 1;
+        RK_U32 reserve2                       : 7;
+    } reg16;
+
+    struct {
+        RK_U32 roi_x_ctu_offset_st            : 12;
+        RK_U32 reserve0                       : 4;
+        RK_U32 roi_y_ctu_offset_st            : 12;
+        RK_U32 reserve1                       : 4;
+    } reg17;
+
+    struct {
+        RK_U32 roi_x_ctu_offset_end           : 12;
+        RK_U32 reserve0                       : 4;
+        RK_U32 roi_y_ctu_offset_end           : 12;
+        RK_U32 reserve1                       : 4;
+    } reg18;
+
+    struct {
+        RK_U32 avs2_ref_error_field           : 1;
+        RK_U32 avs2_ref_error_topfield        : 1;
+        RK_U32 ref_error_topfield_used        : 1;
+        RK_U32 ref_error_botfield_used        : 1;
+        RK_U32 reserve0                       : 28;
+    } reg19;
+
+    /* SWREG20_CABAC_ERROR_EN_LOWBITS */
+    RK_U32 reg20_cabac_error_en_lowbits;
+
+    /* SWREG21_CABAC_ERROR_EN_HIGHBITS */
+    RK_U32 reg21_cabac_error_en_highbits;
+
+    RK_U32 reserve_reg22;
+
+    struct {
+        RK_U32 fill_y                         : 10;
+        RK_U32 fill_u                         : 10;
+        RK_U32 fill_v                         : 10;
+        RK_U32 reserve0                       : 2;
+    } reg23;
+
+    RK_U32 reserve_reg24_26[3];
+
+    struct {
+        RK_U32 reserve0                       : 4;
+        RK_U32 ctu_align_wr_en                : 1;
+        RK_U32 reserve1                       : 27;
+    } reg27;
+
+    struct {
+        RK_U32 axi_perf_work_e                : 1;
+        RK_U32 reserve0                       : 2;
+        RK_U32 axi_cnt_type                   : 1;
+        RK_U32 rd_latency_id                  : 8;
+        RK_U32 reserve1                       : 4;
+        RK_U32 rd_latency_thr                 : 12;
+        RK_U32 reserve2                       : 4;
+    } reg28;
+
+    struct {
+        RK_U32 addr_align_type                : 2;
+        RK_U32 ar_cnt_id_type                 : 1;
+        RK_U32 aw_cnt_id_type                 : 1;
+        RK_U32 ar_count_id                    : 8;
+        RK_U32 reserve0                       : 4;
+        RK_U32 aw_count_id                    : 8;
+        RK_U32 rd_band_width_mode             : 1;
+        RK_U32 reserve1                       : 7;
+    } reg29;
+
+    struct {
+        RK_U32 axi_wr_qos_level               : 4;
+        RK_U32 reserve0                       : 4;
+        RK_U32 axi_wr_qos                     : 4;
+        RK_U32 reserve1                       : 4;
+        RK_U32 axi_rd_qos_level               : 4;
+        RK_U32 reserve2                       : 4;
+        RK_U32 axi_rd_qos                     : 4;
+        RK_U32 reserve3                       : 4;
+    } reg30;
+} Vdpu383CtrlReg;
+
+typedef struct Vdpu383RegCommParas_t {
+    /* SWREG64_H26X_PARA */
+    RK_U32 reg64_unused_bits;
+
+    /* SWREG65_STREAM_PARAM_SET */
+    RK_U32 reg65_strm_start_bit;
+
+    /* SWREG66_STREAM_LEN */
+    RK_U32 reg66_stream_len;
+
+    /* SWREG67_GLOBAL_LEN */
+    RK_U32 reg67_global_len;
+
+    /* SWREG68_HOR_STRIDE */
+    RK_U32 reg68_hor_virstride;
+
+    /* SWREG69_RASTER_UV_HOR_STRIDE */
+    RK_U32 reg69_raster_uv_hor_virstride;
+
+    /* SWREG70_Y_STRIDE */
+    RK_U32 reg70_y_virstride;
+
+    /* SWREG71_SCL_Y_HOR_VIRSTRIDE */
+    RK_U32 reg71_scl_ref_hor_virstride;
+
+    /* SWREG72_SCL_UV_HOR_VIRSTRIDE */
+    RK_U32 reg72_scl_ref_raster_uv_hor_virstride;
+
+    /* SWREG73_SCL_Y_VIRSTRIDE */
+    RK_U32 reg73_scl_ref_virstride;
+
+    /* SWREG74_FGS_Y_HOR_VIRSTRIDE */
+    RK_U32 reg74_fgs_ref_hor_virstride;
+
+    RK_U32 reserve_reg75_79[5];
+
+    /* SWREG80_ERROR_REF_Y_HOR_VIRSTRIDE */
+    RK_U32 reg80_error_ref_hor_virstride;
+
+    /* SWREG81_ERROR_REF_UV_HOR_VIRSTRIDE */
+    RK_U32 reg81_error_ref_raster_uv_hor_virstride;
+
+    /* SWREG82_ERROR_REF_Y_VIRSTRIDE */
+    RK_U32 reg82_error_ref_virstride;
+
+    /* SWREG83 - SWREG106 */
+    struct {
+        RK_U32 hor_y_stride;
+        RK_U32 hor_uv_stride;
+        RK_U32 y_stride;
+    } ref_stride[VDPU38X_REG_MAX_REF_CNT];
+} Vdpu383RegCommParas;
+
+typedef struct Vdpu383RegCommonAddr_t {
+    /* SWREG128_STRM_BASE */
+    RK_U32 reg128_strm_base;
+
+    /* SWREG129_RPS_BASE */
+    RK_U32 reg129_rps_base;
+
+    /* SWREG130_CABACTBL_BASE */
+    RK_U32 reg130_cabactbl_base;
+
+    /* SWREG131_GBL_BASE */
+    RK_U32 reg131_gbl_base;
+
+    /* SWREG132_SCANLIST_ADDR */
+    RK_U32 reg132_scanlist_addr;
+
+    /* SWREG133_SCL_BASE */
+    RK_U32 reg133_scale_down_base;
+
+    /* SWREG134_FGS_BASE */
+    RK_U32 reg134_fgs_base;
+
+    RK_U32 reserve_reg135_139[5];
+
+    union {
+        Vdpu38xRcbRegSet rcb_regs;
+        struct {
+            RK_U32 reg140_rcb_strmd_row_offset;
+            RK_U32 reg141_rcb_strmd_row_len;
+            RK_U32 reg142_rcb_strmd_tile_row_offset;
+            RK_U32 reg143_rcb_strmd_tile_row_len;
+            RK_U32 reg144_rcb_inter_row_offset;
+            RK_U32 reg145_rcb_inter_row_len;
+            RK_U32 reg146_rcb_inter_tile_row_offset;
+            RK_U32 reg147_rcb_inter_tile_row_len;
+            RK_U32 reg148_rcb_intra_row_offset;
+            RK_U32 reg149_rcb_intra_row_len;
+            RK_U32 reg150_rcb_intra_tile_row_offset;
+            RK_U32 reg151_rcb_intra_tile_row_len;
+            RK_U32 reg152_rcb_filterd_row_offset;
+            RK_U32 reg153_rcb_filterd_row_len;
+            RK_U32 reg154_rcb_filterd_protect_row_offset;
+            RK_U32 reg155_rcb_filterd_protect_row_len;
+            RK_U32 reg156_rcb_filterd_tile_row_offset;
+            RK_U32 reg157_rcb_filterd_tile_row_len;
+            RK_U32 reg158_rcb_filterd_tile_col_offset;
+            RK_U32 reg159_rcb_filterd_tile_col_len;
+            RK_U32 reg160_rcb_filterd_av1_upscale_tile_col_offset;
+            RK_U32 reg161_rcb_filterd_av1_upscale_tile_col_len;
+        };
+    };
+
+    RK_U32 reserve_reg162_167[6];
+
+    /* SWREG168_DECOUT_BASE */
+    RK_U32 reg168_decout_base;
+
+    /* SWREG169_ERROR_REF_BASE */
+    RK_U32 reg169_error_ref_base;
+
+    /* SWREG170_185_REF_BASE */
+    union {
+        RK_U32 reg170_185_ref_base[16];
+        /* vp9 */
+        struct {
+            RK_U32 reg170_180[11];
+            RK_U32 reg181_segidlast_base;
+            RK_U32 reg182_segidcur_base;
+            RK_U32 reg183_kfprob_base;
+            RK_U32 reg184_lastprob_base;
+            RK_U32 reg185_updateprob_base;
+        };
+        /* av1 */
+        struct {
+            RK_U32 reg170_av1_last_base;
+            RK_U32 reg171_av1golden_base;
+            RK_U32 reg172_av1alfter_base;
+            RK_U32 reg173_refer3_base;
+            RK_U32 reg174_refer4_base;
+            RK_U32 reg175_refer5_base;
+            RK_U32 reg176_refer6_base;
+            RK_U32 reg177_refer7_base;
+            RK_U32 reg178_av1_coef_rd_base;
+            RK_U32 reg179_av1_coef_wr_base;
+            RK_U32 reg180_refer10_base;
+            RK_U32 reg181_av1_rd_segid_base;
+            RK_U32 reg182_av1_wr_segid_base;
+            RK_U32 reg183_kf_prob_base;
+            RK_U32 reg184_av1_noncoef_rd_base;
+            RK_U32 reg185_av1_noncoef_wr_base;
+        };
+    };
+
+    RK_U32 reserve_reg186_191[6];
+
+    /* SWREG192_PAYLOAD_ST_CUR_BASE */
+    RK_U32 reg192_payload_st_cur_base;
+
+    /* SWREG193_FBC_PAYLOAD_OFFSET */
+    RK_U32 reg193_fbc_payload_offset;
+
+    /* SWREG194_PAYLOAD_ST_ERROR_REF_BASE */
+    RK_U32 reg194_payload_st_error_ref_base;
+
+    /* SWREG195_210_PAYLOAD_ST_REF0_BASE */
+    RK_U32 reg195_210_payload_st_ref_base[16];
+
+    RK_U32 reserve_reg211_215[5];
+
+    /* SWREG216_COLMV_CUR_BASE */
+    RK_U32 reg216_colmv_cur_base;
+
+    /* SWREG217_232_COLMV_REF0_BASE */
+    RK_U32 reg217_232_colmv_ref_base[16];
+} Vdpu383RegCommonAddr;
+
+typedef struct Vdpu383RegStatistic_t {
+    struct {
+        RK_U32 reserve0                       : 24;
+        RK_U32 rkvdec_bus_idle_flag           : 1;
+        RK_U32 reserve1                       : 7;
+    } reg320;
+
+    RK_U32 reserve_reg321;
+
+    /* SWREG322_PERF_MONITOR */
+    RK_U32 reg322_perf_rd_max_latency_num;
+
+    /* SWREG323_PERF_MONITOR */
+    RK_U32 reg323_perf_rd_latency_samp_num;
+
+    /* SWREG324_PERF_MONITOR */
+    RK_U32 reg324_perf_rd_latency_acc_sum;
+
+    /* SWREG325_PERF_MONITOR */
+    RK_U32 reg325_perf_rd_axi_total_byte;
+
+    /* SWREG326_PERF_MONITOR */
+    RK_U32 reg326_perf_wr_axi_total_bytes;
+
+    /* SWREG327_PERF_MONITOR */
+    RK_U32 reg327_perf_working_cnt;
+
+    RK_U32 reserve_reg328_336[9];
+
+    /* SWREG337_REFLIST_IDX_USED */
+    RK_U32 reg337_inter_sw_reflst_idx_use;
+
+    RK_U32 reserve_reg338_348[11];
+
+    /* SWREG349_PAYLOAD_CNT */
+    RK_U32 reg349_filterd_payload_total_cnt;
+
+    struct {
+        RK_U32 filterd_report_offsety         : 16;
+        RK_U32 filterd_report_offsetx         : 16;
+    } reg350;
+
+    struct {
+        RK_U32 filterd_max_y                  : 10;
+        RK_U32 filterd_max_u                  : 10;
+        RK_U32 filterd_max_v                  : 10;
+        RK_U32 reserve0                       : 2;
+    } reg351;
+
+    struct {
+        RK_U32 filterd_min_y                  : 10;
+        RK_U32 filterd_min_u                  : 10;
+        RK_U32 filterd_min_v                  : 10;
+        RK_U32 reserve0                       : 2;
+    } reg352;
+
+    /* SWREG353_WR_LINE_NUM */
+    RK_U32 reg353_filterd_line_irq_offsety;
+
+    RK_U32 reserve_reg354_355[2];
+
+    struct {
+        RK_U32 rcb_rd_sum_chk                 : 8;
+        RK_U32 rcb_wr_sum_chk                 : 8;
+        RK_U32 reserve0                       : 16;
+    } reg356;
+
+    RK_U32 reserve_reg357;
+
+    struct {
+        RK_U32 error_ctu_num                  : 24;
+        RK_U32 roi_error_ctu_num_lowbit       : 8;
+    } reg358;
+
+    /* SWREG359_ERR_CTU_NUM1 */
+    RK_U32 reg359_roi_error_ctu_num_highbit;
+
+} Vdpu383RegStatistic;
+
+typedef struct Vdpu383RegLlp_t {
+    struct {
+        RK_U32 llp_mmu_zap_cache_dis          : 1;
+        RK_U32 reserve0                       : 15;
+        RK_U32 core_work_mode                 : 1;
+        RK_U32 ccu_core_work_mode             : 1;
+        RK_U32 reserve1                       : 3;
+        RK_U32 ltb_pause_flag                 : 1;
+        RK_U32 reserve2                       : 10;
+    } reg0;
+
+    struct {
+        RK_U32 reserve0                       : 4;
+        RK_U32 reg_cfg_addr                   : 28;
+    } reg1;
+
+    struct {
+        RK_U32 pre_frame_num                  : 30;
+        RK_U32 reserve0                       : 1;
+        RK_U32 link_mode                      : 1;
+    } reg2;
+
+    /* SWREG3_CONFIG_DONE */
+    RK_U32 reg3_done;
+
+    /* SWREG4_DECODERED_NUM */
+    RK_U32 reg4_num;
+
+    /* SWREG5_DEC_TOTAL_NUM */
+    RK_U32 reg5_total_num;
+
+    /* SWREG6_LINK_MODE_EN */
+    RK_U32 reg6_mode_en;
+
+    /* SWREG7_SKIP_NUM */
+    RK_U32 reg7_num;
+
+    /* SWREG8_CUR_LTB_IDX */
+    RK_U32 reg8_ltb_idx;
+
+    RK_U32 reserve_reg9_15[7];
+
+    /* SWREG16_DEC_E */
+    RK_U32 reg16_dec_e;
+
+    /* SWREG17_SOFT_RST */
+    RK_U32 reg17_rkvdec_ip_rst_p;
+
+    struct {
+        RK_U32 rkvdec_irq                     : 1;
+        RK_U32 rkvdec_line_irq                : 1;
+        RK_U32 reserve0                       : 14;
+        RK_U32 wmask                          : 2;
+        RK_U32 reserve1                       : 14;
+    } reg18;
+
+    struct {
+        RK_U32 rkvdec_frame_rdy_sta           : 1;
+        RK_U32 rkvdec_strm_error_sta          : 1;
+        RK_U32 rkvdec_core_timeout_sta        : 1;
+        RK_U32 rkvdec_ip_timeout_sta          : 1;
+        RK_U32 rkvdec_bus_error_sta           : 1;
+        RK_U32 rkvdec_buffer_empty_sta        : 1;
+        RK_U32 rkvdec_colmv_ref_error_sta     : 1;
+        RK_U32 rkvdec_error_spread_sta        : 1;
+        RK_U32 create_core_timeout_sta        : 1;
+        RK_U32 wlast_miss_match_sta           : 1;
+        RK_U32 rkvdec_core_rst_rdy_sta        : 1;
+        RK_U32 rkvdec_ip_rst_rdy_sta          : 1;
+        RK_U32 force_busidle_rdy_sta          : 1;
+        RK_U32 ltb_pause_rdy_sta              : 1;
+        RK_U32 ltb_end_flag                   : 1;
+        RK_U32 unsupport_decmode_error_sta    : 1;
+        RK_U32 wmask_bits                     : 15;
+        RK_U32 reserve0                       : 1;
+    } reg19;
+
+    RK_U32 reserve_reg20;
+
+    /* SWREG21_IP_TIMEOUT_THRESHOD */
+    RK_U32 reg21_ip_timeout_threshold;
+
+    struct {
+        RK_U32 ip_timeout_pause_flag          : 1;
+        RK_U32 reserve0                       : 3;
+        RK_U32 auto_reset_dis                 : 1;
+        RK_U32 reserve1                       : 3;
+        RK_U32 force_busidle_req_flag         : 1;
+        RK_U32 reserve2                       : 3;
+        RK_U32 bus_clkgate_dis                : 1;
+        RK_U32 ctrl_clkgate_dis               : 1;
+        RK_U32 reserve3                       : 1;
+        RK_U32 irq_dis                        : 1;
+        RK_U32 wid_reorder_dis                : 1;
+        RK_U32 reserve4                       : 7;
+        RK_U32 clk_cru_mode                   : 2;
+        RK_U32 reserve5                       : 5;
+        RK_U32 mmu_sel                        : 1;
+    } reg22;
+
+    struct {
+        RK_U32 endian                         : 1;
+        RK_U32 swap32_e                       : 1;
+        RK_U32 swap64_e                       : 1;
+        RK_U32 str_endian                     : 1;
+        RK_U32 str_swap32_e                   : 1;
+        RK_U32 str_swap64_e                   : 1;
+        RK_U32 reserve0                       : 26;
+    } reg23;
+
+    /* SWREG24_EXTRA_STRM_BASE */
+    RK_U32 reg24_extra_stream_base;
+
+    /* SWREG25_EXTRA_STRM_LEN */
+    RK_U32 reg25_extra_stream_len;
+
+    /* SWREG26_EXTRA_STRM_PARA_SET */
+    RK_U32 reg26_extra_strm_start_bit;
+
+    /* SWREG27_BUF_EMPTY_RESTART */
+    RK_U32 reg27_buf_emtpy_restart_p;
+
+    /* SWREG28_RCB_BASE */
+    RK_U32 reg28_rcb_base;
+
+} Vdpu383RegLlp;
+
+typedef struct Vdpu383RegSet_t {
+    Vdpu383RegVersion     reg_version;       /* 0 */
+    Vdpu383CtrlReg        ctrl_regs;         /* 8-30 */
+    Vdpu383RegCommParas   comm_paras;        /* 64-74, 80-106 */
+    Vdpu383RegCommonAddr  comm_addrs;        /* 128-134, 140-161, 168-185, 192-210, 216-232 */
+    Vdpu383RegStatistic   statistic_regs;    /* 320-359 */
+} Vdpu383RegSet;
+
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
+void vdpu383_init_ctrl_regs(Vdpu383RegSet *regs, MppCodingType codec_t);
+void vdpu383_setup_statistic(Vdpu383CtrlReg *com);
+MPP_RET vdpu383_setup_cur_stride_info(MppFrame mframe, Vdpu383RegSet *regs, RK_U32 chroma_fmt_idc);
+void vdpu383_setup_down_scale(MppFrame frame, MppDev dev, Vdpu383CtrlReg *com, void* comParas);
+RK_RET vdpu383_dump_sw_regs(Vdpu383RegSet *regs, HalDbgCtx *dbg_ctx);
+RK_RET vdpu383_dump_hw_regs(Vdpu383RegSet *regs, HalDbgCtx *dbg_ctx);
+
+#ifdef  __cplusplus
+}
+#endif
+
+#endif /* VDPU383_COM_H */

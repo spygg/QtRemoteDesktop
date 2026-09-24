@@ -1,0 +1,9 @@
+{
+    "keep_cpb" : 0,
+    "st_cfg_cnt" : 1,
+    "lt_cfg_cnt" : 0,
+    "st_cfg" : [
+        { "is_non_ref": 0, "temporal_id": 0, "ref_mode": 0, "ref_arg": 0, "repeat": 0 }
+    ],
+    "lt_cfg" : []
+}

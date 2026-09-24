@@ -1,0 +1,42 @@
+/* SPDX-License-Identifier: Apache-2.0 OR MIT */
+/*
+ * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
+ */
+
+#ifndef KMPP_OBJ_IMPL_H
+#define KMPP_OBJ_IMPL_H
+
+#include "kmpp_obj.h"
+
+rk_s32 kmpp_obj_impl_set_s8(KmppEntry *tbl, void *entry, rk_s8 val);
+rk_s32 kmpp_obj_impl_get_s8(KmppEntry *tbl, void *entry, rk_s8 *val);
+rk_s32 kmpp_obj_impl_set_u8(KmppEntry *tbl, void *entry, rk_u8 val);
+rk_s32 kmpp_obj_impl_get_u8(KmppEntry *tbl, void *entry, rk_u8 *val);
+rk_s32 kmpp_obj_impl_set_s16(KmppEntry *tbl, void *entry, rk_s16 val);
+rk_s32 kmpp_obj_impl_get_s16(KmppEntry *tbl, void *entry, rk_s16 *val);
+rk_s32 kmpp_obj_impl_set_u16(KmppEntry *tbl, void *entry, rk_u16 val);
+rk_s32 kmpp_obj_impl_get_u16(KmppEntry *tbl, void *entry, rk_u16 *val);
+rk_s32 kmpp_obj_impl_set_s32(KmppEntry *tbl, void *entry, rk_s32 val);
+rk_s32 kmpp_obj_impl_get_s32(KmppEntry *tbl, void *entry, rk_s32 *val);
+rk_s32 kmpp_obj_impl_set_u32(KmppEntry *tbl, void *entry, rk_u32 val);
+rk_s32 kmpp_obj_impl_get_u32(KmppEntry *tbl, void *entry, rk_u32 *val);
+rk_s32 kmpp_obj_impl_set_s64(KmppEntry *tbl, void *entry, rk_s64 val);
+rk_s32 kmpp_obj_impl_get_s64(KmppEntry *tbl, void *entry, rk_s64 *val);
+rk_s32 kmpp_obj_impl_set_u64(KmppEntry *tbl, void *entry, rk_u64 val);
+rk_s32 kmpp_obj_impl_get_u64(KmppEntry *tbl, void *entry, rk_u64 *val);
+rk_s32 kmpp_obj_impl_set_st(KmppEntry *tbl, void *entry, void *val);
+rk_s32 kmpp_obj_impl_get_st(KmppEntry *tbl, void *entry, void *val);
+rk_s32 kmpp_obj_impl_set_arr(KmppEntry *tbl, void *entry, void *val);
+rk_s32 kmpp_obj_impl_get_arr(KmppEntry *tbl, void *entry, void *val);
+
+rk_s32 kmpp_obj_impl_set_shm(KmppEntry *tbl, void *entry, KmppShmPtr *val);
+rk_s32 kmpp_obj_impl_get_shm(KmppEntry *tbl, void *entry, KmppShmPtr *val);
+
+rk_s32 kmpp_obj_impl_set_obj(KmppEntry *tbl, void *entry, void *val);
+rk_s32 kmpp_obj_impl_get_obj(KmppEntry *tbl, void *entry, void **val);
+rk_s32 kmpp_obj_impl_set_ptr(KmppEntry *tbl, void *entry, void *val);
+rk_s32 kmpp_obj_impl_get_ptr(KmppEntry *tbl, void *entry, void **val);
+rk_s32 kmpp_obj_impl_set_fp(KmppEntry *tbl, void *entry, void *val);
+rk_s32 kmpp_obj_impl_get_fp(KmppEntry *tbl, void *entry, void **val);
+
+#endif /* KMPP_OBJ_IMPL_H */
