@@ -382,8 +382,8 @@ int32_t yang_stun_encode_binding_request(YangStunPacket* pkt, YangBuffer* stream
 	yang_write_bytes(stream,randstr,8);
 	yang_free(randstr);
 
-	stream->data[2] = ((yang_buffer_pos(stream) - 20 + 20 + 4 ) & 0x0000FF00) >> 8;
-	stream->data[3] = ((yang_buffer_pos(stream) - 20 + 20 + 4 ) & 0x000000FF);
+	stream->data[2] = ((yang_buffer_pos(stream) + 12) & 0x0000FF00) >> 8;
+	stream->data[3] = ((yang_buffer_pos(stream) + 12) & 0x000000FF);
 #if Yang_Enable_Dtls
 	char hmac_buf[20] = {0};
 	uint32_t  hmac_buf_len = 0;
@@ -743,8 +743,8 @@ int32_t yang_stun_encode_binding_request2(YangStunPacket* pkt, YangBuffer* strea
 	yang_write_bytes(stream,randstr,8);
 	yang_free(randstr);
 
-	stream->data[2] = ((yang_buffer_pos(stream) - 20 + 20 + 4 ) & 0x0000FF00) >> 8;
-	stream->data[3] = ((yang_buffer_pos(stream) - 20 + 20 + 4 ) & 0x000000FF);
+	stream->data[2] = ((yang_buffer_pos(stream) + 12) & 0x0000FF00) >> 8;
+	stream->data[3] = ((yang_buffer_pos(stream) + 12) & 0x000000FF);
 
 	char hmac_buf[20] = {0};
 	uint32_t  hmac_buf_len = 0;

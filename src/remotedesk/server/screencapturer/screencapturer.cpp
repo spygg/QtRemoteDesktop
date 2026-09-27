@@ -34,9 +34,8 @@ void ScreenCapturer::resume()
     qInfo() << "ScreenCapturer: resume (timer active=" << captureTimer_->isActive()
             << "interval=" << captureTimer_->interval() << ")";
     // 无论 timer 是否已激活都恢复目标帧率：idle 降频后 resume 若不重置，
-    // 会一直以 1s 周期空转，客户端连接后画面响应极慢（远程桌面延迟主因之一）。
-    if (captureTimer_->interval() != 1000 / fps_)
-        captureTimer_->setInterval(1000 / fps_);
+    // 会一直以 4fps 周期空转，客户端连接后画面响应极慢（远程桌面延迟主因之一）。
+    leaveIdleThrottle();
     if (!captureTimer_->isActive()) {
         // 强制连续推送若干帧：桌面静止时首帧会被 checksum 去重丢弃，导致客户端
         // 连接后永远收不到画面（黑屏）。连续预热帧还让编码器（含 MPP 失败回退
@@ -59,8 +58,8 @@ void ScreenCapturer::forceNextFrame()
     forceFrameCount_ = 2;
     lastFrameChecksum_ = 0;
     idleCount_ = 0;
-    if (captureTimer_->isActive() && captureTimer_->interval() != 1000 / fps_)
-        captureTimer_->setInterval(1000 / fps_);
+    if (captureTimer_->isActive())
+        leaveIdleThrottle();
 }
 
 void ScreenCapturer::setFps(int fps)

@@ -26,8 +26,8 @@
 #define YangOpusPayloadType 111
 
 #define YangAV1PayloadType 123
-#define YangH264PayloadType 106
-#define YangH265PayloadType 126
+#define YangH264PayloadType 107
+#define YangH265PayloadType 125
 #define YangMjpegPayloadType 26
 
 #define Yang_TWCC_ID 3
@@ -356,6 +356,7 @@ typedef struct{
     int64_t pts;
     int64_t dts;
     uint8_t* payload;
+    int32_t marker;   // 帧内最后一个 NALU 置 1（RTP M bit），其余为 0
 }YangFrame;
 
 

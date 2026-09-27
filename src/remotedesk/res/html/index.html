@@ -47,6 +47,7 @@
             display: none;
             background: #000;
             z-index: 1;
+            pointer-events: none;
         }
 
         #status {
@@ -60,6 +61,7 @@
             font-size: 12px;
             font-family: monospace;
             z-index: 1000;
+            pointer-events: none;
             transition: opacity 0.3s;
         }
 
@@ -764,6 +766,13 @@
             <div class="dropdown-options" id="screen-options" data-key="screen"></div>
         </div>
         <div class="dropdown-section">
+            <div class="dropdown-title">安全连接</div>
+            <div class="dropdown-note">HTTPS/WSS 加密通道；WebRTC 需安全上下文才可靠（自签名证书首次访问需在浏览器手动信任）</div>
+            <div class="dropdown-options" data-key="ssl">
+                <button data-value="on" onclick="switchToHttps()">启用 HTTPS (推荐)</button>
+            </div>
+        </div>
+        <div class="dropdown-section">
             <div class="dropdown-title">视频模式</div>
             <div class="dropdown-note">WebRTC/FFmpeg 需服务端编码支持；图片为 JPEG 帧</div>
             <div class="dropdown-options" data-key="videomode">
@@ -895,6 +904,7 @@
             },
             displayStreamMode: 'ffmpeg', // 配置菜单高亮用的当前生效模式（webrtc/ffmpeg/image）
             modeRestored: false, // 刷新后是否已按持久化模式恢复过一次
+            serverCodec: '', // 服务端当前编码协议（mode_changed 回传，切视频模式时优先对齐）
             hwEncode: false, // 服务端是否有 H.264 硬件编码（auto 模式据此选路）
             showFps: false,
             mouseX: 0,
@@ -908,43 +918,101 @@
         const webrtcState = {
             supported: false,
             active: false,
+            // intending: 用户已选择 webrtc/auto 模式、WebRTC 是“意图中的视频路径”。
+            // 与 active 区分：active 要等 ICE 真正 connected 才置真（晚于协商开始），
+            // 而 intending 在 applyStreamMode 选中模式时即同步置真，覆盖 initWebRTC
+            // 延迟 400ms 的握手空窗。该窗口内服务端仍在广播 WS 视频帧，若无此标志
+            // 会漏进 H264Decoder.decode，无 WebCodecs 的浏览器即触发 fallbackToImage
+            // 把正在建立的 WebRTC(RTP) 会话误杀。intending 不阻塞 initWebRTC（其守卫
+            // 只看 active/pc），仅用于让 handleBinary 忽略 WS 视频帧直到 WebRTC 失败。
+            intending: false,
             pc: null,
             pendingIce: [],
             videoEl: document.getElementById('webrtc-video'),
         };
 
         function initWebRTC() {
+            console.log('RD-INIT initWebRTC called, active=', webrtcState.active, 'pc=', !!webrtcState.pc);
             if (!window.RTCPeerConnection || webrtcState.active || webrtcState.pc) return;
             // 注意:WebRTC 用 <video> 播放,走浏览器原生 H.264 解码,不依赖 WebCodecs。
             // 即使 WebCodecs 不可用也应先尝试 WebRTC;失败后再降级 WS视频/图片。
-            const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            // 内网直连场景不配 STUN：外网 STUN（stun.l.google.com）在隔离网络中
+            // 必然超时，会把 ICE 收集拖慢 5~10s，导致 12s 超时定时器先杀掉会话。
+            // 服务端候选已在 offer 中给出（host），无需中继穿透。
+            const pc = new RTCPeerConnection({ iceServers: [] });
             webrtcState.pc = pc;
 
             pc.onicecandidate = (e) => {
                 if (e.candidate) {
-                    send({ type: 'signal_ice', candidate: e.candidate.candidate, mid: e.candidate.sdpMid || '' });
+                    const c = e.candidate.candidate || '';
+                    // metaRTC 服务端仅支持 IPv4：IPv6 候选（地址含 ::）直接丢弃，
+                    // 否则服务端对 IPv6 sendto 失败（ERROR_RTC_SOCKET）且 ICE 整体判 fail。
+                    if (c.indexOf('::') >= 0) return;
+                    // mDNS 候选（xxx.local）metaRTC 无法解析，会污染服务端 remote_candidates
+                    // 导致 ICE 配对失败（WebRTC 黑屏根因）。丢弃，服务端仍可从浏览器
+                    // 连通性检查的源地址（prflx）完成配对。
+                    if (c.indexOf('.local') >= 0) return;
+                    send({ type: 'signal_ice', candidate: c, mid: e.candidate.sdpMid || '' });
                 }
             };
 
-            pc.onconnectionstatechange = () => {
-                const st = pc.connectionState;
-                if (st === 'connected') {
+            pc.oniceconnectionstatechange = () => {
+                console.log('RD-ICE state:', pc.iceConnectionState);
+                // 双保险：connectionState 可能因 DTLS 状态停留在 connecting，
+                // 但 ICE 已 connected 时 RTP 流可用，直接显示视频
+                if (pc.iceConnectionState === 'connected' && webrtcState.pc === pc && !webrtcState.active) {
                     webrtcState.active = true;
+                    // 连接已建立，立即撤销 12s 超时定时器，防止定时器与回调竞态误杀
+                    if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
                     webrtcState.videoEl.style.display = 'block';
                     webrtcState.videoEl.play?.().catch(() => {});
                     if (state.currentConfig.videomode === 'auto') {
                         state.displayStreamMode = 'webrtc';
                         updateDropdownActive();
                     }
+                }
+            };
+            pc.onconnectionstatechange = () => {
+                const st = pc.connectionState;
+                console.log('RD-CONN state:', st);
+                if (st === 'connected') {
+                    webrtcState.active = true;
+                    // 连接已建立，立即撤销 12s 超时定时器
+                    if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
+                    webrtcState.videoEl.style.display = 'block';
+                    webrtcState.videoEl.play?.().catch(() => {});
+                    // [DIAG] WebRTC 黑屏排查：连接后连续 dump video 元素状态，定位 RTP 是否可解码
+                    for (let di = 1; di <= 4; di++) {
+                        setTimeout(() => {
+                            const v = document.getElementById('webrtc-video');
+                            if (!v) return;
+                            console.log('RD-VD dump#' + di + ' readyState=' + v.readyState +
+                                ' w=' + v.videoWidth + 'x' + v.videoHeight +
+                                ' srcObj=' + !!v.srcObject + ' paused=' + v.paused +
+                                ' err=' + (v.error ? v.error.code : 0) +
+                                ' trackState=' + (v.srcObject && v.srcObject.getVideoTracks().length ? v.srcObject.getVideoTracks()[0].readyState : 'n/a'));
+                        }, di * 2000);
+                    }
+                    if (state.currentConfig.videomode === 'auto') {
+                        state.displayStreamMode = 'webrtc';
+                        updateDropdownActive();
+                    }
                     showTransferStatus('WebRTC 已连接', 2000);
                 } else if (st === 'failed' || st === 'closed' || st === 'disconnected') {
-                    webrtcClose();
+                    if (webrtcState.pc !== pc) return; // 旧 pc 回调不影响当前模式
+                    // 显式选择 WebRTC 且连接失败时降级回图片模式并持久化，画面持续刷新
+                    if (state.currentConfig.videomode === 'webrtc') {
+                        fallbackToImage('WebRTC 不可用，已切换图片模式');
+                    } else {
+                        webrtcClose();
+                    }
                 }
             };
 
             pc.ontrack = (e) => {
                 const stream = e.streams.length > 0 ? e.streams[0] : new MediaStream([e.track]);
                 webrtcState.videoEl.srcObject = stream;
+                if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
             };
 
             // 视频帧到达时统计 FPS
@@ -958,6 +1026,21 @@
 
             // 通知服务端发起 WebRTC（服务端生成 offer 后经 WS 回传）
             send({ type: 'signal_start' });
+            // 连接超时保护：12s 内未建立连接则关闭会话，避免界面停在无画面的 webrtc 模式。
+            // 不依赖 connectionState 的具体取值（受限环境下可能一直停在 new/connecting），
+            // 只要 12s 仍未 active 就降级，保证画面持续刷新。
+            if (webrtcState._to) clearTimeout(webrtcState._to);
+            webrtcState._to = setTimeout(() => {
+                console.log('RD-TIMER timeout fired, pc=', !!webrtcState.pc, 'active=', webrtcState.active);
+                if (webrtcState.pc && !webrtcState.active) {
+                    try { pc.close(); } catch (e) {}
+                    webrtcState.pc = null;
+                    send({ type: 'signal_close' });
+                    if (state.currentConfig.videomode === 'webrtc') {
+                        fallbackToImage('WebRTC 连接超时，已切换图片模式');
+                    }
+                }
+            }, 15000);
         }
 
         function onWebRtcOffer(sdp) {
@@ -981,18 +1064,27 @@
         function onWebRtcIce(candidate, mid) {
             const pc = webrtcState.pc;
             if (!candidate) return;
+            // 兼容 metaRTC 发来的 JSON 包装候选 {"candidate":"candidate:...","sdpMid":"..."}
+            let cand = candidate;
+            if (typeof cand === 'string' && cand.charAt(0) === '{') {
+                try {
+                    const obj = JSON.parse(cand);
+                    if (obj.candidate) { cand = obj.candidate; mid = mid || obj.sdpMid || ''; }
+                } catch (e) {}
+            }
             if (pc && pc.remoteDescription) {
-                pc.addIceCandidate({ candidate, sdpMid: mid }).catch(() => {});
+                pc.addIceCandidate({ candidate: cand, sdpMid: mid }).catch(() => {});
             } else if (pc) {
-                webrtcState.pendingIce.push({ candidate, mid });
+                webrtcState.pendingIce.push({ candidate: cand, mid });
             }
         }
 
         function webrtcClose() {
+            console.log('RD-WEBRTC close, stack:', new Error().stack);
             webrtcState.active = false;
-            webrtcState.videoEl.style.display = 'none';
-            webrtcState.videoEl.srcObject = null;
+            webrtcState.intending = false;
             webrtcState.pendingIce = [];
+            if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
             if (webrtcState.pc) {
                 webrtcState.pc.close();
                 webrtcState.pc = null;
@@ -1004,10 +1096,386 @@
                 state.displayStreamMode = 'ffmpeg';
                 updateDropdownActive();
             }
+            // 仅当没有活跃 MSE 播放时才清理 videoEl 并停 MSE；
+            // 否则异步关闭（如 pc.onconnectionstatechange）会误杀切换后正在用的 MediaSource
+            if (!msePlayer.using) {
+                try { webrtcState.videoEl.src = ''; } catch (e) {}
+                webrtcState.videoEl.style.display = 'none';
+                webrtcState.videoEl.srcObject = null;
+                msePlayer.stop('webrtcClose');
+            }
         }
 
+        // ==================== MSE 播放器（无 WebCodecs 时 FFmpeg 视频模式的兜底） ====================
+        // WebCodecs 需要安全上下文（HTTPS/localhost），http 局域网下不可用。
+        // MediaSource Extensions（MSE）是标准 API，http 下可用，浏览器原生解码 H.264。
+        // 服务端 FFmpeg 模式经 WS 发 annexb ES 流，这里转 avcc（length-prefixed）喂 MSE。
+        // annexb: [start code][NAL][start code][NAL]... -> avcc: [4B BE len][NAL]...
+        function annexbToAvcc(data) {
+            const n = data.length;
+            if (!n) return data;
+            const out = [];
+            let i = 0;
+            while (i < n) {
+                let sc = 0;
+                if (i + 3 < n && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) sc = 4;
+                else if (i + 2 < n && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) sc = 3;
+                if (!sc) { i++; continue; }
+                let end = i + sc;
+                while (end < n) {
+                    if (end + 3 < n && data[end] === 0 && data[end + 1] === 0 && data[end + 2] === 0 && data[end + 3] === 1) break;
+                    if (end + 2 < n && data[end] === 0 && data[end + 1] === 0 && data[end + 2] === 1) break;
+                    end++;
+                }
+                const nalLen = end - (i + sc);
+                if (nalLen > 0) {
+                    out.push((nalLen >>> 24) & 0xff, (nalLen >>> 16) & 0xff, (nalLen >>> 8) & 0xff, nalLen & 0xff);
+                    for (let k = i + sc; k < end; k++) out.push(data[k]);
+                }
+                i = end;
+            }
+            return new Uint8Array(out);
+        }
+
+        // ---------- 最小 fMP4 封装器 ----------
+        // MSE 的 video/mp4 SourceBuffer 只接受标准 ISO-BMFF 字节流：
+        // init segment(ftyp+moov+avcC) + media segment(moof+mdat)。
+        // 直接 append 裸 avcc 样本会让 MP4 demuxer 解析失败 -> MediaSource 死亡
+        // -> 触发 self-heal 无限重启 -> 永远黑屏。因此必须在客户端做 fMP4 封装。
+        function mp4Box(type) {
+            let size = 8;
+            for (let i = 1; i < arguments.length; i++) size += arguments[i].length;
+            const b = new Uint8Array(size);
+            new DataView(b.buffer).setUint32(0, size);
+            for (let i = 0; i < 4; i++) b[4 + i] = type.charCodeAt(i);
+            let off = 8;
+            for (let i = 1; i < arguments.length; i++) { b.set(arguments[i], off); off += arguments[i].length; }
+            return b;
+        }
+        function mp4U8(v)  { return new Uint8Array([v & 0xff]); }
+        function mp4U16(v) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v); return b; }
+        function mp4U32(v) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v >>> 0); return b; }
+        function mp4Str(s) { const b = new Uint8Array(4); for (let i = 0; i < 4; i++) b[i] = (s.charCodeAt(i) || 0) & 0xff; return b; }
+        function mp4Matrix() { return new Uint8Array([0,0,1,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0x40,0,0,0]); }
+        function mp4Concat() {
+            let n = 0;
+            for (let i = 0; i < arguments.length; i++) n += arguments[i].length;
+            const b = new Uint8Array(n);
+            let o = 0;
+            for (let i = 0; i < arguments.length; i++) { b.set(arguments[i], o); o += arguments[i].length; }
+            return b;
+        }
+        // 从 annexb 帧提取 SPS(类型7)/PPS(类型8) NAL
+        function extractSpsPps(data) {
+            const nals = [];
+            let i = 0;
+            while (i < data.length - 3) {
+                let sc = 0;
+                if (data[i]===0 && data[i+1]===0 && data[i+2]===0 && data[i+3]===1) sc = 4;
+                else if (i < data.length - 2 && data[i]===0 && data[i+1]===0 && data[i+2]===1) sc = 3;
+                if (!sc) { i++; continue; }
+                const start = i + sc;
+                let end = start;
+                while (end < data.length - 3) {
+                    if (data[end]===0 && data[end+1]===0 && (data[end+2]===1 || (data[end+2]===0 && data[end+3]===1))) break;
+                    end++;
+                }
+                if (end > start) nals.push(data.subarray(start, end));
+                i = end > start ? end : i + sc;
+            }
+            const sps = nals.find(function(n){ return (n[0] & 0x1f) === 7; });
+            const pps = nals.find(function(n){ return (n[0] & 0x1f) === 8; });
+            return (sps && pps) ? { sps: sps, pps: pps } : null;
+        }
+        // init segment：ftyp + moov(mvhd/trak/mdia/stbl(avc1+avcC))
+        function buildFmp4Init(sps, pps, width, height) {
+            const w = width > 0 ? width : 1920, h = height > 0 ? height : 1080;
+            const avcC = mp4Box('avcC', mp4U8(1),
+                // AVCProfileIndication/compat/level 取 SPS 载荷的 profile_idc 等
+                // （sps[0] 是 NAL 头 0x67，不是 profile！填错会被 demuxer 判非法直接失败）
+                mp4U8(sps[1]), mp4U8(sps[2]), mp4U8(sps[3]),
+                mp4U8(0xff), mp4U8(0xe1), mp4U16(sps.length), sps,
+                mp4U8(1), mp4U16(pps.length), pps);
+            const avc1 = mp4Box('avc1',
+                new Uint8Array(6), mp4U16(1),           // reserved + data_reference_index
+                new Uint8Array(16),                     // pre_defined/reserved
+                mp4U16(w), mp4U16(h),
+                mp4U32(0x00480000), mp4U32(0x00480000), // 72dpi
+                mp4U32(0), mp4U16(1),                   // reserved + frame_count
+                new Uint8Array(32),                     // compressorname
+                mp4U16(0x0018), mp4U16(0xffff),         // depth + pre_defined(-1)
+                avcC);
+            const stbl = mp4Box('stbl',
+                mp4Box('stsd', mp4U32(0), mp4U32(1), avc1),
+                mp4Box('stts', mp4U32(0), mp4U32(0)),
+                mp4Box('stsc', mp4U32(0), mp4U32(0)),
+                mp4Box('stsz', mp4U32(0), mp4U32(0), mp4U32(0)),
+                mp4Box('stco', mp4U32(0), mp4U32(0)));
+            const minf = mp4Box('minf',
+                mp4Box('vmhd', mp4U32(1), new Uint8Array(8)),
+                mp4Box('dinf', mp4Box('dref', mp4U32(0), mp4U32(1), mp4Box('url ', mp4U32(1)))),
+                stbl);
+            const hdlrName = new Uint8Array(13);
+            'VideoHandler'.split('').forEach(function(c, i){ hdlrName[i] = c.charCodeAt(0); });
+            const mdia = mp4Box('mdia',
+                mp4Box('mdhd', mp4U32(0), mp4U32(0), mp4U32(0), mp4U32(1000), mp4U32(0), mp4U16(0x55c4), mp4U16(0)),
+                mp4Box('hdlr', mp4U32(0), mp4U32(0), mp4Str('vide'), mp4U32(0), mp4U32(0), mp4U32(0), hdlrName),
+                minf);
+            const tkhd = mp4Box('tkhd', mp4U32(3), mp4U32(0), mp4U32(0), mp4U32(1), mp4U32(0), mp4U32(0),
+                mp4U32(0), mp4U32(0), mp4U16(0), mp4U16(0), mp4U16(0), mp4U16(0),
+                mp4Matrix(), mp4U32(w * 65536), mp4U32(h * 65536));
+            const trak = mp4Box('trak', tkhd, mdia);
+            const mvhd = mp4Box('mvhd', mp4U32(0), mp4U32(0), mp4U32(0), mp4U32(1000), mp4U32(0),
+                mp4U32(0x10000), mp4U16(0x0100), mp4U16(0), mp4U32(0), mp4U32(0),
+                mp4Matrix(), new Uint8Array(24), mp4U32(2));
+            const moov = mp4Box('moov', mvhd, trak,
+                // Chrome 要求 moov 含 mvex 声明分片 MP4，否则报
+                // "Detected unfragmented MP4" 致命错误
+                mp4Box('mvex', mp4Box('trex', mp4U32(0), mp4U32(1),
+                    mp4U32(1), mp4U32(33), mp4U32(0), mp4U32(0x01010000))));
+            const ftyp = mp4Box('ftyp', mp4Str('iso5'), mp4U32(0), mp4Str('isom'), mp4Str('iso5'), mp4Str('avc1'), mp4Str('mp41'));
+            return mp4Concat(ftyp, moov);
+        }
+        // 单样本 media fragment：moof(mfhd/traf(tfhd/tfdt/trun)) + mdat(avcc 样本)
+        // timescale=1000，每样本 33ms(30fps)，DTS 用单调帧计数避免时间戳回退
+        function buildFmp4Fragment(avccData, isKey, dtsMs, seq) {
+            const trun = mp4Box('trun', mp4U32(0x000701), mp4U32(1), mp4U32(0),
+                mp4U32(33), mp4U32(avccData.length), mp4U32(isKey ? 0x00000000 : 0x01010000));
+            const traf = mp4Box('traf',
+                mp4Box('tfhd', mp4U32(0x020000), mp4U32(1)),
+                mp4Box('tfdt', mp4U32(0), mp4U32(dtsMs >>> 0)),
+                trun);
+            const moof = mp4Box('moof', mp4Box('mfhd', mp4U32(0), mp4U32(seq >>> 0)), traf);
+            const frag = mp4Concat(moof, mp4U32(8 + avccData.length), mp4Str('mdat'), avccData);
+            // trun data_offset = moof 大小 + 8 字节 mdat 头；trun 内偏移 = 8+4+4=16，
+            // trun 在 frag 中的绝对偏移 = 8(moof)+16(mfhd)+8(traf)+16(tfhd)+16(tfdt) = 64
+            new DataView(frag.buffer).setUint32(64 + 16, moof.length + 8);
+            return frag;
+        }
+
+        // 彻底解绑并移除 <video>：仅调用 remove() 不会阻止元素继续加载已失效的
+        // MediaSource blob URL，控制台会出现 blob:... ERR_FILE_NOT_FOUND（纯噪声，
+        // 常被误判为"画面没了"的根因）。必须先解绑 src 再移除。
+        function disposeVideoEl(v) {
+            if (!v) return;
+            try {
+                v.pause();
+                v.removeAttribute('src');
+                v.load();
+                v.remove();
+            } catch (e) {}
+        }
+
+        const msePlayer = {
+            using: false, started: false, ms: null, sb: null, ready: false, pending: [], _gen: 0, _lastRestart: 0, _needKf: false,
+            fmp4Seq: 0, fmp4Dts: 0,
+            // 复用 webrtc-video 元素渲染 MSE 流；codec 影响 MIME（hevc 浏览器兼容性差，尽力而为）
+            start(codec) {
+                if (this.using) return true;
+                if (!('MediaSource' in window)) return false;
+                this.using = true; this.started = false; this.ready = false; this.pending = [];
+                const gen = ++this._gen;
+                // 独立 video 元素：不共用 webrtc-video，避免 MediaSource 生命周期互相干扰
+                disposeVideoEl(this.videoEl);
+                const v = document.createElement('video');
+                v.id = 'mse-video';
+                v.autoplay = true; v.playsInline = true; v.muted = true;
+                v.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;object-fit:fill;background:#000;z-index:1;pointer-events:none;';
+                document.body.appendChild(v);
+                this.videoEl = v;
+                this.ms = new MediaSource();
+                v.src = URL.createObjectURL(this.ms);
+                v.play().catch(() => {});
+                v.addEventListener('error', function(e) {
+                    console.error('MSE video element error:', v.error ? (v.error.code + '/' + v.error.message) : 'unknown');
+                });
+                this.ms.addEventListener('sourceclose', () => { console.log('MSE sourceclose event, gen=' + this._gen + ', using=' + this.using); });
+                this.ms.addEventListener('sourceended', () => { console.log('MSE sourceended event, gen=' + this._gen); });
+                this.ms.addEventListener('sourceopen', () => {
+                    if (gen !== this._gen) return; // 已被 stop/重启，废弃旧 MediaSource 回调
+                    try {
+                        const mime = (codec === 'hevc')
+                            ? 'video/mp4; codecs="hev1.1.6.L120.90"'
+                            : 'video/mp4; codecs="avc1.42C028"';
+                        this.sb = this.ms.addSourceBuffer(mime);
+                        this.sb.addEventListener('error', function(e) {
+                            console.error('MSE SourceBuffer error event:', e.target && e.target.updating ? 'updating' : 'idle');
+                        });
+                        this.ready = true;
+                        console.log('MSE sourcebuffer ready: ' + mime);
+                        if (this._needKf && !this.started) {
+                            console.log('MSE sourceopen: requesting keyframe after restart');
+                            send({ type: 'request_keyframe' });
+                            let tries = 0;
+                            const t = setInterval(() => {
+                                if (this.started || !this.using || ++tries > 4) { clearInterval(t); return; }
+                                if (this.ms && this.ms.readyState === 'open') {
+                                    console.log('MSE sourceopen: retry keyframe #' + tries);
+                                    send({ type: 'request_keyframe' });
+                                }
+                            }, 500);
+                        }
+                        // sourceopen 前排队的帧在 ready 后一次性补投
+                        const pend = this.pending; this.pending = [];
+                        for (const d of pend) this._queue(d);
+                        this.sb.addEventListener('updateend', () => {
+                            if (gen !== this._gen) return;
+                            if (this.ms && this.ms.readyState === 'open' && this.pending.length && !this.sb.updating) {
+                                const d = this.pending.shift();
+                                try { this.sb.appendBuffer(d); } catch (e) {
+                                    console.error('MSE updateend appendBuffer error:', e.name, e.message);
+                                }
+                            }
+                        });
+                    } catch (e) {
+                        console.error('MSE addSourceBuffer failed:', e);
+                        this.using = false;
+                    }
+                });
+                return true;
+            },
+            _queue(avcc) {
+                if (this.pending.length >= 400) this.pending.shift(); // 丢最旧，防内存膨胀
+                this.pending.push(avcc);
+                if (this.sb && this.ms && this.ms.readyState === 'open' && !this.sb.updating && this.pending.length) {
+                    const d = this.pending.shift();
+                    try { this.sb.appendBuffer(d); } catch (e) {
+                        console.error('MSE appendBuffer error:', e.name, e.message);
+                        if (e.name === 'InvalidStateError') this._lastRestart = 0; // 允许立即自愈
+                    }
+                }
+            },
+            append(data, isKeyframe) {
+                if (!this.using) return;
+                // 自愈：MediaSource 被外部意外关闭（如残留 WebRTC 异步回调）时自动重启
+                if (this.ms && this.ms.readyState !== 'open') {
+                    const now = Date.now();
+                    if (now - this._lastRestart > 3000) {
+                        this._lastRestart = now;
+                        console.log('MSE ms closed (state=' + this.ms.readyState + '), auto-restarting; mode=' + (state.displayStreamMode || '?') + ' videoMode=' + (state.currentConfig ? state.currentConfig.videomode : '?'));
+                        this.stop('self-heal');
+                        this._needKf = true; // 必须在 stop 之后设置（stop 会清掉）
+                        if (msePlayer.start('h264')) {
+                            send({ type: 'request_keyframe' });
+                        }
+                    } else if (isKeyframe) {
+                        // ms 已关闭且重启被节流：不能缓存裸 avcc 片段（重启后缺 init
+                        // segment 会再次弄死 demuxer），直接丢弃，由 request_keyframe
+                        // 重试循环取新关键帧并重建完整 fMP4 封装。
+                    }
+                    return;
+                }
+                // MSE 必须以关键帧起步（SPS/PPS+IDR），此前帧丢弃
+                if (!this.started) {
+                    if (!isKeyframe) return;
+                    this.started = true;
+                    console.log('MSE got first keyframe, size=' + data.length);
+                    // 扫描 annexb NAL 类型分布：67=SPS 68=PPS 65=IDR 6=SEI 9=AUD
+                    const nalCount = {};
+                    for (let p = 0; p < data.length - 4;) {
+                        if (data[p] === 0 && data[p+1] === 0 && data[p+2] === 0 && data[p+3] === 1) {
+                            const t = data[p+4] & 0x1f;
+                            nalCount[t] = (nalCount[t] || 0) + 1;
+                            p += 4;
+                            while (p < data.length - 4 && !(data[p] === 0 && data[p+1] === 0 && (data[p+2] === 1 || (data[p+2] === 0 && data[p+3] === 1)))) p++;
+                        } else p++;
+                    }
+                    console.log('MSE keyframe NALs:', JSON.stringify(nalCount));
+                    const av = annexbToAvcc(data);
+                    console.log('MSE first avcc head:', Array.from(av.slice(0, 20)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                    // video/mp4 SourceBuffer 必须先收 fMP4 init segment（含 avcC），
+                    // 之后每帧封装为 moof+mdat fragment，否则 MP4 demuxer 解析失败黑屏。
+                    this.fmp4Seq = 0; this.fmp4Dts = 0;
+                    const spsPps = extractSpsPps(data);
+                    if (spsPps) {
+                        console.log('MSE building fMP4 init segment, sps=' + spsPps.sps.length + ' pps=' + spsPps.pps.length + ' screen=' + state.screenWidth + 'x' + state.screenHeight);
+                        this._queue(buildFmp4Init(spsPps.sps, spsPps.pps, state.screenWidth, state.screenHeight));
+                    } else {
+                        console.warn('MSE first keyframe has no SPS/PPS, cannot build init segment');
+                    }
+                    this._queue(buildFmp4Fragment(av, true, this.fmp4Dts, ++this.fmp4Seq));
+                    this.fmp4Dts += 33;
+                    // 1.5s 后验证解码状态：videoWidth>0 说明解码器已解析出画面尺寸
+                    setTimeout(() => {
+                        const el = msePlayer.videoEl;
+                        let b = 0;
+                        try { b = el.buffered.length ? el.buffered.end(el.buffered.length - 1) : 0; } catch (e) {}
+                        console.log('MSE decode check: readyState=' + el.readyState + ' videoWidth=' + el.videoWidth + ' videoHeight=' + el.videoHeight + ' paused=' + el.paused + ' currentTime=' + el.currentTime + ' bufferedEnd=' + b + ' msState=' + (msePlayer.ms ? msePlayer.ms.readyState : 'null') + ' sbUpdating=' + (msePlayer.sb ? msePlayer.sb.updating : 'null') + ' pending=' + msePlayer.pending.length);
+                    }, 1500);
+                    return;
+                }
+                if (++this.frameCount % 60 === 0) {
+                    console.log('MSE frames=' + this.frameCount + ' pending=' + this.pending.length);
+                }
+                this._queue(buildFmp4Fragment(annexbToAvcc(data), false, this.fmp4Dts, ++this.fmp4Seq));
+                this.fmp4Dts += 33;
+            },
+            frameCount: 0,
+            stop(tag) {
+                if (tag) console.log('MSE stop() called by: ' + tag + '; using=' + this.using + ' gen=' + this._gen);
+                this._gen++; // 使旧 MediaSource 的 sourceopen/updateend 回调全部失效
+                this.using = false; this.started = false; this.ready = false; this.pending = []; this._needKf = false;
+                try { if (this.ms && this.ms.readyState === 'open') this.ms.endOfStream(); } catch (e) {}
+                disposeVideoEl(this.videoEl);
+                this.videoEl = null;
+                this.ms = null; this.sb = null;
+            }
+        };
+
         // ==================== 视频模式切换（WebRTC / FFmpeg / 图片） ====================
+        // 降级到图片模式：切换服务端模式、更新 UI 高亮、持久化选择，并提示用户。
+        // 无 WebCodecs 且 WebRTC 不可用时反复尝试视频模式只会抖动画面，降级后应稳定停留。
+        // 无 WebCodecs 时启动 MSE 视频模式（FFmpeg 帧经 WS → MSE → <video> 原生解码）
+        function mseStart(mode) {
+            if (!('MediaSource' in window)) return false;
+            try {
+                webrtcClose();
+                if (state.decoder) state.decoder.imageRequested = false;
+                // http 无 WebCodecs 场景：MSE 固定 H.264（avc1），服务端软编也仅有 h264，
+                // 避免 codec=hevc 残留导致服务端无编码器、MSE 黑屏。
+                const mseCodec = 'h264';
+                console.log('MSE start mode=' + mode + ' codec=' + mseCodec + ' MediaSource=' + ('MediaSource' in window));
+                if (!msePlayer.start(mseCodec)) return false;
+                state.currentConfig.videomode = mode;
+                state.displayStreamMode = mode;
+                try { localStorage.setItem('rd_videomode', mode); } catch (e) {}
+                state.modeRestored = true;
+                send({ type: 'set_mode', mode: 'video' });
+                send({ type: 'config', codec: state.currentConfig.codec, hw_encode: state.currentConfig.hw_encode });
+                send({ type: 'request_keyframe' });
+                updateDropdownActive();
+                return true;
+            } catch (e) {
+                console.error('mseStart failed:', e);
+                return false;
+            }
+        }
+
+        function fallbackToImage(tip) {
+            console.log('RD-FALLBACK to image:', tip, 'active=', webrtcState.active, 'pc=', !!webrtcState.pc);
+            // 先停 MSE 再 webrtcClose：webrtcClose 仅在 !msePlayer.using 时才清理 video 元素，
+            // 残留的全屏 <video> 会盖住 canvas 导致图片模式画面冻结
+            msePlayer.stop('fallbackToImage');
+            webrtcClose();
+            send({ type: 'set_mode', mode: 'image' });
+            state.currentConfig.videomode = 'image';
+            state.displayStreamMode = 'image';
+            try { localStorage.setItem('rd_videomode', 'image'); } catch (e) {}
+            updateDropdownActive();
+            if (tip) showTransferStatus(tip, 2500);
+        }
+
         function applyStreamMode(mode) {
+            // 无 WebCodecs（WS 视频解不了 WebCodecs 通道）时：
+            //  - ffmpeg：尝试 MSE（浏览器原生解码 H.264，http 可用），MSE 也不支持则图片；
+            //  - auto：仍优先尝试 WebRTC（浏览器原生解码，不依赖 WebCodecs），失败再降级。
+            if (mode === 'ffmpeg' && !('VideoDecoder' in window)) {
+                // 先同步关闭残留 WebRTC 会话，避免其异步关闭回调清掉即将启动的 MSE
+                webrtcClose();
+                if (mseStart('ffmpeg')) return;
+                fallbackToImage('当前浏览器不支持 WebCodecs/MSE，已使用图片模式');
+                return;
+            }
             state.currentConfig.videomode = mode;
             state.displayStreamMode = mode;
             // 持久化用户选择，刷新后恢复（auto 也存，等价清除）
@@ -1015,21 +1483,44 @@
             state.modeRestored = true;
             if (mode === 'webrtc') {
                 // 切到视频模式并显式发起 WebRTC 会话（服务端回传 offer 后由浏览器原生解码）
+                msePlayer.stop('webrtc-branch');
                 webrtcClose();
+                // 同步置 intending：覆盖 initWebRTC 延迟 400ms 的握手空窗，期间服务端
+                // 仍在广播 WS 视频帧，若无此标志会漏进 H264Decoder 触发 fallbackToImage
+                // 把正在建立的 WebRTC(RTP) 会话误杀。intending 不阻塞 initWebRTC。
+                webrtcState.intending = true;
                 if (state.decoder) state.decoder.imageRequested = false;
                 send({ type: 'set_mode', mode: 'webrtc' });
                 setTimeout(() => {
                     if (!webrtcState.active && !webrtcState.pc) initWebRTC();
                 }, 400);
             } else if (mode === 'ffmpeg') {
-                // 视频模式但不发起 WebRTC：H.264/H.265 帧经 WS 传输，用 WebCodecs 解码
+                // 视频模式但不发起 WebRTC：H.264 帧经 WS 传输。
+                // WebCodecs 可用时用它解码；http 下无 WebCodecs 则用 MSE（浏览器原生解码）。
                 webrtcClose();
+                if (!('VideoDecoder' in window) && !msePlayer.using) {
+                    // 刷新后 onopen 重同步等场景兜底启动 MSE
+                    mseStart('ffmpeg');
+                    return;
+                }
                 if (state.decoder) state.decoder.imageRequested = false;
                 send({ type: 'set_mode', mode: 'video' });
-                // 与服务端同步编码协议与硬件开关（服务端按此重建编码器）
-                send({ type: 'config', codec: state.currentConfig.codec, hw_encode: state.currentConfig.hw_encode });
+                // 与服务端同步编码协议与硬件开关（服务端按此重建编码器）。
+                // codec 优先用服务端已知协议（mode_changed 回传），避免 hevc 残留导致服务端回退。
+                const cfgCodec = state.serverCodec || state.currentConfig.codec;
+                if (state.serverCodec && state.serverCodec !== state.currentConfig.codec) {
+                    state.currentConfig.codec = state.serverCodec;
+                    try { localStorage.setItem('rd_codec', state.serverCodec); } catch (e) {}
+                }
+                send({ type: 'config', codec: cfgCodec, hw_encode: state.currentConfig.hw_encode });
+                send({ type: 'request_keyframe' });
             } else if (mode === 'image') {
                 // 图片模式：JPEG 帧
+                // 必须先显式停 MSE：webrtcClose 内部仅在 !msePlayer.using 时才停 MSE/隐藏
+                // video 元素（保护 webrtc→ffmpeg 切换不被异步关闭误杀）。从 ffmpeg(MSE)
+                // 模式切图片时若不先停，全屏 <video>（z-index:1）持续盖在 canvas 上，
+                // JPEG 帧画在底下不可见 → 画面停留在最后一帧视频（"切图片后不动"）。
+                msePlayer.stop('applyStreamMode-image');
                 webrtcClose();
                 send({ type: 'set_mode', mode: 'image' });
             } else if (mode === 'auto') {
@@ -1037,8 +1528,16 @@
                 // 局域网 UDP 直连延迟最低；WebRTC 无法建立时退 WS 视频（WebCodecs），
                 // 两者都不可用时服务端回退图片(JPEG)。
                 webrtcClose();
+                // 同步置 intending：auto 也优先 WebRTC，覆盖 400ms 协商空窗，防止 WS 视频
+                // 帧漏进 H264Decoder 触发 fallbackToImage 误杀正在建立的 RTP 会话。
+                webrtcState.intending = true;
                 send({ type: 'set_mode', mode: 'video' });
-                send({ type: 'config', codec: state.currentConfig.codec, hw_encode: state.currentConfig.hw_encode });
+                const cfgCodec2 = state.serverCodec || state.currentConfig.codec;
+                if (state.serverCodec && state.serverCodec !== state.currentConfig.codec) {
+                    state.currentConfig.codec = state.serverCodec;
+                    try { localStorage.setItem('rd_codec', state.serverCodec); } catch (e) {}
+                }
+                send({ type: 'config', codec: cfgCodec2, hw_encode: state.currentConfig.hw_encode });
                 if (!webrtcState.active && !webrtcState.pc) {
                     setTimeout(() => { if (!webrtcState.active && !webrtcState.pc) initWebRTC(); }, 400);
                 }
@@ -1054,6 +1553,8 @@
                 this.decoder = null;
                 this.supported = false;
                 this.configured = false;
+                this.lastKeyframeReqMs = 0;   // 关键帧请求节流
+                this.recoverCount = 0;
                 this.init();
             }
 
@@ -1076,13 +1577,45 @@
                 }
 
                 this.supported = true;
-                this.decoder = new VideoDecoder({
-                    output: this.handleFrame.bind(this),
-                    error: (e) => console.error('Decode error:', e)
-                });
-
-                // 等待首个关键帧获取 SPS/PPS 后配置
+                this.decoder = this.createDecoder();
                 this.configured = false;
+            }
+
+            // 创建解码器（init 与 resetAndRecover 共用）。WebCodecs VideoDecoder
+            // 出错后粘性不可复用，必须重新 new 一个才能继续解码。
+            createDecoder() {
+                const d = new VideoDecoder({
+                    output: this.handleFrame.bind(this),
+                    error: (e) => {
+                        // WebCodecs VideoDecoder 出错是粘性不可复用的：一旦解码失败，
+                        // 解码器永久停摆、不再输出新画面，canvas 残留黑块/花屏。
+                        // 必须重建解码器并请求关键帧自愈。
+                        console.error('Decode error:', e);
+                        this.resetAndRecover();
+                    }
+                });
+                return d;
+            }
+
+            // 解码自愈：WebCodecs 出错后重建解码器 + 请求服务端强制下一帧为 IDR。
+            // 新建解码器未 configure，收到下一帧关键帧后会自动 configure 并解码出干净画面。
+            resetAndRecover() {
+                // 限制重建频率，避免解码器反复报错时无限自愈形成死循环
+                const now = Date.now();
+                if (now - this.lastKeyframeReqMs < 250) return;
+                this.lastKeyframeReqMs = now;
+                if (++this.recoverCount > 20) {
+                    // 频繁解码失败说明当前编码/参数不可用，降级到图片模式兜底
+                    console.warn('WebCodecs keeps failing, falling back to image mode');
+                    send({ type: 'set_mode', mode: 'image' });
+                    return;
+                }
+                try { if (this.decoder) this.decoder.close(); } catch (e) {}
+                this.decoder = this.createDecoder();   // 重建解码器，未 configure 状态
+                this.configured = false;
+                // 请求服务端强制关键帧，从干净参考帧重新同步；关键帧到来后
+                // decode() 的 “!configured && isKeyframe” 分支会 configure 并解码。
+                send({ type: 'request_keyframe' });
             }
 
             configure(extraData) {
@@ -1098,12 +1631,14 @@
 
             decode(data, isKeyframe, timestamp) {
                 if (!this.supported) {
-                    // 无 WebCodecs 无法解码 WS H.264，此时应降级到图片模式。
-                    // 到达这里说明 WebRTC 未能建立（否则帧走 RTP，不会经 WS 0x01/0x02 到达），
-                    // 故请求 image 兜底。
+                    // 无 WebCodecs 无法解码 WS H.264。但若 WebRTC 是活动/意图中的视频路径，
+                    // 帧走 RTP、不应经 WS 0x01/0x02 到达此处；即便竞态漏入也绝不能触发
+                    // fallbackToImage（否则会 webrtcClose 误杀正在建立的 RTP 会话）。
+                    // 仅在完全无 WebRTC 意图时才降级图片模式。
+                    if (webrtcState.intending || webrtcState.active || webrtcState.pc) return;
                     if (!this.imageRequested) {
                         this.imageRequested = true;
-                        send({ type: 'set_mode', mode: 'image' });
+                        fallbackToImage('当前浏览器不支持 WebCodecs，已使用图片模式');
                     }
                     return;
                 }
@@ -1132,7 +1667,13 @@
                     data: data
                 });
 
-                this.decoder.decode(chunk);
+                try {
+                    this.decoder.decode(chunk);
+                } catch (e) {
+                    // decode() 在解码器处于 error/closed 状态时同步抛异常，同样触发自愈
+                    console.error('Decoder.decode threw:', e);
+                    this.resetAndRecover();
+                }
             }
 
             handleFrame(frame) {
@@ -1182,6 +1723,14 @@
 
                 // 发送认证
                 send({ type: 'auth', version: '1.0' });
+
+                // 认证后再同步一次视频模式：onload 时 WS 可能未就绪，
+                // set_mode/signal_start 未送达服务端，导致 webrtc 模式挂着等 offer、画面停死。
+                // 此处重新应用持久化模式，命令经已建立的 WS 送达，同时重置 WebRTC 超时降级。
+                try {
+                    const vm = (localStorage.getItem('rd_videomode') || 'auto');
+                    applyStreamMode(vm);
+                } catch (e) {}
             };
 
             state.ws.onclose = () => {
@@ -1225,8 +1774,11 @@
             const view = new DataView(data.buffer);
             const frameType = data[0]; // 第一个字节
 
-            // WebRTC 已连接：视频帧走 RTP，忽略 WS 视频/图片帧，文件传输等仍正常处理
-            if (webrtcState.active && (frameType === 0x01 || frameType === 0x02 || frameType === 0x03))
+            // WebRTC 已连接（或意图中：intending）时视频帧走 RTP，忽略 WS 视频/图片帧，
+            // 文件传输等仍正常处理。MSE 播放中（FFmpeg 模式）时即使 webrtcState.active
+            // 残留为 true 也不丢弃 WS 帧。intending 覆盖 initWebRTC 前的 400ms 协商空窗，
+            // 否则该窗口内的 WS 视频帧会漏进 H264Decoder 触发 fallbackToImage 误杀 RTP 会话。
+            if ((webrtcState.active || webrtcState.intending) && !msePlayer.using && (frameType === 0x01 || frameType === 0x02 || frameType === 0x03))
                 return;
 
             if (frameType === 0x03) {
@@ -1250,14 +1802,28 @@
                     entry.received += chunkLen;
                 }
             } else if (frameType === 0x01 || frameType === 0x02) {
+                // WebRTC 会话存在期间（或意图中：intending）丢弃 WS 视频帧：
+                // 握手窗口内残留的 WS 帧（排除竞态）会进入 H264Decoder.decode，
+                // 无 WebCodecs 的浏览器在那里触发 fallbackToImage → webrtcClose，
+                // 把正在建立的 WebRTC 会话误杀。pc/intending 存在即等 RTP 流；
+                // WebRTC 失败时 webrtcClose 会把二者清掉，WS 帧自然恢复走解码路径。
+                if (webrtcState.pc || webrtcState.intending) return;
                 // 视频模式：H.264 帧（原有逻辑）
+                if (!window._dbgRx) window._dbgRx = 0;
+                const _t = performance.now();
+                if (_t - window._dbgRx > 1000) {
+                    window._dbgRx = _t;
+                    console.log('WS frame rx: type=' + frameType + ' len=' + (data.length - 13) + ' mseUsing=' + msePlayer.using + ' wActive=' + webrtcState.active + ' started=' + msePlayer.started);
+                }
                 if (data.length < 13) return;
                 const dataLength = view.getUint32(1, false);
                 const timestamp = view.getBigInt64(5, false);
                 const h264Data = data.slice(13, 13 + dataLength);
                 const isKeyframe = frameType === 0x01;
 
-                if (state.decoder) {
+                if (msePlayer.using) {
+                    msePlayer.append(h264Data, isKeyframe);
+                } else if (state.decoder) {
                     state.decoder.decode(h264Data, isKeyframe, Number(timestamp));
                 }
             } else if (frameType === 0x11) {
@@ -1325,30 +1891,28 @@
                     displayJpegFrame(p);
                 }
             };
-            // 解码降采样到 canvas 实际显示尺寸：高分辨率 JPEG 全尺寸软解慢（1s+），
-            // 按窗口内显示尺寸（约 1/4 像素）解码快 3-4 倍，图片模式延迟显著下降。
-            // 画布内部保持 1920x1080（坐标映射不变），bitmap 绘制时拉伸到画布尺寸，
-            // 再由浏览器缩放到窗口显示，画质对远程操控无感知差异。
+            // 解码分辨率对齐画布（=屏幕物理分辨率，如 1920x1080），不再降到窗口显示尺寸：
+            // 旧方案“解码~675p→拉伸1080p画布→浏览器缩到窗口”三重缩放，静态文字明显发糊；
+            // 新方案解码即原生分辨率，画布 1:1 绘制，仅浏览器 GPU 做最后一次高质量缩放。
+            // 画布内部保持 1920x1080（坐标映射不变），bitmap 绘制时拉伸到画布尺寸。
             if (state.screenWidth > 0 && window.createImageBitmap) {
                 let dispW = state.canvas.width, dispH = state.canvas.height;
-                try {
-                    const r = state.canvas.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) {
-                        dispW = Math.max(1, Math.round(r.width));
-                        dispH = Math.max(1, Math.round(r.height));
-                    }
-                } catch (e) {}
-                createImageBitmap(blob, {
-                    resizeWidth: dispW,
-                    resizeHeight: dispH,
-                    resizeQuality: 'high',
-                }).then(bmp => {
-                    finish({ bmp, width: bmp.width, height: bmp.height }, true);
-                    bmp.close();
-                }).catch(() => {
+                if (dispW > 0 && dispH > 0) {
+                    createImageBitmap(blob, {
+                        resizeWidth: dispW,
+                        resizeHeight: dispH,
+                        resizeQuality: 'high',
+                    }).then(bmp => {
+                        finish({ bmp, width: bmp.width, height: bmp.height }, true);
+                        bmp.close();
+                    }).catch(() => {
+                        img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
+                        img.src = url;
+                    });
+                } else {
                     img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
                     img.src = url;
-                });
+                }
             } else {
                 img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
                 img.src = url;
@@ -1478,6 +2042,13 @@
                 case 'mode_changed':
                     if (typeof msg.hwEncode === 'boolean')
                         state.hwEncode = msg.hwEncode;
+                    // 服务端主动切回图片模式（如编码器初始化失败回退）时，本地必须同步
+                    // 停掉 MSE/WebRTC：否则残留的全屏 <video> 盖住 canvas，JPEG 帧画在
+                    // 底下不可见，画面冻结在最后一帧视频。
+                    if (msg.mode === 'image' && (msePlayer.using || webrtcState.active || webrtcState.pc || webrtcState.intending)) {
+                        msePlayer.stop('mode_changed-image');
+                        webrtcClose();
+                    }
                     // 记录服务端当前编码协议（供调试/回显；不强制覆盖用户选择）
                     if (msg.codec && (msg.codec === 'h264' || msg.codec === 'hevc'))
                         state.serverCodec = msg.codec;
@@ -1899,6 +2470,22 @@
             document.getElementById('btn-quality').querySelector('.btn-text').textContent = '画质: ' + label;
         }
 
+        // 切换到 HTTPS 安全连接：整页跳转（WS 协议随之自适应为 wss://）。
+        // 已是 https 时仅刷新高亮状态，不重复跳转。
+        function switchToHttps() {
+            if (location.protocol === 'https:') return;
+            location.href = 'https://' + location.host + location.pathname + location.search;
+        }
+
+        // 页面加载后同步“安全连接”按钮状态：https 下标 active 并提示已启用
+        function syncSslOption() {
+            const btn = document.querySelector('#config-dropdown .dropdown-options[data-key="ssl"] button');
+            if (!btn) return;
+            const secure = (location.protocol === 'https:');
+            btn.classList.toggle('active', secure);
+            btn.textContent = secure ? '已启用 HTTPS' : '启用 HTTPS (推荐)';
+        }
+
         function onDropdownClick(e) {
             const btn = e.target.closest('button');
             if (!btn) return;
@@ -1907,6 +2494,12 @@
             const key = group.dataset.key;
             const val = btn.dataset.value;
 
+            if (key === 'ssl') {
+                // 安全连接：页面级跳转到 HTTPS（服务端 SSL 监听同一端口）。
+                // WebSocket 协议由 CONFIG.wsUrl 按 location.protocol 自动适配 wss://
+                switchToHttps();
+                return;
+            }
             if (key === 'quality') {
                 const fps = state.currentConfig.fps;
                 const jpegQ = val === 'high' ? 80 : val === 'medium' ? 60 : 35;
@@ -2046,6 +2639,7 @@
         }
 
         document.getElementById('config-dropdown').addEventListener('click', onDropdownClick);
+        syncSslOption(); // 初始化“安全连接”按钮状态（http=可启用 / https=已启用）
 
         function toggleFullscreen() {
             if (!document.fullscreenElement) {

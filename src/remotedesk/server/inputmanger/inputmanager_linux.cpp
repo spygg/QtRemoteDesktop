@@ -167,7 +167,30 @@ namespace {
     }
 }
 
+bool InputManager::ensureXDisplay()
+{
+    if (xDisplay_)
+        return true;
+    Display* d = XOpenDisplay(nullptr);
+    if (!d) {
+        // X display 仍不可用：纯 Wayland 且无 Xwayland 时，惰性发起 portal（只一次）。
+        if (waylandMode_ && !portalInitStarted_) {
+            portalInitStarted_ = true;
+            initWaylandPortal();
+        }
+        return false;
+    }
+    xDisplay_ = d;
+    if (waylandMode_) {
+        // 有可用 X display：优先 X11 输入（XTest），不再尝试 uinput/Wayland portal。
+        qInfo() << "InputManager: X display opened lazily, switching to X11 (XTest) input";
+        waylandMode_ = false;
+    }
+    return true;
+}
+
 void InputManager::injectMouseMove(int x, int y) {
+    lastInjX_ = x; lastInjY_ = y;
     // Wayland 门户模式：通过 RemoteDesktop D-Bus 注入
     if (waylandPortalMode_ && portalReady_) {
         // NotifyPointerMotionAbsolute(session, options, stream, x, y)
@@ -183,6 +206,9 @@ void InputManager::injectMouseMove(int x, int y) {
         QDBusConnection::sessionBus().asyncCall(msg);
         return;
     }
+    // 首次注入时惰性打开 X display（env 已就绪）：X11 机器上此后走 XTest；
+    // 成功会把 waylandMode_ 改回 false，避免下面误走 uinput。
+    ensureXDisplay();
     // Wayland 下无 X：走 uinput 绝对定位
     if (uinputMouseFd_ < 0 && waylandMode_)
         initUinputMouse();
@@ -191,8 +217,9 @@ void InputManager::injectMouseMove(int x, int y) {
         return;
     }
     if (!xDisplay_) return;
-    XWarpPointer(xdisp(xDisplay_), None, DefaultRootWindow(xdisp(xDisplay_)), 0, 0, 0, 0, x, y);
-    XFlush(xdisp(xDisplay_));
+    Display* d = xdisp(xDisplay_);
+    XWarpPointer(d, None, DefaultRootWindow(d), 0, 0, 0, 0, x, y);
+    XSync(d, False);
 }
 
 QPoint InputManager::cursorPosition() const
@@ -228,10 +255,16 @@ void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
     }
     if (!xDisplay_) return;
     focusLockScreenWindow(xdisp(xDisplay_));
-    int xButton = (button == 0 ? 1 : button == 1 ? 2 : 3);
-    XTestGrabControl(xdisp(xDisplay_), True);
+    unsigned int xButton = (button == 0 ? Button1 : button == 1 ? Button2 : Button3);
+    // XTest 真实设备事件：由 X 服务器按当前指针位置投递给光标下的**应用窗口**。
+    //
+    // 绝不能再改回 XSendEvent(root, propagate=True)：合成事件发到 root 后，root 自己
+    // 能收到（所以 `xev -root` 会显示 BP/BR>0，极易误判为"注入成功"），但 X 并不会
+    // 把它 propagate 到光标下的应用窗口 —— 实测用 xev 自建窗口收不到任何 ButtonPress，
+    // 表现就是"点击无效"。
+    // 推论：`xev -root` 不能用来判定按钮注入是否生效（根窗口收不到发给子窗口的
+    // 真实按钮事件，XTest 在那里恒为 0）。判定必须用会实际接收按钮的窗口。
     XTestFakeButtonEvent(xdisp(xDisplay_), xButton, isDown, CurrentTime);
-    XTestGrabControl(xdisp(xDisplay_), False);
     XFlush(xdisp(xDisplay_));
 }
 
@@ -248,6 +281,8 @@ void InputManager::injectWheel(int delta) {
         QDBusConnection::sessionBus().asyncCall(msg);
         return;
     }
+    // 首次注入时惰性打开 X display（env 已就绪）
+    ensureXDisplay();
     if (uinputWheelFd_ < 0 && waylandMode_)
         initUinputMouse();
     if (uinputWheelFd_ >= 0) {
@@ -255,11 +290,12 @@ void InputManager::injectWheel(int delta) {
         return;
     }
     if (!xDisplay_) return;
-    int button = delta > 0 ? 4 : 5;
-    XTestGrabControl(xdisp(xDisplay_), True);
+    // wheel 消息本身不带坐标：先把指针移到最近一次注入的位置，再发按钮事件
+    if (lastInjX_ != 0 || lastInjY_ != 0)
+        injectMouseMove(lastInjX_, lastInjY_);
+    unsigned int button = delta > 0 ? Button4 : Button5;
     XTestFakeButtonEvent(xdisp(xDisplay_), button, True, CurrentTime);
     XTestFakeButtonEvent(xdisp(xDisplay_), button, False, CurrentTime);
-    XTestGrabControl(xdisp(xDisplay_), False);
     XFlush(xdisp(xDisplay_));
 }
 
@@ -271,6 +307,13 @@ void InputManager::primeFocusWindow() {
 void InputManager::focusLockScreenWindow(void* dpy)
 {
     Display* display = static_cast<Display*>(dpy);
+
+    // 仅在锁屏/安全输入会话下方可抢焦点。普通桌面下，X11 会把 XTest 注入的
+    // 键盘/鼠标事件派发给“当前活动窗口”，无需也不应该 XSetInputFocus 改焦点。
+    // 否则会扫到任意“全屏或置顶(ABOVE)”窗口并将其强设为焦点，抢走记事本等
+    // 正在输入的应用的焦点（键盘输入几秒后失焦）。
+    if (!screenLocked_)
+        return;
 
     // 焦点管理带 2 秒节流：已成功处理过且短时间内无需再校验，
     // 后续按键直接走 XTest（无 X 同步往返，QEMU/软渲染下首次按键不再明显卡顿）。
@@ -842,6 +885,9 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         return;
     }
 
+    // 首次注入时惰性打开 X display（env 已就绪）：X11 机器上把 waylandMode_ 改回
+    // false，避免上面误走 uinput，并让下面 XTest 路径可用。
+    ensureXDisplay();
     if (uinputFd_ >= 0 || waylandMode_) {
         // Wayland 会话（无门户授权时）优先走 uinput：无 X 也可注入
         if (uinputFd_ < 0 && !initUinput())

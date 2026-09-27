@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
+void applyLogLevelFromArgs(int argc, char* argv[]);
 
 // Check if a dirent is likely a numeric PID directory (handle DT_UNKNOWN)
 static bool isPidDir(struct dirent* entry)
@@ -371,6 +372,8 @@ int LinuxService::run(int argc, char* argv[])
 
     QString logDir = QString("%1/logs").arg(QCoreApplication::applicationDirPath());
     QDir().mkpath(logDir);
+    // --service 分流绕过了 main() 的 QCommandLineParser，须从原始 argv 恢复日志级别
+    applyLogLevelFromArgs(argc, argv);
     qInstallMessageHandler(logToFile);
 
     qInfo() << "Linux service mode: starting RDP server";

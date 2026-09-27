@@ -19,7 +19,11 @@ public:
     static bool isSupported();
 
     // codec: 0=H264, 1=HEVC（与 videoencoder.h CodecType 对齐）；forceHw=true 失败即失败
-    bool initialize(int codec, int width, int height, int fps, int bitrate, bool forceHw);
+    // srcW/srcH = 捕获到的源尺寸；encW/encH = 实际编码输出尺寸（可能因 scale 缩放）。
+    // 早期版本只传编码尺寸，导致 sws 上下文按 encW×encH 解释全尺寸源帧：
+    // 横向裁掉右侧、纵向压扁（默认 scale=75 时 100% 复现）。
+    bool initialize(int codec, int srcW, int srcH, int encW, int encH,
+                    int fps, int bitrate, bool forceHw);
     void shutdown();
     bool isActive() const { return active_; }
 
@@ -43,7 +47,8 @@ private:
     void* sws_ = nullptr;    // SwsContext*（RGB32 -> NV12）
     void* buffer_ = nullptr; // MppBuffer（NV12 帧缓冲，循环使用）
     int codec_ = 0;          // 0=H264 1=HEVC
-    int width_ = 0, height_ = 0;
+    int width_ = 0, height_ = 0;   // 编码输出尺寸
+    int srcW_ = 0, srcH_ = 0;      // 输入源尺寸（sws 源端）
     int horStride_ = 0, verStride_ = 0;  // 16 字节对齐
     int fps_ = 30, bitrate_ = 2000000;
     bool active_ = false;

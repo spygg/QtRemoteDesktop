@@ -32,6 +32,7 @@ typedef struct{
 	YangRtpPacket videoFuaPacket;
 	YangRtpPacket videoRawPacket;
 	YangRtpPacket videoStapPacket;
+	YangRtpExtensions midExtension;  // [MID-EXT] one-byte mid="0"(id=1)，Chrome demux 依赖
 }YangPushVideoSession;
 
 
@@ -100,6 +101,7 @@ static int32_t yang_push_h264_package_stap_a(
 	session->videoStapPacket.header.marker = yangfalse;
 	session->videoStapPacket.header.sequence = session->videoSeq++;
 	session->videoStapPacket.header.timestamp = timestamp;
+	session->videoStapPacket.header.extensions = &session->midExtension;
 
 	session->videoStapPacket.payload_type = YangRtpPacketPayloadTypeSTAP;
 
@@ -137,7 +139,8 @@ static int32_t yang_push_h264_package_single_nalu2(YangPushVideoSession *session
 	session->videoRawPacket.frame_type = YangFrameTypeVideo;
 	session->videoRawPacket.header.sequence = session->videoSeq++;
 	session->videoRawPacket.header.timestamp = videoFrame->pts;
-	session->videoRawPacket.header.marker = yangtrue;
+	session->videoRawPacket.header.marker = videoFrame->marker ? yangtrue : yangfalse;
+	session->videoRawPacket.header.extensions = &session->midExtension;
 	session->videoRawPacket.payload_type = YangRtpPacketPayloadTypeRaw;
 
 	session->videoRawData.payload = session->videoBuf;
@@ -178,7 +181,8 @@ static int32_t yang_push_h264_package_fu_a(YangPushVideoSession *session,
 		session->videoFuaPacket.frame_type = YangFrameTypeVideo;
 		session->videoFuaPacket.header.sequence = session->videoSeq++;
 		session->videoFuaPacket.header.timestamp = videoFrame->pts;
-		session->videoFuaPacket.header.marker = (i == num_of_packet - 1) ? 1 : 0;
+		session->videoFuaPacket.header.marker = (i == num_of_packet - 1) ? (videoFrame->marker ? 1 : 0) : 0;
+		session->videoFuaPacket.header.extensions = &session->midExtension;
 
 		session->videoFuaPacket.payload_type = YangRtpPacketPayloadTypeFUA2;
 
@@ -245,6 +249,11 @@ int32_t yang_create_pushVideoDataH264(YangPushDataVideo* videoData,YangPushDataS
 	session->dataBuffer = pushData;
 
 	session->videoSeq = 0;
+	yang_memset(&session->midExtension, 0, sizeof(YangRtpExtensions));
+	session->midExtension.has_ext = yangtrue;
+	session->midExtension.audio_level.has_ext = yangtrue;
+	session->midExtension.audio_level.id = 1;   // 与 SDP extmap:1 sdes:mid 对应
+	session->midExtension.audio_level.value = '0'; // mid="0"
 
 	session->videoBuf = (char*) yang_calloc(kRtpPacketSize,1);
 

@@ -23,12 +23,16 @@ public:
     ~WebRtcSession() override;
 
     // 创建 metaRTC PeerConnection + H.264 视频轨道，并生成 offer（经 localOffer 信号发出）
-    bool create(const QVector<QString>& iceServers);
+    // fps 用于 RTP 时间戳推进（90kHz 时钟）；旧实现硬编码 30fps，
+    // 前端把帧率改成 15/60 时时间戳速率对不上，浏览器抖动缓冲会持续 underrun 或堆积。
+    bool create(const QVector<QString>& iceServers, int fps = 30);
     void handleAnswer(const QString& sdp);
     void handleIce(const QString& candidate, const QString& mid);
     void close();
 
-    bool isConnected() const { return connected_; }
+    // 实际推流状态（answer 已设置）。connected_ 仅反映 metaRTC 状态回调，
+    // 纯媒体推流场景它恒为 false，不能用于业务判断。
+    bool isConnected() const { return remoteSet_; }
     void sendFrame(const QByteArray& data, bool keyframe);
 
     // YangCallback* 纯虚实现：metaRTC 回调
@@ -50,13 +54,27 @@ signals:
     void failed();
     void closed();
     void keyframeRequested();          // 浏览器请求关键帧（PLI）
+    void answerReceived();             // answer 已生效（用于连接后强制产 IDR）
 
 private:
     YangPeerInfo peerInfo_;
     std::unique_ptr<YangPeerConnection8> pc_;
     std::unique_ptr<YangRtcPacer> pacer_;
     uint64_t rtpTimestamp_ = 0;
+    uint64_t rtpTicksPerFrame_ = 3000;  // 90000 / fps，由 create(fps) 计算
     bool connected_ = false;
+    // answer 已设置（DTLS/SRTP 握手可以开始）：sendFrame 的推流门禁用它而非
+    // connected_——metaRTC 在纯媒体推流（无 DataChannel）场景下不回调
+    // Yang_Conn_State_Connected（实测 connected=0 次而媒体面可用），
+    // 若以 connected_ 为门禁则一帧都不会推送（表现为 WebRTC 首帧后冻结）。
+    // 会话失败/关闭时由 stopWebRtcSession 将本会话从 webrtcSessions_ 移除，
+    // 推流随之自然停止。
+    bool remoteSet_ = false;
+    // answer 未生效前到达的远端 ICE 候选先排队，answer 生效后补发，
+    // 否则 metaRTC addIceCandidate 在 remoteDescription 未设置时失败、候选被丢弃。
+    QVector<QPair<QString, QString>> pendingIce_;
+    // 向 metaRTC 添加单个远端 ICE 候选（包装成 JSON 对象）
+    void addIce(const QString& candidate, const QString& mid);
 };
 
 #endif // USE_WEBRTC

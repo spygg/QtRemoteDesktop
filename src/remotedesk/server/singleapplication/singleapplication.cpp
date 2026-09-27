@@ -195,8 +195,6 @@ SingleApplication::SingleApplication(int& argc, char** argv)
 
         socket.waitForBytesWritten();
         m_bRunning = true;
-
-        qDebug() << "Running single instance" << strArg;
     } else {
         if (!m_pServer) {
             // 注意：不要在 listen 之前无条件 removeServer —— 若另一实例正在启动

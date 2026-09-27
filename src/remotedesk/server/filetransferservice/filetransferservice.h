@@ -18,6 +18,11 @@ public:
     explicit FileTransferService(QObject* parent = nullptr);
     ~FileTransferService();
 
+    // 文件传输根目录约束（防越权读写）。默认限制在当前用户 home；
+    // 传入 "/"（或空）表示显式放开全盘（不推荐，仅内网可信环境使用）。
+    void setRootPath(const QString& root);
+    static QString rootPath() { return s_rootPath; }
+
 public slots:
     void processFileList(const QString& clientId, const QString& path);
     void processDownload(const QString& clientId, const QString& path);
@@ -34,6 +39,8 @@ signals:
                           qint64 transferred, qint64 total, double speedKBps);
 
 private:
+    static QString s_rootPath;
+    static bool s_enforceRoot;
     static QString sanitizeFilePath(const QString& path);
     static void writeTarHeader(QByteArray& data, const QString& name, qint64 size, char type);
     static void addToTar(QByteArray& tarData, const QDir& dir, const QString& prefix);

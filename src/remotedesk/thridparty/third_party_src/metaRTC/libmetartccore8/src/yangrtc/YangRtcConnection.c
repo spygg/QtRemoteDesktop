@@ -577,6 +577,7 @@ static int32_t yang_rtcconn_setRemoteDescription(YangRtcSession* session,char* s
 	if(!session->isControlled)
 		yang_rtcconn_initPlay(session);
 
+		yang_error("ICE-DBG setRemote: ufrag=[%s] pwdlen=%d iceMode=%d", session->ice.session.remote_ufrag, (int)yang_strlen(session->ice.session.remoteIcePwd), session->ice.session.remoteIceMode);
 	session->ice.session.stun.createRequestStunPacket(session,session->ice.session.remoteIcePwd);
 	return err;
 }
@@ -729,7 +730,9 @@ int32_t yang_create_rtcConnection(YangRtcConnection* conn,YangPeerInfo* peerInfo
 
 	session->iceInited=yangfalse;
 	session->isInited = yangfalse;
-	session->isControlled=yangfalse;
+	// 继承 peerInfo 的角色（原硬编码 yangfalse 会导致 createOffer 生成
+	// a=setup:active 且 DTLS 仅为 client 触发，配合浏览器 mDNS 候选死锁）
+	session->isControlled=peerInfo->rtc.isControlled;
 
 	conn->close=yang_rtcconn_close;
 

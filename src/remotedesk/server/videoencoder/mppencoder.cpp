@@ -64,20 +64,25 @@ bool MppEncoder::isSupported()
     return QFile::exists("/dev/mpp_service");
 }
 
-bool MppEncoder::initialize(int codec, int w, int h, int fps, int bitrate, bool forceHw)
+bool MppEncoder::initialize(int codec, int srcW, int srcH, int encW, int encH,
+                            int fps, int bitrate, bool forceHw)
 {
     shutdown();
     codec_ = codec;
-    width_ = w;
-    height_ = h;
+    srcW_ = srcW;
+    srcH_ = srcH;
+    width_ = encW;
+    height_ = encH;
     fps_ = fps;
     bitrate_ = bitrate;
-    horStride_ = mppAlign16(w);
-    verStride_ = mppAlign16(h);
+    horStride_ = mppAlign16(encW);
+    verStride_ = mppAlign16(encH);
 
-    // RGB32 -> NV12（YUV420SP = NV12）缩放上下文，编码线程直接使用
-    sws_ = sws_getContext(w, h, AV_PIX_FMT_RGB32,
-                          w, h, AV_PIX_FMT_NV12,
+    // RGB32 -> NV12（YUV420SP = NV12）缩放上下文，编码线程直接使用。
+    // 源端必须用**捕获尺寸** srcW×srcH，目标端才是编码尺寸 encW×encH；
+    // 早期版本两端都用编码尺寸，于是全尺寸源帧被按 encW 宽度截取 → 画面裁切+压扁。
+    sws_ = sws_getContext(srcW, srcH, AV_PIX_FMT_RGB32,
+                          encW, encH, AV_PIX_FMT_NV12,
                           SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
     if (!sws_) {
         qCritical() << "MppEncoder: sws_getContext failed";
@@ -105,7 +110,7 @@ bool MppEncoder::initialize(int codec, int w, int h, int fps, int bitrate, bool 
     // （kcfg/kmpp 缺失），若等运行时连续失败再回退，静止桌面将长期黑屏。
     // 喂一帧黑帧，3 次尝试（含内部重试）均无输出则立即判为不可用，由上层回退软编。
     {
-        QImage probe(w, h, QImage::Format_RGB32);
+        QImage probe(srcW, srcH, QImage::Format_RGB32);
         probe.fill(Qt::black);
         QByteArray dummy;
         bool dummyKey = false;
@@ -119,7 +124,8 @@ bool MppEncoder::initialize(int codec, int w, int h, int fps, int bitrate, bool 
     }
 
     qInfo() << "MppEncoder initialized" << (static_cast<CodecType>(codec_) == CodecType::HEVC ? "hevc" : "h264")
-            << w << "x" << h << "@" << fps << "fps stride" << horStride_ << "x" << verStride_;
+            << srcW_ << "x" << srcH_ << "->" << encW << "x" << encH
+            << "@" << fps << "fps stride" << horStride_ << "x" << verStride_;
     return true;
 }
 
@@ -258,11 +264,15 @@ bool MppEncoder::encode(const QImage& img, QByteArray& out, bool& keyframe)
     MppPacket packet = nullptr;
     MPP_RET ret = MPP_ERR_UNKNOW;
     for (int attempt = 0; attempt < 2; ++attempt) {
-        packet = nullptr;
+        // 用局部 p 接收本次尝试的结果：旧实现在循环开头 `packet = nullptr`，
+        // 会把上一次拿到的（非空但 size==0 的）packet 指针直接丢弃 → MppPacket 泄漏，
+        // 长时间运行会耗尽 MPP 内存。这里只把"有效包"交给 packet，无效包立即释放。
+        MppPacket p = nullptr;
         MppFrame f = nullptr;
         mpp_frame_init(&f);
         if (!f) {
             qWarning() << "MppEncoder: mpp_frame_init failed";
+            if (packet) mpp_packet_deinit(&packet);
             return false;
         }
         mpp_frame_set_width(f, width_);
@@ -272,12 +282,15 @@ bool MppEncoder::encode(const QImage& img, QByteArray& out, bool& keyframe)
         mpp_frame_set_fmt(f, MPP_FMT_YUV420SP);
         mpp_frame_set_pts(f, pts);
         mpp_frame_set_buffer(f, buffer_);
-        ret = static_cast<MppApi*>(mpi_)->encode(static_cast<MppCtx>(ctx_), f, &packet);
+        ret = static_cast<MppApi*>(mpi_)->encode(static_cast<MppCtx>(ctx_), f, &p);
         mpp_frame_deinit(&f);
-        if (ret == MPP_OK && packet && mpp_packet_get_size(packet) > 0)
+        if (ret == MPP_OK && p && mpp_packet_get_size(p) > 0) {
+            packet = p;
             break;
-        if (attempt < 2)
-            qWarning() << "MppEncoder: encode retry" << (attempt + 1) << "null/empty, ret =" << ret;
+        }
+        if (p) mpp_packet_deinit(&p);
+        if (attempt == 0)
+            qWarning() << "MppEncoder: encode retry 1 null/empty, ret =" << ret;
     }
     if (ret != MPP_OK) {
         qWarning() << "MppEncoder: mpi encode failed, ret =" << ret << "frameCount =" << (frameCount_ - 1);
@@ -356,7 +369,7 @@ void MppEncoder::shutdown()
 MppEncoder::MppEncoder() {}
 MppEncoder::~MppEncoder() { shutdown(); }
 bool MppEncoder::isSupported() { return false; }
-bool MppEncoder::initialize(int, int, int, int, int, bool) { return false; }
+bool MppEncoder::initialize(int, int, int, int, int, int, int, bool) { return false; }
 void MppEncoder::shutdown() {}
 bool MppEncoder::encode(const QImage&, QByteArray&, bool&) { return false; }
 void MppEncoder::setBitrate(int) {}

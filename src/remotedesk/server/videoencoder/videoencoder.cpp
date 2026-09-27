@@ -15,6 +15,21 @@ VideoEncoder::VideoEncoder(QObject*)
     connect(&encoderThread_, &QThread::started, this, &VideoEncoder::encodingLoop);
 }
 
+// 进程级标志：MPP 一旦被证明实际不可用（initialize 成功但 encode 恒返回 null），
+// 本进程后续一律不再尝试 MPP。
+//
+// 原因：RK3588 上 MPP 常出现"初始化/探测成功、实际编码恒 null"的情况
+// （实测 mpp_venc_kcfg_init failed -1、encode returned null packet 上百次）。
+// 若每次重建编码器都重新走一遍必然失败的 MPP 路径，就会与软编无限交替
+// （日志表现为 "Using MPP encoder" / "Using software encoder" 反复切换），
+// 每次切换都要 shutdown+initialize（含线程停止/启动），画面长时间中断且 CPU 空转。
+static std::atomic<bool> g_mppDisabled{ false };
+
+bool VideoEncoder::isMppDisabled()
+{
+    return g_mppDisabled.load();
+}
+
 VideoEncoder::~VideoEncoder()
 {
     shutdown();
@@ -127,6 +142,25 @@ static void applyHwOpts(const QString& hwName, AVDictionary** opts)
     // videotoolbox / vaapi / rkmpp：默认参数即可，不额外设置
 }
 
+// 释放 FFmpeg 编码链路资源（幂等，指针置空）。
+// 独立出来的原因：initialize() 会被重复调用（上层 reinit 未必先 shutdown），
+// 必须能安全地把上一轮的上下文清干净，否则每次重建都泄漏一套编码器。
+static void releaseAv(AVCodecContext** ctx, AVFrame** frame, SwsContext** sws)
+{
+    if (sws && *sws) {
+        sws_freeContext(*sws);
+        *sws = nullptr;
+    }
+    if (frame && *frame) {
+        av_frame_free(frame);
+        *frame = nullptr;
+    }
+    if (ctx && *ctx) {
+        avcodec_free_context(ctx);
+        *ctx = nullptr;
+    }
+}
+
 bool VideoEncoder::isHwAcceleratedAvailable(CodecType type)
 {
     // RK3588 MPP：H264/HEVC 直连硬编（非 avcodec 编码器，单独探测）
@@ -158,11 +192,17 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         delete mpp_;
         mpp_ = nullptr;
     }
+    // 释放上一轮 FFmpeg 资源：initialize 允许重复调用（上层 reinit 未必先 shutdown），
+    // 若不先释放就直接覆盖指针，会泄漏整套编码器上下文（硬编时还含 GPU/驱动资源）。
+    releaseAv(&codecCtx_, &frame_, &swsCtx_);
+
     abort_ = false;
+    hasIdr_.store(false);
     frameCount_ = 0;
     startTime_ = 0;
     pendingBitrate_.store(0);
     forceKeyframe_.store(false);
+    mppBroken_.store(false);
     encodeEmaMs_ = 0;
     lastOverloadLogMs_ = 0;
     overloaded_ = false;
@@ -177,12 +217,20 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     currentCodec_ = type;
     fps_ = fps;
     hwMode_ = hwMode;
+    // 记录本轮上下文对应的源尺寸：后续投入的帧尺寸必须一致，
+    // 否则 sws_scale/MPP 会按旧尺寸解释新帧（越界读 / 画面错乱）。
+    swsSrcW_ = srcW;
+    swsSrcH_ = srcH;
+    sizeMismatch_.store(false);
 
     // ---- RK3588 MPP 硬编：H264/HEVC + 硬件开关非 Off 时优先走 MPP 直连 ----
     // MPP 不是 avcodec 编码器（无编码器名可探测），需单独初始化；其他平台 isSupported()=false 自动跳过
-    if ((type == CodecType::H264 || type == CodecType::HEVC) && hwMode != HwEncodeMode::Off) {
+    if ((type == CodecType::H264 || type == CodecType::HEVC) && hwMode != HwEncodeMode::Off
+        && !g_mppDisabled.load()) {
         mpp_ = new MppEncoder();
-        if (mpp_->initialize(static_cast<int>(type), encW, encH, fps, bitrate,
+        // 源尺寸 srcW×srcH 与编码尺寸 encW×encH 分开传：MPP 内部 sws 需要按
+        // 源尺寸解释输入帧，只传编码尺寸会导致画面裁切+压扁。
+        if (mpp_->initialize(static_cast<int>(type), srcW, srcH, encW, encH, fps, bitrate,
                              hwMode == HwEncodeMode::On)) {
             codecName_ = mpp_->name();
             hwName_ = mpp_->hwName();
@@ -194,6 +242,10 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         }
         delete mpp_;
         mpp_ = nullptr;
+        // MPP 初始化失败（如 mpp_venc_kcfg_init 失败）：置全局禁用标志，
+        // 本进程后续重建不再尝试。重复 init/free mpp 库在部分固件上会崩
+        // （曾见连续重建时 Segmentation fault）。
+        g_mppDisabled.store(true);
         if (hwMode == HwEncodeMode::On) {
             // 强制硬编但 MPP 不可用：仍回退 FFmpeg 软编保证画面可用
             // （本设备 MPP 1.1.0 初始化成功但 encode 恒 null，强制 on 若直接失败
@@ -262,7 +314,9 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         ctx->time_base = { 1, fps };
         ctx->framerate = { fps, 1 };
         ctx->bit_rate = bitrate;
-        ctx->gop_size = fps;
+        // 关键帧间隔取半秒到一秒之间：太短浪费码率，太长则画面突变后
+        // 要等待整个 GOP 才能恢复清晰。桌面远程建议 ~0.5s 一个 IDR。
+        ctx->gop_size = qMax(1, fps / 2);
         ctx->max_b_frames = 0;
         ctx->pix_fmt = pixFmt_;
         // 硬件编码器内部自带加速与缓冲管理，线程数固定 1；多线程仅对软编有效
@@ -276,9 +330,19 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
                 applyHwOpts(hwName_, &opts);
             } else if (c->name &&
                 (qstrcmp(c->name, "libopenh264") == 0 || qstrcmp(c->name, "h264_openh264") == 0)) {
-                // libopenh264（FFmpeg 3.4.8 封装）：减少实时桌面的 CPU 占用
-                av_dict_set(&opts, "allow_skip_frames", "1", 0); // 码率超限时允许跳帧，避免积压
-                av_dict_set(&opts, "loopfilter", "0", 0);        // 禁用环内滤波，省 CPU（桌面画面可接受）
+                // libopenh264（FFmpeg 3.4.8 封装）：
+                // 注意：openh264 硬约束——禁用跳帧(bEnableFrameSkip=0)会导致
+                // RC_QUALITY/BITRATE/TIMESTAMP 模式全部失效（日志明确警告
+                // "bitrate can't be controlled without enabling skip frame"），
+                // 表现为刷新后画面停滞。必须保持跳帧允许；码率充足(高档~25M)时
+                // 编码器实际不会跳帧，画质不受影响，仅低码率时才触发跳帧保流畅。
+                av_dict_set(&opts, "allow_skip_frames", "1", 0);
+                // 高码率（高质量档）时开启环内滤波消除块状感，否则禁用以省 CPU。
+                // 100 万像素约需 0.05 bits/px 落点区分档位，此处按 bitrate 判定更直观。
+                if (bitrate >= 15000000)
+                    av_dict_set(&opts, "loopfilter", "1", 0);
+                else
+                    av_dict_set(&opts, "loopfilter", "0", 0);
             } else {
                 av_dict_set(&opts, "preset", "ultrafast", 0);
                 av_dict_set(&opts, "tune", "zerolatency", 0);
@@ -412,60 +476,67 @@ void VideoEncoder::encodingLoop()
         image = image.convertToFormat(QImage::Format_RGB32);
     }
 
+    // 尺寸一致性校验：sws 上下文/MPP 都是按 initialize() 时的源尺寸建立的。
+    // 分辨率切换、输出切换或显示器热插拔后若上层未重建编码器，sws_scale 会按旧宽度
+    // 解释新帧、却用新 bytesPerLine 作行距 → 降分辨率时堆越界读（可致随机崩溃）。
+    // 这里直接丢帧并置位，由上层（onFrameCaptured）触发重建。
+    if (image.width() != swsSrcW_ || image.height() != swsSrcH_) {
+        if (!sizeMismatch_.exchange(true))
+            qWarning() << "VideoEncoder: frame size" << image.width() << "x" << image.height()
+                       << "!= context" << swsSrcW_ << "x" << swsSrcH_
+                       << "- dropping frames until reinit";
+        continue;
+    }
+
     // ---- MPP 硬编路径（RK3588）：不经过 FFmpeg sws/编码器，MPP 内部自带 RGB32->NV12 ----
-    if (mpp_ && mpp_->isActive()) {
-        int br = pendingBitrate_.exchange(0);
-        if (br > 0) {
-            mpp_->setBitrate(br);
-            appliedBitrate_.store(br);
-        }
-        if (forceKeyframe_.exchange(false))
-            mpp_->requestKeyframe();
+    //
+    // 重要：只要 mpp_ 存在，本帧就必须完全走这条路 —— 绝不能落到下面的 FFmpeg 分支。
+    // 因为 MPP 初始化成功时根本不会创建 swsCtx_/frame_/codecCtx_（见 initialize 的
+    // MPP 成功分支 early return），一旦走到 sws_scale(swsCtx_) 就是空指针崩溃。
+    // MPP 失效（mppBroken_）或已 teardown（isActive()==false）时直接跳过本帧，
+    // 等待上层重建编码器。
+    if (mpp_) {
+        if (!mppBroken_.load() && mpp_->isActive()) {
+            int br = pendingBitrate_.exchange(0);
+            if (br > 0) {
+                mpp_->setBitrate(br);
+                appliedBitrate_.store(br);
+            }
+            if (forceKeyframe_.exchange(false))
+                mpp_->requestKeyframe();
 
-        qint64 encodeStart = QDateTime::currentMSecsSinceEpoch();
-        QByteArray out;
-        bool key = false;
-        if (!mpp_->encode(image, out, key)) {
-            // 连续失败阈值后认为 MPP 编码器实际不可用（如设备固件/库版本不兼容，
-            // 初始化成功但 encode 始终 null），自动重建为 FFmpeg 软编，避免永久黑屏
-            if (++mppFailCount_ >= 3) {
-                qWarning() << "MPP encoder failing continuously (" << mppFailCount_
-                           << "), falling back to software encoder";
-                initialize(currentCodec_, image.width(), image.height(),
-                           image.width(), image.height(), fps_, (pendingBitrate_.load() > 0 ? pendingBitrate_.load() : 1000000), HwEncodeMode::Off);
+            qint64 encodeStart = QDateTime::currentMSecsSinceEpoch();
+            QByteArray out;
+            bool key = false;
+            if (mpp_->encode(image, out, key)) {
                 mppFailCount_ = 0;
+                qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
+                emit encodedFrame(out, key, timestamp);
+                updateOverloadState(encodeStart);
+                continue;
             }
-            continue;
-        }
-        mppFailCount_ = 0;
-        qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
-        emit encodedFrame(out, key, timestamp);
 
-        // 过载监控（与 FFmpeg 路径同一套 EMA 逻辑；MPP 编码很快，通常远低于帧间隔）
-        qint64 encodeMs = QDateTime::currentMSecsSinceEpoch() - encodeStart;
-        encodeEmaMs_ = (encodeEmaMs_ == 0) ? encodeMs : (encodeEmaMs_ * 0.8 + encodeMs * 0.2);
-        double frameIntervalMs = fps_ > 0 ? 1000.0 / fps_ : 33.0;
-        if (frameCount_ > 5) {
-            bool overloadedNow = encodeEmaMs_ > frameIntervalMs * 0.8;
-            if (overloadedNow && !overloaded_) {
-                overloaded_ = true;
-                emit encoderOverload(true);
-            } else if (!overloadedNow && overloaded_ && encodeEmaMs_ < frameIntervalMs * 0.5) {
-                overloaded_ = false;
-                emit encoderOverload(false);
-            }
-            if (overloadedNow) {
-                qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-                if (nowMs - lastOverloadLogMs_ > 5000) {
-                    lastOverloadLogMs_ = nowMs;
-                    qWarning() << "VideoEncoder: overloaded, encode EMA"
-                               << QString::number(encodeEmaMs_, 'f', 1) << "ms / frame interval"
-                               << QString::number(frameIntervalMs, 'f', 1) << "ms";
-                }
+            // MPP 编码失败：累计到阈值判定本机 MPP 实际不可用。
+            // 此前这里直接调用 initialize() 回退软编，是严重错误 —— 本函数运行在
+            // encoderThread_ 自身（由 QThread::started 触发），而 initialize() 末尾会
+            // encoderThread_.start()，等于让线程重新启动自己（Qt 明确禁止），
+            // 且重新入参丢了缩放档位与用户码率（pendingBitrate_ 刚被 exchange(0) 清零，
+            // 只能取硬编码兜底值）。正确做法是置标志 + 通知主线程重建。
+            if (++mppFailCount_ >= 3) {
+                g_mppDisabled.store(true);   // 本进程不再尝试 MPP，避免与软编无限交替
+                mppBroken_.store(true);
+                mppFailCount_ = 0;
+                qWarning() << "MPP encoder failing continuously, disabling it for this process"
+                           << "and requesting software reinit";
+                emit reinitRequired();
             }
         }
         continue;
     }
+
+    // MPP 之外的路径必须保证 FFmpeg 资源就绪，否则跳过本帧而不是崩溃
+    if (!codecCtx_ || !frame_ || !swsCtx_)
+        continue;
 
     const uint8_t* srcData[1] = { image.bits() };
     int srcLinesize[1] = { static_cast<int>(image.bytesPerLine()) };
@@ -478,8 +549,17 @@ void VideoEncoder::encodingLoop()
             codecCtx_->bit_rate = br;
             appliedBitrate_.store(br);
         }
-        if (forceKeyframe_.exchange(false))
-            codecCtx_->gop_size = 1; // 下一帧强制为 IDR
+        if (forceKeyframe_.exchange(false)) {
+            qWarning() << "VideoEncoder: FORCE-KF -> flush (frameCount=" << frameCount_ << ")";
+            // libx264 运行期改 gop_size / 设 pict_type 均不可靠（旧版 ffmpeg 不认 frame->pict_type，
+            // 实测 frame=2/3/4 强制后仍输出 P 帧），用 avcodec_flush_buffers 重置编码器内部
+            // GOP 帧计数器，下一帧必为 IDR（含 SPS/PPS，MSE 可衔接解码）。
+            avcodec_flush_buffers(codecCtx_);
+            codecCtx_->gop_size = 1; // 双保险：部分编码器运行时读取
+            frame_->pict_type = AV_PICTURE_TYPE_I; // 双保险：新版 ffmpeg 认
+        } else {
+            frame_->pict_type = AV_PICTURE_TYPE_NONE; // 防残留：非强制帧不继承上一帧的 I 标记
+        }
 
         frame_->pts = frameCount_++;
 
@@ -504,6 +584,8 @@ void VideoEncoder::encodingLoop()
                 break;
 
             bool isKeyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0;
+            if (isKeyframe)
+                hasIdr_.store(true);
             QByteArray data(reinterpret_cast<char*>(packet->data), packet->size);
             qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
 
@@ -522,28 +604,41 @@ void VideoEncoder::encodingLoop()
                 codecCtx_->gop_size = fps_;
             continue;
         }
-        bool overloadedNow = encodeEmaMs_ > frameIntervalMs * 0.8;
-        // 过载状态变化时通知上层（带滞回：<50% 才算恢复，避免频繁抖动）
-        if (overloadedNow && !overloaded_) {
-            overloaded_ = true;
-            emit encoderOverload(true);
-        } else if (!overloadedNow && overloaded_ && encodeEmaMs_ < frameIntervalMs * 0.5) {
-            overloaded_ = false;
-            emit encoderOverload(false);
-        }
-        if (overloadedNow) {
-            qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-            if (nowMs - lastOverloadLogMs_ > 5000) {
-                lastOverloadLogMs_ = nowMs;
-                qWarning() << "VideoEncoder: overloaded, encode EMA"
-                           << QString::number(encodeEmaMs_, 'f', 1) << "ms / frame interval"
-                           << QString::number(frameIntervalMs, 'f', 1) << "ms";
-            }
-        }
+        updateOverloadState(encodeStart);
 
         // 恢复正常 GOP 间隔
         if (codecCtx_->gop_size == 1)
             codecCtx_->gop_size = fps_;
+    }
+}
+
+void VideoEncoder::updateOverloadState(qint64 encodeStartMs)
+{
+    qint64 encodeMs = QDateTime::currentMSecsSinceEpoch() - encodeStartMs;
+    encodeEmaMs_ = (encodeEmaMs_ == 0) ? encodeMs : (encodeEmaMs_ * 0.8 + encodeMs * 0.2);
+    double frameIntervalMs = fps_ > 0 ? 1000.0 / fps_ : 33.0;
+
+    // 冷启动前几帧含编码器预热（首帧必然慢），跳过过载判定避免启动时误降码率
+    if (frameCount_ <= 5)
+        return;
+
+    bool overloadedNow = encodeEmaMs_ > frameIntervalMs * 0.8;
+    // 过载状态变化时通知上层（带滞回：<50% 才算恢复，避免频繁抖动）
+    if (overloadedNow && !overloaded_) {
+        overloaded_ = true;
+        emit encoderOverload(true);
+    } else if (!overloadedNow && overloaded_ && encodeEmaMs_ < frameIntervalMs * 0.5) {
+        overloaded_ = false;
+        emit encoderOverload(false);
+    }
+    if (overloadedNow) {
+        qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (nowMs - lastOverloadLogMs_ > 5000) {
+            lastOverloadLogMs_ = nowMs;
+            qWarning() << "VideoEncoder: overloaded, encode EMA"
+                       << QString::number(encodeEmaMs_, 'f', 1) << "ms / frame interval"
+                       << QString::number(frameIntervalMs, 'f', 1) << "ms";
+        }
     }
 }
 
@@ -571,31 +666,31 @@ void VideoEncoder::shutdown()
         condition_.wakeAll();
     }
 
+    // 绝不能用 terminate() 强杀编码线程：
+    // 1) 线程正持有 mutex_（encode()/encodingLoop 的 QMutexLocker）时被杀，
+    //    mutex_ 永久锁死，下一次 initialize() 的 QMutexLocker 立即死锁；
+    // 2) 线程可能正处在 emit encodedFrame() 的半发射状态（QMetaObject::activate 中途），
+    //    强杀会让接收方访问已析构对象。
+    // 正确做法：只置 abort_ + 唤醒条件变量，让线程自己从循环退出；超时只告警不硬杀。
+    bool stopped = true;
     if (encoderThread_.isRunning()) {
-        encoderThread_.quit();
-        if (!encoderThread_.wait(3000)) {
-            qWarning() << "Encoder thread did not stop within 3s, terminating...";
-            encoderThread_.terminate();
-            encoderThread_.wait();
+        encoderThread_.requestInterruption();
+        encoderThread_.quit();          // 线程无事件循环时无效，仅作兜底
+        stopped = encoderThread_.wait(8000);
+        if (!stopped)
+            qWarning() << "Encoder thread did not stop within 8s; skip resource release "
+                          "to avoid use-after-free (no terminate: it would deadlock mutex_)";
+    }
+
+    // 只有线程确实停了才释放资源，避免与仍在运行的编码线程竞争（UAF）
+    if (stopped) {
+        if (mpp_) {
+            mpp_->shutdown();
+            delete mpp_;
+            mpp_ = nullptr;
         }
-    }
 
-    if (mpp_) {
-        mpp_->shutdown();
-        delete mpp_;
-        mpp_ = nullptr;
-    }
-
-    if (swsCtx_) {
-        sws_freeContext(swsCtx_);
-        swsCtx_ = nullptr;
-    }
-    if (frame_) {
-        av_frame_free(&frame_);
-        frame_ = nullptr;
-    }
-    if (codecCtx_) {
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
+        // 与 initialize() 开头的清理保持一致，保证 shutdown 后可安全重建
+        releaseAv(&codecCtx_, &frame_, &swsCtx_);
     }
 }

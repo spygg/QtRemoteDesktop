@@ -82,10 +82,46 @@ int32_t yang_enc_rtp(YangSRtp* srtp,void* packet, int* nb_cipher)
         return yang_error_wrap(ERROR_RTC_SRTP_PROTECT, "srtp not init");
     }
 
+    // [DIAG] plaintext RTP mode (QTRD_NO_SRTP=1): 跳过 srtp_protect，用于判定 Chrome demux vs SRTP
+    {
+        static int s_noSrtp = -1;
+        if (s_noSrtp < 0) {
+            s_noSrtp = (getenv("QTRD_NO_SRTP") != NULL) ? 1 : 0;
+            if (s_noSrtp) fprintf(stderr, "SRTP-DISABLED plaintext RTP mode\n");
+        }
+        if (s_noSrtp) return Yang_Ok;
+    }
 
     yang_thread_mutex_lock(&srtp->rtpLock);
-    if ((r0 = srtp_protect(srtp->sendCtx, packet, nb_cipher)) != srtp_err_status_ok) {
-        return yang_error_wrap(ERROR_RTC_SRTP_PROTECT, "rtp protect r0=%u", r0);
+    {
+        int in_len = *nb_cipher;
+        // [DIAG] WebRTC 黑屏排查：srtp_protect 前 dump 明文 RTP 载荷（每进程前 12 包）
+        {
+            static int s_rtpdump = 0;
+            if (*nb_cipher >= 12 && s_rtpdump < 12 && (((unsigned char*)packet)[0] & 0x80)) {
+                s_rtpdump++;
+                unsigned char* rp = (unsigned char*)packet;
+                fprintf(stderr, "RTPRAW len=%d M=%d pt=%d seq=%u ts=%u ssrc=%u nal=%d | %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                    *nb_cipher, (rp[1] >> 7) & 1, rp[1] & 0x7F,
+                    ((unsigned)rp[2]<<8)|(unsigned)rp[3],
+                    ((unsigned)rp[4]<<24)|((unsigned)rp[5]<<16)|((unsigned)rp[6]<<8)|(unsigned)rp[7],
+                    ((unsigned)rp[8]<<24)|((unsigned)rp[9]<<16)|((unsigned)rp[10]<<8)|(unsigned)rp[11],
+                    (*nb_cipher >= 13) ? (rp[12] & 0x1F) : -1,
+                    rp[12], rp[13], rp[14], rp[15], rp[16], rp[17], rp[18], rp[19], rp[20], rp[21], rp[22], rp[23]);
+                fflush(stderr);
+            }
+        }
+        if ((r0 = srtp_protect(srtp->sendCtx, packet, nb_cipher)) != srtp_err_status_ok) {
+            unsigned char* rp=(unsigned char*)packet;
+            fprintf(stderr, "SRTP-PROTECT-FAIL r0=%d in=%d nb=%d v=%02x pt=%02x seq=%u ts=%u ssrc=%u cc=%u x=%u p=%u\n",
+                r0, in_len, *nb_cipher, rp[0], rp[1],
+                ((unsigned)rp[2]<<8)|(unsigned)rp[3],
+                ((unsigned)rp[4]<<24)|((unsigned)rp[5]<<16)|((unsigned)rp[6]<<8)|(unsigned)rp[7],
+                ((unsigned)rp[8]<<24)|((unsigned)rp[9]<<16)|((unsigned)rp[10]<<8)|(unsigned)rp[11],
+                rp[0]&0x0F, (rp[0]>>4)&1, (rp[1]>>5)&1);
+            fflush(stderr);
+            return yang_error_wrap(ERROR_RTC_SRTP_PROTECT, "rtp protect r0=%u", r0);
+        }
     }
     yang_thread_mutex_unlock(&srtp->rtpLock);
     return err;

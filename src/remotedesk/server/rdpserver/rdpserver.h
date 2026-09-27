@@ -161,6 +161,12 @@ private:
     std::unique_ptr<ScreenCapturer> screenCapturer_;
 #ifdef USE_FFMPEG
     std::unique_ptr<VideoEncoder> videoEncoder_;
+    // 缓存最近一帧关键帧，用于新客户端接入时立即回放以引导出图
+    // （静态桌面抓取去重不会主动出帧，否则新客户端永远等不到关键帧而黑屏）。
+    QByteArray lastKeyframeData_;
+    qint64 lastKeyframeTs_ = 0;
+    // 编码器尺寸不匹配触发的重建节流时间戳（避免每帧都尝试重建阻塞主线程）
+    qint64 lastSizeReinitMs_ = 0;
 #endif
 
     std::unique_ptr<InputManager> inputManager_;
@@ -182,7 +188,7 @@ private:
     int videoBaseBitrate_ = 0; // 视频模式目标码率（过载降质后用于恢复）
     QJsonObject lastScreenInfo_;
 
-    bool useSsl_ = false;
+    bool useSsl_ = true; // 默认启用 HTTPS/WSS：WebRTC 需安全上下文；无 OpenSSL 时自动降级
     bool serviceMode_ = false;
     int configFps_ = 30;
     int configQuality_ = 60;
@@ -211,6 +217,10 @@ private:
     bool switchToVideoMode();
     void reinitVideoEncoderForScale();
     bool hwEncodeAvailable() const;
+    // 创建 VideoEncoder 并接好全部信号（此前两处创建点接线不一致，
+    // 前台模式那处漏了 encoderReady/encoderOverload/reinitRequired）
+    void createVideoEncoder();
+    VideoEncoder* ensureVideoEncoder();
 
     void loadServerConfig(const QString& configPath);
     void saveServerConfig(const QString& configPath);
@@ -247,6 +257,24 @@ private:
     QSet<QString> webrtcExcluded_;
     QVector<QString> webrtcIceServers_;
 #endif
+
+    // 周期关键帧定时器：仅当存在视频客户端时每 2s 强制出一帧 IDR。
+    // 静态桌面下抓取去重（checksum 相同即丢帧）会让编码器长时间不产新帧，
+    // 而编码器一旦已产过 IDR（hasIdr_=true）便不会主动再产。此时任何在 GOP
+    // 中途加入、或刚重置等帧门的客户端都会永久拿不到 IDR 而丢弃全部 P 帧
+    // → 画面完全冻结（ffmpeg/MSE 路径静默黑屏的主因）。
+    // 定时器必须**无条件编译**：ffmpeg/MSE 客户端不在 webrtcSessions_ 里，
+    // 若随 USE_WEBRTC 一起被裁掉，纯 WS 视频模式就再没有任何补关键帧机制。
+    QTimer* webrtcKfTimer_ = nullptr;
+    // 编码器重建冷却时间戳：pumpKeyframe 检测到无 IDR 时重建编码器，
+    // 重建本身有线程开销且部分平台 MPP 库重复 init 会崩，需冷却后再重建。
+    qint64 lastReinitMs_ = 0;
+
+    // 强制出一帧关键帧：静态桌面抓取去重不会主动出帧，新客户端（FFmpeg/WebRTC）
+    // 接入时需要一帧关键帧来引导出图，否则视频流永远起不来。
+    // requestNewIdr=true 时（显式 request_keyframe）即使编码器已产过 IDR 也强制
+    // 重新产一帧，用于客户端刚重置等帧门（WS videoStarted_）的场景。
+    void pumpKeyframe(bool requestNewIdr = false);
 
 public:
     static QStringList getLocalIpAddr();

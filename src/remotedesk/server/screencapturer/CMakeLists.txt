@@ -38,3 +38,19 @@ if(HAVE_PIPEWIRE)
     target_link_libraries(${SCREEN_CAPTURER} PRIVATE ${PIPEWIRE_LIBRARIES})
     target_compile_definitions(${SCREEN_CAPTURER} PRIVATE HAVE_PIPEWIRE=1)
 endif()
+
+# XRandR 多屏枚举为可选能力：装有 libXrandr-devel 时启用进程内 XRR 枚举
+# （HAVE_XRANDR=1）；未安装时自动回退到 `xrandr --query` 子进程枚举，
+# 保证缺开发包的系统（如最小化 Anolis/RHEL）也能正常编译与运行。
+find_path(XRANDR_INCLUDE_DIR X11/extensions/Xrandr.h)
+find_library(XRANDR_LIBRARY Xrandr)
+if(XRANDR_INCLUDE_DIR AND XRANDR_LIBRARY)
+    target_include_directories(${SCREEN_CAPTURER} PRIVATE ${XRANDR_INCLUDE_DIR})
+    # PUBLIC：让链接 ScreenCapturer 的主程序传递性获得 Xrandr；
+    # 未探测到时这里不加任何链接（配合主 CMakeLists 去掉字面量 Xrandr）。
+    target_link_libraries(${SCREEN_CAPTURER} PUBLIC ${XRANDR_LIBRARY})
+    target_compile_definitions(${SCREEN_CAPTURER} PRIVATE HAVE_XRANDR=1)
+    message(STATUS "ScreenCapturer: XRandR found, in-process output enumeration enabled")
+else()
+    message(STATUS "ScreenCapturer: XRandR not found, fallback to xrandr process enumeration")
+endif()

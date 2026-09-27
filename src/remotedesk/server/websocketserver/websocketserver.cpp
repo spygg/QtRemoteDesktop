@@ -64,7 +64,9 @@ void WebSocketServer::onNewConnection()
     QWebSocket* socket = server_->nextPendingConnection();
 
     QUrl url = socket->requestUrl();
-    qInfo() << "WS new connection, path:" << url.path() << "URL:" << url.toString();
+    // 只记 path，不打完整 URL：URL 的 ?token= 携带会话令牌，写入日志文件会泄漏；
+    // 连接属低频事件，降为 qDebug 避免默认日志噪音
+    qDebug() << "WS new connection, path:" << url.path();
 
     // 内部通道（helper / secure-input）必须来自本机回环地址：
     // 服务端监听 0.0.0.0，若不加限制，局域网内任意主机可连 /capture 伪造
@@ -170,6 +172,9 @@ void WebSocketServer::onSocketDisconnected()
     QString clientId = socketToId_.take(socket);
     clients_.remove(clientId);
     videoStarted_.remove(clientId);
+    // clientId 是每条连接新建的 UUID，若不清理 clientTokens_，
+    // 每次断线都会残留一条 token→会话映射，长期运行（含频繁重连）单调增长。
+    clientTokens_.remove(clientId);
     socket->deleteLater();
 
     emit clientDisconnected(clientId);
@@ -333,6 +338,28 @@ void WebSocketServer::sendJson(const QString& clientId, const QJsonObject& data)
         QJsonDocument doc(data);
         socket->sendTextMessage(QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
     }
+}
+
+void WebSocketServer::sendFrameToClient(const QString& clientId, const QByteArray& data,
+                                        bool isKeyframe, qint64 timestamp)
+{
+    QWebSocket* socket = clients_.value(clientId);
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState)
+        return;
+    if (mediaExcludedClients_.contains(clientId))
+        return; // 走 WebRTC 的客户端由 RTP 收流，不回放 WS 帧
+
+    QByteArray packet;
+    QDataStream stream(&packet, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quint8(isKeyframe ? 0x01 : 0x02);
+    stream << quint32(data.size());
+    stream << qint64(timestamp);
+    packet.append(data);
+
+    if (isKeyframe)
+        videoStarted_.insert(clientId); // 关键帧已就位，后续 P 帧不再丢弃
+    socket->sendBinaryMessage(packet);
 }
 
 void WebSocketServer::broadcastJson(const QJsonObject& data)

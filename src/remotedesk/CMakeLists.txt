@@ -149,6 +149,9 @@ elseif(UNIX AND NOT APPLE AND NOT ANDROID)
         if(X11_FOUND)
             target_link_libraries(InputManager PUBLIC ${X11_LIBRARIES} Xtst)
             target_link_libraries(ScreenCapturer PUBLIC ${X11_LIBRARIES} Xtst Xdamage Xcomposite Xrender Xfixes)
+            # Xrandr 不做无条件链接：libXrandr-devel 缺失的系统（仅有运行时
+            # libXrandr.so.2）会因找不到 -lXrandr 链接失败。改为由
+            # server/screencapturer/CMakeLists.txt 探测到 XRANDR 后 PUBLIC 传递链接。
         endif()
 endif()
 

@@ -114,11 +114,13 @@ int32_t yang_get_srtp_key(YangDtlsSession *session, char *precv_key, int *precvk
 		char *psend_key, int *psendkeylen){
 
 	char* send_key=psend_key;
+	// RFC5764: material = client_write_key(16)||server_write_key(16)||client_write_IV(14)||server_write_IV(14)
+	// DTLS server(isControlled, 被动方) 出方向用 server_write_*，入方向用 client_write_*；客户端反之。
+	// 原实现 isControlled 分支交换 send/recv 缓冲导致 send 用了 client_write_key，
+	// Chrome 按 server_write_key 解密必失败 -> WebRTC 黑屏。
+	size_t sendOff = 0, recvOff = 16;   // client: send=client(0), recv=server(16)
+	if(session->isControlled){ sendOff = 16; recvOff = 0; }  // server: send=server(16), recv=client(0)
 	char* recv_key=precv_key;
-	if(session->isControlled){
-		send_key=precv_key;
-		recv_key=psend_key;
-	}
 	size_t offset = 0;
 
 	uint8_t keyingMaterialBuffer[SRTP_MASTER_KEY_KEY_LEN * 2 + SRTP_MASTER_KEY_SALT_LEN * 2];
@@ -132,13 +134,15 @@ int32_t yang_get_srtp_key(YangDtlsSession *session, char *precv_key, int *precvk
 
 
 
-	yang_memcpy(send_key, &keyingMaterialBuffer[offset], SRTP_MASTER_KEY_KEY_LEN);
-	offset += SRTP_MASTER_KEY_KEY_LEN;
-
-	yang_memcpy(recv_key, &keyingMaterialBuffer[offset], SRTP_MASTER_KEY_KEY_LEN);
-	offset += SRTP_MASTER_KEY_KEY_LEN;
-
-	yang_memcpy(send_key + SRTP_MASTER_KEY_KEY_LEN, &keyingMaterialBuffer[offset], SRTP_MASTER_KEY_SALT_LEN);
+	yang_memcpy(send_key, &keyingMaterialBuffer[sendOff], SRTP_MASTER_KEY_KEY_LEN);
+	yang_memcpy(recv_key, &keyingMaterialBuffer[recvOff], SRTP_MASTER_KEY_KEY_LEN);
+	// salt: client_IV@32..45, server_IV@46..59（salt 区每个 14 字节）
+	{
+		int sendSaltOff = (sendOff == 0) ? 32 : 46;
+		int recvSaltOff = (recvOff == 0) ? 32 : 46;
+		yang_memcpy(send_key + SRTP_MASTER_KEY_KEY_LEN, &keyingMaterialBuffer[sendSaltOff], SRTP_MASTER_KEY_SALT_LEN);
+		yang_memcpy(recv_key + SRTP_MASTER_KEY_KEY_LEN, &keyingMaterialBuffer[recvSaltOff], SRTP_MASTER_KEY_SALT_LEN);
+	}
 	offset += SRTP_MASTER_KEY_SALT_LEN;
 
 	yang_memcpy(recv_key + SRTP_MASTER_KEY_KEY_LEN, &keyingMaterialBuffer[offset], SRTP_MASTER_KEY_SALT_LEN);
@@ -235,6 +239,10 @@ int32_t yang_on_handshake_done(YangDtlsSession *dtls) {
 	}
 	// Change to done state.
 	dtls->state = YangDtlsStateClientDone;
+	// 被控端（服务端）连接态提升依赖 handshake_done（见 YangRtcConnection.c:
+	// 仅当 session->handshake_done 才置 Yang_Conn_State_Connected），OpenSSL 后端
+	// 在握手完成时置位，mbedtls 后端此前漏设，导致 on_video 门禁永远不满足。
+	dtls->handshake_done = yangtrue;
 	yang_trace("\ndtls handshake is sucess\n");
 
 	return err;
@@ -257,9 +265,12 @@ int32_t yang_process_dtls_data(void* user,YangDtlsSession *dtls, char *data, int
 	if(dtls->datachannel==NULL)
 		dtls->datachannel=user;
 
+	// 被控端（DTLS server）不启动握手线程：yang_start_rtcdtls 会 spawn 线程并发
+	// 运行 mbedtls_ssl_handshake，与下方主线程的 mbedtls_ssl_read 无锁并发操作同一
+	// ssl context（mbedtls 非线程安全），会踩坏握手状态机导致 ServerHello 永远发不出。
+	// 被端改由本函数内的 mbedtls_ssl_read 单线程驱动握手（read 内部自动推进状态机）。
 	if(dtls->isControlled&&dtls->state != YangDtlsStateClientDone){
-		if(dtls->isStart==0)
-			yang_start_rtcdtls(dtls);
+		dtls->isStart = 1; /* 标记握手已激活（仅标记，不建线程） */
 	}
 
 	yang_memcpy(dtls->buffer+dtls->bufferLen,data,nb_data);
@@ -361,8 +372,10 @@ int32_t yang_dtls_mbed_receiveCallback(void* user, unsigned char* buf, size_t le
 	if(user==NULL)
 		return MBEDTLS_ERR_SSL_WANT_READ;
 
+	// DTLS 语义：无数据时必须返回 WANT_READ。
+	// 返回 0 会被 mbedtls 视为非法（EOF/内部错误），导致服务端握手状态机异常卡死。
 	if(dtls->bufferLen==0)
-		return 0;
+		return MBEDTLS_ERR_SSL_WANT_READ;
 
 	dataLen=yang_min(dtls->bufferLen,len);
 	yang_memcpy(buf,dtls->buffer,dataLen);
@@ -408,8 +421,8 @@ void yang_dtls_mbed_initDtls(YangDtlsSession* session){
 		yang_error("mbedtls set certificate fail");
 	}
 
-	//mbedtls_ssl_conf_dbg(session->sslConfig,yang_dtls_debug,session);
-	//mbedtls_debug_set_threshold(5);
+	mbedtls_ssl_conf_dbg(session->sslConfig,yang_dtls_debug,session);
+	mbedtls_debug_set_threshold(3);
 
 	mbedtls_ssl_conf_dtls_cookies(session->sslConfig, NULL, NULL, NULL);
 

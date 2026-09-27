@@ -523,6 +523,9 @@ static int32_t yang_iceagent_checkConnection(void *psession, int32_t turnUid,
 
 	iceSession->stun.getRequestStunPacket(rtcSession, pair->tid,
 			iceSession->remoteIcePwd, &stundata, &nb);
+			static int chkdbg = 0;
+			if (chkdbg < 5) { char rip[64]={0}; yang_addr_getIPStr(&pair->remoteCandidate->address, rip, 64); yang_error("ICE-CHK send stun to %s:%d", rip, yang_addr_getPort(&pair->remoteCandidate->address)); chkdbg++; }
+
 
 
 	if (iceSession->gatherCandidateType == YangIceRelayed) {
@@ -565,6 +568,7 @@ void* yang_iceagent_connectivity_thread(void *obj) {
 			&& iceSession->iceState == YangIceNew) {
 		if ((yang_get_system_time() - startTime) / 1000
 				> session->maxCheckTime) {
+				yang_error("ICE-DBG connectivity timeout after %d ms, pairs=%d", session->maxCheckTime, session->pair.vec.vsize);
 			iceSession->iceState = YangIceFail;
 			rtcSession->ice.onIceStateChange(iceSession, YangIceFail);
 			session->connect_isLoop = yangfalse;
@@ -634,6 +638,7 @@ static int32_t yang_iceagent_on_stun(void *psession, YangStunPacket *response) {
 	if (psession == NULL)
 			return ERROR_RTC_ICE;
 	iceSession = (YangIceSession*) session->iceSession;
+	yang_error("ICE-DBG on_stun received, isPaired=%d pairs=%d", iceSession->isPaired, session->pair.vec.vsize);
 	if (iceSession->isPaired)
 		return Yang_Ok;
 
@@ -662,6 +667,7 @@ static int32_t yang_iceagent_on_server_stun(void *psession, YangStunPacket *requ
 	if (psession == NULL)
 			return ERROR_RTC_ICE;
 	iceSession = (YangIceSession*) session->iceSession;
+	yang_error("ICE-DBG on_server_stun received, isPaired=%d remotes=%d", iceSession->isPaired, session->remote_candidates.vec.vsize);
 
 	if (iceSession->isPaired)
 		return Yang_Ok;

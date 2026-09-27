@@ -25,7 +25,7 @@ target_include_directories(radiometer_breakpad PUBLIC
 
 # breakpad 源码使用 QtCore (QString/QProcess/QCoreApplication), pri 无 QT 行,
 # 链接 Core 保证头文件与依赖可见。
-target_link_libraries(radiometer_breakpad PUBLIC Qt5::Core)
+target_link_libraries(radiometer_breakpad PUBLIC Qt${QT_VERSION_MAJOR}::Core)
 
 # ---------------------------------------------------------------
 # Windows

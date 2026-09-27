@@ -431,8 +431,8 @@ void ScreenCapturer::captureFrame()
                 // 无新帧（DXGI 无桌面更新）：同样递增 idle 计数并降频，
                 // 避免静止时 capture timer 保持全帧率空转消耗 CPU。
                 idleCount_++;
-                if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-                    captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+                if (idleCount_ > static_cast<int>(fps_ * 2))
+                    enterIdleThrottle(); // idle 静止 4fps（原 1s，交互反馈太慢）
             }
             return;
         }
@@ -456,8 +456,7 @@ void ScreenCapturer::captureFrame()
     if (useGDI_ && gdiCapturer_ && gdiCapturer_->captureFrame(frame)) {
         if (isFrameBlack(frame)) {
             idleCount_ = 0;
-            if (captureTimer_->interval() != 1000 / fps_)
-                captureTimer_->setInterval(1000 / fps_);
+            leaveIdleThrottle();
             if (!screenLocked_) {
                 screenLocked_ = true;
                 emit screenLocked(true);
@@ -474,13 +473,12 @@ void ScreenCapturer::captureFrame()
         quint16 checksum = quickFrameChecksum(frame);
         if (checksum == lastFrameChecksum_) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+            if (idleCount_ > static_cast<int>(fps_ * 2))
+                enterIdleThrottle();
             return;
         }
         idleCount_ = 0;
-        if (captureTimer_->interval() != 1000 / fps_)
-            captureTimer_->setInterval(1000 / fps_);
+        leaveIdleThrottle();
         lastFrameChecksum_ = checksum;
 
         emit frameCaptured(frame);
@@ -492,8 +490,7 @@ void ScreenCapturer::captureFrame()
 
     if (isFrameBlack(frame)) {
         idleCount_ = 0;
-        if (captureTimer_->interval() != 1000 / fps_)
-            captureTimer_->setInterval(1000 / fps_);
+        leaveIdleThrottle();
         if (!screenLocked_) {
             screenLocked_ = true;
             emit screenLocked(true);
@@ -510,13 +507,12 @@ void ScreenCapturer::captureFrame()
     quint16 checksum = quickFrameChecksum(frame);
     if (checksum == lastFrameChecksum_) {
         idleCount_++;
-        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-            captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+        if (idleCount_ > static_cast<int>(fps_ * 2))
+            enterIdleThrottle();
         return;
     }
     idleCount_ = 0;
-    if (captureTimer_->interval() != 1000 / fps_)
-        captureTimer_->setInterval(1000 / fps_);
+    leaveIdleThrottle();
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);
@@ -751,8 +747,7 @@ bool ScreenCapturer::winApplyOutput(int index)
     forceSendNextFrame_ = true;
     lastFrameChecksum_ = 0;
     idleCount_ = 0;
-    if (captureTimer_->interval() != 1000 / fps_)
-        captureTimer_->setInterval(1000 / fps_);
+    leaveIdleThrottle();
     qInfo() << "ScreenCapturer: switched to output" << index;
     return true;
 }

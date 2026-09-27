@@ -60,4 +60,3 @@ mark_as_advanced(FFMPEG_INCLUDE_DIR
                  FFMPEG_AVCODEC_LIBRARY
                  FFMPEG_AVUTIL_LIBRARY
                  FFMPEG_SWSCALE_LIBRARY)
-

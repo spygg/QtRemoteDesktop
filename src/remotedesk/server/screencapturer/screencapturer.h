@@ -72,6 +72,10 @@ public:
     // 区域抓取实现（如 X11 Damage）可返回 true，表示本次捕获已知有变化，
     // 上层可跳过全帧校验和以省 CPU
     virtual bool regionDirty() const { return false; }
+    // 强制恒全量抓取（禁用增量 Damage）：图片/低动态模式用它规避增量损伤
+    // 漏报子窗口重绘（任务栏/顶部面板）导致的局部黑块。默认 false=尽量增量。
+    bool fullCaptureOnly_ = false;
+    virtual void setFullCaptureOnly(bool v) { fullCaptureOnly_ = v; }
 };
 
 class ScreenCapturer : public QObject {
@@ -87,6 +91,16 @@ public:
     void resume();
     void forceNextFrame();   // 输入注入后强制下一帧通过校验（光标移动不产生 XDamage）
     void setFps(int fps);
+
+    // 切换恒全量抓取模式（图片模式 true；视频模式 false）。转发到平台捕获器。
+    void setFullCaptureOnly(bool v) {
+#ifdef Q_OS_LINUX
+        if (useX11_ && x11Capturer_)
+            x11Capturer_->setFullCaptureOnly(v);
+        if (useWayland_ && waylandCapturer_)
+            waylandCapturer_->setFullCaptureOnly(v);
+#endif
+    }
 
     int width() const {
 #ifdef Q_OS_LINUX
@@ -163,6 +177,21 @@ private:
 #endif
 
     int idleCount_ = 0;
+    // 静止画面的降频/恢复：连续静止时降到 kIdleIntervalMs（4fps，兼顾交互反馈
+    // 与 CPU），一旦画面有变化立刻恢复全帧率。
+    // 注意：原实现在降频分支的守卫里加了 "interval() < 250"，导致降到 250ms 后
+    // 该条件恒假、再也无法重新设置；而恢复分支同样被这层守卫挡住，使静止后
+    // 即使画面变化也长期停在 4fps。改为显式 enter/leave 两个方法消除该歧义。
+    static constexpr int kIdleIntervalMs = 250;
+    void enterIdleThrottle() {
+        if (captureTimer_->interval() != kIdleIntervalMs)
+            captureTimer_->setInterval(kIdleIntervalMs);
+    }
+    void leaveIdleThrottle() {
+        const int target = (fps_ > 0) ? (1000 / fps_) : 33;
+        if (captureTimer_->interval() != target)
+            captureTimer_->setInterval(target);
+    }
 
 #ifdef Q_OS_LINUX
     PlatformCapturer* x11Capturer_ = nullptr;

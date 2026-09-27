@@ -147,6 +147,23 @@ static int32_t yang_pushVideoData(void* psession,YangFrame* videoFrame,YangPushC
  		return 1;
 
  	callback->onVideoData(callback->session,pushData);
+	// [DIAG] PUSHVID: dump plaintext RTP (before SRTP), payload first bytes
+	{
+		static int pvcnt=0;
+		YangPacket* pp=(YangPacket*)pushData->pushData;
+		if (pp && pp->payload && pp->length>=20 && pvcnt++<200) {
+			unsigned char* p=(unsigned char*)pp->payload;
+			fprintf(stderr, "PUSHVID pt=%d ssrc=%u seq=%u ts=%u len=%d p0=%02x p1=%02x p2=%02x p3=%02x p4=%02x p5=%02x p6=%02x p7=%02x\n",
+				p[1]&0x7F,
+				((unsigned)p[8]<<24)|((unsigned)p[9]<<16)|((unsigned)p[10]<<8)|(unsigned)p[11],
+				((unsigned)p[2]<<8)|(unsigned)p[3],
+				((unsigned)p[4]<<24)|((unsigned)p[5]<<16)|((unsigned)p[6]<<8)|(unsigned)p[7],
+				pp->length,
+				p[12],p[13],p[14],p[15],p[16],p[17],p[18],p[19]);
+			fflush(stderr);
+		}
+	}
+
 
  	return Yang_Ok;
  }

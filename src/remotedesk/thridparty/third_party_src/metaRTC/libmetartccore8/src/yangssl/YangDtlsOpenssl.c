@@ -104,32 +104,34 @@ int32_t yang_dtls_filter_data(YangDtlsSession *dtls, uint8_t *data, int32_t size
 int32_t yang_dtls_get_srtp_key(YangDtlsSession *dtls, char *precv_key, int *precvkeylen,
 		char *psend_key, int *psendkeylen) {
 	int32_t err = Yang_Ok;
-	size_t offset = 0;
-	uint8_t material[SRTP_MASTER_KEY_LEN * 2] = { 0 }; // client(SRTP_MASTER_KEY_KEY_LEN + SRTP_MASTER_KEY_SALT_LEN) + server
+	uint8_t material[SRTP_MASTER_KEY_LEN * 2] = { 0 }; // RFC5764: client_write_key||server_write_key||client_write_IV||server_write_IV
 	static const char *dtls_srtp_lable = "EXTRACTOR-dtls_srtp";
 	if (!SSL_export_keying_material(dtls->ssl, material, sizeof(material),
 			dtls_srtp_lable, yang_strlen(dtls_srtp_lable), NULL, 0, 0)) {
 		return yang_error_wrap(ERROR_RTC_SRTP_INIT, "SSL export key r0=%lu",
 				ERR_get_error());
 	}
-	char* send_key=psend_key;
-	char* recv_key=precv_key;
-	if(dtls->isControlled){
-		send_key=precv_key;
-		recv_key=psend_key;
+	// RFC5764 标准布局：client_write_key(16)||server_write_key(16)||client_write_IV(14)||server_write_IV(14)
+	// 服务端(isControlled, DTLS 被动方)出方向(加密 RTP 给浏览器)用 server_write_*，
+	// 入方向(解密浏览器 RTP)用 client_write_*；客户端反之。
+	// 注：早期版本曾按 key||salt||key||salt 划分导致浏览器解密失败，此处为浏览器标准布局。
+	uint8_t *cKey  = material + 0;   // client_write_key
+	uint8_t *sKey  = material + 16;  // server_write_key
+	uint8_t *cSalt = material + 32;  // client_write_IV
+	uint8_t *sSalt = material + 46;  // server_write_IV
+
+	uint8_t *sendKey, *sendSalt, *recvKey, *recvSalt;
+	if (dtls->isControlled) {
+		sendKey = sKey;  sendSalt = sSalt;   // 出方向用 server_write_*
+		recvKey = cKey;  recvSalt = cSalt;   // 入方向用 client_write_*
+	} else {
+		sendKey = cKey;  sendSalt = cSalt;   // 出方向用 client_write_*
+		recvKey = sKey;  recvSalt = sSalt;   // 入方向用 server_write_*
 	}
-
-
-	yang_memcpy(send_key, material, SRTP_MASTER_KEY_KEY_LEN);
-	offset += SRTP_MASTER_KEY_KEY_LEN;
-
-	yang_memcpy(recv_key, material + offset, SRTP_MASTER_KEY_KEY_LEN);
-	offset += SRTP_MASTER_KEY_KEY_LEN;
-
-	yang_memcpy(send_key + SRTP_MASTER_KEY_KEY_LEN, material + offset,SRTP_MASTER_KEY_SALT_LEN);
-	offset += SRTP_MASTER_KEY_SALT_LEN;
-
-	yang_memcpy(recv_key + SRTP_MASTER_KEY_KEY_LEN, material + offset,SRTP_MASTER_KEY_SALT_LEN);
+	yang_memcpy(psend_key, sendKey, SRTP_MASTER_KEY_KEY_LEN);
+	yang_memcpy(psend_key + SRTP_MASTER_KEY_KEY_LEN, sendSalt, SRTP_MASTER_KEY_SALT_LEN);
+	yang_memcpy(precv_key, recvKey, SRTP_MASTER_KEY_KEY_LEN);
+	yang_memcpy(precv_key + SRTP_MASTER_KEY_KEY_LEN, recvSalt, SRTP_MASTER_KEY_SALT_LEN);
 
 	*precvkeylen = SRTP_MASTER_KEY_KEY_LEN + SRTP_MASTER_KEY_SALT_LEN;
 	*psendkeylen = SRTP_MASTER_KEY_KEY_LEN + SRTP_MASTER_KEY_SALT_LEN;

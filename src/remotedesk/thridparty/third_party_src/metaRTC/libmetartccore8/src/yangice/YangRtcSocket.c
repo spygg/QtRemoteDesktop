@@ -19,6 +19,20 @@ int32_t yang_rtcsock_sendData(YangRtcSocketSession *session, char *data, int32_t
 	yang_thread_mutex_lock(&session->sendLock);
 	err=yang_socket_sendto(session->fd, data, nb, &session->remote_addr,0) > 0 ? Yang_Ok : ERROR_RTC_SOCKET;
 	yang_thread_mutex_unlock(&session->sendLock);
+	// [DIAG] RTPOUT dump: RTP header v=2, bytes: 0,1=flags+PT, 2-3=seq, 4-7=ts, 8-11=ssrc
+	if (nb >= 12 && (data[0] & 0xC0) == 0x80) {
+		char dbgip[64] = {0};
+		yang_addr_getIPStr(&session->remote_addr, dbgip, 64);
+		fprintf(stderr, "RTPOUT pt=%d ssrc=%u seq=%u ts=%u len=%d M=%d dst=%s:%d\n",
+			(unsigned char)data[1] & 0x7F,
+			((unsigned char)data[8]<<24)|((unsigned char)data[9]<<16)|((unsigned char)data[10]<<8)|(unsigned char)data[11],
+			((unsigned char)data[2]<<8)|(unsigned char)data[3],
+			((unsigned char)data[4]<<24)|((unsigned char)data[5]<<16)|((unsigned char)data[6]<<8)|(unsigned char)data[7],
+			nb,
+			((unsigned char)data[1] >> 7) & 1,
+			dbgip, yang_addr_getPort(&session->remote_addr));
+		fflush(stderr);
+	}
 
 	return err;
 }
@@ -30,6 +44,11 @@ int32_t yang_rtcsock_sendData2(YangRtcSocketSession *session, YangIpAddress* rem
 
 	yang_thread_mutex_lock(&session->sendLock);
 	err=yang_socket_sendto(session->fd, data, nb, remote_addr,0) > 0 ? Yang_Ok : ERROR_RTC_SOCKET;
+	if (err != Yang_Ok) {
+		char dbgip[64] = {0};
+		yang_addr_getIPStr(remote_addr, dbgip, 64);
+		yang_error("sendData2 sendto fail fd=%d ip=%s port=%d errno=%d", session->fd, dbgip, yang_addr_getPort(remote_addr), errno);
+	}
 	yang_thread_mutex_unlock(&session->sendLock);
 
 	return err;
@@ -120,6 +139,8 @@ void* yang_run_rtcudp_thread(void *obj) {
 	while (session->isLoop) {
 		yang_memset(buffer, 0, 2048);
 		if ((nbytes = yang_socket_recvfrom(session->fd, buffer, 2048,  &src)) > 0) {
+			static int udpdbg = 0;
+			if (udpdbg < 5) { char sip[64]={0}; yang_addr_getIPStr(&src, sip, 64); yang_error("UDP-RX from %s:%d len=%d t=%02x%02x", sip, yang_addr_getPort(&src), nbytes, (unsigned char)buffer[0], (unsigned char)buffer[1]); udpdbg++; }
 
 			if(buffer[0]==0x01&&buffer[1]==0x01&&session->rtcSession){
 

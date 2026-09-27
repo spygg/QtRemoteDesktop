@@ -202,7 +202,7 @@ static yangbool yang_isStunRtp(YangIceSession* session,char* data,int32_t len){
 	if(rtcSession->isControlled && data[0] == 0x00 && data[1]==0x01)
 		return yangtrue;
 
-	if(!rtcSession->isControlled && data[0] == 0x01 && data[1]==0x01)
+	if(!rtcSession->isControlled && (data[0] == 0x01 && data[1]==0x01 || data[0]==0x00 && data[1]==0x01))
 		return yangtrue;
 
 	return yangfalse;

@@ -21,9 +21,24 @@ public:
     // 发送视频帧给所有客户端
     void broadcastFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp);
 
+    // 直接发送一帧给指定客户端（用于新客户端接入时立即回放最近关键帧，
+    // 绕过 videoStarted_ 等待门，避免静态桌面永远等不到关键帧而黑屏）。
+    void sendFrameToClient(const QString& clientId, const QByteArray& data,
+                           bool isKeyframe, qint64 timestamp);
+
     // 发送 JSON 给指定客户端
     void sendJson(const QString& clientId, const QJsonObject& data);
     QStringList clients() const { return clients_.keys(); }
+    // 是否存在需要视频帧的 WS 客户端（排除仅走 RTP 的 WebRTC 客户端）。
+    // 供服务端判断是否需要周期补关键帧——纯 ffmpeg/MSE 模式下没有
+    // WebRTC 会话，若只检查 webrtcSessions_ 就永远不补帧，静态画面冻结。
+    bool hasVideoClients() const {
+        for (auto it = clients_.constBegin(); it != clients_.constEnd(); ++it) {
+            if (!mediaExcludedClients_.contains(it.key()))
+                return true;
+        }
+        return false;
+    }
     QString clientToken(const QString& clientId) const;
     void dropClient(const QString& clientId);
 

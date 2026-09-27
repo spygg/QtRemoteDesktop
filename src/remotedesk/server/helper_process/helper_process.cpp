@@ -26,6 +26,7 @@
 #endif
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
+void applyLogLevelFromArgs(int argc, char* argv[]);
 
 int HelperProcess::run(int argc, char* argv[])
 {
@@ -43,6 +44,7 @@ int HelperProcess::run(int argc, char* argv[])
 
     QString logDir = QString("%1/logs").arg(QGuiApplication::applicationDirPath());
     QDir().mkpath(logDir);
+    applyLogLevelFromArgs(argc, argv);
     qInstallMessageHandler(logToFile);
 
     int wsPort = 8081;
@@ -96,7 +98,10 @@ int HelperProcess::run(int argc, char* argv[])
         if (quitting) return;
         qWarning() << "Helper WS disconnected (helper may have crashed), retrying in 3s...";
         SetThreadExecutionState(ES_CONTINUOUS);
-        QTimer::singleShot(3000, [&]() {
+        // 必须绑定 context（&app）：无 context 的 singleShot 定时器不随对象析构取消，
+        // helper 在 3s 内退出时，lambda 会解引用已销毁的 ws/quitting（use-after-scope），
+        // 而 `if (quitting) return` 里的 quitting 本身也是悬垂引用，保护形同虚设。
+        QTimer::singleShot(3000, &app, [&]() {
             if (quitting) return;
             ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
         });

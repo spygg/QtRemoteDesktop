@@ -42,6 +42,9 @@ void ScreenCapturer::cleanupPlatform()
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xrender.h>
 #include <X11/extensions/Xfixes.h>
+#ifdef HAVE_XRANDR
+#include <X11/extensions/Xrandr.h>
+#endif
 
 // 安装 X11 错误处理函数，阻止 BadMatch 等异步 X 错误导致 abort() 崩溃
 static int (*s_oldXErrorHandler)(Display*, XErrorEvent*) = nullptr;
@@ -73,6 +76,10 @@ class X11Capturer : public PlatformCapturer {
     int primaryW_ = 0;
     int primaryH_ = 0;
     std::chrono::steady_clock::time_point lastProbe_ = std::chrono::steady_clock::now();
+    // 上次全量抓取/全何刷新时间。XComposite 下部分常变窗口（任务栏/顶部菜单等）
+    // 的损伤不会上报到根窗口，导致全屏缓冲该区域停留在初始全黑→顽固黑块。
+    // 定期强制一次全量抓取可自愈这类区域（≤ ~0.8s 的短暂黑块可接受）。
+    std::chrono::steady_clock::time_point lastFullRefresh_ = std::chrono::steady_clock::now();
 
 public:
     // 输出枚举（多屏切换）
@@ -136,7 +143,15 @@ public:
 
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
-        if (damageSupported_ && !forceFull_) {
+        if (damageSupported_ && !forceFull_ && !fullCaptureOnly_) {
+            // 周期性自愈：即使本次有 damage 矩形，若距上次全量抓取已超 ~0.8s，
+            // 也强制走一次全量抓取。这是为了修复 XComposite/面板类常变区域
+            // 损伤不上报到根窗口导致的顽固黑块（尤其任务栏、顶部）。
+            auto nowFull = std::chrono::steady_clock::now();
+            if (nowFull - lastFullRefresh_ >= std::chrono::milliseconds(800))
+                forceFull_ = true; // 本次改走下方全量路径；成功后由下方清除标志并更新计时
+        }
+        if (damageSupported_ && !forceFull_ && !fullCaptureOnly_) {
             XserverRegion region = XFixesCreateRegion(display_, nullptr, 0);
             XDamageSubtract(display_, damage_, None, region);
             int rectCount = 0;
@@ -244,6 +259,7 @@ public:
             return false;
         }
         forceFull_ = false; // 全量抓取成功，清除强制标志
+        lastFullRefresh_ = std::chrono::steady_clock::now(); // 记录全量刷新时刻，供下方周期性自愈计时
 
         if (ximage->bits_per_pixel == 32) {
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
@@ -274,36 +290,56 @@ public:
     int width() const { return primaryW_ > 0 ? primaryW_ : width_; }
     int height() const { return primaryH_ > 0 ? primaryH_ : height_; }
 
-    // 用 xrandr --query 枚举所有 connected 输出及其几何
+    // 用 XRandR X 扩展在进程内枚举输出，避免依赖 xrandr 子进程。
+    // 旧实现 spawn `xrandr --query` 子进程，在服务运行环境下 QProcess 偶发
+    // 拿不到 DISPLAY / waitForFinished 超时，导致枚举返回空、主输出回退成整屏
+    // 虚拟分辨率（如 5120x1080），进而与编码器上下文（1920x1080）尺寸不匹配、
+    // 丢帧→reinit 死循环、视频黑屏。XRandR 扩展枚举可靠且不依赖子进程环境。
+#ifndef HAVE_XRANDR
+    // 构建环境缺 libXrandr-devel 时回退：返回空列表，调用方走 xrandr 子进程枚举
     QList<OutputGeom> enumerateOutputs()
     {
         QList<OutputGeom> list;
-        QProcess xrandr;
-        xrandr.start(QStringLiteral("xrandr"), QStringList() << QStringLiteral("--query"));
-        if (!xrandr.waitForFinished(3000))
-            return list;
-        QString output = QString::fromUtf8(xrandr.readAllStandardOutput());
-        const QRegularExpression reLine(
-            QStringLiteral("^(\\S+)\\s+connected\\s+(primary\\s+)?(\\d+)x(\\d+)\\+(\\d+)\\+(\\d+)"));
-        for (const QString& rawLine : output.split(QLatin1Char('\n'))) {
-            QString line = rawLine.trimmed();
-            if (line.isEmpty() || !line.contains(QStringLiteral("connected")))
-                continue;
-            QRegularExpressionMatch m = reLine.match(line);
-            if (m.hasMatch()) {
-                OutputGeom g;
-                g.name = m.captured(1);
-                g.primary = !m.captured(2).isEmpty();
-                g.w = m.captured(3).toInt();
-                g.h = m.captured(4).toInt();
-                g.x = m.captured(5).toInt();
-                g.y = m.captured(6).toInt();
-                if (g.w > 0 && g.h > 0)
-                    list.append(g);
-            }
-        }
         return list;
     }
+#else
+    QList<OutputGeom> enumerateOutputs()
+    {
+        QList<OutputGeom> list;
+        if (!display_)
+            return list;
+        int randrEventBase = 0, randrErrorBase = 0;
+        if (!XRRQueryExtension(display_, &randrEventBase, &randrErrorBase))
+            return list;
+        XRRScreenResources* res = XRRGetScreenResources(display_, rootWindow_);
+        if (!res)
+            return list;
+        RROutput primaryOut = rootWindow_ ? XRRGetOutputPrimary(display_, rootWindow_) : None;
+        for (int i = 0; i < res->noutput; ++i) {
+            RROutput out = res->outputs[i];
+            XRROutputInfo* info = XRRGetOutputInfo(display_, res, out);
+            if (!info)
+                continue;
+            if (info->connection == RR_Connected && info->crtc != None) {
+                XRRCrtcInfo* crtc = XRRGetCrtcInfo(display_, res, info->crtc);
+                if (crtc) {
+                    OutputGeom g;
+                    g.name = QString::fromUtf8(info->name);
+                    g.w = static_cast<int>(crtc->width);
+                    g.h = static_cast<int>(crtc->height);
+                    g.x = static_cast<int>(crtc->x);
+                    g.y = static_cast<int>(crtc->y);
+                    g.primary = (out == primaryOut);
+                    list.append(g);
+                    XRRFreeCrtcInfo(crtc);
+                }
+            }
+            XRRFreeOutputInfo(info);
+        }
+        XRRFreeScreenResources(res);
+        return list;
+    }
+#endif
 
     void applyOutput(const OutputGeom& g)
     {
@@ -441,8 +477,8 @@ void ScreenCapturer::captureFrame()
             // 无新帧（如静止时 Damage 为空）：同样递增 idle 计数并降频，
             // 避免 capture timer 在无变化时保持全帧率空转消耗 CPU。
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+            if (idleCount_ > static_cast<int>(fps_ * 2))
+                enterIdleThrottle();
             return;
         }
 
@@ -462,8 +498,7 @@ void ScreenCapturer::captureFrame()
         if (regionKnownDirty) {
             // 区域抓取已知有变化（XDamage 非空），跳过全帧校验和以省 CPU
             idleCount_ = 0;
-            if (captureTimer_->interval() != 1000 / fps_)
-                captureTimer_->setInterval(1000 / fps_);
+            leaveIdleThrottle();
             emit frameCaptured(frame);
             return;
         }
@@ -471,8 +506,8 @@ void ScreenCapturer::captureFrame()
         quint16 checksum = quickFrameChecksum(frame);
         if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+            if (idleCount_ > static_cast<int>(fps_ * 2))
+                enterIdleThrottle();
             return;
         }
         forceSendNextFrame_ = false;
@@ -480,8 +515,7 @@ void ScreenCapturer::captureFrame()
             forceFrameCount_--;
         // 画面有变化，恢复全帧率
         idleCount_ = 0;
-        if (captureTimer_->interval() != 1000 / fps_)
-            captureTimer_->setInterval(1000 / fps_);
+        leaveIdleThrottle();
         lastFrameChecksum_ = checksum;
 
         emit frameCaptured(frame);
@@ -513,8 +547,8 @@ void ScreenCapturer::captureFrame()
 
         if (!updated) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+            if (idleCount_ > static_cast<int>(fps_ * 2))
+                enterIdleThrottle();
             return;
         }
 
@@ -533,21 +567,20 @@ void ScreenCapturer::captureFrame()
         // 空帧 / 0 尺寸帧保护（Wayland 流初始化中可能提交 0 宽高帧）
         if (frame.isNull() || frame.width() <= 0 || frame.height() <= 0) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+            if (idleCount_ > static_cast<int>(fps_ * 2))
+                enterIdleThrottle();
             return;
         }
 
         quint16 checksum = quickFrameChecksum(frame);
         if (checksum == lastFrameChecksum_) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-                captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+            if (idleCount_ > static_cast<int>(fps_ * 2))
+                enterIdleThrottle();
             return;
         }
         idleCount_ = 0;
-        if (captureTimer_->interval() != 1000 / fps_)
-            captureTimer_->setInterval(1000 / fps_);
+        leaveIdleThrottle();
         lastFrameChecksum_ = checksum;
 
         emit frameCaptured(frame);
@@ -575,13 +608,12 @@ void ScreenCapturer::captureFrame()
     quint16 checksum = quickFrameChecksum(frame);
     if (checksum == lastFrameChecksum_) {
         idleCount_++;
-        if (idleCount_ > static_cast<int>(fps_ * 2) && captureTimer_->interval() < 250)
-            captureTimer_->setInterval(250); // idle 静止 4fps（原 1s，交互反馈太慢）
+        if (idleCount_ > static_cast<int>(fps_ * 2))
+            enterIdleThrottle();
         return;
     }
     idleCount_ = 0;
-    if (captureTimer_->interval() != 1000 / fps_)
-        captureTimer_->setInterval(1000 / fps_);
+    leaveIdleThrottle();
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);

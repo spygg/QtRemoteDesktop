@@ -13,7 +13,7 @@
 void yang_sdp_genLocalSdp_payloadType(YangVideoCodec codec,YangMediaPayloadType *videotype){
 	videotype->clock_rate = 90000;
 	if(codec==Yang_VED_H264){
-		yang_strcpy(videotype->format_specific_param,"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f");
+		yang_strcpy(videotype->format_specific_param,"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42c028");
 	}else if(codec==Yang_VED_H265){
 		yang_strcpy(videotype->format_specific_param,"level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST");
 	}
@@ -257,6 +257,10 @@ int32_t yang_sdp_genLocalSdp2(YangRtcSession *session, int32_t localport,char *d
 		yang_insert_YangExtmapVector(&video_media_desc->extmaps, NULL);
 		video_media_desc->extmaps.payload[0].mapid = session->context.twccId;
 		yang_strcpy(video_media_desc->extmaps.payload[0].extmap,Yang_SDP_kTWCCExt);
+		// [MID-EXT] 协商 sdes:mid：Chrome 收流 demux 依赖 mid 扩展（BUNDLE 单 m-section）
+		yang_insert_YangExtmapVector(&video_media_desc->extmaps, NULL);
+		video_media_desc->extmaps.payload[1].mapid = 1;
+		yang_strcpy(video_media_desc->extmaps.payload[1].extmap, "urn:ietf:params:rtp-hdrext:sdes:mid");
 	}
 #endif
 
@@ -333,6 +337,8 @@ int32_t yang_sdp_genLocalSdp2(YangRtcSession *session, int32_t localport,char *d
 	if(video_media_desc) {
 		yang_insert_YangSSRCInfoVector(&video_media_desc->ssrc_infos, NULL);
 		video_media_desc->ssrc_infos.payload[0].ssrc = session->context.videoSsrc;
+		fprintf(stderr, "SDP-DIAG offer videoSsrc=%u audioSsrc=%u\n",
+			session->context.videoSsrc, session->context.audioSsrc);
 	}
 #endif
 
@@ -454,7 +460,7 @@ YangRtcTrack* yang_sdp_find_track(YangRtcSession* session,uint32_t ssrc){
 
 
 static yangbool yang_is_h264PayoadType(char* str) {
-	if (yang_strstr(str, "packetization-mode=1") && yang_strstr(str, "profile-level-id=42e01f")) return yangtrue;
+	if (yang_strstr(str, "packetization-mode=1") && yang_strstr(str, "profile-level-id=42c028")) return yangtrue;
 	return yangfalse;
 }
 

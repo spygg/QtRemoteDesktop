@@ -19,10 +19,63 @@ FileTransferService::~FileTransferService()
     activeUploads_.clear();
 }
 
+// 文件根目录：默认限制在当前用户 home 目录，防止登录用户读写任意路径。
+QString FileTransferService::s_rootPath = QDir::homePath();
+bool FileTransferService::s_enforceRoot = true;
+
+void FileTransferService::setRootPath(const QString& root)
+{
+    QString r = root.trimmed();
+    if (r.isEmpty() || r == "/" || r == "\\") {
+        // 显式放开：仅应在完全可信的内网环境使用
+        s_enforceRoot = false;
+        s_rootPath = QDir::rootPath();
+        qWarning() << "FileTransfer: root restriction DISABLED (fileRoot=\"/\") - "
+                      "any file on this host may be read or overwritten";
+        return;
+    }
+    s_rootPath = QDir::cleanPath(QDir(r).absolutePath());
+    s_enforceRoot = true;
+    qInfo() << "FileTransfer: root path restricted to" << s_rootPath;
+}
+
 QString FileTransferService::sanitizeFilePath(const QString& path)
 {
-    QDir dir(path);
-    return dir.absolutePath();
+    // 旧实现只做 absolutePath()：客户端可传 "/etc/shadow"、"../../" 或 "C:/Windows/..."，
+    // 造成任意文件读写（配合上传还能覆盖任意可写文件）。这里把路径强制约束在根目录内，
+    // 并用 canonicalFilePath 解析符号链接，防止软链逃出根目录。越界一律返回空串，
+    // 调用方必须把空串当作失败处理。
+    if (!s_enforceRoot) {
+        QDir dir(path);
+        return dir.absolutePath();
+    }
+
+    QDir root(s_rootPath);
+    const QString rootCanon = root.canonicalPath();
+    if (rootCanon.isEmpty())
+        return QString();   // 根目录本身不存在：拒绝一切访问
+
+    // 客户端用 "/" 或空路径表示"根目录"，映射到受限根目录（而不是磁盘根）
+    if (path.isEmpty() || path == "/" || path == "\\")
+        return rootCanon;
+
+    // 以根目录为基准解析（相对路径、".." 都相对 root 解析，无法逃出）
+    QString abs  = QDir::cleanPath(root.absoluteFilePath(path));
+    QString canon = QFileInfo(abs).canonicalFilePath();
+    if (canon.isEmpty()) {
+        // 目标尚不存在（典型：上传新文件）→ 解析其父目录的真实路径再拼文件名
+        QFileInfo fi(abs);
+        QString parentCanon = QFileInfo(fi.path()).canonicalFilePath();
+        if (parentCanon.isEmpty())
+            return QString();
+        canon = parentCanon + "/" + fi.fileName();
+    }
+
+    if (canon != rootCanon && !canon.startsWith(rootCanon + "/")) {
+        qWarning() << "FileTransfer: path outside root rejected:" << path << "->" << canon;
+        return QString();
+    }
+    return canon;
 }
 
 void FileTransferService::writeTarHeader(QByteArray& data, const QString& name, qint64 size, char type)
@@ -109,8 +162,8 @@ QByteArray FileTransferService::createTarForDirectory(const QString& dirPath)
 void FileTransferService::processFileList(const QString& clientId, const QString& path)
 {
 #ifdef Q_OS_WIN
-    // Windows: path "/" or empty → list drives
-    if (path == "/" || path.isEmpty()) {
+    // Windows: path "/" or empty → 未启用根目录约束时才列驱动器（放开全盘）
+    if ((path == "/" || path.isEmpty()) && !s_enforceRoot) {
         QFileInfoList drives = QDir::drives();
         QJsonArray items;
         for (const QFileInfo& drive : drives) {
@@ -132,8 +185,17 @@ void FileTransferService::processFileList(const QString& clientId, const QString
         return;
     }
 
+    QString safePath = sanitizeFilePath(path);
+    if (safePath.isEmpty()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_list"}, {"path", path},
+            {"error", "拒绝访问：路径超出允许范围 (" + s_rootPath + ")"}
+        });
+        return;
+    }
+
     // Convert forward slashes to native, ensure drive root has separator
-    QString nativePath = QDir::fromNativeSeparators(path);
+    QString nativePath = QDir::fromNativeSeparators(safePath);
     if (nativePath.length() == 2 && nativePath[1] == ':')
         nativePath += '\\';
 
@@ -163,8 +225,16 @@ void FileTransferService::processFileList(const QString& clientId, const QString
         {"items", items}
     });
 #else
-    // Linux: existing behavior
-    QDir dir(path);
+    // Linux: 与 Windows 分支一致，先做根目录约束
+    QString safePath = sanitizeFilePath(path);
+    if (safePath.isEmpty()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_list"}, {"path", path},
+            {"error", "拒绝访问：路径超出允许范围 (" + s_rootPath + ")"}
+        });
+        return;
+    }
+    QDir dir(safePath);
     if (!dir.exists()) {
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_list"}, {"path", path}, {"error", "Directory not found"}
@@ -195,6 +265,13 @@ void FileTransferService::processFileList(const QString& clientId, const QString
 void FileTransferService::processDownload(const QString& clientId, const QString& path)
 {
     QString safePath = sanitizeFilePath(path);
+    if (safePath.isEmpty()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_download"}, {"path", path},
+            {"error", "拒绝访问：路径超出允许范围 (" + s_rootPath + ")"}
+        });
+        return;
+    }
     QFileInfo fi(safePath);
 
     // Directory: create tar archive
@@ -296,6 +373,13 @@ void FileTransferService::processUploadStart(const QString& clientId, const QStr
 {
     Q_UNUSED(clientId);
     QString safePath = sanitizeFilePath(path);
+    if (safePath.isEmpty()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_upload_done"},
+            {"error", "拒绝上传：路径超出允许范围 (" + s_rootPath + ")"}
+        });
+        return;
+    }
 
     QFileInfo fi(safePath);
     QDir parentDir = fi.absoluteDir();
@@ -331,6 +415,8 @@ void FileTransferService::processUploadStart(const QString& clientId, const QStr
 void FileTransferService::processUploadChunk(const QString& path, const QByteArray& data)
 {
     QString safePath = sanitizeFilePath(path);
+    if (safePath.isEmpty())
+        return;
     auto it = activeUploads_.find(safePath);
     if (it == activeUploads_.end()) {
         qWarning() << "Upload chunk for unknown file:" << safePath;
@@ -344,6 +430,8 @@ void FileTransferService::processUploadChunk(const QString& path, const QByteArr
 void FileTransferService::processUploadDone(const QString& clientId, const QString& path)
 {
     QString safePath = sanitizeFilePath(path);
+    if (safePath.isEmpty())
+        return;
     auto it = activeUploads_.find(safePath);
     if (it == activeUploads_.end()) {
         emit jsonResponse(clientId, QJsonObject{
