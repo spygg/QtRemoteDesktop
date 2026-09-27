@@ -4,7 +4,7 @@
 
 ---
 
-## 平台支持现状（2026-09 代码审查确认）
+## 平台支持现状
 
 | 平台 | 状态 | 说明 |
 |------|------|------|
@@ -116,6 +116,7 @@ qtremotedesktop/
 | libpcap | metaRTC 网络依赖 | `libpcap-dev` | `libpcap-devel` |
 | **可选** PipeWire | Wayland 抓屏（缺失则仅 X11） | `libpipewire-0.3-dev` | `pipewire-devel` |
 | **可选** mlocate | Qt 路径探测加速 | `mlocate` | `mlocate` |
+| **可选** libXrandr | 进程内多显示器枚举（缺失则回退 `xrandr` 子进程，多屏分辨率探测可能不稳） | `libxrandr-dev` | `libXrandr-devel` |
 | **可选** libdrm | RK3588 MPP 硬编 | `libdrm-dev` | `libdrm-devel` |
 
 一键安装：
@@ -139,6 +140,17 @@ sudo dnf install -y gcc gcc-c++ make cmake pkgconfig \
 sudo pacman -S --needed base-devel cmake pkgconf qt5-base qt5-websockets \
     libx11 libxtst libxdamage libxcomposite libxrender libxfixes openssl zlib alsa-lib libpcap \
     pipewire mlocate
+```
+
+> 多显示器分辨率精确枚举：建议额外安装 `libXrandr-devel`（RHEL/Anolis）或 `libxrandr-dev`（Debian/Ubuntu）后重新构建，启用进程内 XRandR 枚举；未安装时自动回退 `xrandr --query` 子进程枚举（历史上多屏尺寸探测不稳的来源，不影响编译与单屏运行）。
+
+可选但推荐（进程内多显示器枚举，提升多屏分辨率探测稳定性）：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y libxrandr-dev
+# RHEL / Fedora / Anolis
+sudo dnf install -y libXrandr-devel
 ```
 
 构建前自检依赖（会按发行版打印缺失包的安装命令）：
@@ -206,14 +218,16 @@ bin\QtRemoteDesktop.exe
 | 选项 | 说明 |
 |------|------|
 | `--no-ssl` | 禁用 HTTPS/WSS，使用明文 HTTP/WS |
+| `--log-level <level>` | 日志分级过滤：`debug` / `info` / `warning` / `critical`（默认随构建类型：debug 构建为 `debug`，release 构建为 `info`） |
 | `--install` | 安装系统服务（Windows 服务 / Linux systemd） |
 | `--uninstall` | 卸载系统服务 |
 | `--service` | 以服务模式运行（由服务管理器调用） |
 | `--helper` | Windows 辅助进程模式（注入用户会话，由服务自动拉起） |
+| `--version` | 打印版本号并退出 |
 | `--help` | 查看帮助 |
 
 - 默认端口：HTTP `8080`，WebSocket `8081`（HTTP 端口 + 1）
-- 日志：`<程序目录>/logs/YYYY-MM-DD.txt`
+- 日志：`<程序目录>/logs/YYYY-MM-DD.txt`；默认级别随构建类型（debug 构建全量记录，release 构建仅 `info` 及以上），可用 `--log-level debug` 临时开启全量调试日志
 - 默认账号：`admin` / `admin`
 
 ### 配置文件
@@ -271,32 +285,7 @@ SSL 使用 `res/sslperm/` 下的自签名证书，浏览器会有安全警告；
 | 编译报找不到 X11 头 | 先跑 `build_linux.sh --check-deps`，按提示安装 X11 系列开发库 |
 
 ---
-
-## 代码审查修复记录
-
-首轮全项目审查发现的问题已按下表修复，并在 RK3588（`192.168.1.90`）实测通过。
-验证方式：远端增量编译（`make -j4`，EXIT=0）+ 浏览器端到端冒烟（WebRTC 与 ffmpeg/MSE
-两种模式均出图，解码计数持续递增、丢帧 0）。
-
-| 状态 | 级别 | 问题 | 修复要点 |
-|------|------|------|----------|
-| ✅ 已修复 | **P0** | 无捕获环境时 `/api/shell/exec`、`/api/shell/ws` 跳过鉴权 | `skipAuth` 收窄为仅 `/`、`/shell` 静态页；`onShellConnected` 恒校验 token |
-| ✅ 已修复 | **P0** | `sanitizeFilePath` 不做根目录约束，可任意读写 | 新增 `setRootPath()` 根约束 + `canonicalFilePath` 解析软链；越界返回空并由调用方判失败 |
-| ✅ 已修复 | **P0** | `onEncodedFrame` 遍历 `webrtcSessions_` 迭代器失效 | 先快照 key 列表，再按 key 查表，已移除会话自然跳过 |
-| ✅ 已修复 | **P0** | `VideoEncoder::shutdown` 用 `terminate()` 强杀线程 | 改为 `requestInterruption()` + `quit()` + `wait(8000)`，仅在确认退出后释放资源 |
-| ✅ 已修复 | **P0** | 分辨率/输出切换后未重建编码器（`sws_scale` 越界读） | 尺寸不匹配即丢帧并节流重建（3s 冷却）；切换成功后清缓存并 reinit |
-| ✅ 已修复 | **P0** | 静态画面下 ffmpeg/MSE 完全冻结（只出首帧） | 周期关键帧定时器不再限定 WebRTC；`request_keyframe` 强制产新 IDR（`pumpKeyframe(true)`） |
-| ✅ 已修复 | **P0** | 静止降频后永久卡在 4fps，画面变化也不恢复 | 移除 `interval() < 250` 守卫陷阱，改为显式 `enterIdleThrottle()`/`leaveIdleThrottle()`（Win/Linux/macOS 同步） |
-| ✅ 已修复 | **P1** | WebRTC 启动失败后 `webrtcExcluded_` 未回滚 | 新增 `failNoEncoder` 统一回滚排除列表后再下发 `failed` |
-| ✅ 已修复 | **P1** | 断开连接未清理 `clientTokens_`；上传残留 `QFile` | `onSocketDisconnected` 同步移除 token；析构与覆盖时关闭句柄 |
-| ✅ 已修复 | **P1** | MPP 缩放用编码尺寸而非源尺寸；重试路径泄漏 `MppPacket` | `initialize` 区分 src/enc 尺寸；重试使用局部 packet 并 deinit 无效包 |
-| ✅ 已修复 | **P1** | RTP 时间戳固定从 0 起、64 位不截断 | 随机初始值 + 32 位回绕；时间戳步进按实际 fps（`90000/fps`） |
-| ✅ 已修复 | **P1** | `QTimer::singleShot` 无 context（UAF 风险） | 补 context 对象 `&app` |
-| ✅ 已修复 | **P1** | breakpad CMake 硬编码 `Qt5::Core`，Qt6 全平台 configure 失败 | 改为 `Qt${QT_VERSION_MAJOR}::Core` |
-| ⏳ 未处理 | **P2** | 开机自启模块在 CMake 中被注释（全平台不可用） | 需产品决策：是否恢复 `thridparty/startup` |
-| ⏳ 未处理 | **P2** | macOS / Android 存在链接级缺口与 stub 实现 | 需目标平台实机才能验证与补齐 |
-
----
+## 
 
 ## 技术栈
 

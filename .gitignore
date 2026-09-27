@@ -1,8 +1,12 @@
 # 编译输出和构建目录
-*/*build*/*
+# 仅忽略名为 build 的目录（含任意层级，如第三方源码内的 build/），
+# 不再用 */*build*/*（会误伤 linux_build_script / windows_build_script 等
+# 目录名含 build 的构建脚本）。顶层 build/ 与 build_output/ 由下方 build*/ 覆盖。
+**/build/
 */bin/*
 */dist/*
 build*/
+build_output/
 bin/
 dist/
 
@@ -75,7 +79,6 @@ src/remotedesk/thridparty/ffmpeg/linux/presets/
 *.swp
 *.swo
 *~
-build*/
 
 # 日志文件
 *.log
