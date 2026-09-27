@@ -13,6 +13,7 @@
 #include <wtsapi32.h>
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
+void applyLogLevelFromArgs(int argc, char* argv[]);
 
 #define SERVICE_NAME L"QtRemoteDesktop"
 
@@ -292,6 +293,10 @@ int WindowsService::run(int argc, char* argv[])
 {
     (void*)argc;
     (void*)argv;
+
+    // --service 分流绕过了 main() 的 QCommandLineParser，须从原始 argv 恢复日志级别
+    // （g_logLevel 为全局，serviceMain 安装 handler 前即已生效）
+    applyLogLevelFromArgs(argc, argv);
 
     wchar_t serviceName[] = SERVICE_NAME;
     SERVICE_TABLE_ENTRYW table[] = {

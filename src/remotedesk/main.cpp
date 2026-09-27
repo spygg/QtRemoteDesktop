@@ -19,7 +19,13 @@
 
 #include <cstring>
 
+// 默认级别：debug 构建全量记录，release 构建只记 info 及以上
+// （release 部署如需全量调试，显式传 --log-level debug）。
+#ifdef QT_DEBUG
 int g_logLevel = QtDebugMsg;
+#else
+int g_logLevel = QtInfoMsg;
+#endif
 
 // 设置日志级别；无法识别的级别返回 false
 bool setLogLevel(const QString& lvRaw)
@@ -43,16 +49,20 @@ bool setLogLevel(const QString& lvRaw)
 // WindowsService::run，不会执行 main() 里的 QCommandLineParser）。
 void applyLogLevelFromArgs(int argc, char* argv[])
 {
+    // 同时支持 "--log-level info" 与 "--log-level=info" 两种形式，
+    // 与 main() 中 QCommandLineParser 的行为保持一致。
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc)
             setLogLevel(QString::fromLocal8Bit(argv[++i]));
+        else if (strncmp(argv[i], "--log-level=", 12) == 0)
+            setLogLevel(QString::fromLocal8Bit(argv[i] + 12));
     }
 }
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
 {
-    // 日志分级过滤：低于 --log-level 指定级别的消息直接丢弃。
-    // 默认 QtDebugMsg 全量记录；release 部署建议 --log-level info。
+    // 日志分级过滤：低于级别的消息直接丢弃。默认级别随构建类型：
+    // debug 构建 QtDebugMsg 全量记录；release 构建 QtInfoMsg 及以上。
     if (type < g_logLevel)
         return;
 
@@ -140,10 +150,9 @@ int main(int argc, char* argv[])
 
     QCommandLineOption logLevelOption(
         "log-level",
-        "日志分级过滤: debug|info|warning|critical（默认 debug，"
-        "release 部署建议 info）",
-        "level",
-        "debug");
+        "日志分级过滤: debug|info|warning|critical（默认值随构建类型：debug 构建 debug / "
+        "release 构建 info）",
+        "level");
     parser.addOption(logLevelOption);
 
     // 以下选项由 service 层（platformMain）在进入 main 前处理并提前退出，

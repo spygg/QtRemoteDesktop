@@ -1809,9 +1809,12 @@
                 // WebRTC 失败时 webrtcClose 会把二者清掉，WS 帧自然恢复走解码路径。
                 if (webrtcState.pc || webrtcState.intending) return;
                 // 视频模式：H.264 帧（原有逻辑）
-                if (!window._dbgRx) window._dbgRx = 0;
+                // 帧接收诊断日志：仅 ?debug URL 参数开启时输出（1 秒节流），
+                // 生产环境保持控制台静默
+                if (window._wsRxLog === undefined)
+                    window._wsRxLog = /[?&]debug\b/.test(location.search);
                 const _t = performance.now();
-                if (_t - window._dbgRx > 1000) {
+                if (window._wsRxLog && _t - (window._dbgRx || 0) > 1000) {
                     window._dbgRx = _t;
                     console.log('WS frame rx: type=' + frameType + ' len=' + (data.length - 13) + ' mseUsing=' + msePlayer.using + ' wActive=' + webrtcState.active + ' started=' + msePlayer.started);
                 }

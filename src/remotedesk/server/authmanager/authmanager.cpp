@@ -8,6 +8,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <QUuid>
+
+#include <cstring>
 
 // Qt 5.7 compatibility
 #if QT_VERSION < QT_VERSION_CHECK(5, 10, 0)
@@ -15,18 +18,26 @@
 static qint64 currentSecsSinceEpoch() { return QDateTime::currentDateTime().toTime_t(); }
 static QByteArray randomBytes(int count)
 {
-    // qrand 未播种时每次进程启动生成相同序列，token 可预测（安全弱点）。
-    // 用时间 + 进程号播种一次，保证每次启动序列不同。
-    static bool seeded = false;
-    if (!seeded) {
-        qsrand(static_cast<uint>(QDateTime::currentDateTime().toTime_t())
-               ^ static_cast<uint>(QCoreApplication::applicationPid()));
-        seeded = true;
-    }
+    // 优先用 OS 熵源生成会话 token/salt：
+    // - Unix：/dev/urandom（内核 CSPRNG）
+    // - Windows / 其他：QUuid::createUuid()（Windows 上走 CoCreateGuid，加密强度；
+    //   Unix 上 Qt 内部同样优先读 /dev/urandom）
+    // 旧实现用时间+PID 播种的 qrand()（LCG）生成 token，熵不足、可预测。
     QByteArray data;
     data.resize(count);
-    for (int i = 0; i < count; i++)
-        data[i] = static_cast<char>(qrand());
+#if defined(Q_OS_UNIX)
+    QFile urandom(QStringLiteral("/dev/urandom"));
+    if (urandom.open(QIODevice::ReadOnly)
+        && urandom.read(data.data(), count) == count)
+        return data;
+#endif
+    int filled = 0;
+    while (filled < count) {
+        const QByteArray uuid = QUuid::createUuid().toRfc4122(); // 16 字节
+        const int n = qMin(16, count - filled);
+        memcpy(data.data() + filled, uuid.constData(), static_cast<size_t>(n));
+        filled += n;
+    }
     return data;
 }
 #else

@@ -167,6 +167,10 @@ namespace {
     }
 }
 
+// 惰性打开 X display（首次注入时调用）。
+// 线程约束：所有 inject* 注入入口最终都经 RDPServer::onInputReceived 在主线程
+// 串行执行（WS 的 inputReceived 为队列连接），因此此处对 xDisplay_ 的写无需
+// 加锁。若未来把注入移到独立线程，必须先加同步保护。
 bool InputManager::ensureXDisplay()
 {
     if (xDisplay_)

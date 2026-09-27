@@ -296,9 +296,19 @@ public:
     // 虚拟分辨率（如 5120x1080），进而与编码器上下文（1920x1080）尺寸不匹配、
     // 丢帧→reinit 死循环、视频黑屏。XRandR 扩展枚举可靠且不依赖子进程环境。
 #ifndef HAVE_XRANDR
-    // 构建环境缺 libXrandr-devel 时回退：返回空列表，调用方走 xrandr 子进程枚举
+    // 构建环境缺 libXrandr-devel 时回退：返回空列表，调用方走 xrandr 子进程枚举。
+    // 注意：xrandr 子进程路径即历史上黑屏问题的来源（QProcess 偶发拿不到
+    // DISPLAY / 超时 → 枚举空/尺寸错配 → 丢帧 reinit 循环），部署侧应尽量
+    // 安装 libXrandr-devel 重新构建以启用进程内枚举（见上方注释）。
     QList<OutputGeom> enumerateOutputs()
     {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            qWarning() << "XR11Capturer: built without libXrandr-devel, in-process output"
+                       << "enumeration unavailable; falling back to 'xrandr --query' subprocess."
+                       << "Install libXrandr-devel and rebuild for reliable multi-output handling.";
+        }
         QList<OutputGeom> list;
         return list;
     }
