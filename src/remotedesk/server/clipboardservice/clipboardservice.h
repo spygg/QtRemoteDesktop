@@ -6,6 +6,7 @@
 #include <QByteArray>
 
 class QTimer;
+class QProcess;
 
 // 共享剪贴板服务：支持文本（text/plain）与图片（image/png）两种内容类型。
 // - GUI 模式（QGuiApplication）：QClipboard 原生读写，dataChanged 信号驱动远端→客户端同步。
@@ -50,6 +51,9 @@ private:
     bool cliMode_ = false;      // 无 QGuiApplication 时用 xclip/xsel 走 X11 CLIPBOARD
     bool cliImageCapable_ = false; // xclip 支持图片 target（xsel 不支持）
     QString clipBin_;           // xclip 或 xsel 的绝对路径
+    // 常驻的 xclip/xsel 进程：必须存活才能作为 CLIPBOARD selection owner 向其他
+    // X 客户端提供数据（局部 QProcess 析构会 kill 子进程 → owner 消失 → 粘贴为空）
+    QProcess* cliOwner_ = nullptr;
     void ensureCliMode();       // 惰性启用 CLI 后端（DISPLAY 出现后自动初始化）
     void readCliContent(QString& mime, QByteArray& data) const;
 #endif

@@ -2070,6 +2070,74 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
             launch(lock, { "-l" });
         else
             launch(lock, { "lock-session" });
+    } else if (action == "unlock_screen") {
+        // 免密解锁：让被控端从锁屏界面切回桌面（方案A）。
+        //  1) loginctl unlock-session —— 解开 light-locker / gnome-screensaver 这类
+        //     “同一 VT 上把屏幕遮住”的锁屏（会话没切换，只是屏幕被盖住）。
+        //  2) chvt <桌面VT> —— 解开 lightdm greeter 型锁屏：lightdm 锁屏时会在另一
+        //     个 VT（如 tty8）另起一个 greeter 并把前台 VT 切过去，桌面会话仍在原
+        //     VT（如 tty7），X :0 画面被置黑，采集到的就是全黑帧。实测对这种情况
+        //     loginctl unlock-session / dm-tool switch-to-user 都无效，只有把前台 VT
+        //     切回桌面 VT 才能恢复画面。
+        // 桌面 VT 由 loginctl 中的图形会话（Type=x11/wayland @ seat0）推导，不硬编码。
+        // chvt 需要 root（服务以 root 运行时可直接执行）。
+        QString sh = findBin("sh");
+        if (sh.isEmpty()) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "unlock_result" }, { "ok", false },
+                { "message", "系统缺少 sh，无法执行解锁" } });
+            return;
+        }
+        QStringList lines;
+        lines << "VT=''; SESS=''";
+        lines << "for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do";
+        lines << "  t=$(loginctl show-session \"$s\" -p Type --value 2>/dev/null)";
+        lines << "  seat=$(loginctl show-session \"$s\" -p Seat --value 2>/dev/null)";
+        lines << "  tty=$(loginctl show-session \"$s\" -p TTY --value 2>/dev/null)";
+        // 必须带真实 ttyN 才算桌面会话：lightdm greeter 会话同为图形会话但 TTY 为空，
+        // 若先命中它会拿到空 VT 导致误判失败。
+        lines << "  if { [ \"$t\" = x11 ] || [ \"$t\" = wayland ]; } && [ \"$seat\" = seat0 ] && [ \"${tty#tty}\" != \"$tty\" ]; then";
+        lines << "    VT=\"$tty\"; SESS=\"$s\"; break";
+        lines << "  fi";
+        lines << "done";
+        lines << "[ -n \"$SESS\" ] && loginctl unlock-session \"$SESS\" >/dev/null 2>&1";
+        lines << "CUR=$(cat /sys/class/tty/tty0/active 2>/dev/null)";
+        lines << "if [ -n \"$VT\" ] && [ \"$CUR\" != \"$VT\" ]; then";
+        lines << "  chvt \"${VT#tty}\" >/dev/null 2>&1";
+        lines << "  CUR=$(cat /sys/class/tty/tty0/active 2>/dev/null)";
+        lines << "fi";
+        lines << "echo \"VT=$VT CUR=$CUR\"";
+
+        QProcess* proc = new QProcess(this);
+        const QString cid = clientId;
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, proc, cid](int, QProcess::ExitStatus) {
+            QString vt, cur;
+            const QStringList toks = QString::fromLocal8Bit(proc->readAllStandardOutput()).trimmed().split(QLatin1Char(' '));
+            for (const QString& tok : toks) {
+                if (tok.startsWith(QLatin1String("VT=")))       vt  = tok.mid(3);
+                else if (tok.startsWith(QLatin1String("CUR="))) cur = tok.mid(4);
+            }
+            const bool ok = !vt.isEmpty() && vt == cur;
+            QString msg;
+            if (ok)
+                msg = QStringLiteral("已切回桌面 %1").arg(vt);
+            else if (vt.isEmpty())
+                msg = QStringLiteral("未识别到图形会话所在 VT");
+            else
+                msg = QStringLiteral("未切换成功（当前 %1 / 目标 %2），解锁需 root 权限").arg(cur, vt);
+            qInfo() << "unlock_screen result:" << ok << msg;
+            wsServer_->sendJson(cid, QJsonObject {
+                { "type", "unlock_result" }, { "ok", ok }, { "message", msg } });
+            proc->deleteLater();
+        });
+        connect(proc, &QProcess::errorOccurred, this, [this, proc, cid](QProcess::ProcessError) {
+            wsServer_->sendJson(cid, QJsonObject {
+                { "type", "unlock_result" }, { "ok", false },
+                { "message", "解锁命令启动失败: " + proc->errorString() } });
+            proc->deleteLater();
+        });
+        proc->start(sh, { QStringLiteral("-c"), lines.join(QLatin1Char('\n')) });
     } else if (action == "show_desktop") {
         // 显示桌面链：
         //  1) wmctrl -k on —— EWMH 标准，openbox/LXDE、GNOME、XFCE、KDE 的 X11 会话均支持；

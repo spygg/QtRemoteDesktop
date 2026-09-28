@@ -63,15 +63,31 @@ QString FileTransferService::sanitizeFilePath(const QString& path)
     QString abs  = QDir::cleanPath(root.absoluteFilePath(path));
     QString canon = QFileInfo(abs).canonicalFilePath();
     if (canon.isEmpty()) {
-        // 目标尚不存在（典型：上传新文件）→ 解析其父目录的真实路径再拼文件名
-        QFileInfo fi(abs);
-        QString parentCanon = QFileInfo(fi.path()).canonicalFilePath();
-        if (parentCanon.isEmpty())
+        // 目标尚不存在（典型：上传新文件 / 拖拽上传多级子目录）→ 向上回溯到最近的
+        // 已存在祖先目录，解析其真实路径后拼回剩余片段，从而支持一次上传整棵目录树。
+        QString tail;
+        QString probe = abs;
+        QFileInfo pi(probe);
+        while (!pi.exists()) {
+            tail = tail.isEmpty() ? pi.fileName() : pi.fileName() + "/" + tail;
+            QString parent = pi.path();
+            if (parent.isEmpty() || parent == probe)
+                break;
+            probe = parent;
+            pi = QFileInfo(probe);
+        }
+        QString baseCanon = QFileInfo(probe).canonicalFilePath();
+        if (baseCanon.isEmpty())
             return QString();
-        canon = parentCanon + "/" + fi.fileName();
+        // 拼接后必须归一化：baseCanon 为 "/"（受限根就是磁盘根时）会拼出 "//x"，
+        // 既让后续的包含性判断失效，又会让 QFile("//x") 写到根目录。
+        canon = tail.isEmpty() ? baseCanon : QDir::cleanPath(baseCanon + "/" + tail);
     }
 
-    if (canon != rootCanon && !canon.startsWith(rootCanon + "/")) {
+    // 包含性判断不能直接拼 rootCanon + "/"：rootCanon 为 "/" 时会得到 "//"，
+    // 任何正常路径都不以 "//" 开头，导致全部被误判为越界而拒绝。
+    const QString rootPrefix = rootCanon.endsWith('/') ? rootCanon : (rootCanon + '/');
+    if (canon != rootCanon && !canon.startsWith(rootPrefix)) {
         qWarning() << "FileTransfer: path outside root rejected:" << path << "->" << canon;
         return QString();
     }
@@ -322,6 +338,7 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     if (!file.open(QIODevice::ReadOnly)) {
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_download"},
+            {"path", path},
             {"error", "Cannot open file: " + safePath}
         });
         return;

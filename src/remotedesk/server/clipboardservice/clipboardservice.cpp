@@ -29,7 +29,19 @@ ClipboardService::ClipboardService(QObject* parent)
     connect(debounceTimer_, &QTimer::timeout, this, &ClipboardService::flushPending);
 }
 
-ClipboardService::~ClipboardService() = default;
+ClipboardService::~ClipboardService()
+{
+#ifdef Q_OS_LINUX
+    if (cliOwner_) {
+        cliOwner_->disconnect(this);
+        if (cliOwner_->state() != QProcess::NotRunning) {
+            cliOwner_->kill();
+            cliOwner_->waitForFinished(1000);
+        }
+        cliOwner_ = nullptr;
+    }
+#endif
+}
 
 void ClipboardService::start()
 {
@@ -115,23 +127,34 @@ void ClipboardService::ensureCliMode()
     qInfo() << "ClipboardService: using" << qPrintable(bin)
             << "for X11 clipboard (lazy init, DISPLAY ="
             << qgetenv("DISPLAY").constData() << ")";
+    // 惰性启用后同样要起轮询：CLI 模式没有剪贴板变化信号，
+    // 否则此时才探测到 DISPLAY 的场景（service 模式启动时 DISPLAY 为空）
+    // 无法把远端剪贴板变化上报给浏览器。
+    QTimer* poll = new QTimer(this);
+    connect(poll, &QTimer::timeout, this, &ClipboardService::pollClipboard);
+    poll->start(kCliPollMs);
 }
 
 void ClipboardService::readCliContent(QString& mime, QByteArray& data) const
 {
     const bool isXclip = clipBin_.endsWith(QStringLiteral("xclip"));
-    // 1) 探测 TARGETS：判断当前是图片还是文本
-    QStringList probeArgs;
-    if (isXclip)
-        probeArgs << QStringList{ "-selection", "clipboard", "-o", "-t", "TARGETS" };
-    else
-        probeArgs << QStringList{ "--clipboard", "--output" }; // xsel 无 TARGETS，直接按文本读
+    if (!isXclip) {
+        // xsel 无 TARGETS 探测，--output 直接返回剪贴板文本
+        QProcess p;
+        p.start(clipBin_, QStringList{ "--clipboard", "--output" });
+        if (!p.waitForFinished(1500))
+            return;
+        mime = QString::fromLatin1(kMimeText);
+        data = p.readAllStandardOutput();
+        return;
+    }
+    // 1) 探测 TARGETS：仅用于判断当前是图片还是文本
     QProcess p;
-    p.start(clipBin_, probeArgs);
+    p.start(clipBin_, QStringList{ "-selection", "clipboard", "-o", "-t", "TARGETS" });
     if (!p.waitForFinished(1500))
         return;
-    const QByteArray probeOut = p.readAllStandardOutput();
-    if (isXclip && probeOut.contains("image/png") && cliImageCapable_) {
+    const QByteArray targets = p.readAllStandardOutput();
+    if (targets.contains("image/png") && cliImageCapable_) {
         // 2) 图片：按 image/png 读原始字节
         QProcess ip;
         ip.start(clipBin_, QStringList{ "-selection", "clipboard", "-o", "-t", "image/png" });
@@ -144,9 +167,14 @@ void ClipboardService::readCliContent(QString& mime, QByteArray& data) const
         }
         return;
     }
-    // 3) 文本
+    // 3) 文本：必须再读一次实际内容。-t TARGETS 的输出只是目标列表
+    //    （如 "TARGETS\nUTF8_STRING\n"），不是剪贴板文本，直接回传会污染前端。
+    QProcess tp;
+    tp.start(clipBin_, QStringList{ "-selection", "clipboard", "-o" });
+    if (!tp.waitForFinished(1500))
+        return;
     mime = QString::fromLatin1(kMimeText);
-    data = probeOut;
+    data = tp.readAllStandardOutput();
 }
 #endif
 
@@ -263,9 +291,19 @@ bool ClipboardService::setContentFromClient(const QString& mime, const QByteArra
     pendingData_.clear();
 #ifdef Q_OS_LINUX
     if (cliMode_) {
-        // xclip 从 stdin 读入并成为 CLIPBOARD selection owner（进程常驻，向 X 客户端提供数据）；
-        // xsel 同理。QProcess 析构不杀子进程，owner 持续有效。
-        QProcess p;
+        // xclip/xsel 必须常驻成为 CLIPBOARD selection owner 才能向其他 X 客户端提供数据。
+        // 旧实现用局部 QProcess：函数返回即析构，Qt 会 kill 子进程，owner 随即消失，
+        // 远端应用读取剪贴板时拿到空内容（表现为"粘贴无反应"）。改为持有一个常驻进程。
+        if (cliOwner_) {
+            cliOwner_->disconnect(this);
+            if (cliOwner_->state() != QProcess::NotRunning) {
+                cliOwner_->kill();
+                cliOwner_->waitForFinished(1000);
+            }
+            cliOwner_->deleteLater();
+            cliOwner_ = nullptr;
+        }
+        QProcess* owner = new QProcess(this);
         QStringList args;
         if (clipBin_.endsWith(QStringLiteral("xclip"))) {
             args << "-selection" << "clipboard" << "-i";
@@ -274,13 +312,28 @@ bool ClipboardService::setContentFromClient(const QString& mime, const QByteArra
         } else {
             args << "--clipboard" << "--input";
         }
-        p.start(clipBin_, args);
-        if (!p.waitForStarted(2000))
+        owner->start(clipBin_, args);
+        if (!owner->waitForStarted(2000)) {
+            qWarning("ClipboardService: failed to start clipboard owner process");
+            owner->deleteLater();
             return false;
-        p.write(data);
-        p.closeWriteChannel();
-        // xclip/xsel 作为 owner 常驻不退出，只等待管道写入完成即返回
-        p.waitForFinished(500);
+        }
+        owner->write(data);
+        owner->closeWriteChannel();
+        cliOwner_ = owner;
+        // xclip 读完 stdin 后可能 fork 到后台并让前台进程退出，或失去 selection
+        // （其他应用复制）后自行退出；这里统一清理成员指针。
+        // 注意：必须在等待之前连接，否则等待期间已发出的 finished 会丢失，指针悬空。
+        connect(owner, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+            this, [this, owner](int, QProcess::ExitStatus) {
+                if (cliOwner_ == owner)
+                    cliOwner_ = nullptr;
+                owner->deleteLater();
+            });
+        // 确保数据已写入管道：xclip 若在读全 stdin 后 fork，数据未送达时会以空内容
+        // 成为 selection owner。xsel 不 fork、常驻前台，waitForFinished 超时返回。
+        owner->waitForBytesWritten(1000);
+        owner->waitForFinished(200);
         return true;
     }
 #endif

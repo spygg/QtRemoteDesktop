@@ -165,6 +165,54 @@ namespace {
 
         return None;
     }
+
+    // 把 ASCII 码点映射为 X keysym。锁屏密码等逐字符注入场景前端只给 Unicode
+    // 码点（code 为空、isChar=true），需要在此还原成 keysym 才能注入。
+    // needShift 输出该字符在标准 US 键盘布局下是否必须配合 Shift 才能打出
+    // （大写字母与 !@#$ 等符号位于键的上档）。
+    unsigned long asciiToKeysym(int ch, bool* needShift)
+    {
+        *needShift = false;
+        if (ch >= 'a' && ch <= 'z') return XK_a + (ch - 'a');
+        if (ch >= 'A' && ch <= 'Z') { *needShift = true; return XK_a + (ch - 'A'); }
+        if (ch >= '0' && ch <= '9') return XK_0 + (ch - '0');
+        switch (ch) {
+            case ' ':  return XK_space;
+            case '!':  *needShift = true; return XK_1;
+            case '"':  *needShift = true; return XK_apostrophe;
+            case '#':  *needShift = true; return XK_3;
+            case '$':  *needShift = true; return XK_4;
+            case '%':  *needShift = true; return XK_5;
+            case '&':  *needShift = true; return XK_7;
+            case '\'': return XK_apostrophe;
+            case '(':  *needShift = true; return XK_9;
+            case ')':  *needShift = true; return XK_0;
+            case '*':  *needShift = true; return XK_8;
+            case '+':  *needShift = true; return XK_equal;
+            case ',':  return XK_comma;
+            case '-':  return XK_minus;
+            case '.':  return XK_period;
+            case '/':  return XK_slash;
+            case ':':  *needShift = true; return XK_semicolon;
+            case ';':  return XK_semicolon;
+            case '<':  *needShift = true; return XK_comma;
+            case '=':  return XK_equal;
+            case '>':  *needShift = true; return XK_period;
+            case '?':  *needShift = true; return XK_slash;
+            case '@':  *needShift = true; return XK_2;
+            case '[':  return XK_bracketleft;
+            case '\\': return XK_backslash;
+            case ']':  return XK_bracketright;
+            case '^':  *needShift = true; return XK_6;
+            case '_':  *needShift = true; return XK_minus;
+            case '`':  return XK_grave;
+            case '{':  *needShift = true; return XK_bracketleft;
+            case '|':  *needShift = true; return XK_backslash;
+            case '}':  *needShift = true; return XK_bracketright;
+            case '~':  *needShift = true; return XK_grave;
+        }
+        return NoSymbol;
+    }
 }
 
 // 惰性打开 X display（首次注入时调用）。
@@ -797,12 +845,19 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
             sendPortalKey(lk, isDown);
         return;
     }
-    Q_UNUSED(code);
-    Q_UNUSED(isChar);
-
+    bool charShift = false;
     KeySym keySym = NoSymbol;
 
-    if (code == "Delete")      keySym = XK_Delete;
+    if (isChar && code.isEmpty() && keycode > 0) {
+        // 锁屏密码逐字符注入：前端只给 Unicode 码点（code 为空、isChar=true）。
+        // 此前这里被 Q_UNUSED 丢弃，导致密码字符全部丢失、只有末尾回车生效。
+        keySym = static_cast<KeySym>(asciiToKeysym(keycode, &charShift));
+        if (keySym == NoSymbol) {
+            qWarning() << "InputManager: unmapped char keycode:" << keycode;
+            return;
+        }
+    }
+    else if (code == "Delete")      keySym = XK_Delete;
     else if (code == "Backspace") keySym = XK_BackSpace;
     else if (code == "Enter")  keySym = XK_Return;
     else if (code == "Tab")    keySym = XK_Tab;
@@ -889,30 +944,41 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         return;
     }
 
-    // 首次注入时惰性打开 X display（env 已就绪）：X11 机器上把 waylandMode_ 改回
-    // false，避免上面误走 uinput，并让下面 XTest 路径可用。
-    ensureXDisplay();
-    if (uinputFd_ >= 0 || waylandMode_) {
-        // Wayland 会话（无门户授权时）优先走 uinput：无 X 也可注入
-        if (uinputFd_ < 0 && !initUinput())
-            qWarning() << "InputManager: uinput unavailable, falling back to XTest";
-        if (uinputFd_ >= 0) {
-            unsigned short lkc = keysymToLinuxKeycode(static_cast<unsigned long>(keySym));
-            if (lkc != 0)
-                sendUinputKey(lkc, isDown);
-            return;
+    // 单次按键注入：uinput（Wayland/锁屏）优先，否则 XTest。
+    auto injectSym = [this](unsigned long ks, bool down) {
+        // 首次注入时惰性打开 X display（env 已就绪）：X11 机器上把 waylandMode_
+        // 改回 false，避免上面误走 uinput，并让下面 XTest 路径可用。
+        ensureXDisplay();
+        if (uinputFd_ >= 0 || waylandMode_) {
+            // Wayland 会话（无门户授权时）优先走 uinput：无 X 也可注入
+            if (uinputFd_ < 0 && !initUinput())
+                qWarning() << "InputManager: uinput unavailable, falling back to XTest";
+            if (uinputFd_ >= 0) {
+                unsigned short lkc = keysymToLinuxKeycode(ks);
+                if (lkc != 0)
+                    sendUinputKey(lkc, down);
+                return;
+            }
         }
-    }
-    if (!xDisplay_)
-        return;
-    focusLockScreenWindow(xdisp(xDisplay_));
-    KeyCode xKeyCode = XKeysymToKeycode(xdisp(xDisplay_), keySym);
-    if (xKeyCode != 0) {
-        XTestGrabControl(xdisp(xDisplay_), True);
-        XTestFakeKeyEvent(xdisp(xDisplay_), xKeyCode, isDown, CurrentTime);
-        XTestGrabControl(xdisp(xDisplay_), False);
-        XFlush(xdisp(xDisplay_));
-    }
+        if (!xDisplay_)
+            return;
+        focusLockScreenWindow(xdisp(xDisplay_));
+        KeyCode xKeyCode = XKeysymToKeycode(xdisp(xDisplay_), static_cast<KeySym>(ks));
+        if (xKeyCode != 0) {
+            XTestGrabControl(xdisp(xDisplay_), True);
+            XTestFakeKeyEvent(xdisp(xDisplay_), xKeyCode, down, CurrentTime);
+            XTestGrabControl(xdisp(xDisplay_), False);
+            XFlush(xdisp(xDisplay_));
+        }
+    };
+
+    // 字符注入：上档字符（大写字母、!@#$ 等）按需临时按下 Shift，注入后立即抬起；
+    // 不写进 shiftDown_ 持久状态，避免逐字符注入时 Shift 卡住。
+    if (charShift)
+        sendXModifier(static_cast<X11KeySym>(XK_Shift_L), true);
+    injectSym(static_cast<unsigned long>(keySym), isDown);
+    if (charShift)
+        sendXModifier(static_cast<X11KeySym>(XK_Shift_L), false);
 }
 
 void InputManager::updateModifiers(bool ctrl, bool alt, bool shift) {
