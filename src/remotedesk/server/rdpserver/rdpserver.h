@@ -238,6 +238,12 @@ private:
     // 执行被控端系统动作：lock/show_desktop/task_manager/logout/reboot/poweroff
     void handleSystemAction(const QString& action, const QString& clientId);
 
+    // ---- 输入法切换 ----
+    // ibus panel 的 hotkey grab（如 Super+space）对 XTEST 注入的合成按键不响应，
+    // 远程桌面里无法用注入快捷键触发切换；改为服务端直接调用 `ibus engine <next>`
+    // 循环切换 preload-engines 列表（ibus CLI 走自身 socket 地址文件，不依赖 X grab）。
+    void handleImeCycle(const QString& clientId);
+
     bool sleepSignalsConnected_ = false;
     bool sleepInhibitActive_ = false;
     bool preparedForSleep_ = false;

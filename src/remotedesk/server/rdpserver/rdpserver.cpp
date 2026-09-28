@@ -72,6 +72,7 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #include <QDBusUnixFileDescriptor>
 #include <fcntl.h>
 #include <unistd.h>
+#include <pwd.h>
 #endif
 
 #ifdef Q_OS_MACOS
@@ -1898,6 +1899,132 @@ void RDPServer::onPrepareForSleep(bool sleeping)
 #endif
 }
 
+// 输入法切换：循环 preload-engines 列表。
+// 背景：ibus panel 的 hotkey（默认 <Super>space）通过 X grab 实现，对 XTEST 注入的
+// 合成按键事件不响应（已在 RK3588/LXDE 实测：注入事件到达 X 但 panel 零回调），
+// 所以远程端"注入 Super+space"永远无法切换输入法。这里绕开键盘事件，直接用
+// `ibus engine <name>` 切换 —— ibus CLI 通过 ~/.config/ibus/bus/ 下的地址文件连接
+// ibus-daemon，不依赖 X grab，也不依赖 DISPLAY。
+// 注意：Linux 上 systemd 服务模式以 root 跑（--service），root 下没有桌面用户的
+// session bus，ibus/gsettings 必须以 X 会话用户身份执行（sudo -H -u <user> env ...）。
+void RDPServer::handleImeCycle(const QString& clientId)
+{
+#ifdef Q_OS_LINUX
+    if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
+        // 服务模式且有 helper 连接：helper 侧（用户会话）的 ibus 切换尚未实现
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "ime_state" },
+            { "error", "unsupported" },
+        });
+        return;
+    }
+
+    // 命令前缀：root 时定位桌面用户（/run/user/ 下最小的非 0 uid），包装 sudo -u 执行
+    QStringList prefix;
+    if (::getuid() == 0) {
+        quint64 target = 0;
+        bool found = false;
+        const QStringList ids = QDir(QStringLiteral("/run/user"))
+                .entryList(QDir::AllEntries | QDir::NoDotAndDotDot);
+        for (const QString& id : ids) {
+            bool okNum = false;
+            const quint64 v = id.toULongLong(&okNum);
+            if (okNum && v != 0 && (!found || v < target)) {
+                target = v;
+                found = true;
+            }
+        }
+        if (!found) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "ime_state" }, { "error", "no_user_session" } });
+            return;
+        }
+        const passwd* pw = ::getpwuid(static_cast<uid_t>(target));
+        if (!pw) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "ime_state" }, { "error", "no_user_session" } });
+            return;
+        }
+        if (QStandardPaths::findExecutable(QStringLiteral("sudo")).isEmpty()) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "ime_state" }, { "error", "no_sudo" } });
+            return;
+        }
+        const QString user = QString::fromLatin1(pw->pw_name);
+        prefix = QStringList {
+            QStringLiteral("sudo"), QStringLiteral("-H"),
+            QStringLiteral("-u"), user, QStringLiteral("env"),
+            QStringLiteral("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%1/bus").arg(target),
+            QStringLiteral("XDG_RUNTIME_DIR=/run/user/%1").arg(target),
+        };
+    }
+
+    // 执行一条完整命令（prefix 非空时包装为 sudo -u ... env ...），返回 exit code
+    auto runCmd = [&prefix](const QStringList& cmd, int timeoutMs, QString* out) -> int {
+        QProcess p;
+        if (prefix.isEmpty())
+            p.start(cmd.first(), cmd.mid(1));
+        else
+            p.start(prefix.first(), prefix.mid(1) + cmd);
+        p.waitForFinished(timeoutMs);
+        if (out)
+            *out = QString::fromUtf8(p.readAllStandardOutput());
+        return (p.exitStatus() == QProcess::NormalExit) ? p.exitCode() : -1;
+    };
+
+    // 1) 当前 engine（无焦点窗口时可能为空）
+    QString cur;
+    runCmd({ QStringLiteral("ibus"), QStringLiteral("engine") }, 2000, &cur);
+    cur = cur.trimmed();
+
+    // 2) preload-engines 列表（gsettings 输出形如 ['libpinyin', 'pinyin']）
+    QString raw;
+    runCmd({ QStringLiteral("gsettings"), QStringLiteral("get"),
+             QStringLiteral("org.freedesktop.ibus.general"),
+             QStringLiteral("preload-engines") }, 2000, &raw);
+    QStringList engines;
+    raw.remove(QLatin1Char('[')).remove(QLatin1Char(']'))
+       .remove(QLatin1Char('\'')).remove(QLatin1Char('"'));
+    const QStringList parts = raw.split(QLatin1Char(','));
+    for (const QString& item : parts) {
+        const QString e = item.trimmed();
+        if (!e.isEmpty())
+            engines << e;
+    }
+
+    if (engines.size() < 2) {
+        qInfo() << "IME switch: no switchable engines (preload =" << engines << ")";
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "ime_state" },
+            { "engine", cur },
+            { "error", engines.isEmpty() ? "no_engines" : "single_engine" },
+        });
+        return;
+    }
+
+    // 3) 计算下一个 engine（循环切换；当前 engine 不在列表时落到第一个）
+    const int idx = engines.indexOf(cur);
+    const QString next = engines[(idx + 1) % engines.size()];
+
+    // 4) 应用切换并读回验证（实测 ibus CLI set 后 exit code 可能为非 0 但切换
+    //    实际生效，故以读回结果为准，不用 exit code 判定）
+    runCmd({ QStringLiteral("ibus"), QStringLiteral("engine"), next }, 3000, nullptr);
+    QString verify;
+    runCmd({ QStringLiteral("ibus"), QStringLiteral("engine") }, 2000, &verify);
+    const QString now = verify.trimmed();
+    const bool ok = !now.isEmpty();
+
+    qInfo() << "IME switch:" << cur << "->" << next << "now =" << now;
+    wsServer_->sendJson(clientId, QJsonObject {
+        { "type", "ime_state" },
+        { "engine", now.isEmpty() ? next : now },
+        { "ok", ok },
+    });
+#else
+    Q_UNUSED(clientId);
+#endif
+}
+
 void RDPServer::handleSystemAction(const QString& action, const QString& clientId)
 {
     qInfo() << "System action requested:" << action << "from" << clientId.left(8);
@@ -2277,6 +2404,13 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     if (type == "system_action") {
         // 系统操作（快捷键面板）：由服务端直接执行，不转发给 helper
         handleSystemAction(input["action"].toString(), clientId);
+        return;
+    }
+
+    if (type == "ime_cycle") {
+        // 输入法切换：ibus hotkey grab 对 XTEST 合成事件不响应（实测 Super+space /
+        // Ctrl+Alt+space 注入均无法触发 panel），故由服务端直接切 ibus engine
+        handleImeCycle(clientId);
         return;
     }
 

@@ -268,12 +268,18 @@ public:
             // 直接输出 RGB32（小端=BGRA），不再转换到 RGB888。
             // 视频编码线程的 sws_scale 直接以 BGRA 为输入，把转换从主线程移走，
             // 显著降低主线程 CPU（X11 捕获本机数据就是 32bpp）。
-            outImage = rawImg.copy();
+            // [FIX] 必须同步进 fullFrame_：damage 区域抓取路径输出的就是这份持久缓冲，
+            // 若全量抓取不回填，缓冲自 applyOutput 清零后永远只有零散 damage 矩形，
+            // 视频模式会交替输出"黑底+局部内容"的损坏帧（表现为画面闪烁）。
+            fullFrame_ = rawImg.copy();
+            outImage = fullFrame_;
         } else {
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
                           primaryW_, primaryH_, ximage->bytes_per_line,
                           QImage::Format_RGB888);
             outImage = rawImg.rgbSwapped();
+            // 非 32bpp 平台：同样保持缓冲与实际画面一致（damage 路径依赖它）
+            fullFrame_ = outImage.convertToFormat(QImage::Format_RGB32);
         }
 
         XDestroyImage(ximage);
@@ -405,7 +411,14 @@ public:
             applyOutput(outputs_[idx]);
             currentOutputIndex_ = idx;
         } else {
-            applyOutput(outputs_[currentOutputIndex_]);
+            // [FIX] 几何未变化时不得重建缓冲：applyOutput 会清零 fullFrame_ 并置
+            // forceFull_，而客户端连接/拉取配置都会走到这里；清零后 damage 帧
+            // 会输出"黑底+局部矩形"的损坏帧（视频模式闪烁根因之一）。
+            const OutputGeom& g = outputs_[currentOutputIndex_];
+            if (g.x != offsetX_ || g.y != offsetY_ ||
+                g.w != primaryW_ || g.h != primaryH_) {
+                applyOutput(g);
+            }
         }
     }
     int currentOutput() const { return currentOutputIndex_; }

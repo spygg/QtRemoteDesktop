@@ -696,6 +696,8 @@
         </button>
         <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span
                 class="btn-text">文件</span></button>
+        <button class="btn" id="btn-ime" onclick="cycleIme()"><span class="btn-icon">文</span><span
+                class="btn-text">输入法</span><span class="shortcut">Ctrl+Alt+I</span></button>
         <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span
                 class="btn-icon">👤</span><span class="btn-text">用户</span></button>
         <a class="btn" id="btn-shell" href="/shell" target="_blank"><span class="btn-icon">🔧</span><span
@@ -1268,7 +1270,7 @@
 
         const msePlayer = {
             using: false, started: false, ms: null, sb: null, ready: false, pending: [], _gen: 0, _lastRestart: 0, _needKf: false,
-            fmp4Seq: 0, fmp4Dts: 0,
+            fmp4Seq: 0, fmp4Dts: 0, lastTs: null,
             // 复用 webrtc-video 元素渲染 MSE 流；codec 影响 MIME（hevc 浏览器兼容性差，尽力而为）
             start(codec) {
                 if (this.using) return true;
@@ -1286,6 +1288,15 @@
                 this.ms = new MediaSource();
                 v.src = URL.createObjectURL(this.ms);
                 v.play().catch(() => {});
+                // 追边：播放位置因网络抖动/静态桌面后恢复而落后于缓冲前沿时，
+                // 跳到最新帧。远程桌面要求“永远看最新画面”，与图片模式行为一致。
+                v.addEventListener('waiting', () => {
+                    try {
+                        const b = v.buffered;
+                        if (b.length && b.end(b.length - 1) > v.currentTime + 0.05)
+                            v.currentTime = b.end(b.length - 1) - 0.02;
+                    } catch (e) {}
+                });
                 v.addEventListener('error', function(e) {
                     console.error('MSE video element error:', v.error ? (v.error.code + '/' + v.error.message) : 'unknown');
                 });
@@ -1326,6 +1337,14 @@
                                     console.error('MSE updateend appendBuffer error:', e.name, e.message);
                                 }
                             }
+                            // 延迟守卫：缓冲积压超过 1s（长时间静止后恢复等）时跳到接近前沿，
+                            // 防止播放位置落后导致画面延迟持续增长
+                            try {
+                                const el = this.videoEl;
+                                const b = el && el.buffered;
+                                if (el && b && b.length && b.end(b.length - 1) - el.currentTime > 1.0)
+                                    el.currentTime = b.end(b.length - 1) - 0.1;
+                            } catch (e) {}
                         });
                     } catch (e) {
                         console.error('MSE addSourceBuffer failed:', e);
@@ -1345,7 +1364,7 @@
                     }
                 }
             },
-            append(data, isKeyframe) {
+            append(data, isKeyframe, tsMs) {
                 if (!this.using) return;
                 // 自愈：MediaSource 被外部意外关闭（如残留 WebRTC 异步回调）时自动重启
                 if (this.ms && this.ms.readyState !== 'open') {
@@ -1394,6 +1413,8 @@
                         console.warn('MSE first keyframe has no SPS/PPS, cannot build init segment');
                     }
                     this._queue(buildFmp4Fragment(av, true, this.fmp4Dts, ++this.fmp4Seq));
+                    // 记录首帧服务端时间戳（编码器启动后毫秒数），后续帧按真实间隔推进
+                    this.lastTs = (typeof tsMs === 'number' && isFinite(tsMs)) ? tsMs : null;
                     this.fmp4Dts += 33;
                     // 1.5s 后验证解码状态：videoWidth>0 说明解码器已解析出画面尺寸
                     setTimeout(() => {
@@ -1408,7 +1429,17 @@
                     console.log('MSE frames=' + this.frameCount + ' pending=' + this.pending.length);
                 }
                 this._queue(buildFmp4Fragment(annexbToAvcc(data), false, this.fmp4Dts, ++this.fmp4Seq));
-                this.fmp4Dts += 33;
+                // fMP4 时间戳按服务端真实帧间隔推进（静态桌面帧稀疏、动态时密集）。
+                // 旧实现固定 +33ms（假定 30fps），而实际到达率远低于此（去重后 ~3fps），
+                // 流时间增长速度只有真实时间的 1/10，播放位置永远顶死在缓冲前沿，
+                // 视频元素反复“饿死→新数据→恢复”，表现为黑屏与桌面交替闪烁/画面冻结。
+                // delta 夹在 [1,200]ms：单调递增，且长时间静止后恢复时延迟有界。
+                if (typeof tsMs === 'number' && isFinite(tsMs) && this.lastTs !== null) {
+                    this.fmp4Dts += Math.min(Math.max(tsMs - this.lastTs, 1), 200);
+                    this.lastTs = tsMs;
+                } else {
+                    this.fmp4Dts += 33;
+                }
             },
             frameCount: 0,
             stop(tag) {
@@ -1441,7 +1472,16 @@
                 try { localStorage.setItem('rd_videomode', mode); } catch (e) {}
                 state.modeRestored = true;
                 send({ type: 'set_mode', mode: 'video' });
-                send({ type: 'config', codec: state.currentConfig.codec, hw_encode: state.currentConfig.hw_encode });
+                // codec 跟随服务端已知协议（http+MSE 固定 h264 路径）：
+                // 若 localStorage 残留 hevc 而服务端软编只有 h264，每次切视频模式
+                // 都会触发服务端“hevc 初始化失败→回退 h264→编码器重建”双重重建，
+                // 造成一次额外的流断点（黑屏闪烁）。
+                const mseCfgCodec = state.serverCodec || 'h264';
+                if (state.currentConfig.codec !== mseCfgCodec) {
+                    state.currentConfig.codec = mseCfgCodec;
+                    try { localStorage.setItem('rd_codec', mseCfgCodec); } catch (e) {}
+                }
+                send({ type: 'config', codec: mseCfgCodec, hw_encode: state.currentConfig.hw_encode });
                 send({ type: 'request_keyframe' });
                 updateDropdownActive();
                 return true;
@@ -1825,7 +1865,7 @@
                 const isKeyframe = frameType === 0x01;
 
                 if (msePlayer.using) {
-                    msePlayer.append(h264Data, isKeyframe);
+                    msePlayer.append(h264Data, isKeyframe, Number(timestamp));
                 } else if (state.decoder) {
                     state.decoder.decode(h264Data, isKeyframe, Number(timestamp));
                 }
@@ -1944,6 +1984,18 @@
                             state.decoder.configure(extra);
                     }
                     break;
+                case 'ime_state':
+                    // 服务端切换 ibus engine 的结果
+                    if (msg.error) {
+                        const why = msg.error === 'no_engines' ? '未配置输入法'
+                            : msg.error === 'single_engine' ? '只有一个输入法'
+                            : msg.error === 'unsupported' ? '服务模式暂不支持'
+                            : msg.error;
+                        showTransferStatus('输入法切换失败: ' + why, 3000);
+                    } else if (msg.engine) {
+                        showTransferStatus('输入法: ' + msg.engine, 1800);
+                    }
+                    break;
                 case 'file_list':
                     if (msg.items) renderFileList(msg.items);
                     if (msg.path) {
@@ -2048,7 +2100,13 @@
                     // 服务端主动切回图片模式（如编码器初始化失败回退）时，本地必须同步
                     // 停掉 MSE/WebRTC：否则残留的全屏 <video> 盖住 canvas，JPEG 帧画在
                     // 底下不可见，画面冻结在最后一帧视频。
-                    if (msg.mode === 'image' && (msePlayer.using || webrtcState.active || webrtcState.pc || webrtcState.intending)) {
+                    // [FIX] 仅 auto 模式尊重该广播：显式选择 webrtc/ffmpeg 时，此前
+                    // fallback 发出的 set_mode(image) 广播可能滞后到达，若在此处无条件
+                    // webrtcClose()，会杀掉刚建立的会话 → 400ms 定时器重建会话 → 服务端
+                    // 再次重建编码器 → 与漏帧 fallback 形成 image↔video 死循环（闪烁）。
+                    // 显式模式下的真实故障由 15s 超时 / connectionState failed 正常降级。
+                    if (msg.mode === 'image' && state.currentConfig.videomode === 'auto' &&
+                        (msePlayer.using || webrtcState.active || webrtcState.pc || webrtcState.intending)) {
                         msePlayer.stop('mode_changed-image');
                         webrtcClose();
                     }
@@ -2118,6 +2176,12 @@
             if (state.ws?.readyState === WebSocket.OPEN) {
                 state.ws.send(JSON.stringify(data));
             }
+        }
+
+        // ---- 输入法切换：发 ime_cycle，服务端直接切 ibus engine ----
+        function cycleIme() {
+            if (!state.connected || !state.ws) return;
+            send({ type: 'ime_cycle' });
         }
 
         // ---- 系统操作（快捷键面板）：锁屏/显示桌面/任务管理器/注销/重启/关机 ----
@@ -2290,6 +2354,14 @@
                 }
                 if (e.ctrlKey && e.shiftKey && e.code === 'KeyQ') {
                     toggleConfigDropdown();
+                    e.preventDefault();
+                    return;
+                }
+                // Ctrl+Alt+I: 切换远端 ibus 输入法。不能转发给远端（远端会真的收到
+                // 该组合键），由服务端直接切 ibus engine —— ibus 的 hotkey grab
+                // （Super+space）对 XTEST 注入的合成事件不响应，注入永远无法触发。
+                if (e.ctrlKey && e.altKey && e.code === 'KeyI') {
+                    cycleIme();
                     e.preventDefault();
                     return;
                 }
