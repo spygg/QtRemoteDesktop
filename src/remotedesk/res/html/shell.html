@@ -666,22 +666,21 @@
             }
 
             function fallbackPaste() {
-                const ta = document.createElement('textarea');
-                ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;';
-                document.body.appendChild(ta);
-                ta.focus();
-                try {
-                    if (document.execCommand('paste')) {
-                        const text = ta.value;
-                        if (text) sendPastedText(text);
-                        else appendOutput('\n[提示] 粘贴内容为空\n','info');
-                    } else {
-                        appendOutput('\n[提示] 粘贴失败，请使用 Ctrl+V\n','info');
-                    }
-                } catch(e) {
-                    appendOutput('\n[提示] 粘贴失败，请使用 Ctrl+V\n','info');
-                }
-                document.body.removeChild(ta);
+                // HTTP 非安全上下文下浏览器禁止脚本读取剪贴板（navigator.clipboard 不可用、
+                // execCommand('paste') 已被禁用），只能靠用户 Ctrl+V 触发的 paste 事件携带数据。
+                // 这里武装一次性捕获：下一次 paste 事件（15 秒内）由我们转发到 shell。
+                const handler = function(e) {
+                    document.removeEventListener('paste', handler, true);
+                    if (mode !== 'interactive') return;            // one-shot 输入框原生粘贴即可
+                    if (term && termHost.contains(e.target)) return; // xterm.js 已自行处理，避免重复
+                    const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+                    if (text) { wsSend(text); echoLocal(text); }
+                };
+                document.addEventListener('paste', handler, true);
+                setTimeout(function() { document.removeEventListener('paste', handler, true); }, 15000);
+                if (mode === 'interactive' && term) term.focus();
+                else if (document.getElementById('cmd-input')) document.getElementById('cmd-input').focus();
+                appendOutput('\n[提示] 请按 Ctrl+V 完成粘贴\n','info');
             }
 
             function doPaste() {
@@ -732,18 +731,43 @@
                 }
             });
 
+            // 复制兜底：HTTP 非安全上下文下 navigator.clipboard 不可用，
+            // 用隐藏 textarea + execCommand('copy')（用户手势内有效）
+            function copyTextFallback(text) {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                let ok = false;
+                try { ok = document.execCommand('copy'); } catch(e) { ok = false; }
+                document.body.removeChild(ta);
+                return ok;
+            }
+            function copyText(text) {
+                if (!text) return false;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    // writeText 在非安全上下文可能 undefined / 被拒，失败时走兜底
+                    try {
+                        navigator.clipboard.writeText(text).catch(() => { copyTextFallback(text); });
+                        return true;
+                    } catch(e) { /* 落到兜底 */ }
+                }
+                return copyTextFallback(text);
+            }
             function terminalCopy() {
                 if (term && mode === 'interactive') {
                     const sel = term.getSelection && term.getSelection();
                     if (sel) {
-                        if (navigator.clipboard) navigator.clipboard.writeText(sel).catch(()=>{});
+                        if (!copyText(sel)) appendOutput('\n[提示] 复制失败，请手动选中文本后 Ctrl+C\n','info');
                     }
                 }
             }
             function copySelection() {
                 const s = window.getSelection().toString();
                 if (s) {
-                    if (navigator.clipboard) navigator.clipboard.writeText(s).catch(()=>{});
+                    if (!copyText(s)) appendOutput('\n[提示] 复制失败，请手动选中文本后 Ctrl+C\n','info');
                 } else if (term && mode === 'interactive') {
                     terminalCopy();
                 }

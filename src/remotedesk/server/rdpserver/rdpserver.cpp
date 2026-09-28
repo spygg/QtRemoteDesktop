@@ -29,6 +29,21 @@ static bool isInputEventLogged(const QString& type)
         && type != "wheel" && type != "keydown" && type != "keyup";
 }
 
+// 剪贴板内容 → WS 消息。文本沿用 {text} 字段（兼容旧前端），
+// 图片用 {mime:"image/png", data:base64}。
+static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
+{
+    QJsonObject msg;
+    msg["type"] = "clipboard";
+    if (mime == QLatin1String("image/png")) {
+        msg["mime"] = mime;
+        msg["data"] = QString::fromLatin1(data.toBase64());
+    } else {
+        msg["text"] = QString::fromUtf8(data);
+    }
+    return msg;
+}
+
 #include <QCursor>
 #include <QDateTime>
 #include <QFile>
@@ -443,15 +458,12 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     connect(wsServer_.get(), &WebSocketServer::inputReceived,
         this, &RDPServer::onInputReceived);
 
-    // 剪贴板服务：系统剪贴板变化 → 广播给所有客户端
+    // 剪贴板服务：系统剪贴板变化（文本/图片）→ 广播给所有客户端
     clipboardService_ = std::unique_ptr<ClipboardService>(new ClipboardService(this));
     clipboardService_->start();
-    connect(clipboardService_.get(), &ClipboardService::textChanged,
-        this, [this](const QString& text) {
-            wsServer_->broadcastJson(QJsonObject {
-                { "type", "clipboard" },
-                { "text", text },
-            });
+    connect(clipboardService_.get(), &ClipboardService::contentChanged,
+        this, [this](const QString& mime, const QByteArray& data) {
+            wsServer_->broadcastJson(clipboardPayload(mime, data));
         });
 
     connect(wsServer_.get(), &WebSocketServer::modeChangeRequested,
@@ -2077,14 +2089,13 @@ void RDPServer::onClientConnected(const QString& clientId)
         wsServer_->sendToCaptureSource(msg);
     }
 
-    // 发送当前剪贴板内容（若有）
+    // 发送当前剪贴板内容（若有，文本/图片）
     if (clipboardService_) {
-        QString clipText = clipboardService_->text();
-        if (!clipText.isEmpty()) {
-            wsServer_->sendJson(clientId, QJsonObject {
-                { "type", "clipboard" },
-                { "text", clipText },
-            });
+        QString mime;
+        QByteArray clipData;
+        clipboardService_->content(mime, clipData);
+        if (!clipData.isEmpty()) {
+            wsServer_->sendJson(clientId, clipboardPayload(mime, clipData));
         }
     }
 
@@ -2236,28 +2247,27 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 #endif
 
     if (type == "clipboard") {
+        // 内容类型：文本（text，兼容旧协议）或图片（mime:"image/png" + data:base64）
+        const bool isImage = input.contains("mime") && input["mime"].toString() == "image/png";
+        const QString mime = isImage ? QStringLiteral("image/png") : QStringLiteral("text/plain");
+        QByteArray clipData;
+        if (isImage) {
+            clipData = QByteArray::fromBase64(input["data"].toString().toLatin1());
+        } else {
+            clipData = input["text"].toString().toUtf8();
+        }
         if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
             // 服务模式：剪贴板在用户会话的 helper 进程中读写，转发给 helper；
             // 同时广播给所有客户端（含发送者），让多端剪贴板保持一致，发送者前端按内容去重
-            wsServer_->sendToCaptureSource(QJsonObject {
-                { "type", "clipboard" },
-                { "text", input["text"].toString() },
-            });
-            wsServer_->broadcastJson(QJsonObject {
-                { "type", "clipboard" },
-                { "text", input["text"].toString() },
-            });
+            wsServer_->sendToCaptureSource(clipboardPayload(mime, clipData));
+            wsServer_->broadcastJson(clipboardPayload(mime, clipData));
             return;
         }
         // 直接模式：浏览器粘贴/同步 → 写入远端系统剪贴板，并在远端触发一次 Ctrl+V 粘贴
         if (clipboardService_) {
-            QString text = input["text"].toString();
-            if (clipboardService_->setTextFromClient(text)) {
+            if (clipboardService_->setContentFromClient(mime, clipData)) {
                 // 广播给所有客户端（含发送者），保持多端一致；发送者前端按内容去重
-                wsServer_->broadcastJson(QJsonObject {
-                    { "type", "clipboard" },
-                    { "text", text },
-                });
+                wsServer_->broadcastJson(clipboardPayload(mime, clipData));
                 injectPasteShortcut();
             }
         }

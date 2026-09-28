@@ -7,6 +7,18 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <QDebug>
+#include <QBuffer>
+#include <QImage>
+
+#ifdef Q_OS_LINUX
+#include <QMimeData>
+#endif
+
+namespace {
+constexpr const char* kMimeText  = "text/plain";
+constexpr const char* kMimeImage = "image/png";
+constexpr int kCliPollMs = 1200; // CLI 模式轮询周期（X11 无剪贴板变化信号）
+}
 
 ClipboardService::ClipboardService(QObject* parent)
     : QObject(parent)
@@ -29,13 +41,23 @@ void ClipboardService::start()
         // 服务进程的 DISPLAY/XAUTHORITY 由 detectUserX11Env 设置，GUI 会话可正常读取。
         if (!qEnvironmentVariableIsEmpty("DISPLAY")) {
             QString bin = QStandardPaths::findExecutable(QStringLiteral("xclip"));
-            if (bin.isEmpty())
-                bin = QStandardPaths::findExecutable(QStringLiteral("xsel"));
             if (!bin.isEmpty()) {
                 cliMode_ = true;
+                cliImageCapable_ = true;
+            } else {
+                bin = QStandardPaths::findExecutable(QStringLiteral("xsel"));
+                cliMode_ = !bin.isEmpty();
+                // xsel 不支持 image target，仅文本
+            }
+            if (cliMode_) {
                 clipBin_ = bin;
                 available_ = true;
-                qInfo() << "ClipboardService: using" << qPrintable(bin) << "for X11 clipboard (service mode)";
+                qInfo() << "ClipboardService: using" << qPrintable(bin)
+                        << "for X11 clipboard (service mode, image:"
+                        << (cliImageCapable_ ? "yes" : "no") << ")";
+                QTimer* poll = new QTimer(this);
+                connect(poll, &QTimer::timeout, this, &ClipboardService::pollClipboard);
+                poll->start(kCliPollMs);
                 return;
             }
             qWarning("ClipboardService: no xclip/xsel found, clipboard disabled");
@@ -54,10 +76,13 @@ void ClipboardService::start()
         this, &ClipboardService::onClipboardChanged);
 
     // Push current clipboard content as initial state
-    QString t = clipboard->text();
-    if (!t.isEmpty() && t != lastText_) {
-        lastText_ = t;
-        emit textChanged(t);
+    QString mime;
+    QByteArray data;
+    content(mime, data);
+    if (!data.isEmpty()) {
+        lastMime_ = mime;
+        lastData_ = data;
+        emit contentChanged(mime, data);
     }
 }
 
@@ -75,8 +100,11 @@ void ClipboardService::ensureCliMode()
     if (qEnvironmentVariableIsEmpty("DISPLAY"))
         return;
     QString bin = QStandardPaths::findExecutable(QStringLiteral("xclip"));
-    if (bin.isEmpty())
+    if (!bin.isEmpty()) {
+        cliImageCapable_ = true;
+    } else {
         bin = QStandardPaths::findExecutable(QStringLiteral("xsel"));
+    }
     if (bin.isEmpty()) {
         qWarning("ClipboardService: no xclip/xsel found, clipboard disabled");
         return;
@@ -85,33 +113,77 @@ void ClipboardService::ensureCliMode()
     clipBin_ = bin;
     available_ = true;
     qInfo() << "ClipboardService: using" << qPrintable(bin)
-            << "for X11 clipboard (lazy init, DISPLAY =" << qgetenv("DISPLAY").constData() << ")";
+            << "for X11 clipboard (lazy init, DISPLAY ="
+            << qgetenv("DISPLAY").constData() << ")";
+}
+
+void ClipboardService::readCliContent(QString& mime, QByteArray& data) const
+{
+    const bool isXclip = clipBin_.endsWith(QStringLiteral("xclip"));
+    // 1) 探测 TARGETS：判断当前是图片还是文本
+    QStringList probeArgs;
+    if (isXclip)
+        probeArgs << QStringList{ "-selection", "clipboard", "-o", "-t", "TARGETS" };
+    else
+        probeArgs << QStringList{ "--clipboard", "--output" }; // xsel 无 TARGETS，直接按文本读
+    QProcess p;
+    p.start(clipBin_, probeArgs);
+    if (!p.waitForFinished(1500))
+        return;
+    const QByteArray probeOut = p.readAllStandardOutput();
+    if (isXclip && probeOut.contains("image/png") && cliImageCapable_) {
+        // 2) 图片：按 image/png 读原始字节
+        QProcess ip;
+        ip.start(clipBin_, QStringList{ "-selection", "clipboard", "-o", "-t", "image/png" });
+        if (ip.waitForFinished(2500)) {
+            QByteArray png = ip.readAllStandardOutput();
+            if (!png.isEmpty()) {
+                mime = QString::fromLatin1(kMimeImage);
+                data = png;
+            }
+        }
+        return;
+    }
+    // 3) 文本
+    mime = QString::fromLatin1(kMimeText);
+    data = probeOut;
 }
 #endif
 
-QString ClipboardService::text() const
+void ClipboardService::content(QString& mime, QByteArray& data) const
 {
 #ifdef Q_OS_LINUX
     if (!available_ && !qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
         const_cast<ClipboardService*>(this)->ensureCliMode();
 #endif
+    mime.clear();
+    data.clear();
     if (!available_)
-        return QString();
+        return;
 #ifdef Q_OS_LINUX
     if (cliMode_) {
-        // 读取 X11 CLIPBOARD（远端→本地同步时使用）
-        QProcess p;
-        QStringList args = clipBin_.endsWith(QStringLiteral("xclip"))
-            ? QStringList{ "-selection", "clipboard", "-o" }
-            : QStringList{ "--clipboard", "--output" };
-        p.start(clipBin_, args);
-        if (p.waitForFinished(2000))
-            return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
-        return QString();
+        readCliContent(mime, data);
+        return;
     }
 #endif
     QClipboard* clipboard = QGuiApplication::clipboard();
-    return clipboard ? clipboard->text() : QString();
+    if (!clipboard)
+        return;
+    const QMimeData* md = clipboard->mimeData();
+    if (md && md->hasImage()) {
+        QImage img = qvariant_cast<QImage>(md->imageData());
+        if (!img.isNull()) {
+            QBuffer buf;
+            buf.open(QIODevice::WriteOnly);
+            if (img.save(&buf, "PNG")) {
+                mime = QString::fromLatin1(kMimeImage);
+                data = buf.data();
+                return;
+            }
+        }
+    }
+    mime = QString::fromLatin1(kMimeText);
+    data = clipboard->text().toUtf8();
 }
 
 void ClipboardService::onClipboardChanged()
@@ -121,41 +193,91 @@ void ClipboardService::onClipboardChanged()
     QClipboard* clipboard = QGuiApplication::clipboard();
     if (!clipboard)
         return;
-    pendingText_ = clipboard->text();
+    const QMimeData* md = clipboard->mimeData();
+    if (md && md->hasImage()) {
+        QImage img = qvariant_cast<QImage>(md->imageData());
+        if (!img.isNull()) {
+            QBuffer buf;
+            buf.open(QIODevice::WriteOnly);
+            if (img.save(&buf, "PNG")) {
+                pendingMime_ = QString::fromLatin1(kMimeImage);
+                pendingData_ = buf.data();
+                debounceTimer_->start();
+                return;
+            }
+        }
+    }
+    pendingMime_ = QString::fromLatin1(kMimeText);
+    pendingData_ = clipboard->text().toUtf8();
     debounceTimer_->start();
 }
 
 void ClipboardService::flushPending()
 {
-    if (pendingText_.isEmpty() || pendingText_ == lastText_)
+    if (pendingData_.isEmpty() || (pendingMime_ == lastMime_ && pendingData_ == lastData_))
         return;
-    lastText_ = pendingText_;
-    emit textChanged(pendingText_);
+    lastMime_ = pendingMime_;
+    lastData_ = pendingData_;
+    emit contentChanged(pendingMime_, pendingData_);
 }
 
-bool ClipboardService::setTextFromClient(const QString& text)
+#ifdef Q_OS_LINUX
+void ClipboardService::pollClipboard()
+{
+    // CLI 模式没有剪贴板变化信号，轮询读当前内容并去重广播
+    QString mime;
+    QByteArray data;
+    readCliContent(mime, data);
+    if (data.isEmpty() || (mime == lastMime_ && data == lastData_))
+        return;
+    lastMime_ = mime;
+    lastData_ = data;
+    emit contentChanged(mime, data);
+}
+#endif
+
+bool ClipboardService::setContentFromClient(const QString& mime, const QByteArray& data)
 {
 #ifdef Q_OS_LINUX
     if (!available_ && !qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
         ensureCliMode();
 #endif
-    if (!available_ || text.isEmpty())
+    if (!available_ || data.isEmpty())
         return false;
-    // 先更新 lastText_ 再写入，setText 触发的 dataChanged 会被 flushPending 抑制，避免回声
-    lastText_ = text;
-    pendingText_.clear();
+    const bool isImage = (mime == QLatin1String(kMimeImage));
+    if (isImage) {
+#ifdef Q_OS_LINUX
+        if (cliMode_ && !cliImageCapable_) {
+            qWarning("ClipboardService: image clipboard requires xclip (xsel unsupported)");
+            return false;
+        }
+#endif
+#ifndef Q_OS_LINUX
+        // 非 Linux 平台暂不支持图片剪贴板写入（Windows helper 走文本通道）
+        return false;
+#endif
+    }
+    // 先更新指纹再写入，写入触发的 dataChanged/轮询会被去重抑制，避免回声
+    lastMime_ = mime;
+    lastData_ = data;
+    pendingData_.clear();
 #ifdef Q_OS_LINUX
     if (cliMode_) {
         // xclip 从 stdin 读入并成为 CLIPBOARD selection owner（进程常驻，向 X 客户端提供数据）；
         // xsel 同理。QProcess 析构不杀子进程，owner 持续有效。
         QProcess p;
-        QStringList args = clipBin_.endsWith(QStringLiteral("xclip"))
-            ? QStringList{ "-selection", "clipboard", "-i" }
-            : QStringList{ "--clipboard", "--input" };
+        QStringList args;
+        if (clipBin_.endsWith(QStringLiteral("xclip"))) {
+            args << "-selection" << "clipboard" << "-i";
+            if (isImage)
+                args << "-t" << "image/png";
+        } else {
+            args << "--clipboard" << "--input";
+        }
         p.start(clipBin_, args);
         if (!p.waitForStarted(2000))
             return false;
-        p.write(text.toUtf8());
+        p.write(data);
         p.closeWriteChannel();
         // xclip/xsel 作为 owner 常驻不退出，只等待管道写入完成即返回
         p.waitForFinished(500);
@@ -165,8 +287,15 @@ bool ClipboardService::setTextFromClient(const QString& text)
     QClipboard* clipboard = QGuiApplication::clipboard();
     if (!clipboard)
         return false;
-    clipboard->setText(text);
-    // 即使文本与当前剪贴板相同也返回 true：客户端主动粘贴必须触发一次远端 Ctrl+V，
+    if (isImage) {
+        QImage img;
+        if (!img.loadFromData(data, "PNG") || img.isNull())
+            return false;
+        clipboard->setImage(img);
+    } else {
+        clipboard->setText(QString::fromUtf8(data));
+    }
+    // 即使内容与当前剪贴板相同也返回 true：客户端主动粘贴必须触发一次远端 Ctrl+V，
     // 否则"远端复制→本地同步→再粘贴回远端"的场景会被去重吞掉
     return true;
 }

@@ -10,6 +10,7 @@
 #include <yangrtc/YangRtcSession.h>
 
 #include <errno.h>
+#include <stdlib.h>
 
 int32_t yang_rtcsock_sendData(YangRtcSocketSession *session, char *data, int32_t nb) {
 	int32_t err = Yang_Ok;
@@ -19,8 +20,13 @@ int32_t yang_rtcsock_sendData(YangRtcSocketSession *session, char *data, int32_t
 	yang_thread_mutex_lock(&session->sendLock);
 	err=yang_socket_sendto(session->fd, data, nb, &session->remote_addr,0) > 0 ? Yang_Ok : ERROR_RTC_SOCKET;
 	yang_thread_mutex_unlock(&session->sendLock);
-	// [DIAG] RTPOUT dump: RTP header v=2, bytes: 0,1=flags+PT, 2-3=seq, 4-7=ts, 8-11=ssrc
-	if (nb >= 12 && (data[0] & 0xC0) == 0x80) {
+	// [DIAG] RTPOUT dump（默认关闭）：设置环境变量 QRD_DIAG_RTPOUT=1 时逐包打印
+	// RTP 头（pt/ssrc/seq/ts/len/M/dst）。诊断用，平时关闭避免控制台刷屏。
+	static int s_rtpoutDiag = -1;
+	if (s_rtpoutDiag < 0) {
+		s_rtpoutDiag = getenv("QRD_DIAG_RTPOUT") != NULL ? 1 : 0;
+	}
+	if (s_rtpoutDiag && nb >= 12 && (data[0] & 0xC0) == 0x80) {
 		char dbgip[64] = {0};
 		yang_addr_getIPStr(&session->remote_addr, dbgip, 64);
 		fprintf(stderr, "RTPOUT pt=%d ssrc=%u seq=%u ts=%u len=%d M=%d dst=%s:%d\n",

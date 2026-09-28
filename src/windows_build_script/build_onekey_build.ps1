@@ -37,6 +37,20 @@ Write-Host "Qt prefix: $qtPrefix"
 Write-Host "MinGW bin: $mingwBin"
 Write-Host ""
 
+# ---- Stray-header cleanup ------------------------------------------------
+# src/remotedesk/ must never hold loose .h files. Older runs (and a failed
+# 'make install', see note in stage 3) dropped FFmpeg's libavutil headers
+# there. Remove them so the source tree stays clean.
+$remotedeskDir = Join-Path $srcDir 'remotedesk'
+function Remove-StrayHeaders([string]$dir) {
+    $stray = Get-ChildItem -LiteralPath $dir -Filter '*.h' -File -ErrorAction SilentlyContinue
+    if ($stray) {
+        Write-Host "[cleanup] removing $($stray.Count) stray header(s) from $dir"
+        $stray | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+    }
+}
+Remove-StrayHeaders $remotedeskDir
+
 # Prepend mingw to PATH for openh264 make / gcc resolution
 $env:PATH = "$mingwBin;$env:PATH"
 
@@ -140,7 +154,14 @@ esac
         (Get-Content $_.FullName -Raw) -replace "$unixRepo/", "$winRepo/" | Set-Content $_.FullName -Encoding UTF8
     }
 
-    & $gitBash -lc "cd $unixBuild && PATH=${msysPath}:`$PATH && make -j4 && (make install || true)"
+    # Install the STATIC LIBS only - never 'make install'.
+    # 'make install' also runs install-libavutil-headers, whose rule builds one
+    # huge command line: install -m 644 <70+ headers> "<INCINSTDIR>". Under
+    # git-bash/MSYS the drive-letter path gets mangled and the headers land in
+    # src/remotedesk/ (source tree) instead of $ffmpegInstall - reproducing a
+    # set of stray FFmpeg headers at the top of the source tree on every clean
+    # rebuild. Headers are copied explicitly right below instead.
+    & $gitBash -lc "cd $unixBuild && PATH=${msysPath}:`$PATH && make -j4 && (make install-libs || true)"
     if ($LASTEXITCODE -ne 0) { throw "FFmpeg make failed" }
 
     # make install sometimes fails on header paths (mingw make + git-bash install
@@ -157,6 +178,9 @@ esac
     foreach ($l in @('libavcodec.a','libavutil.a','libswscale.a')) {
         if (-not (Test-Path "$ffmpegInstall\lib\$l")) { throw "FFmpeg library missing: $l" }
     }
+    # Safety net: drop any header the build may still have written into the
+    # source tree (e.g. when FFmpeg is rebuilt by an older script version).
+    Remove-StrayHeaders $remotedeskDir
 }
 
 # ---- 4. Configure CMake ----

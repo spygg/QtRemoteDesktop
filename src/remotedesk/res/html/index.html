@@ -910,7 +910,7 @@
             mouseX: 0,
             mouseY: 0,
             keysPressed: new Set(),
-            clip: { remoteText: '', lastLocalSent: '', lastOsWritten: '', pendingLocalWrite: false },
+            clip: { remoteText: '', remoteMime: '', remoteData: '', lastLocalSent: '', lastOsWritten: '', pendingLocalWrite: false },
         };
 
         // ==================== WebRTC 视频（libdatachannel → H.264 RTP） ====================
@@ -2011,8 +2011,8 @@
                     }
                     break;
                 case 'clipboard':
-                    // 远端剪贴板变化 → 存入缓冲，下一次用户手势时写入本地系统剪贴板
-                    onRemoteClipboard(msg.text || '');
+                    // 远端剪贴板变化（文本/图片）→ 存入缓冲，下一次用户手势时写入本地系统剪贴板
+                    onRemoteClipboard(msg);
                     break;
                 case 'file_upload_done':
                     refreshFileList();
@@ -2353,6 +2353,23 @@
                 if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
                 if (!state.connected || !state.ws) return;
                 e.preventDefault();
+                // 图片剪贴板（截图/复制的图片）→ 统一转 PNG 后 base64 发送
+                const items = (e.clipboardData || {}).items || [];
+                for (const it of items) {
+                    if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
+                        const blob = it.getAsFile();
+                        if (!blob) continue;
+                        blobToPngBase64(blob).then((b64) => {
+                            if (!b64) return;
+                            state.clip.lastLocalSent = 'img:' + b64;
+                            state.clip.remoteMime = 'image/png';
+                            state.clip.remoteData = b64;
+                            send({ type: 'clipboard', mime: 'image/png', data: b64 });
+                            showTransferStatus('已把图片粘贴到远端', 1500);
+                        });
+                        return;
+                    }
+                }
                 const text = (e.clipboardData || {}).getData('text/plain');
                 if (!text) return;
                 state.clip.lastLocalSent = text;
@@ -2672,35 +2689,116 @@
             }
         }
 
-        // ==================== 共享剪贴板（无缝双向同步） ====================
-        function onRemoteClipboard(text) {
+        // ==================== 共享剪贴板（无缝双向同步，文本/图片） ====================
+        function onRemoteClipboard(msg) {
+            const isImage = msg && msg.mime === 'image/png' && msg.data;
+            if (isImage) {
+                const fp = 'img:' + msg.data;
+                // 忽略自己刚发送的内容（服务端广播回来的回声）
+                if (fp === state.clip.lastLocalSent) return;
+                state.clip.remoteMime = 'image/png';
+                state.clip.remoteData = msg.data;
+                state.clip.remoteText = '';
+                state.clip.pendingLocalWrite = true;
+                // 无手势时立即尝试一次（已授权/安全上下文可直接写入）
+                tryWriteRemoteClipToLocal(true);
+                return;
+            }
+            const text = (msg && msg.text) || '';
             if (!text) return;
             // 忽略自己刚发送的内容（服务端广播回来的回声）
             if (text === state.clip.lastLocalSent) return;
             state.clip.remoteText = text;
+            state.clip.remoteMime = 'text/plain';
+            state.clip.remoteData = '';
             state.clip.pendingLocalWrite = true;
             // 无手势时立即尝试一次（Chrome/Firefox 若已授权可直接写入）
             tryWriteRemoteClipToLocal(true);
             showTransferStatus('已同步远端剪贴板，可直接 Ctrl+V', 2000);
         }
 
-        // 将远端剪贴板文本写入本地系统剪贴板；force 时无视手势要求直接尝试
+        // 将远端剪贴板内容（文本/图片）写入本地系统剪贴板；force 时无视手势要求直接尝试
         function tryWriteRemoteClipToLocal(force) {
-            if (!state.clip.pendingLocalWrite || !state.clip.remoteText) return;
-            if (state.clip.remoteText === state.clip.lastOsWritten) {
+            if (!state.clip.pendingLocalWrite) return;
+            const isImage = state.clip.remoteMime === 'image/png';
+            const fp = isImage ? ('img:' + state.clip.remoteData) : state.clip.remoteText;
+            if (!fp) { state.clip.pendingLocalWrite = false; return; }
+            if (fp === state.clip.lastOsWritten) {
                 state.clip.pendingLocalWrite = false;
                 return;
             }
-            const text = state.clip.remoteText;
             const done = () => {
-                state.clip.lastOsWritten = text;
+                state.clip.lastOsWritten = fp;
                 state.clip.pendingLocalWrite = false;
             };
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(text).then(done).catch(() => fallbackWrite(text, done));
-            } else {
-                fallbackWrite(text, done);
+            if (isImage) {
+                writeImageToOsClipboard(state.clip.remoteData).then((ok) => {
+                    if (ok) { done(); return; }
+                    // HTTP 非安全上下文无法程序化写入图片剪贴板 → 弹出预览/下载面板（只弹一次）
+                    showRemoteImagePanel(state.clip.remoteData);
+                    done();
+                });
+                return;
             }
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(state.clip.remoteText).then(done).catch(() => fallbackWrite(state.clip.remoteText, done));
+            } else {
+                fallbackWrite(state.clip.remoteText, done);
+            }
+        }
+
+        // 把 base64 PNG 写入本地图片剪贴板（需安全上下文 + ClipboardItem 支持）
+        async function writeImageToOsClipboard(b64) {
+            try {
+                if (!navigator.clipboard || !window.ClipboardItem) return false;
+                const blob = base64ToBlob(b64, 'image/png');
+                await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+                return true;
+            } catch (e) { return false; }
+        }
+
+        function base64ToBlob(b64, mime) {
+            const bin = atob(b64);
+            const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            return new Blob([arr], { type: mime });
+        }
+
+        // 任意图片 Blob → PNG base64（统一格式，服务端只存 image/png）
+        async function blobToPngBase64(blob) {
+            try {
+                const bmp = await createImageBitmap(blob);
+                const c = document.createElement('canvas');
+                c.width = bmp.width; c.height = bmp.height;
+                c.getContext('2d').drawImage(bmp, 0, 0);
+                bmp.close && bmp.close();
+                const url = c.toDataURL('image/png');
+                return url.split(',')[1] || '';
+            } catch (e) { return ''; }
+        }
+
+        // 远端图片兜底面板：HTTP 下浏览器禁止脚本写图片到本地剪贴板，
+        // 提供预览 + 一键下载（复制到远端已生效，本地用下载或截图工具承接）
+        function showRemoteImagePanel(b64) {
+            let panel = document.getElementById('remote-clip-img-panel');
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.id = 'remote-clip-img-panel';
+                panel.style.cssText = 'position:fixed;right:16px;bottom:64px;z-index:99999;background:#222;color:#eee;'
+                    + 'border:1px solid #444;border-radius:8px;padding:10px;box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:280px;font-size:12px;';
+                document.body.appendChild(panel);
+            }
+            const url = 'data:image/png;base64,' + b64;
+            panel.innerHTML = '<div style="margin-bottom:6px;">🖼 远端剪贴板为图片</div>'
+                + '<img src="' + url + '" style="max-width:256px;max-height:160px;display:block;border-radius:4px;margin-bottom:8px;background:#111;">'
+                + '<div style="display:flex;gap:8px;">'
+                + '<a id="rcip-dl" href="' + url + '" download="remote-clipboard.png" style="flex:1;text-align:center;background:#4a9eff;color:#fff;padding:6px;border-radius:4px;text-decoration:none;">下载图片</a>'
+                + '<span id="rcip-close" style="flex:0 0 auto;cursor:pointer;background:#333;padding:6px 10px;border-radius:4px;">关闭</span>'
+                + '</div>';
+            panel.style.display = 'block';
+            document.getElementById('rcip-close').onclick = () => { panel.style.display = 'none'; };
+            clearTimeout(showRemoteImagePanel._t);
+            showRemoteImagePanel._t = setTimeout(() => { panel.style.display = 'none'; }, 20000);
         }
 
         // 兜底：http://IP 非安全上下文没有 navigator.clipboard，用隐藏 textarea + execCommand('copy')。
