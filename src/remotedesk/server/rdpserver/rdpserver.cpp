@@ -2909,12 +2909,24 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         } else if (qname == "medium") {
             jpegQ = 60;
             configScale_ = userScale_;
-        } else if (qname == "low" || qname == "verylow") {
+        } else if (qname == "low") {
             jpegQ = 35;
             configScale_ = userScale_;
+        } else if (qname == "verylow") {
+            // 极低：在 low 基础上进一步大幅降码率，并强制降分辨率（封顶 50%），
+            // 让静止桌面也肉眼可见地变模糊。原因：openh264 在静止内容上会大量
+            // 跳 P 帧（仅周期传清晰 I 帧），仅靠降码率（low=0.08）在静态 UI 上几乎
+            // 看不出差异，必须叠加降分辨率才能体现“极低”。
+            jpegQ = 20;
+            configScale_ = qMin(userScale_, 50);
         }
+        // 视频码率档位：默认与 JPEG 质量一致；verylow 单独用更低档位（videoBitrateFor
+        // 的 case 15 = 0.035 bpp），使“极低”相较“低”有额外可见降级，而非等价。
+        int videoQualityLevel = jpegQ;
+        if (qname == "verylow")
+            videoQualityLevel = 15;
         if (jpegQ > 0 && jpegCompressor_) {
-            configQuality_ = jpegQ;
+            configQuality_ = videoQualityLevel;
             jpegCompressor_->setQuality(jpegQ);
             jpegCompressor_->setScalePercent(configScale_);
 #ifdef USE_FFMPEG
@@ -3459,7 +3471,8 @@ int RDPServer::videoBitrateFor(int encW, int encH, int fps, CodecType codec) con
     switch (configQuality_) {
     case 80: bitsPerPixel = 0.20; break; // high：加大每像素码率，1080P60 下显著高于 medium
     case 60: bitsPerPixel = 0.11; break; // medium
-    case 35: bitsPerPixel = 0.08; break; // low / verylow
+    case 35: bitsPerPixel = 0.08; break; // low
+    case 15: bitsPerPixel = 0.035; break; // verylow：极低码率，叠加降分辨率可见
     default: bitsPerPixel = 0.10; break;
     }
     // HEVC/VP9/AV1 压缩效率约为 H.264 的两倍，同画质下码率减半，节省带宽
