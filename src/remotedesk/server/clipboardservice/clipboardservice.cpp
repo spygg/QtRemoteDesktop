@@ -9,10 +9,10 @@
 #include <QDebug>
 #include <QBuffer>
 #include <QImage>
-
-#ifdef Q_OS_LINUX
+// QMimeData 是跨平台类：content()/onClipboardChanged() 调用 clipboard->mimeData()
+// 的成员（hasImage/imageData）需要完整定义，qclipboard.h 只前置声明。
+// 必须无条件 include，否则 Windows/macOS 编译报 incomplete type。
 #include <QMimeData>
-#endif
 
 namespace {
 constexpr const char* kMimeText  = "text/plain";
@@ -249,9 +249,13 @@ void ClipboardService::flushPending()
     emit contentChanged(pendingMime_, pendingData_);
 }
 
-#ifdef Q_OS_LINUX
+// 实现必须全平台存在：pollClipboard() 声明在 private slots 区（无条件），
+// moc 会为所有平台生成 qt_static_metacall 调用代码；若实现被 #ifdef Q_OS_LINUX
+// 包住，Windows/macOS 链接期报 undefined reference。函数体内部条件编译即可——
+// 非 Linux 平台为空函数且永不触发（轮询定时器仅在 Linux CLI 模式启动）。
 void ClipboardService::pollClipboard()
 {
+#ifdef Q_OS_LINUX
     // CLI 模式没有剪贴板变化信号，轮询读当前内容并去重广播
     QString mime;
     QByteArray data;
@@ -261,8 +265,8 @@ void ClipboardService::pollClipboard()
     lastMime_ = mime;
     lastData_ = data;
     emit contentChanged(mime, data);
-}
 #endif
+}
 
 bool ClipboardService::setContentFromClient(const QString& mime, const QByteArray& data)
 {
