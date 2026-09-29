@@ -33,10 +33,13 @@
 - 软件编码：FFmpeg + libopenh264（H.264）
 - 硬件编码：RK3588 Rockchip MPP，初始化失败自动回退软编
 - 过载保护：按编码耗时 EMA 动态降码率
+- 画质档位驱动码率自适应：高/中/低/极低（high/medium/low/verylow → JPEG 质量 80/60/35）在视频模式下映射为每像素码率（0.20/0.11/0.08 bpp × 分辨率 × 帧率）并重建编码器；1080P60 下 high≈24.9Mbps、medium≈13.7Mbps（上限 25Mbps，HEVC/VP9/AV1 减半）
+- WebRTC 与 WS 视频共用同一编码管线：编码产物同时经 RTP 推流与 WS 广播，切换画质/帧率两端同时生效
 
 **其他**
 - 输入控制（鼠标/键盘/滚轮，Windows 支持 Unicode 字符注入）
-- 剪贴板同步、文件传输（上传/下载/目录打包下载）
+- 剪贴板双向同步与仲裁：三态策略 `ask`/`always`/`never`（localStorage `rd_clip_autosync`）；远端 60s 内有更新、本机无新复制、页面未失焦且内容不同时采用远端；本机产生新复制手势时把远端内容回写本机
+- 文件传输（上传/下载/目录打包下载）：受限根目录（默认服务端运行用户家目录），前端显示真实绝对路径；拒绝 Windows 盘符风格路径，防止越权访问与误建垃圾目录
 - 交互式远程 Shell（Linux/macOS 为真 PTY，支持窗口尺寸同步与 Tab 补全；Windows 为管道式非 PTY）
 - 用户认证（用户名/密码 + token 会话）、用户管理页面
 - 单实例运行、HTTPS/WSS、系统睡眠阻止
@@ -252,7 +255,7 @@ bin\QtRemoteDesktop.exe
 | `httpPort` | HTTP 服务端口 | 8080 | — |
 | `console` | 显示控制台窗口 | false | — |
 | `fps` | 捕获帧率 | 30 | 1–60 |
-| `quality` | JPEG 质量 | 60 | 10–100 |
+| `quality` | JPEG 质量基准（10–100）；前端画质档 high/medium/low/verylow 映射为 80/60/35，并在视频模式下决定码率 | 60 | 10–100 |
 | `scale` | 画面缩放 | 75 | 10–100 |
 | `users` | 用户表（salt:hash） | admin | — |
 
@@ -271,6 +274,16 @@ SSL 使用 `res/sslperm/` 下的自签名证书，浏览器会有安全警告；
 
 浏览器要求：WebRTC 路径由浏览器原生解码；WS 视频路径经 MSE 播放（无需 WebCodecs）。
 
+### 画质、帧率与缩放
+
+顶部工具栏的「画质」（高/中/低/极低）与「帧率」（60/30/15 等）在**任意模式下均即时生效**：
+
+- 视频模式（WebRTC / FFmpeg-MSE）：切换即按新参数重建编码器（码率随画质档位，time_base/gop/码率随帧率），并强制下一帧穿过静止画面去重，避免“看着没变化”。
+- 图片模式：画质对应 JPEG 压缩质量（80/60/35），帧率不影响（按需出帧）。
+- WebRTC 会话期间：编码协议（H.264/HEVC/VP9/AV1）与硬件编码开关切换被忽略（WebRTC 固定 H.264）；FFmpeg/WS 模式下这些开关即时生效。
+
+> 切换后服务端日志会打印 `Video encoder re-initialized ... at WxH`；若前端 UI 未更新，确认 index.html 已随服务端重编译（页面已加 `Cache-Control: no-cache`，但磁盘推送需重编并重启）。
+
 ---
 
 ## 故障排查
@@ -283,6 +296,8 @@ SSL 使用 `res/sslperm/` 下的自签名证书，浏览器会有安全警告；
 | RK3588 编码慢 | 日志 `mpp_venc_kcfg_init failed` 表示 MPP 硬编不可用，已自动回退软件编码（1080p30 软编会明显占用 CPU） |
 | 端口占用 | 改 `server_config.json` 的 `httpPort`（WS 端口自动 +1） |
 | 编译报找不到 X11 头 | 先跑 `build_linux.sh --check-deps`，按提示安装 X11 系列开发库 |
+| 切换画质/帧率后画面无变化 | 实际立即生效：用 `journalctl -u remotedesk -f` 看 `Video encoder re-initialized ...` 日志；静止桌面已强制下一帧穿过去重 |
+| 浏览器端 UI / 前端行为未更新 | 前端 index.html 编入 Qt 资源（qrc），需重编并重启服务端；页面已加 `Cache-Control: no-cache`，但磁盘推送不重编不会生效 |
 
 ---
 ## 
