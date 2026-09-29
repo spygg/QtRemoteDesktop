@@ -720,13 +720,13 @@ void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
             return;
         }
         sslSocket->setSslConfiguration(*sslConfiguration_);
-        // 延迟一帧到事件循环启动服务端加密：在 incomingConnection 内同步调用
-        // startServerEncryption 时，Qt5.9/OpenSSL1.0.2 下底层读通知尚未就绪，
-        // 握手不会真正发起（客户端收不到 ServerHello，encrypted/sslErrors 均不触发）。
-        // 延迟到事件循环后读通知生效，握手正常完成。
-        QTimer::singleShot(0, sslSocket, [sslSocket]() {
-            sslSocket->startServerEncryption();
-        });
+        // 服务端握手：在 incomingConnection 内同步启动最稳妥——此刻尚未返回事件循环，
+        // 不会有任何 readyRead 抢先读走 ClientHello（否则明文 ClientHello 进了普通缓冲、
+        // TLS 层收不到，握手会卡死）。OpenSSL 已与 Qt QSslSocket 统一为 1.0.x，底层 BIO
+        // 读通知即时可用，无需再延迟到事件循环或用 readyRead 触发。
+        sslSocket->startServerEncryption();
+        qInfo() << "SSL: startServerEncryption (useSsl=" << useSsl_
+                << " supportsSsl=" << QSslSocket::supportsSsl() << ")";
         connect(sslSocket, &QSslSocket::readyRead, this, &RDPServer::onHttpRequest);
         connect(sslSocket, &QSslSocket::encrypted, this, [this, sslSocket]() {
             if (sslSocket->bytesAvailable() > 0)

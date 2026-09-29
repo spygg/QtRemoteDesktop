@@ -142,7 +142,61 @@ if [ "${dirname%$tmp}" != "/" ]; then
     dirname=$PWD/$dirname
 fi
 
-LD_LIBRARY_PATH=$dirname/libs:$LD_LIBRARY_PATH
+# ---- OpenSSL 版本对齐（智能检测，不硬绑版本）----
+# Qt 在运行期按「可执行文件 NEEDED 的 libssl SONAME」解析 OpenSSL。若宿主系统的 OpenSSL
+# 主版本与编译时不一致（如 Qt5.9 需要 1.0.x，而宿主只有 1.1/3.x），TLS 会静默失效。
+# 这里从可执行文件自身读出所需的 SONAME，只在候选目录中「确实同时提供 libssl 与
+# libcrypto 同版本」的目录上注入；找不到就保持原样，避免破坏其它发行版/环境下的正常场景。
+REQ_SSL=""
+if command -v readelf >/dev/null 2>&1; then
+    REQ_SSL=`readelf -d "$dirname/$appname" 2>/dev/null \
+        | sed -n 's/.*NEEDED.*\[\(libssl\.so\.[0-9][0-9.]*\)\].*/\1/p' | sort -u`
+fi
+if [ -z "$REQ_SSL" ] && command -v objdump >/dev/null 2>&1; then
+    REQ_SSL=`objdump -p "$dirname/$appname" 2>/dev/null \
+        | sed -n 's/.*NEEDED[[:space:]]*\(libssl\.so\.[0-9][0-9.]*\).*/\1/p' | sort -u`
+fi
+
+VERS=""
+for s in $REQ_SSL; do
+    VERS="$VERS ${s#libssl.so.}"
+done
+if [ -z "$VERS" ]; then
+    VERS=" 1.0.0 1.1 3"
+fi
+VERS=`echo $VERS`
+
+# 候选目录（优先随包 libs；QTRD_OPENSSL_DIR 可显式覆盖；开发树 build_output 兜底）
+cand="$dirname/libs"
+if [ -n "$QTRD_OPENSSL_DIR" ]; then
+    cand="$QTRD_OPENSSL_DIR:$cand"
+fi
+cand="$cand:$dirname/../build_output/openssl102_install/lib"
+cand=`echo "$cand" | tr ':' ' '`
+
+OSSL_DIR=""
+for d in $cand; do
+    if [ -z "$d" ] || [ ! -d "$d" ]; then
+        continue
+    fi
+    for v in $VERS; do
+        if [ -f "$d/libssl.so.$v" ] && [ -f "$d/libcrypto.so.$v" ]; then
+            OSSL_DIR="$d"
+            break
+        fi
+    done
+    if [ -n "$OSSL_DIR" ]; then
+        break
+    fi
+done
+
+if [ -n "$OSSL_DIR" ]; then
+    LD_LIBRARY_PATH="$OSSL_DIR:$dirname/libs:$LD_LIBRARY_PATH"
+    echo "[QtRemoteDesktop] OpenSSL: $OSSL_DIR (libssl.so.$VERS)" >&2
+else
+    LD_LIBRARY_PATH="$dirname/libs:$LD_LIBRARY_PATH"
+    echo "[QtRemoteDesktop] WARN: 未找到与可执行文件匹配的 OpenSSL (libssl.so.$VERS)，TLS 可能不可用" >&2
+fi
 export LD_LIBRARY_PATH
 cd "$dirname/"
 
