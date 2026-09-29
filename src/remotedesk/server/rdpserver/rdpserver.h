@@ -2,6 +2,8 @@
 #ifndef RDP_SERVER_H
 #define RDP_SERVER_H
 
+#include <QElapsedTimer>
+#include <QFile>
 #include <QHostAddress>
 #include <QHash>
 #include <QImage>
@@ -79,6 +81,17 @@ private:
     enum { kMaxQueueSize = 1 }; // 只编最新帧，避免编码慢时 FIFO 队列造成画面延迟累积
 };
 
+// HTTP 直链下载（/api/file）的传输状态：大文件必须分块流式写出，
+// 一次性 write 整份数据会让主线程长时间阻塞（数 GB 文件 = 整个远程会话冻结），
+// 因此按 socket 的写缓冲背压，配合 bytesWritten 信号持续泵送。
+struct HttpDownloadState {
+    std::unique_ptr<QFile> file; // 单文件：从磁盘流式读
+    QByteArray payload;          // 目录 tar：一次性在内存中的整包数据
+    qint64 totalSize = 0;        // 未分片时的完整长度（用于 Content-Range: bytes s-e/total）
+    qint64 offset = 0;           // 下一个待写字节位置
+    qint64 end = 0;              // 本次响应最后一个字节位置（含）
+};
+
 class RDPServer : public QObject {
     Q_OBJECT
 
@@ -132,6 +145,16 @@ private:
     void handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body);
     void handleShellExec(QTcpSocket* socket, const QByteArray& body);
     QString extractSessionToken(const QByteArray& request);
+
+    // HTTP 直链文件下载：GET /api/file?path=<受限根内的绝对路径>
+    // 存在的意义：浏览器的拖拽/下载 API 对 WebSocket 分块传输的数据无能为力
+    // （必须先把全部数据预取进内存再生成 Blob，且无法拖到桌面）。
+    // 走标准 HTTP GET 后，浏览器可用 DownloadURL 把远程文件直接拖到本机桌面，
+    // 由内核/浏览器接管断点续传与磁盘写入，不受 32MB 预取上限限制。
+    void handleApiFileDownload(QTcpSocket* socket, const QString& path, const QString& headerText);
+    // 按 socket 写缓冲背压泵送下一批数据（bytesWritten 触发）
+    void pumpFileDownload(QTcpSocket* socket);
+    void cleanupHttpDownload(QTcpSocket* socket);
     int videoBitrateFor(int encW, int encH, int fps, CodecType codec = CodecType::H264) const;
     QByteArray buildHttpResponse(int statusCode, const QString& statusText,
         const QString& contentType, const QByteArray& body,
@@ -203,6 +226,9 @@ private:
 
     // 每个 HTTP 连接的请求解析状态（跨 readyRead 累积，避免主线程阻塞）
     QHash<QTcpSocket*, HttpParseState> httpParseState_;
+    // 每个 socket 的直链下载传输状态（streaming 写出，写完自动清理）。
+    // 存指针而非值：QHash 的插入/扩容都要求值可拷贝，而状态里持有独占文件句柄。
+    QHash<QTcpSocket*, HttpDownloadState*> httpDownloadStates_;
 #ifdef _WIN32
     int secureInputPid_ = 0;
 #endif

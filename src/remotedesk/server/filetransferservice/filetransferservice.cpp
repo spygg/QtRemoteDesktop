@@ -2,10 +2,32 @@
 #include <QDebug>
 #include <QDirIterator>
 #include <QJsonDocument>
+#include <QProcess>
 
 FileTransferService::FileTransferService(QObject* parent)
     : QObject(parent)
 {
+#ifdef Q_OS_LINUX
+    // 服务常以 root 运行：QDir::homePath() 变成 /root，对远程桌面用户不直观，
+    // 拖拽上传默认落 /root 会被误认为"磁盘根目录"。改为优先使用系统常规用户
+    // home（/home/xxx 下第一个可写目录）作为文件根；已有显式配置则不改动。
+    if (s_enforceRoot && s_rootPath == QDir::homePath()) {
+        QDir homeDir("/home");
+        if (homeDir.exists()) {
+            const QStringList users = homeDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+            for (const QString& u : users) {
+                if (u == "lost+found" || u.startsWith('.'))
+                    continue;
+                QString p = QDir::cleanPath("/home/" + u);
+                if (QFileInfo(p).isWritable()) {
+                    if (p != s_rootPath)
+                        setRootPath(p);
+                    return;
+                }
+            }
+        }
+    }
+#endif
 }
 
 FileTransferService::~FileTransferService()
@@ -22,6 +44,60 @@ FileTransferService::~FileTransferService()
 // 文件根目录：默认限制在当前用户 home 目录，防止登录用户读写任意路径。
 QString FileTransferService::s_rootPath = QDir::homePath();
 bool FileTransferService::s_enforceRoot = true;
+
+// 默认上传目录：本机拖入文件时的落点。
+// 服务进程常以 root 运行（systemd service），此时 QDir::homePath() 是 /root，
+// 但真正在看屏幕、能操作文件的桌面用户是另一个人（如 neardi）。把拖入的文件
+// 默认塞进 /root 既不符合直觉，桌面用户也没权限看到。这里推导「桌面用户」：
+//   1) loginctl 找 seat0 上的 x11/wayland 图形会话所属用户（最准，排除 gdm greeter）
+//   2) 退回 /etc/passwd 中最小非 0 uid 的普通用户（有 /home/<u>）
+//   3) 再退回服务自身 home
+// 目标用户没有 Desktop 目录则直接用其 home。结果只计算一次（缓存）。
+QString FileTransferService::defaultUploadDir()
+{
+    static QString cached;
+    static bool computed = false;
+    if (computed)
+        return cached;
+    computed = true;
+
+    QString homeDir;
+#ifdef Q_OS_LINUX
+    {
+        QProcess proc;
+        // 单引号保护 awk 的 $3，避免被外层 /bin/sh -c 当作位置参数展开
+        const QString script =
+            "for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do "
+            "  t=$(loginctl show-session \"$s\" -p Type --value 2>/dev/null); "
+            "  seat=$(loginctl show-session \"$s\" -p Seat --value 2>/dev/null); "
+            "  u=$(loginctl show-session \"$s\" -p User --value 2>/dev/null); "
+            "  if [ \"$seat\" = \"seat0\" ] && { [ \"$t\" = \"x11\" ] || [ \"$t\" = \"wayland\" ]; } && [ \"$u\" -ge 1000 ] 2>/dev/null; then "
+            "    echo \"$u\"; exit 0; "
+            "  fi; "
+            "done; "
+            "awk -F: '$3>=1000 && $3<65534 && $6 ~ /^/home// {print $3; exit}' /etc/passwd";
+        proc.start("/bin/sh", QStringList() << "-c" << script);
+        if (proc.waitForFinished(3000)) {
+            const QString out = proc.readAllStandardOutput().trimmed();
+            bool ok = false;
+            const uint uid = out.toUInt(&ok);
+            if (ok && uid > 0) {
+                QProcess pp;
+                pp.start("/bin/sh", QStringList() << "-c" <<
+                          QString("getent passwd %1 | cut -d: -f6").arg(uid));
+                if (pp.waitForFinished(2000))
+                    homeDir = pp.readAllStandardOutput().trimmed();
+            }
+        }
+    }
+#endif
+    if (homeDir.isEmpty())
+        homeDir = QDir::homePath();
+
+    QDir home(homeDir);
+    cached = home.exists("Desktop") ? (homeDir + "/Desktop") : homeDir;
+    return cached;
+}
 
 void FileTransferService::setRootPath(const QString& root)
 {
@@ -196,7 +272,8 @@ void FileTransferService::processFileList(const QString& clientId, const QString
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_list"},
             {"path", "/"},
-            {"items", items}
+            {"items", items},
+            {"desktopPath", defaultUploadDir()}
         });
         return;
     }
@@ -238,7 +315,8 @@ void FileTransferService::processFileList(const QString& clientId, const QString
     emit jsonResponse(clientId, QJsonObject{
         {"type", "file_list"},
         {"path", QDir::toNativeSeparators(dir.absolutePath())},
-        {"items", items}
+        {"items", items},
+        {"desktopPath", defaultUploadDir()}
     });
 #else
     // Linux: 与 Windows 分支一致，先做根目录约束
@@ -273,7 +351,8 @@ void FileTransferService::processFileList(const QString& clientId, const QString
     emit jsonResponse(clientId, QJsonObject{
         {"type", "file_list"},
         {"path", dir.absolutePath()},
-        {"items", items}
+        {"items", items},
+        {"desktopPath", defaultUploadDir()}
     });
 #endif
 }
@@ -400,8 +479,16 @@ void FileTransferService::processUploadStart(const QString& clientId, const QStr
 
     QFileInfo fi(safePath);
     QDir parentDir = fi.absoluteDir();
-    if (!parentDir.exists())
+    if (!parentDir.exists()) {
+        const QString parentAbs = parentDir.absolutePath();
         parentDir.mkpath(".");
+        // 新建的中间目录设为 0777：服务常以 root 写出，桌面用户需要执行(x)权限
+        // 才能进入这些子目录查看刚拖入的文件（文件本身在 done 时再设 0666）。
+        QFile::setPermissions(parentAbs,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner
+            | QFile::ReadGroup | QFile::WriteGroup | QFile::ExeGroup
+            | QFile::ReadOther | QFile::ExeOther);
+    }
 
     auto existing = activeUploads_.find(safePath);
     if (existing != activeUploads_.end()) {
@@ -462,6 +549,13 @@ void FileTransferService::processUploadDone(const QString& clientId, const QStri
     delete it.value().file;
     qint64 received = it.value().receivedSize;
     activeUploads_.erase(it);
+
+    // 落盘后改为所有用户可读写（0666）：服务常以 root 运行，写出的文件 owner 是 root，
+    // 桌面用户默认只有只读/无权限，改 0666 后桌面用户也能正常读写拖入的文件。
+    QFile::setPermissions(safePath,
+        QFile::ReadOwner | QFile::WriteOwner
+        | QFile::ReadGroup | QFile::WriteGroup
+        | QFile::ReadOther | QFile::WriteOther);
 
     qInfo() << "Upload complete:" << safePath << received << "bytes";
 

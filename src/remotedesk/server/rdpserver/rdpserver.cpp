@@ -57,6 +57,7 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #include <QThread>
 #include <QTimer>
 #include <QPointer>
+#include <QUrl>
 #include <QUrlQuery>
 #include <QSslCertificate>
 #include <string>
@@ -815,6 +816,254 @@ QByteArray RDPServer::buildHttpResponse(int statusCode, const QString& statusTex
     return resp;
 }
 
+// Content-Disposition 文件名安全化：文件名是远程主上的任意 UTF-8 串，
+// 直接拼接进响应头会（1）被 CR/LF 注入伪造响应头、（2）被引号截断。
+// 这里把控制字符与引号/反斜杠替换为下划线；非 ASCII 用 RFC5987 filename* 另送一份。
+static QString httpSafeFilename(const QString& name)
+{
+    QString out;
+    out.reserve(name.size());
+    for (const QChar c : name) {
+        const ushort u = c.unicode();
+        if (u < 32 || u == 127 || c == '"' || c == '\\' || c == '\r' || c == '\n')
+            out += QLatin1Char('_');
+        else
+            out += c;
+    }
+    return out;
+}
+
+// GET /api/file?path=<受限根内的路径> —— 远程文件直链下载
+//
+// 为什么需要它：前端原来的"拖到本机"必须经 WebSocket 把整个文件拉进浏览器内存，
+// 再拼成 Blob 用 DownloadURL 交给系统。浏览器对一个 blob: URL 的可拖出性、
+// 内存占用（>32MB 直接被预制上限拦掉）、以及目录（只能先打成 tar）都有硬限制。
+// 提供标准 HTTP GET 后：
+//   - Chrome/Edge 支持 `DownloadURL` 指向 http(s) 直链，拖到桌面由浏览器后台接管下载；
+//   - 不受预取上限限制，超大文件也能拖出；
+//   - 支持 Range，浏览器/下载工具可断点续传；
+//   - 鉴权沿用 cookie `session`（同源请求自动携带），不额外开认证口子。
+void RDPServer::handleApiFileDownload(QTcpSocket* socket, const QString& path, const QString& headerText)
+{
+    auto fail = [&](int code, const QString& text, const char* detail) {
+        QByteArray body = detail ? QByteArray(detail) : text.toUtf8();
+        QByteArray resp = buildHttpResponse(code, text, "text/plain; charset=utf-8", body);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+    };
+
+    const int qIdx = path.indexOf('?');
+    if (qIdx < 0) {
+        fail(400, "Bad Request", "missing path parameter");
+        return;
+    }
+    // FullyDecoded：path 值本身是百分号编码的 UTF-8 路径，不能再被二次转义误解
+    QUrlQuery query(path.mid(qIdx + 1));
+    const QString rawPath = query.queryItemValue("path", QUrl::FullyDecoded);
+    if (rawPath.isEmpty()) {
+        fail(400, "Bad Request", "missing path parameter");
+        return;
+    }
+
+    // 与 WS 文件传输共用同一份根目录越权校验
+    const QString safePath = FileTransferService::sanitizeFilePath(rawPath);
+    if (safePath.isEmpty()) {
+        qWarning() << "HTTP download rejected (outside file root):" << rawPath
+                   << "root=" << FileTransferService::rootPath();
+        fail(403, "Forbidden", "path outside allowed file root");
+        return;
+    }
+
+    QFileInfo fi(safePath);
+    if (!fi.exists()) {
+        fail(404, "Not Found", "file not found");
+        return;
+    }
+
+    // 状态必须在堆上：QHash 内部按值拷贝节点，而这里持有独占的文件句柄
+    HttpDownloadState* st = new HttpDownloadState;
+    QString displayName;
+
+    if (fi.isDir()) {
+        // 目录：与 WS 下载一致的 tar 打包（保留目录树）
+        st->payload = FileTransferService::createTarForDirectory(safePath);
+        st->totalSize = st->payload.size();
+        displayName = fi.fileName() + ".tar";
+    } else {
+        if (!fi.isFile() || !fi.isReadable()) {
+            delete st;
+            fail(403, "Forbidden", "not a readable file");
+            return;
+        }
+        st->file.reset(new QFile(safePath));
+        if (!st->file->open(QIODevice::ReadOnly)) {
+            delete st;
+            fail(500, "Internal Server Error", "cannot open file");
+            return;
+        }
+        st->totalSize = st->file->size();
+        displayName = fi.fileName();
+    }
+
+    // 空文件：Range 的最小尾端会变成 -1，若走通用分支会被误判成 416；单独处理
+    if (st->totalSize == 0) {
+        delete st;
+        QByteArray h = "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: application/octet-stream\r\n"
+                       "Content-Length: 0\r\n"
+            + QByteArray("Content-Disposition: attachment; filename=\"") + httpSafeFilename(displayName).toUtf8()
+            + "\"; filename*=UTF-8''" + QUrl::toPercentEncoding(displayName, "~-_./") + "\r\n"
+            + "Cache-Control: no-store\r\nConnection: close\r\n\r\n";
+        socket->write(h);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    // Range 支持（单区间）：浏览器拖动下载大文件/断点续传会带 Range
+    qint64 start = 0;
+    qint64 end = st->totalSize - 1;
+    bool partial = false;
+    // 提前建立自清理：任何后续错误返回都不得泄漏这块状态（含打开的文件句柄）。
+    // 成功路径最后由 pumpFileDownload 收尾，同样会走到 cleanupHttpDownload。
+    connect(socket, &QObject::destroyed, this, [this, socket]() {
+        cleanupHttpDownload(socket);
+    });
+    connect(socket, &QTcpSocket::bytesWritten, this, [this, socket]() {
+        pumpFileDownload(socket);
+    });
+    const int rangeIdx = headerText.indexOf("Range:", 0, Qt::CaseInsensitive);
+    if (rangeIdx >= 0) {
+        int lineEnd = headerText.indexOf('\n', rangeIdx);
+        if (lineEnd < 0)
+            lineEnd = headerText.length();
+        QString rangeLine = headerText.mid(rangeIdx, lineEnd - rangeIdx).trimmed();
+        QString spec = rangeLine.mid(6).trimmed(); // skip "Range:"
+        if (spec.startsWith("bytes=", Qt::CaseInsensitive)) {
+            QString ranged = spec.mid(6).trimmed();
+            const int dash = ranged.indexOf('-');
+            bool okStart = false;
+            if (dash >= 0) {
+                const QString s = ranged.left(dash).trimmed();
+                const QString e = ranged.mid(dash + 1).trimmed();
+                if (!s.isEmpty()) {
+                    start = s.toLongLong(&okStart);
+                } else {
+                    // "bytes=-N" → 末尾 N 字节
+                    bool okTail = false;
+                    const qint64 tail = e.toLongLong(&okTail);
+                    if (okTail && tail > 0) {
+                        start = qMax<qint64>(0, st->totalSize - tail);
+                        okStart = true;
+                    }
+                }
+                if (okStart && !e.isEmpty()) {
+                    bool okEnd = false;
+                    const qint64 ev = e.toLongLong(&okEnd);
+                    if (okEnd)
+                        end = qMin(ev, st->totalSize - 1);
+                }
+            }
+            if (!okStart)
+                start = 0;
+        }
+    }
+    if (start < 0 || start >= st->totalSize || end < start) {
+        // 不可满足的区间
+        QByteArray head = "HTTP/1.1 416 Range Not Satisfiable\r\n";
+        head += "Content-Range: bytes */" + QByteArray::number(st->totalSize) + "\r\n";
+        head += "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        delete st;
+        socket->write(head);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+    end = qMin(end, st->totalSize - 1);
+    partial = (start != 0 || end != st->totalSize - 1);
+    st->offset = start;
+    st->end = end;
+    if (st->file && !st->file->seek(start)) {
+        delete st;
+        fail(500, "Internal Server Error", "cannot seek file");
+        return;
+    }
+
+    const QString safeName = httpSafeFilename(displayName);
+    const QByteArray encodedName = QUrl::toPercentEncoding(displayName, "~-_./");
+
+    QByteArray head;
+    head += partial ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n";
+    head += "Content-Type: application/octet-stream\r\n";
+    head += "Content-Length: " + QByteArray::number(end - start + 1) + "\r\n";
+    head += "Accept-Ranges: bytes\r\n";
+    if (partial)
+        head += "Content-Range: bytes " + QByteArray::number(start) + "-"
+            + QByteArray::number(end) + "/" + QByteArray::number(st->totalSize) + "\r\n";
+    head += "Content-Disposition: attachment; filename=\"" + safeName.toUtf8()
+        + "\"; filename*=UTF-8''" + encodedName + "\r\n";
+    head += "Cache-Control: no-store\r\n";
+    head += "Access-Control-Allow-Origin: *\r\n";
+    head += "Connection: close\r\n\r\n";
+
+    // HEAD：只回元信息（用于前端探活/取大小），不写正文
+    const bool headOnly = headerText.startsWith("HEAD");
+
+    socket->write(head);
+    if (headOnly) {
+        // HEAD 没有正文，状态在这里就地释放
+        delete st;
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    // 不能用 QHash::insert(key,value) 之外的按值存储：状态含独占句柄，这里存指针
+    httpDownloadStates_.insert(socket, st);
+
+    // 首泵：能一次写完就直接结束，写不完由 bytesWritten 续泵
+    pumpFileDownload(socket);
+}
+
+void RDPServer::pumpFileDownload(QTcpSocket* socket)
+{
+    auto it = httpDownloadStates_.find(socket);
+    if (it == httpDownloadStates_.end())
+        return;
+    if (!socket->isOpen()) {
+        cleanupHttpDownload(socket);
+        return;
+    }
+
+    static const qint64 kChunk = 256 * 1024;
+    // 背压阈值：待写字节超过 1MB 就停手，等 bytesWritten 再继续，
+    // 避免把数 GB 文件一次性塞进 Qt 的写队列（内存暴涨 + 主线程卡顿）。
+    static const qint64 kBacklogLimit = 1024 * 1024;
+
+    HttpDownloadState* st = it.value();
+    while (st->offset <= st->end) {
+        if (socket->bytesToWrite() > kBacklogLimit)
+            return;
+        const int n = (int)qMin(kChunk, st->end - st->offset + 1);
+        QByteArray buf = st->file ? st->file->read(n) : st->payload.mid((int)st->offset, n);
+        if (buf.isEmpty())
+            break;
+        socket->write(buf);
+        st->offset += buf.size();
+    }
+
+    cleanupHttpDownload(socket);
+    socket->disconnectFromHost();
+}
+
+void RDPServer::cleanupHttpDownload(QTcpSocket* socket)
+{
+    // 逐个 take：状态里含独占文件句柄，移除时必须真正释放，不能只摘 map 项
+    HttpDownloadState* st = httpDownloadStates_.take(socket);
+    delete st;
+}
+
 void RDPServer::serveLoginPage(QTcpSocket* socket)
 {
     QByteArray html = loadLoginHtml();
@@ -1076,6 +1325,23 @@ void RDPServer::onHttpRequest()
         return;
     }
 
+    // === HEAD handlers ===
+    // 只有 /api/file 支持 HEAD（前端用它探测直链是否可用/取文件大小），
+    // 其余路径的 HEAD 按现状断开，避免其它路由被 HEAD 请求误触发。
+    if (requestStr.startsWith("HEAD /api/file")) {
+        QString token = extractSessionToken(request);
+        if (!authManager_->validateSession(token)) {
+            QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
+                QJsonDocument(QJsonObject { { "success", false }, { "error", "未登录" } }).toJson(QJsonDocument::Compact));
+            socket->write(resp);
+            socket->flush();
+            socket->disconnectFromHost();
+            return;
+        }
+        handleApiFileDownload(socket, path, requestStr);
+        return;
+    }
+
     // === GET handlers ===
     if (!requestStr.startsWith("GET /")) {
         socket->disconnectFromHost();
@@ -1174,6 +1440,12 @@ void RDPServer::onHttpRequest()
 
     if (path == "/api/users" || path.startsWith("/api/users?")) {
         handleApiUsers(socket);
+        return;
+    }
+
+    // 远程文件直链下载（拖拽到本机 / 直接下载均走此路由，已过上面的会话鉴权）
+    if (path == "/api/file" || path.startsWith("/api/file?")) {
+        handleApiFileDownload(socket, path, requestStr);
         return;
     }
 

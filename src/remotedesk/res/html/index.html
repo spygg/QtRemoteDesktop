@@ -179,6 +179,11 @@
             font-size: 16px;
             flex-shrink: 0;
         }
+        #sys-menu button .sys-shortcut {
+            margin-left: auto;
+            color: #8a8a93;
+            font-size: 11px;
+        }
         #sys-menu button:hover { background: rgba(255, 255, 255, 0.12); }
         #sys-menu .sep {
             height: 1px;
@@ -496,6 +501,13 @@
             cursor: grabbing;
         }
 
+        /* 拖入 local file 悬停在远端目录项上：高亮为放置目标 */
+        .file-item.file-drop-target {
+            background: rgba(74, 158, 255, 0.28);
+            outline: 1px dashed #4a9eff;
+            outline-offset: -2px;
+        }
+
         /* 拖拽传输提示遮罩（拖入上传 / 拖出下载） */
         #drop-overlay {
             position: fixed;
@@ -743,15 +755,10 @@
         </button>
         <button class="btn" id="btn-files" onclick="toggleFilePanel()"><span class="btn-icon">📁</span><span
                 class="btn-text">文件</span></button>
-        <button class="btn" id="btn-ime" onclick="cycleIme()"><span class="btn-icon">文</span><span
-                class="btn-text">输入法</span><span class="shortcut">Ctrl+Alt+I</span></button>
         <button class="btn" id="btn-users" onclick="window.open('/admin/users','_blank')"><span
                 class="btn-icon">👤</span><span class="btn-text">用户</span></button>
         <a class="btn" id="btn-shell" href="/shell" target="_blank"><span class="btn-icon">🔧</span><span
                 class="btn-text">Shell</span></a>
-        <button class="btn" id="btn-unlock" onclick="requestRemoteUnlock()"
-            title="被控端黑屏/锁屏时点击，切换回桌面"><span class="btn-icon">🔓</span><span
-                class="btn-text">解锁</span></button>
         <div id="sys-wrap">
             <button class="btn" id="btn-sys" onclick="toggleSysMenu(event)">
                 <span class="btn-icon">⏻</span>
@@ -770,6 +777,7 @@
     <div id="sys-menu">
         <button onclick="systemAction('lock')"><span class="sys-icon">🔒</span>锁屏</button>
         <button onclick="systemAction('unlock_screen')"><span class="sys-icon">🔓</span>解锁屏幕</button>
+        <button onclick="cycleIme(); document.getElementById('sys-menu').classList.remove('open');"><span class="sys-icon">文</span>输入法<span class="sys-shortcut">Ctrl+Alt+I</span></button>
         <button onclick="systemAction('show_desktop')"><span class="sys-icon">🖥️</span>显示桌面</button>
         <button onclick="systemAction('task_manager')"><span class="sys-icon">⚙️</span>任务管理器</button>
         <button onclick="systemAction('logout')"><span class="sys-icon">🚪</span>注销</button>
@@ -972,7 +980,24 @@
             mouseX: 0,
             mouseY: 0,
             keysPressed: new Set(),
-            clip: { remoteText: '', remoteMime: '', remoteData: '', lastLocalSent: '', lastOsWritten: '', pendingLocalWrite: false },
+            // 共享剪贴板状态。核心难点：**本机剪贴板往往非空但内容陈旧**（上一次 Ctrl+C
+            // 的残留），远端刚复制的内容又常常因为非安全上下文而写不进本机剪贴板。
+            // 因此除内容本身外还要记录“谁更新得晚”，粘贴时据此仲裁优先级。
+            clip: {
+                disabled: false,
+                remoteText: '',      // 远端同步来的文本
+                remoteMime: '',      // 'text/plain' | 'image/png'
+                remoteData: '',      // 远端同步来的图片（PNG base64）
+                lastLocalSent: '',   // 本机刚发出去的内容指纹（用于过滤服务端回声）
+                lastOsWritten: '',   // 最近一次成功写入本机系统剪贴板的内容指纹
+                pendingLocalWrite: false,
+                osWrittenOk: false,  // 当前这份远端内容是否已确认落进本机剪贴板
+                remoteTs: 0,         // 远端内容到达时间
+                localCopyTs: 0,      // 观察到的“本机产生新副本”时间（页面 copy / 本机粘贴）
+                blurredTs: 0,        // 最近一次窗口失焦时间（切到别的程序很可能是在那边复制）
+                lastObservedLocalText: '',
+                observedTs: 0,
+            },
         };
 
         // ==================== WebRTC 视频（libdatachannel → H.264 RTP） ====================
@@ -1824,6 +1849,10 @@
                 // 发送认证
                 send({ type: 'auth', version: '1.0' });
 
+                // 连接后立即加载远端文件列表（同时获取服务端下发的桌面路径 desktopPath，
+                // 作为本机拖入文件的默认落点）。
+                refreshFileList();
+
                 // 认证后再同步一次视频模式：onload 时 WS 可能未就绪，
                 // set_mode/signal_start 未送达服务端，导致 webrtc 模式挂着等 offer、画面停死。
                 // 此处重新应用持久化模式，命令经已建立的 WS 送达，同时重置 WebRTC 超时降级。
@@ -2062,6 +2091,9 @@
                         currentRemotePath = msg.path;
                         document.getElementById('file-path-input').value = msg.path;
                     }
+                    // 服务端推导的「桌面用户」桌面路径：本机拖入文件的默认落点
+                    // （服务常以 root 运行，不能落到 /root）。
+                    if (msg.desktopPath) state.remoteDesktopPath = msg.desktopPath;
                     break;
                 case 'file_download_start':
                     // 初始化分块下载缓冲区（限 2GB，防止异常/恶意 totalSize 一次性分配超大数组导致浏览器 OOM）
@@ -2512,55 +2544,130 @@
             canvas.addEventListener('contextmenu', e => e.preventDefault());
 
             // ---- 共享剪贴板（无缝双向同步） ----
-            // 1) 本地复制 → 远端：拦截画布上的 Ctrl+V，读取浏览器剪贴板并发送到远端，
+            // 1) 本机 → 远端：拦截画布上的 Ctrl+V，读取浏览器剪贴板并发送到远端，
             //    由服务端写入远端系统剪贴板并注入一次 Ctrl+V 让远端应用粘贴。
-            window.addEventListener('paste', (e) => {
+            //    注意**不能无条件相信读到的本机内容**：本机剪贴板常常还是上一次 Ctrl+C
+            //    留下的旧东西（非空但已过期），而远端刚复制的内容又因为非安全上下文
+            //    没能写进本机。此时真正该粘贴的是远端那份 —— 见 shouldUseRemoteClip。
+            window.addEventListener('paste', async (e) => {
                 if (state.clip.disabled) return;
                 // 原生输入框（文件路径、锁屏密码等）→ 交给浏览器原生粘贴
                 const t = e.target;
                 if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
                 if (!state.connected || !state.ws) return;
                 e.preventDefault();
-                // 图片剪贴板（截图/复制的图片）→ 统一转 PNG 后 base64 发送
+
+                // 先同步取出本机剪贴板内容（items 在 await 之后会失效）
                 const items = (e.clipboardData || {}).items || [];
+                let localBlob = null;
                 for (const it of items) {
                     if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
-                        const blob = it.getAsFile();
-                        if (!blob) continue;
-                        blobToPngBase64(blob).then((b64) => {
-                            if (!b64) return;
-                            state.clip.lastLocalSent = 'img:' + b64;
-                            state.clip.remoteMime = 'image/png';
-                            state.clip.remoteData = b64;
-                            send({ type: 'clipboard', mime: 'image/png', data: b64 });
-                            showTransferStatus('已把图片粘贴到远端', 1500);
-                        });
+                        localBlob = it.getAsFile();
+                        if (localBlob) break;
+                    }
+                }
+                const text = ((e.clipboardData || {}).getData && e.clipboardData.getData('text/plain')) || '';
+                const remoteKind = state.clip.remoteMime === 'image/png' && state.clip.remoteData
+                    ? 'image'
+                    : (state.clip.remoteText ? 'text' : '');
+
+                // 1) 本机是图片：本地截图/复制图几乎都是用户有意为之，优先本机；
+                //    除非与远端内容完全一致（那就是同一份），走远端路径等价。
+                let localB64 = '';
+                if (localBlob) localB64 = await blobToPngBase64(localBlob);
+                if (localB64) {
+                    if (remoteKind === 'image' && state.clip.remoteData === localB64) {
+                        sendClipboardToRemote('image');
+                        showTransferStatus('已把图片粘贴到远端', 1500);
                         return;
                     }
-                }
-                const text = (e.clipboardData || {}).getData('text/plain');
-                if (!text) {
-                    // 浏览器剪贴板读取受限（非安全上下文/权限拒绝）时，退回使用服务端
-                    // 同步过来的远端内容，避免"远端复制 → Ctrl+V 无内容"。
-                    if (state.clip.remoteText) {
-                        send({ type: 'clipboard', text: state.clip.remoteText });
-                        showTransferStatus('已粘贴到远端', 1500);
-                    }
+                    state.clip.localCopyTs = Date.now();
+                    state.clip.lastLocalSent = 'img:' + localB64;
+                    state.clip.remoteMime = 'image/png';
+                    state.clip.remoteData = localB64;
+                    send({ type: 'clipboard', mime: 'image/png', data: localB64 });
+                    showTransferStatus('已把图片粘贴到远端', 1500);
                     return;
                 }
+
+                // 2) 本机无图片：在本机文本与远端内容之间仲裁（本机剪贴板可能还是旧内容）
+                if (remoteKind && shouldUseRemoteClip(remoteKind, text)) {
+                    sendClipboardToRemote(remoteKind);
+                    showTransferStatus(text ? '本机剪贴板为旧内容，已改用远端内容粘贴'
+                        : '已把远端内容粘贴到远端', 2000);
+                    return;
+                }
+
+                // 3) 用本机文本
+                if (!text) return;
+                state.clip.localCopyTs = Date.now();
+                state.clip.lastObservedLocalText = text;
+                state.clip.observedTs = Date.now();
                 state.clip.lastLocalSent = text;
                 state.clip.remoteText = text;
+                state.clip.remoteMime = 'text/plain';
+                state.clip.remoteData = '';
                 send({ type: 'clipboard', text: text });
                 showTransferStatus('已粘贴到远端', 1500);
             });
+
+            // 本机发生了新的复制动作 → 记录时间，仲裁时本机内容优先级高于远端旧内容
+            window.addEventListener('copy', () => { state.clip.localCopyTs = Date.now(); });
+            window.addEventListener('cut', () => { state.clip.localCopyTs = Date.now(); });
+            // 切到别的窗口多半是去那边复制东西了：失焦之后的本机内容视为"用户新复制的"
+            window.addEventListener('blur', () => { state.clip.blurredTs = Date.now(); });
 
             // 2) 远端复制 → 本地：在下一次用户手势时把远端内容写入本地系统剪贴板
             //    （浏览器要求用户手势授权 clipboard-write，故不能在消息到达时直接写入）。
             //    注意：Ctrl+V/Ctrl+C 等带修饰键的按键同样是有效手势——此前把它们排除，
             //    导致"远端复制 → 直接 Ctrl+V"这条最常见路径永远等不到写入时机。
-            window.addEventListener('keydown', () => tryWriteRemoteClipToLocal(true));
-            window.addEventListener('mousedown', () => tryWriteRemoteClipToLocal(true));
-            window.addEventListener('pointerdown', () => tryWriteRemoteClipToLocal(true));
+            window.addEventListener('keydown', () => tryWriteRemoteClipToLocal());
+            window.addEventListener('mousedown', () => tryWriteRemoteClipToLocal());
+            window.addEventListener('pointerdown', () => tryWriteRemoteClipToLocal());
+        }
+
+        // 粘贴仲裁：本机剪贴板 vs 远端剪贴板谁优先。
+        //
+        // 背景（用户痛点）：远端复制后内容广播到浏览器，但 http 非安全上下文里没法把它
+        // 写进本机系统剪贴板，本机剪贴板里仍然留着上一次复制的旧内容（非空！）。
+        // 此时按 Ctrl+V，粘贴出来的就是完全不相干的旧东西。
+        //
+        // 判定为"该用远端内容"的全部条件：
+        //   1) 确实有远端内容，且是最近同步来的（超过 60s 认为太旧，不再抢）
+        //   2) 此后本机没发生过新的复制（页面内 copy/cut 事件、或已成功写入本机又被改过）
+        //   3) 此后页面没有失焦过（切到别的窗口通常意味着用户在那里复制了东西）
+        //   4) 本机剪贴板内容与远端不一致（一致的话用谁的都一样）
+        function shouldUseRemoteClip(kind, localText) {
+            const hasRemote = kind === 'image'
+                ? (state.clip.remoteMime === 'image/png' && !!state.clip.remoteData)
+                : (state.clip.remoteMime === 'text/plain' && !!state.clip.remoteText);
+            if (!hasRemote) return false;
+            if (!state.clip.remoteTs) return false;
+            const now = Date.now();
+            if (now - state.clip.remoteTs > 60000) return false;         // 1)
+            if (state.clip.localCopyTs > state.clip.remoteTs) return false; // 2)
+            if (state.clip.blurredTs > state.clip.remoteTs) return false;   // 3)
+            if (kind === 'text' && localText) {
+                if (localText === state.clip.remoteText) return true;     // 内容一致，用远端也等价
+                // 本机内容是我们观测到过、且出现时间晚于远端同步 → 视为用户新复制的
+                if (localText === state.clip.lastObservedLocalText
+                    && state.clip.observedTs > state.clip.remoteTs) return false;
+                return true;                                              // 4) 非空但陈旧 → 远端优先
+            }
+            return true;
+        }
+
+        // 把远端同步来的那份内容重新发往远端（服务端写进远端剪贴板并注入 Ctrl+V）。
+        // 用于"本机剪贴板是旧内容"的场景：远端剪贴板里本来就是这份，再发一次即可完成粘贴。
+        function sendClipboardToRemote(kind) {
+            if (kind === 'image' && state.clip.remoteData) {
+                state.clip.lastLocalSent = 'img:' + state.clip.remoteData;
+                send({ type: 'clipboard', mime: 'image/png', data: state.clip.remoteData });
+                return;
+            }
+            if (!state.clip.remoteText) return;
+            state.clip.lastLocalSent = state.clip.remoteText;
+            send({ type: 'clipboard', text: state.clip.remoteText });
         }
 
         function getCanvasPos(e) {
@@ -2857,16 +2964,48 @@
         let currentTransferPath = null;
         let currentTransferType = ''; // 'upload' or 'download'
 
-        // 拖出预取：remote path -> {url,mime,name}（已缓存为 blob URL，可复用/供 DownloadURL）
+        // WS 分块下载结果缓存：remote path -> {url,mime,name}（仅在无法使用直链时作为兜底路径）
         const fileFetchCache = {};
-        // 预取中的下载请求：remote path -> Promise
+        // 下载中的请求：remote path -> Promise
         const fileFetchInflight = {};
-        // 预取等待回调：remote path -> {resolve,reject,name}
+        // 下载等待回调：remote path -> {resolve,reject,name}
         const fetchWaiters = {};
-        // 拖出预取的大小上限（超过则不做预取，仅支持拖到页面触发常规下载）
-        const PREFETCH_MAX = 32 * 1024 * 1024;
         // 内部拖拽标识（区分“远端文件拖出”和“本地文件拖入”）
         const REMOTE_DRAG_MIME = 'application/x-remote-file';
+        // DownloadURL 只有 Chromium 系（Chrome/Edge/Opera）实现：拖出到桌面/资源管理器
+        // 时由浏览器按 URL 后台下载。Firefox/Safari 不认该字段，需在 dragend 兜底触发
+        // 一次常规下载，否则“拖到本机”在那些浏览器上完全无效。
+        const SUPPORTS_DOWNLOAD_URL = (function () {
+            const ua = navigator.userAgent || '';
+            if (/Firefox|FxiOS/i.test(ua)) return false;
+            return /Chrome|Chromium|Edg|OPR/i.test(ua);
+        })();
+        // 本次拖拽是否落在页面内部（落在内部则说明是“拖到页面下载”，不该再触发一次拖出下载）
+        let internalDropHappened = false;
+        let dragLastUrl = '', dragLastName = '';
+        // 拖入时当前悬停的远端目录（null = 放到当前目录）
+        let dropTargetDir = null;
+
+        // 远程文件直链下载 URL —— 服务端 GET /api/file?path=... （同源请求自动携带 session cookie）。
+        // 有了它，拖到本机不必再把整个文件经 WebSocket 预取进浏览器内存拼 Blob：
+        // 那条路受 32MB 预取上限、Firefox 不支持 DownloadURL、目录需自行打包等硬限制。
+        function remoteDirectUrl(path) {
+            try {
+                if (!/^https?:$/.test(location.protocol)) return '';
+                return location.origin + '/api/file?path=' + encodeURIComponent(path);
+            } catch (e) { return ''; }
+        }
+
+        // 触发一次同源直链下载（浏览器负责落盘/续传，不占 JS 堆内存）
+        function saveDirectUrl(url, name) {
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = name || '';
+            a.rel = 'noopener';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }
 
         function toggleFilePanel() {
             const panel = document.getElementById('file-panel');
@@ -2877,61 +3016,121 @@
         }
 
         // ==================== 共享剪贴板（无缝双向同步，文本/图片） ====================
+        // 写回本机策略：远端内容到达时是否自动覆盖本机剪贴板。
+        //  - always：直接写入（安全上下文/已授权场景，体验最接近本地）
+        //  - ask  ：弹出“同步到本机”入口，由用户决定 —— 默认值。因为本机剪贴板
+        //           通常是**非空**的，静默覆盖等于毁掉用户刚复制的东西。
+        //  - never：只在用户点“同步到本机”时才写
+        function getClipAutoSync() {
+            const v = localStorage.getItem('rd_clip_autosync');
+            return (v === 'always' || v === 'ask' || v === 'never') ? v : 'ask';
+        }
+        function setClipAutoSync(v) {
+            localStorage.setItem('rd_clip_autosync', v);
+        }
+
+        function clipFingerprint() {
+            return state.clip.remoteMime === 'image/png'
+                ? ('img:' + state.clip.remoteData)
+                : state.clip.remoteText;
+        }
+
+        function markOsWritten(fp) {
+            state.clip.lastOsWritten = fp || clipFingerprint();
+            state.clip.osWrittenOk = true;
+            state.clip.pendingLocalWrite = false;
+        }
+
         function onRemoteClipboard(msg) {
-            const isImage = msg && msg.mime === 'image/png' && msg.data;
+            const isImage = !!(msg && msg.mime === 'image/png' && msg.data);
+            const fp = isImage ? ('img:' + msg.data) : ((msg && msg.text) || '');
+            if (!fp) return;
+            // 忽略自己刚发送的内容（服务端广播回来的回声）
+            if (fp === state.clip.lastLocalSent) return;
+
             if (isImage) {
-                const fp = 'img:' + msg.data;
-                // 忽略自己刚发送的内容（服务端广播回来的回声）
-                if (fp === state.clip.lastLocalSent) return;
                 state.clip.remoteMime = 'image/png';
                 state.clip.remoteData = msg.data;
                 state.clip.remoteText = '';
-                state.clip.pendingLocalWrite = true;
-                // 无手势时立即尝试一次（已授权/安全上下文可直接写入）
-                tryWriteRemoteClipToLocal(true);
+            } else {
+                state.clip.remoteText = fp;
+                state.clip.remoteMime = 'text/plain';
+                state.clip.remoteData = '';
+            }
+            state.clip.remoteTs = Date.now();
+            state.clip.osWrittenOk = false;
+            hideClipPrompt();
+
+            const mode = getClipAutoSync();
+            if (mode === 'never') {
+                state.clip.pendingLocalWrite = false;
+                showClipPrompt(isImage ? 'image' : 'text');
                 return;
             }
-            const text = (msg && msg.text) || '';
-            if (!text) return;
-            // 忽略自己刚发送的内容（服务端广播回来的回声）
-            if (text === state.clip.lastLocalSent) return;
-            state.clip.remoteText = text;
-            state.clip.remoteMime = 'text/plain';
-            state.clip.remoteData = '';
-            state.clip.pendingLocalWrite = true;
-            // 无手势时立即尝试一次（Chrome/Firefox 若已授权可直接写入）
-            tryWriteRemoteClipToLocal(true);
-            showTransferStatus('已同步远端剪贴板，可直接 Ctrl+V', 2000);
+            if (mode === 'always') {
+                state.clip.pendingLocalWrite = true;
+                // 先无手势尝试一次（已授权/安全上下文可直接成功），失败则留待手势重试
+                tryWriteRemoteClipToLocal();
+                return;
+            }
+            // ask：不在任意按键/点击的间隙静默改写本机剪贴板，交给用户显式确认
+            state.clip.pendingLocalWrite = false;
+            showClipPrompt(isImage ? 'image' : 'text');
         }
 
-        // 将远端剪贴板内容（文本/图片）写入本地系统剪贴板；force 时无视手势要求直接尝试
-        function tryWriteRemoteClipToLocal(force) {
-            if (!state.clip.pendingLocalWrite) return;
+        // 将远端剪贴板内容写入本机系统剪贴板。成功返回 true。
+        // 图片需安全上下文 + ClipboardItem；http 下只能靠下面的面板让用户手动另存。
+        function writeRemoteClipToLocal() {
             const isImage = state.clip.remoteMime === 'image/png';
-            const fp = isImage ? ('img:' + state.clip.remoteData) : state.clip.remoteText;
-            if (!fp) { state.clip.pendingLocalWrite = false; return; }
-            if (fp === state.clip.lastOsWritten) {
-                state.clip.pendingLocalWrite = false;
-                return;
-            }
-            const done = () => {
-                state.clip.lastOsWritten = fp;
-                state.clip.pendingLocalWrite = false;
-            };
+            const fp = clipFingerprint();
+            if (!fp) return Promise.resolve(false);
             if (isImage) {
-                writeImageToOsClipboard(state.clip.remoteData).then((ok) => {
-                    if (ok) { done(); return; }
-                    // HTTP 非安全上下文无法程序化写入图片剪贴板 → 弹出预览/下载面板（只弹一次）
-                    showRemoteImagePanel(state.clip.remoteData);
-                    done();
+                return writeImageToOsClipboard(state.clip.remoteData).then((ok) => {
+                    if (ok) markOsWritten(fp);
+                    return ok;
                 });
-                return;
             }
             if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(state.clip.remoteText).then(done).catch(() => fallbackWrite(state.clip.remoteText, done));
-            } else {
-                fallbackWrite(state.clip.remoteText, done);
+                return navigator.clipboard.writeText(state.clip.remoteText)
+                    .then(() => { markOsWritten(fp); return true; })
+                    .catch(() => {
+                        const ok = !!fallbackWrite(state.clip.remoteText);
+                        if (ok) markOsWritten(fp);
+                        return ok;
+                    });
             }
+            const ok = !!fallbackWrite(state.clip.remoteText);
+            if (ok) markOsWritten(fp);
+            return Promise.resolve(ok);
+        }
+
+        // 在用户手势（按键/点击/显式按钮）中把待写入的远端内容落进本机剪贴板
+        function tryWriteRemoteClipToLocal() {
+            if (!state.clip.pendingLocalWrite) return;
+            const isImage = state.clip.remoteMime === 'image/png';
+            const fp = clipFingerprint();
+            if (!fp) { state.clip.pendingLocalWrite = false; return; }
+            if (fp === state.clip.lastOsWritten && state.clip.osWrittenOk) {
+                state.clip.pendingLocalWrite = false;
+                return;
+            }
+            writeRemoteClipToLocal().then((ok) => {
+                if (ok) {
+                    hideClipPrompt();
+                    showTransferStatus('已同步远端剪贴板到本机，可直接 Ctrl+V', 2000);
+                    return;
+                }
+                if (isImage) {
+                    // http 下无法写图片到剪贴板 → 给预览+下载入口（同一份内容只弹一次）
+                    state.clip.lastOsWritten = fp;
+                    state.clip.pendingLocalWrite = false;
+                    showRemoteImagePanel(state.clip.remoteData);
+                } else {
+                    // 文本也写不进去（典型：非安全上下文且未授权）→ 保留待写标记，
+                    // 下次手势重试；同时给显式入口让用户主动点一次。
+                    showClipPrompt('text');
+                }
+            });
         }
 
         // 把 base64 PNG 写入本地图片剪贴板（需安全上下文 + ClipboardItem 支持）
@@ -2989,8 +3188,8 @@
         }
 
         // 兜底：http://IP 非安全上下文没有 navigator.clipboard，用隐藏 textarea + execCommand('copy')。
-        // execCommand 必须在用户手势内执行才会成功，失败则保持 pending，等下一次手势重试。
-        function fallbackWrite(text, done) {
+        // execCommand 必须在用户手势内执行才会成功；返回是否写入成功，失败则保持 pending 等待下次手势。
+        function fallbackWrite(text) {
             try {
                 const ta = document.createElement('textarea');
                 ta.value = text;
@@ -3003,8 +3202,57 @@
                 ta.select();
                 const ok = document.execCommand('copy');
                 ta.remove();
-                if (ok) { done(); return; }
-            } catch (e) { }
+                return !!ok;
+            } catch (e) { return false; }
+        }
+
+        // ==================== 远端剪贴板 → 本机：显式同步入口 ====================
+        // 远端内容到来时不静默覆盖本机剪贴板（本机通常非空），而是给出这条带按钮的提示：
+        // 用户点“同步到本机”本身就是一次真实手势，execCommand/clipboard.writeText 才能成功。
+        function showClipPrompt(kind) {
+            let panel = document.getElementById('clip-sync-prompt');
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.id = 'clip-sync-prompt';
+                panel.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:64px;z-index:99998;'
+                    + 'background:#24292e;color:#eee;border:1px solid #4a9eff;border-radius:8px;padding:10px 12px;'
+                    + 'box-shadow:0 4px 18px rgba(0,0,0,.55);font-size:12px;max-width:420px;display:none;';
+                document.body.appendChild(panel);
+            }
+            const preview = kind === 'image'
+                ? '远端剪贴板：图片'
+                : '远端剪贴板：' + (state.clip.remoteText.length > 24
+                    ? state.clip.remoteText.slice(0, 24) + '…' : state.clip.remoteText);
+            panel.innerHTML = '<div style="margin-bottom:8px;">' + preview + '</div>'
+                + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
+                + '<button data-act="once" style="flex:1;background:#4a9eff;color:#fff;border:0;padding:6px 10px;border-radius:4px;cursor:pointer;">同步到本机</button>'
+                + '<button data-act="always" style="background:#333;color:#ddd;border:0;padding:6px 8px;border-radius:4px;cursor:pointer;">以后自动同步</button>'
+                + '<button data-act="never" style="background:#333;color:#ddd;border:0;padding:6px 8px;border-radius:4px;cursor:pointer;">仅手动</button>'
+                + '<button data-act="close" style="background:transparent;color:#999;border:0;padding:6px 6px;cursor:pointer;">✕</button>'
+                + '</div>'
+                + '<div style="margin-top:6px;color:#8ab;font-size:11px;">不同步时，在本页按 Ctrl+V 仍会优先粘贴远端内容</div>';
+            panel.style.display = 'block';
+
+            panel.querySelectorAll('button').forEach((btn) => {
+                btn.onclick = () => {
+                    const act = btn.getAttribute('data-act');
+                    if (act === 'always') setClipAutoSync('always');
+                    if (act === 'never') setClipAutoSync('never');
+                    if (act === 'once' || act === 'always') {
+                        state.clip.pendingLocalWrite = true;
+                        tryWriteRemoteClipToLocal();
+                    }
+                    if (act === 'never') hideClipPrompt();
+                };
+            });
+            clearTimeout(showClipPrompt._t);
+            // 自动提示不应长期霸占屏幕
+            showClipPrompt._t = setTimeout(() => { if (getClipAutoSync() !== 'never') hideClipPrompt(); }, 25000);
+        }
+
+        function hideClipPrompt() {
+            const panel = document.getElementById('clip-sync-prompt');
+            if (panel) panel.style.display = 'none';
         }
 
         function navigateTo(path) {
@@ -3066,15 +3314,18 @@
                 div.className = 'file-item';
                 div.innerHTML = '<span class="icon">📁</span><span class="name"></span><span class="size"><button class="file-action-btn">⬇</button></span>';
                 div.querySelector('.name').textContent = item.name;
-                div.querySelector('.name').ondblclick = () => navigateTo(fullPath);
-                div.querySelector('.file-action-btn').onclick = (e) => { e.stopPropagation(); downloadFile(item.name); };
+                // 单击文件夹整行即进入该目录（下载按钮通过 stopPropagation 不会触发）
+                div.onclick = () => navigateTo(fullPath);
+                div.querySelector('.file-action-btn').onclick = (e) => { e.stopPropagation(); downloadFile(item.name, fullPath, true); };
                 makeRemoteItemDraggable(div, item);
+                makeDirectoryDropTarget(div, fullPath);
                 container.appendChild(div);
             }
             for (const item of files) {
+                const filePath = joinPath(currentRemotePath, item.name);
                 const div = document.createElement('div');
                 div.className = 'file-item';
-                div.onclick = () => downloadFile(item.name);
+                div.onclick = () => downloadFile(item.name, filePath, false);
                 div.innerHTML = '<span class="icon">📄</span><span class="name"></span><span class="size"></span>';
                 div.querySelector('.name').textContent = item.name;
                 div.querySelector('.size').textContent = formatSize(item.size);
@@ -3083,41 +3334,90 @@
             }
         }
 
-        // 让远端文件/目录项可拖出：拖到页面即下载；若已预取则附带 DownloadURL，
-        // Chrome/Edge 下可直接拖到系统桌面/文件管理器另存。
+        // 让远端文件/目录项可拖出。
+        // Chrome/Edge：dragstart 里写 DownloadURL 指向服务端直链 `/api/file?path=...`，
+        //   拖到桌面/资源管理器时由浏览器后台下载落盘 —— 不受文件大小限制，也不需要
+        //   事先把文件内容预取进浏览器内存（旧的 blob 方案超过 32MB 就只能放弃）。
+        // Firefox/Safari：不识别 DownloadURL，若最终没有落到本页内部的放置目标上，
+        //   在 dragend 时用同一直链触发一次常规下载，保证“拖到本机”总是有结果。
         function makeRemoteItemDraggable(div, item) {
             div.draggable = true;
             div.addEventListener('dragstart', (e) => {
                 const path = joinPath(currentRemotePath, item.name);
                 e.dataTransfer.effectAllowed = 'copy';
-                e.dataTransfer.setData(REMOTE_DRAG_MIME, item.name);
+                // 内部拖放携带完整远端路径（此前只带文件名，导致只能下载当前目录下的同名文件）
+                e.dataTransfer.setData(REMOTE_DRAG_MIME, path);
                 e.dataTransfer.setData('text/plain', item.name);
-                const cached = fileFetchCache[path];
-                if (cached && cached.url) {
+                internalDropHappened = false;
+                const url = remoteDirectUrl(path);
+                if (url) {
+                    // DownloadURL 格式：<mime>:<filename>:<url>
+                    // 目录由服务端打成 tar 返回，因此文件名补 .tar、类型用 x-tar，避免
+                    // 落到桌面后是个没有扩展名、打不开的裸文件。
+                    const dlName = item.isDir ? item.name + '.tar' : item.name;
+                    const dlMime = item.isDir ? 'application/x-tar' : 'application/octet-stream';
                     try {
-                        e.dataTransfer.setData('DownloadURL',
-                            (cached.mime || 'application/octet-stream') + ':' + item.name + ':' + cached.url);
-                    } catch (err) { /* 某些浏览器不支持 DownloadURL，忽略 */ }
+                        e.dataTransfer.setData('DownloadURL', dlMime + ':' + dlName + ':' + url);
+                    } catch (err) { /* 个别浏览器禁止写该类型，忽略 */ }
+                    dragLastUrl = url;
+                    dragLastName = dlName;
+                } else {
+                    dragLastUrl = '';
                 }
             });
-            // 按下即预取（大小受限），使拖出到系统桌面时 blob 已就绪
-            div.addEventListener('pointerdown', () => {
-                if (!item.isDir) prefetchRemoteFile(item.name, item.size);
+            div.addEventListener('dragend', () => {
+                if (internalDropHappened || !dragLastUrl) { dragLastUrl = ''; return; }
+                // 没有 DownloadURL 支持 → 拖出到系统桌面不会有任何效果，兜底触发常规下载
+                if (!SUPPORTS_DOWNLOAD_URL) {
+                    saveDirectUrl(dragLastUrl, dragLastName);
+                    showTransferStatus('已下载（本浏览器不支持拖到桌面，已保存到下载目录）', 3000);
+                }
+                dragLastUrl = '';
             });
         }
 
-        // 预取远端文件为 blob URL（供拖出）；已有缓存/进行中则跳过
-        function prefetchRemoteFile(fileName, size) {
-            if (!state.connected || !state.ws) return;
-            if (size && size > PREFETCH_MAX) return;
-            const path = joinPath(currentRemotePath, fileName);
-            if (fileFetchCache[path] || fileFetchInflight[path]) return;
+        // 让远端目录项成为“拖入”的放置目标：本地文件拖到某个子目录上释放 → 上传到该子目录
+        // （此前无论拖到哪里都只能进当前目录，要放进子目录必须先切进去再拖一次）。
+        function makeDirectoryDropTarget(div, dirPath) {
+            div.dataset.dirPath = dirPath;
+            const clear = () => {
+                div.classList.remove('file-drop-target');
+                if (dropTargetDir === dirPath) dropTargetDir = null;
+            };
+            div.addEventListener('dragover', (e) => {
+                if (!isLocalFileDrag(e)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+                dropTargetDir = dirPath;
+                div.classList.add('file-drop-target');
+                showDropOverlay('松开以上传到 ' + dirPath);
+            });
+            div.addEventListener('dragleave', clear);
+            div.addEventListener('drop', (e) => {
+                if (!isLocalFileDrag(e)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                clear();
+                hideDropOverlay();
+                internalDropHappened = true;
+                collectDroppedFiles(e.dataTransfer).then((list) => {
+                    if (list && list.length) handleFileUpload(list, dirPath);
+                });
+            });
+        }
+
+        // 经 WebSocket 分块下载（直链不可用时的兜底：例如页面不是 http(s) 打开）
+        function fetchRemoteFileViaWs(path) {
+            if (fileFetchCache[path]) return Promise.resolve(fileFetchCache[path]);
+            if (fileFetchInflight[path]) return fileFetchInflight[path];
             const p = new Promise((resolve, reject) => {
-                fetchWaiters[path] = { resolve: resolve, reject: reject, name: fileName };
-                send({ type: 'file_download', path: path, name: fileName });
+                fetchWaiters[path] = { resolve: resolve, reject: reject, name: path.split('/').pop() };
+                send({ type: 'file_download', path: path, name: path.split('/').pop() });
             });
             fileFetchInflight[path] = p;
             p.catch(() => { }).then(() => { delete fileFetchInflight[path]; });
+            return p;
         }
 
         function saveBlobUrl(url, name) {
@@ -3127,21 +3427,22 @@
             a.click();
         }
 
-        async function downloadFile(fileName) {
-            const filePath = joinPath(currentRemotePath, fileName);
-            // 已预取或正在预取 → 复用缓存，避免重复传输
-            if (fileFetchCache[filePath]) {
-                saveBlobUrl(fileFetchCache[filePath].url, fileName);
+        async function downloadFile(fileName, fullPath, isDir) {
+            const filePath = fullPath || joinPath(currentRemotePath, fileName);
+            // 同源直链下载优先：由浏览器负责落盘与续传，文件大小不再受 JS 内存限制，
+            // 页面也不必先把整份数据拉回来（旧 WS 分块路径保留为兜底）。
+            const saveName = isDir ? fileName.replace(/[/\\]+$/, '') + '.tar' : fileName;
+            const url = remoteDirectUrl(filePath);
+            if (url) {
+                saveDirectUrl(url, saveName);
                 return;
             }
-            if (fileFetchInflight[filePath]) {
-                try {
-                    const r = await fileFetchInflight[filePath];
-                    saveBlobUrl(r.url, fileName);
-                    return;
-                } catch (err) { /* 预取失败 → 退回常规下载 */ }
+            try {
+                const r = await fetchRemoteFileViaWs(filePath);
+                saveBlobUrl(r.url, saveName);
+            } catch (err) {
+                showTransferStatus('下载失败: ' + fileName, 3000);
             }
-            send({ type: 'file_download', path: filePath, name: fileName });
         }
 
         // ==================== 拖拽文件传输（双向） ====================
@@ -3232,56 +3533,76 @@
                 if (!isLocalFileDrag(e) && !isRemoteFileDrag(e)) return;
                 e.preventDefault();
                 dragDepth++;
-                showDropOverlay(isRemoteFileDrag(e) ? '松开以从远端下载该文件' : '松开以上传到远端当前目录');
+                const localDefault = dropTargetDir || state.remoteDesktopPath || currentRemotePath;
+                showDropOverlay(isRemoteFileDrag(e) ? '松开以从远端下载该文件' : '松开以上传到 ' + localDefault);
             });
             document.addEventListener('dragover', (e) => {
                 if (!state.connected) return;
                 if (!isLocalFileDrag(e) && !isRemoteFileDrag(e)) return;
                 e.preventDefault();
                 if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+                // 悬停在远端目录项上时由该元素自己处理提示文案（含目标路径），这里不再覆盖
+                if (!e.target || !e.target.closest || !e.target.closest('.file-item[data-dir-path]')) {
+                    const localDefault = dropTargetDir || state.remoteDesktopPath || currentRemotePath;
+                    showDropOverlay(isRemoteFileDrag(e) ? '松开以从远端下载该文件'
+                        : '松开以上传到 ' + localDefault);
+                }
             });
             document.addEventListener('dragleave', (e) => {
                 if (dragDepth <= 0) return;
                 dragDepth--;
-                if (dragDepth === 0) hideDropOverlay();
+                if (dragDepth === 0) { dropTargetDir = null; hideDropOverlay(); }
             });
             document.addEventListener('drop', (e) => {
                 if (!state.connected) return;
                 if (!isLocalFileDrag(e) && !isRemoteFileDrag(e)) return;
                 e.preventDefault();
+                const targetDir = dropTargetDir;
+                dropTargetDir = null;
                 hideDropOverlay();
+                internalDropHappened = true;
                 if (isRemoteFileDrag(e)) {
-                    const name = e.dataTransfer.getData(REMOTE_DRAG_MIME) ||
+                    // REMOTE_DRAG_MIME 里带的是完整远端路径，落在页面内即触发下载
+                    const remotePath = e.dataTransfer.getData(REMOTE_DRAG_MIME) ||
                         e.dataTransfer.getData('text/plain');
-                    if (name) downloadFile(name);
+                    if (remotePath) {
+                        const nm = remotePath.split('/').pop() || remotePath;
+                        downloadFile(nm, remotePath, false);
+                    }
                     return;
                 }
                 const dt = e.dataTransfer;
                 collectDroppedFiles(dt).then((list) => {
-                    if (list && list.length) handleFileUpload(list);
+                    if (list && list.length)
+                        handleFileUpload(list, targetDir || state.remoteDesktopPath || currentRemotePath);
                 });
             });
         }
 
-        function handleFileUpload(fileList) {
+        function handleFileUpload(fileList, targetDir) {
+            // 本机拖入/选择文件的默认落点：拖到目录项上 → 该目录；否则落到桌面用户桌面
+            // （state.remoteDesktopPath 由服务端下发，避免 root 服务把文件写进 /root）。
+            const dir = targetDir || state.remoteDesktopPath || currentRemotePath;
             for (const file of fileList) {
-                uploadQueue.push(file);
+                uploadQueue.push({ file: file, dir: dir });
             }
             document.getElementById('file-upload-input').value = '';
+            document.getElementById('folder-upload-input').value = '';
             processUploadQueue();
         }
 
         function processUploadQueue() {
             if (isUploading || uploadQueue.length === 0) return;
             isUploading = true;
-            const file = uploadQueue.shift();
-            uploadFileChunked(file);
+            const job = uploadQueue.shift();
+            uploadFileChunked(job.file, job.dir);
         }
 
-        async function uploadFileChunked(file) {
+        async function uploadFileChunked(file, targetDir) {
+            const baseDir = targetDir || currentRemotePath;
             // 拖拽上传目录时 _relPath 携带相对路径（含子目录），远端据此建同名结构
             const relativePath = file._relPath || file.webkitRelativePath || file.name;
-            const remotePath = joinPath(currentRemotePath, relativePath);
+            const remotePath = joinPath(baseDir, relativePath);
             currentTransferPath = remotePath;
             currentTransferType = 'upload';
             showTransferMonitor('⬆', file.name, 0, file.size, 0);

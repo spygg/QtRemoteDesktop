@@ -245,9 +245,13 @@ int HelperProcess::run(int argc, char* argv[])
                     cb->setText(text);
                 lastClipText = text;  // 避免监听到自己的写入后重复上报
                 if (!locked) {
-                    inputMgr.injectKeyboard(86, "KeyV", true, true, false, false, false, false);
-                    inputMgr.injectKeyboard(86, "KeyV", false, true, false, false, false, false);
-                    inputMgr.updateModifiers(false, false, false);
+                    // setText 后延时注入 Ctrl+V：X11 下剪贴板 owner 就绪有短暂异步窗口，
+                    // 立即注入可能让远端应用粘贴到旧内容
+                    QTimer::singleShot(250, &app, [&inputMgr]() {
+                        inputMgr.injectKeyboard(86, "KeyV", true, true, false, false, false, false);
+                        inputMgr.injectKeyboard(86, "KeyV", false, true, false, false, false, false);
+                        inputMgr.updateModifiers(false, false, false); // 释放 Ctrl
+                    });
                 }
                 return;
             }
