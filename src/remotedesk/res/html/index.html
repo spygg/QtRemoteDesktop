@@ -895,8 +895,8 @@
                 上传文件</button>
             <button class="file-action-btn" onclick="document.getElementById('folder-upload-input').click()">⬆
                 上传文件夹</button>
-            <input type="file" id="file-upload-input" multiple onchange="handleFileUpload(this.files)">
-            <input type="file" id="folder-upload-input" webkitdirectory onchange="handleFileUpload(this.files)">
+            <input type="file" id="file-upload-input" multiple onchange="handleFileUpload(this.files, document.getElementById('file-path-input').value.replace(/\\/g, '/'))">
+            <input type="file" id="folder-upload-input" webkitdirectory onchange="handleFileUpload(this.files, document.getElementById('file-path-input').value.replace(/\\/g, '/'))">
         </div>
     </div>
     <div id="transfer-status"></div>
@@ -3627,7 +3627,7 @@
             currentTransferPath = remotePath;
             currentTransferType = 'upload';
             showTransferMonitor('⬆', file.name, 0, file.size, 0);
-            showTransferStatus(`上传: ${file.name} (0%)`);
+            showTransferStatus(`上传: ${file.name} → ${baseDir} (0%)`);
 
             try {
                 // Send start message
@@ -3664,7 +3664,7 @@
                 }
 
                 send({ type: 'file_upload_done', path: remotePath, name: file.name });
-                showTransferStatus(`上传完成: ${file.name}`, 2000);
+                showTransferStatus(`上传完成: ${file.name} → ${baseDir}`, 2000);
                 setTimeout(hideTransferMonitor, 500);
             } catch (err) {
                 console.error('Upload failed:', err);
