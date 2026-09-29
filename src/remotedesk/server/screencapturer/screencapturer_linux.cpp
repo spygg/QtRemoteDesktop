@@ -77,8 +77,9 @@ int ScreenCapturer::realLockState()
         if (login1.isValid()) {
             const QDBusMessage reply = login1.call(QStringLiteral("ListSessions"));
             if (reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty()) {
-                bool anyQueried = false;
+                bool anyQueried = false;   // 读到过有效用户图形会话的 LockedHint
                 bool anyLocked = false;
+                bool anyGreeter = false;   // 系统停在登录界面（lightdm/gdm greeter 会话 active）
                 const QDBusArgument arr = reply.arguments().first().value<QDBusArgument>();
                 arr.beginArray();
                 while (!arr.atEnd()) {
@@ -89,16 +90,39 @@ int ScreenCapturer::realLockState()
                     QDBusObjectPath spath;
                     arr >> sid >> suid >> uname >> spath;
                     arr.endStructure();
-                    if (suid != uid || spath.path().isEmpty())
+                    if (spath.path().isEmpty())
+                        continue;
+                    // 普通桌面进程只看自己的会话；root 服务（systemd 自启，uid=0，
+                    // 本身没有会话）必须全局判定，否则永远查不到 → 无法区分
+                    // "锁屏" 与 "停在登录界面（greeter）"。
+                    if (uid != 0 && suid != uid)
                         continue;
                     QDBusInterface sess(QStringLiteral("org.freedesktop.login1"),
                                         spath.path(),
                                         QStringLiteral("org.freedesktop.login1.Session"), sys);
                     if (!sess.isValid())
                         continue;
+                    const QString cls = sess.property("Class").toString();
+                    const QString st = sess.property("State").toString();
+                    if (cls == QLatin1String("greeter")) {
+                        // greeter 会话没有 LockedHint 语义；active 即代表前台
+                        // 停在登录界面（开机未登录/注销/lightdm 型锁屏切 VT）。
+                        if (st == QLatin1String("active"))
+                            anyGreeter = true;
+                        continue;
+                    }
                     const QVariant v = sess.property("LockedHint");
                     if (!v.isValid())
                         continue;
+                    if (uid == 0) {
+                        // root 服务：只认 active 的图形用户会话（x11/wayland）。
+                        // SSH（tty 类型）等会话与屏幕锁定无关，不能把
+                        // "SSH 在线、桌面停在登录界面" 误判成 "未锁定"。
+                        const QString type = sess.property("Type").toString();
+                        if (st != QLatin1String("active") ||
+                            (type != QLatin1String("x11") && type != QLatin1String("wayland")))
+                            continue;
+                    }
                     anyQueried = true;
                     if (v.toBool())
                         anyLocked = true;
@@ -106,6 +130,8 @@ int ScreenCapturer::realLockState()
                 arr.endArray();
                 if (anyQueried)
                     state = anyLocked ? 1 : 0;
+                else if (anyGreeter)
+                    state = 1;   // 无 active 图形用户会话 + 登录界面在前台 = 锁定语义
             }
         }
     }
