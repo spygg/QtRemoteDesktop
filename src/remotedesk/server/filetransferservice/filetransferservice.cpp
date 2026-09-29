@@ -135,8 +135,41 @@ QString FileTransferService::sanitizeFilePath(const QString& path)
     if (path.isEmpty() || path == "/" || path == "\\")
         return rootCanon;
 
-    // 以根目录为基准解析（相对路径、".." 都相对 root 解析，无法逃出）
-    QString abs  = QDir::cleanPath(root.absoluteFilePath(path));
+#ifndef Q_OS_WIN
+    // 拒绝 Windows 盘符风格的路径（"C:"、"C:/"、"C:\..."）。':' 在 Linux 文件名里
+    // 合法，Windows 客户端误传的盘符路径会在受限根里创建出名为 "C:" 的垃圾目录
+    // （90 上实测出现过 /home/neardi/C:）。
+    for (int i = 0; i + 1 < path.size(); ++i) {
+        if (path.at(i + 1) != QLatin1Char(':') || !path.at(i).isLetter())
+            continue;
+        const bool atBoundary = (i == 0)
+                                || path.at(i - 1) == QLatin1Char('/')
+                                || path.at(i - 1) == QLatin1Char('\\');
+        const QChar after = (i + 2 < path.size()) ? path.at(i + 2) : QChar();
+        const bool driveForm = after.isNull() || after == QLatin1Char('/')
+                               || after == QLatin1Char('\\');
+        if (atBoundary && driveForm) {
+            qWarning() << "FileTransfer: windows drive-style path rejected:" << path;
+            return QString();
+        }
+    }
+#endif
+
+    // 形如 "/xxx" 的路径有两种解读：文件系统绝对路径，或"虚拟根下的子目录"。
+    // 前端把受限根当虚拟根用（"/" 已映射到根），页面状态未同步/手输路径时会发来
+    // "/sounding_server" 这类虚拟路径——按文件系统绝对路径解释会因越界被拒，
+    // 错误响应又把原路径回显给前端，造成路径框显示 "/sounding_server" 的假象。
+    // 这里优先按虚拟根解释（root/xxx 存在即采用）；否则退回文件系统绝对路径的
+    // 原有解释。两种解释最终都要过下面的包含性检查，不会引入越权。
+    QString abs;
+    if (rootCanon != "/"
+            && (path.startsWith(QLatin1Char('/')) || path.startsWith(QLatin1Char('\\')))) {
+        const QString candidate = QDir::cleanPath(rootCanon + QLatin1Char('/') + path);
+        if (QFileInfo::exists(candidate))
+            abs = candidate;
+    }
+    if (abs.isEmpty())
+        abs = QDir::cleanPath(root.absoluteFilePath(path));
     QString canon = QFileInfo(abs).canonicalFilePath();
     if (canon.isEmpty()) {
         // 目标尚不存在（典型：上传新文件 / 拖拽上传多级子目录）→ 向上回溯到最近的
@@ -272,6 +305,7 @@ void FileTransferService::processFileList(const QString& clientId, const QString
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_list"},
             {"path", "/"},
+            {"realPath", "/"},
             {"items", items},
             {"desktopPath", defaultUploadDir()}
         });
@@ -315,6 +349,7 @@ void FileTransferService::processFileList(const QString& clientId, const QString
     emit jsonResponse(clientId, QJsonObject{
         {"type", "file_list"},
         {"path", QDir::toNativeSeparators(dir.absolutePath())},
+        {"realPath", QDir::toNativeSeparators(dir.absolutePath())},
         {"items", items},
         {"desktopPath", defaultUploadDir()}
     });
@@ -351,6 +386,7 @@ void FileTransferService::processFileList(const QString& clientId, const QString
     emit jsonResponse(clientId, QJsonObject{
         {"type", "file_list"},
         {"path", dir.absolutePath()},
+        {"realPath", dir.absolutePath()},
         {"items", items},
         {"desktopPath", defaultUploadDir()}
     });

@@ -1354,7 +1354,8 @@ void RDPServer::onHttpRequest()
     // Unprotected GET routes
     if (path == "/login" || path.startsWith("/login?")) {
         QByteArray html = loadLoginHtml();
-        QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html);
+        QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html,
+            "Cache-Control: no-cache");
         socket->write(resp);
         socket->flush();
         socket->disconnectFromHost();
@@ -1467,7 +1468,8 @@ void RDPServer::onHttpRequest()
         html = loadHtmlResource();
     }
 
-    QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html);
+    QByteArray resp = buildHttpResponse(200, "OK", "text/html; charset=utf-8", html,
+        "Cache-Control: no-cache");
     socket->write(resp);
     socket->flush();
     socket->disconnectFromHost();

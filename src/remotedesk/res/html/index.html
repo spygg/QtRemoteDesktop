@@ -2087,9 +2087,12 @@
                     break;
                 case 'file_list':
                     if (msg.items) renderFileList(msg.items);
-                    if (msg.path) {
-                        currentRemotePath = msg.path;
-                        document.getElementById('file-path-input').value = msg.path;
+                    if (msg.path || msg.realPath) {
+                        // 优先用服务端下发的真实绝对路径 realPath，避免把虚拟根下的
+                        // 子目录显示成 "/Documents" 这种缺失 home 前缀的假路径。
+                        const disp = msg.realPath || msg.path;
+                        currentRemotePath = disp;
+                        document.getElementById('file-path-input').value = disp;
                     }
                     // 服务端推导的「桌面用户」桌面路径：本机拖入文件的默认落点
                     // （服务常以 root 运行，不能落到 /root）。
