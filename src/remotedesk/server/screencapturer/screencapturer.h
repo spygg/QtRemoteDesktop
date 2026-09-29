@@ -2,6 +2,7 @@
 #ifndef SCREEN_CAPTURER_H
 #define SCREEN_CAPTURER_H
 
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
@@ -199,6 +200,17 @@ private:
     PlatformCapturer* waylandCapturer_ = nullptr;
     bool useWayland_ = false;
     int captureFailCount_ = 0;
+
+    // 真实锁屏状态查询（logind LockedHint 优先，gnome-screensaver 兜底），
+    // 带 2s 缓存。返回 1=已锁屏 0=未锁屏 -1=查询失败（调用方回退旧启发式）。
+    // 背景：Wayland 会话下服务端若回落 XWayland，采集会持续失败，旧的
+    // "失败>=5 次 ⇒ 锁屏"启发式会误报锁屏（前端弹出假解锁界面）。
+    int realLockState();
+    // "采集失败/黑帧"时是否允许声明锁屏：查询到未锁屏 → 返回 false 并纠正
+    // 既有状态；已锁屏或查询失败 → 返回 true 维持旧行为。
+    bool shouldDeclareLocked();
+    int cachedLockState_ = -1;
+    QElapsedTimer lockQueryTimer_;
 #endif
 };
 

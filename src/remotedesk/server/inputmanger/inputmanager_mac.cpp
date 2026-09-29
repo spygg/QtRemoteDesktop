@@ -148,10 +148,11 @@ void InputManager::injectWheel(int delta)
     CFRelease(event);
 }
 
-void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar)
+void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar, bool meta)
 {
     Q_UNUSED(useVkFallback);
-    Q_UNUSED(isChar);
+    Q_UNUSED(isChar);
+    Q_UNUSED(meta);
     updateModifiers(ctrl, alt, shift);
 
     CGKeyCode macKey = domCodeToMacKeycode(code);

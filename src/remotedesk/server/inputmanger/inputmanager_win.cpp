@@ -76,7 +76,7 @@ void InputManager::sendModifierEvent(int vk, bool isDown)
     sendInputChecked(1, &input, sizeof(INPUT));
 }
 
-void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar)
+void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar, bool meta)
 {
     // 优先处理 isChar 模式：直接发送 Unicode 字符（中文输入法提交的最终字符）
     if (isChar && isDown && keycode > 0) {
@@ -96,6 +96,13 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
     }
 
     updateModifiers(ctrl, alt, shift);
+
+    // Meta(Win 键)修饰键同步：与 Linux 端同语义，前端 e.metaKey 随 keydown
+    // 上报、keyup 缺省视为释放。VK_LWIN 0x5B / VK_RWIN 0x5C。
+    if (meta != metaDown_) {
+        sendModifierEvent(VK_LWIN, meta);
+        metaDown_ = meta;
+    }
 
     INPUT input = {};
     input.type = INPUT_KEYBOARD;

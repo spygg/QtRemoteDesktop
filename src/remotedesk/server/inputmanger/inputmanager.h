@@ -28,7 +28,7 @@ public:
     void setScreenSize(int w, int h);
     void injectMouseButton(int x, int y, int button, bool isDown);
     void injectWheel(int delta);
-    void injectKeyboard(int keycode, const QString &code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback = false, bool isChar = false);
+    void injectKeyboard(int keycode, const QString &code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback = false, bool isChar = false, bool meta = false);
     void updateModifiers(bool ctrl, bool alt, bool shift);
 
     // 当前指针在屏幕上的坐标（服务模式无 QGuiApplication 时 QCursor::pos() 失效，
@@ -42,6 +42,11 @@ public:
     bool initUinput();
     void destroyUinput();
     bool isUinputActive() const { return uinputFd_ >= 0; }
+    // 桌面会话是否为 Wayland：WAYLAND_DISPLAY 已设，或 $XDG_RUNTIME_DIR 下存在
+    // 合成器 socket（wayland-*，SSH/systemd 启动的进程常缺 WAYLAND_DISPLAY 但
+    // socket 仍在）。决定输入通道：Wayland 桌面必须走 uinput（内核 evdev，
+    // mutter/libinput 直接读取）；XTest 只注入到 XWayland，Wayland 桌面不可见。
+    static bool desktopSessionIsWayland();
     // 捕获启动后预热焦点窗口，避免首次按键才做窗口树遍历（造成明显首键延迟）
     void primeFocusWindow();
     // 屏保/锁屏状态开关：只有锁屏（或安全输入）会话才允许 focusLockScreenWindow
@@ -106,6 +111,7 @@ private:
     bool ctrlDown_  = false;
     bool altDown_   = false;
     bool shiftDown_ = false;
+    bool metaDown_  = false;  // Meta/Super/Win 键状态（前端 e.metaKey 随 keydown 上报）
 };
 
 #endif

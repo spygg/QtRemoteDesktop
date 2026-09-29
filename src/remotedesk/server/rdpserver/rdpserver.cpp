@@ -2814,8 +2814,9 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 bool alt = input["alt"].toBool();
                 bool shift = input["shift"].toBool();
                 bool isChar = input["isChar"].toBool();
+                bool meta = input["meta"].toBool();
                 // 按键逐条打日志会刷爆日志文件，不再记录（需要排查时临时加回）
-                inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar);
+                inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar, meta);
                 if (screenCapturer_) screenCapturer_->forceNextFrame();
             } else if (type == "wheel") {
                 int delta = input["delta"].toInt();
@@ -2891,7 +2892,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             bool alt = input["alt"].toBool();
             bool shift = input["shift"].toBool();
             bool isChar = input["isChar"].toBool();
-            inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar);
+            bool meta = input["meta"].toBool();
+            inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar, meta);
         } else if (type == "wheel") {
             int delta = input["delta"].toInt();
             inputManager_->injectWheel(delta);

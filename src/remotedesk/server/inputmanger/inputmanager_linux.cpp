@@ -2,6 +2,7 @@
 #include <QCursor>
 #include <QDebug>
 #include <QDateTime>
+#include <QDir>
 #include <QGuiApplication>
 #include <QScreen>
 
@@ -215,6 +216,25 @@ namespace {
     }
 }
 
+// 桌面会话是否为 Wayland：WAYLAND_DISPLAY 显式设置，或 $XDG_RUNTIME_DIR 下存在
+// 合成器 socket（wayland-*，排除 *.lock）。SSH/systemd 等脱离桌面会话启动的进程
+// 常缺 WAYLAND_DISPLAY，但 socket 依然存在；纯 X11 桌面没有该 socket。
+bool InputManager::desktopSessionIsWayland()
+{
+    if (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))
+        return true;
+    const QByteArray rt = qgetenv("XDG_RUNTIME_DIR");
+    if (rt.isEmpty())
+        return false;
+    const QStringList socks = QDir(QString::fromUtf8(rt)).entryList(
+        QStringList() << QStringLiteral("wayland-*"), QDir::System | QDir::Files);
+    for (const QString& s : socks) {
+        if (!s.endsWith(QLatin1String(".lock")))
+            return true;
+    }
+    return false;
+}
+
 // 惰性打开 X display（首次注入时调用）。
 // 线程约束：所有 inject* 注入入口最终都经 RDPServer::onInputReceived 在主线程
 // 串行执行（WS 的 inputReceived 为队列连接），因此此处对 xDisplay_ 的写无需
@@ -233,10 +253,16 @@ bool InputManager::ensureXDisplay()
         return false;
     }
     xDisplay_ = d;
-    if (waylandMode_) {
-        // 有可用 X display：优先 X11 输入（XTest），不再尝试 uinput/Wayland portal。
+    if (waylandMode_ && !desktopSessionIsWayland()) {
+        // 真正的 X11 桌面（无 Wayland 合成器 socket）：优先 X11 输入（XTest），
+        // 不再尝试 uinput/Wayland portal。
         qInfo() << "InputManager: X display opened lazily, switching to X11 (XTest) input";
         waylandMode_ = false;
+    } else if (waylandMode_) {
+        // 桌面是 Wayland：XOpenDisplay 打开的是 XWayland，不能作为走 XTest 的
+        // 依据 —— XTest 事件只进 XWayland，mutter 合成器看不到（输入全死的根因）。
+        // 保持 uinput 通道：Xorg 与 mutter 都从内核 evdev 读取，Wayland/X11 通吃。
+        qInfo() << "InputManager: X display is XWayland on a Wayland desktop; staying on uinput input";
     }
     return true;
 }
@@ -276,6 +302,10 @@ void InputManager::injectMouseMove(int x, int y) {
 
 QPoint InputManager::cursorPosition() const
 {
+    // Wayland 桌面：XQueryPointer 只能看到 XWayland 自己的光标（恒定不动），
+    // 真实光标由本进程的 uinput 虚拟指针驱动 —— 直接回报最近一次注入坐标。
+    if (waylandMode_ && uinputMouseFd_ >= 0)
+        return QPoint(lastInjX_, lastInjY_);
     int x = -1, y = -1;
     if (queryPointer(xDisplay_, &x, &y) && x >= 0 && y >= 0)
         return QPoint(x, y);
@@ -499,6 +529,11 @@ bool InputManager::initUinput()
     }
 
     uinputFd_ = fd;
+    // udev/libinput 热插拔延迟：UI_DEV_CREATE 后立即写首事件会被合成器吞掉
+    // （mutter 需处理 udev add 事件才能看到新设备，实测约百毫秒级）。
+    // 设备整个进程生命周期只创建一次，这里的等待只影响首个按键，代价可忽略。
+    // （外部独立注入器等 1.2s 实验证明：等待后首个事件即可达桌面）
+    usleep(200000);
     qInfo() << "InputManager: uinput device created";
 
     // 键盘设备就绪后，一并创建鼠标（绝对定位）与滚轮设备（Wayland 需要）
@@ -566,6 +601,8 @@ bool InputManager::initUinputMouse()
         return false;
     }
     uinputMouseFd_ = fd;
+    // 同 uinput 键盘：给 udev/libinput 热插拔留时间，防止首个绝对定位事件丢失
+    usleep(200000);
 
     // ---- 滚轮设备（EV_REL，独立设备避免与绝对定位冲突）----
     int wfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
@@ -589,6 +626,8 @@ bool InputManager::initUinputMouse()
             wfd = -1;
         }
         uinputWheelFd_ = wfd;
+        if (uinputWheelFd_ >= 0)
+            usleep(200000);  // 滚轮设备热插拔延迟，防首个滚轮事件丢失
     }
 
     qInfo() << "InputManager: uinput mouse devices created (pointer" << uinputMouseFd_
@@ -788,13 +827,18 @@ unsigned short InputManager::keysymToLinuxKeycode(unsigned long ks)
     }
 }
 
-void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar) {
+void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar, bool meta) {
     Q_UNUSED(useVkFallback);
 
     // Wayland 门户模式：通过 D-Bus 注入键盘
     if (waylandPortalMode_ && portalReady_) {
         // 先同步修饰键状态（Ctrl/Alt/Shift），保证组合键（Ctrl+C 等）生效
         updateModifiers(ctrl, alt, shift);
+        // Meta(Super) 修饰键同步：sendXModifier 内部按 portal 优先路由
+        if (meta != metaDown_) {
+            sendXModifier(static_cast<X11KeySym>(XK_Super_L), meta);
+            metaDown_ = meta;
+        }
         // 修饰键本身已由 updateModifiers 注入
         if (code == "ControlLeft" || code == "ControlRight" ||
             code == "ShiftLeft" || code == "ShiftRight" ||
@@ -936,6 +980,15 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
     }
 
     updateModifiers(ctrl, alt, shift);
+
+    // Meta(Super/Win 键)修饰键同步：updateModifiers 只覆盖 Ctrl/Alt/Shift。
+    // 前端把 e.metaKey 随每个 keydown 上报（keyup 消息不含修饰键字段，缺省视为
+    // 释放，与 Ctrl/Alt/Shift 现有语义一致）。sendXModifier 内部按
+    // portal/uinput/XTest 三路路由 —— Wayland/X11 均可注入 KEY_LEFTMETA。
+    if (meta != metaDown_) {
+        sendXModifier(static_cast<X11KeySym>(XK_Super_L), meta);
+        metaDown_ = meta;
+    }
 
     if (code == "ControlLeft" || code == "ControlRight" ||
         code == "ShiftLeft" || code == "ShiftRight" ||

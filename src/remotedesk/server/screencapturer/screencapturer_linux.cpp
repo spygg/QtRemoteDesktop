@@ -2,6 +2,7 @@
 #include "screencapturer.h"
 #include <QColor>
 #include <QDebug>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QProcess>
@@ -9,6 +10,13 @@
 #include <QSet>
 #include <QRegularExpression>
 #include <chrono>
+
+#include <QDBusArgument>
+#include <QDBusConnection>
+#include <QDBusInterface>
+#include <QDBusMessage>
+
+#include <unistd.h>  // getuid
 
 #ifdef HAVE_PIPEWIRE
 #include "screencapturer_wayland.h"
@@ -32,6 +40,113 @@ void ScreenCapturer::cleanupPlatform()
     waylandCapturer_ = nullptr;
     useWayland_ = false;
 #endif
+}
+
+// 在 $XDG_RUNTIME_DIR 下探测桌面合成器的 Wayland socket（wayland-0 等）。
+// SSH/systemd 等脱离桌面会话启动时环境里通常没有 WAYLAND_DISPLAY，但合成器
+// socket 依然存在；纯 X11 桌面没有该 socket，返回空串。
+static QString detectWaylandSocketName()
+{
+    const QByteArray rt = qgetenv("XDG_RUNTIME_DIR");
+    if (rt.isEmpty())
+        return QString();
+    const QStringList socks = QDir(QString::fromUtf8(rt)).entryList(
+        QStringList() << QStringLiteral("wayland-*"), QDir::System | QDir::Files);
+    for (const QString& s : socks) {
+        if (!s.endsWith(QLatin1String(".lock")))
+            return s;
+    }
+    return QString();
+}
+
+int ScreenCapturer::realLockState()
+{
+    if (lockQueryTimer_.isValid() && lockQueryTimer_.elapsed() < 2000)
+        return cachedLockState_;
+
+    int state = -1;
+    const uid_t uid = ::getuid();
+
+    // 1) logind LockedHint：GNOME/KDE 锁屏时会通过 logind SetLockedHint 置位，
+    //    Wayland/X11 通用、不依赖 X，是 Wayland 会话下唯一可靠的判定途径。
+    QDBusConnection sys = QDBusConnection::systemBus();
+    if (sys.isConnected()) {
+        QDBusInterface login1(QStringLiteral("org.freedesktop.login1"),
+                              QStringLiteral("/org/freedesktop/login1"),
+                              QStringLiteral("org.freedesktop.login1.Manager"), sys);
+        if (login1.isValid()) {
+            const QDBusMessage reply = login1.call(QStringLiteral("ListSessions"));
+            if (reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty()) {
+                bool anyQueried = false;
+                bool anyLocked = false;
+                const QDBusArgument arr = reply.arguments().first().value<QDBusArgument>();
+                arr.beginArray();
+                while (!arr.atEnd()) {
+                    arr.beginStructure();
+                    QString sid;
+                    quint32 suid = 0;
+                    QString uname;
+                    QDBusObjectPath spath;
+                    arr >> sid >> suid >> uname >> spath;
+                    arr.endStructure();
+                    if (suid != uid || spath.path().isEmpty())
+                        continue;
+                    QDBusInterface sess(QStringLiteral("org.freedesktop.login1"),
+                                        spath.path(),
+                                        QStringLiteral("org.freedesktop.login1.Session"), sys);
+                    if (!sess.isValid())
+                        continue;
+                    const QVariant v = sess.property("LockedHint");
+                    if (!v.isValid())
+                        continue;
+                    anyQueried = true;
+                    if (v.toBool())
+                        anyLocked = true;
+                }
+                arr.endArray();
+                if (anyQueried)
+                    state = anyLocked ? 1 : 0;
+            }
+        }
+    }
+
+    // 2) gnome-screensaver 兜底（老桌面/logind 不可用时）
+    if (state == -1) {
+        QDBusConnection ses = QDBusConnection::sessionBus();
+        if (ses.isConnected()) {
+            QDBusInterface gs(QStringLiteral("org.gnome.ScreenSaver"),
+                              QStringLiteral("/org/gnome/ScreenSaver"),
+                              QStringLiteral("org.gnome.ScreenSaver"), ses);
+            if (gs.isValid()) {
+                const QDBusMessage r = gs.call(QStringLiteral("GetActive"));
+                if (r.type() == QDBusMessage::ReplyMessage && !r.arguments().isEmpty()) {
+                    state = r.arguments().first().toBool() ? 1 : 0;
+                }
+            }
+        }
+    }
+
+    cachedLockState_ = state;
+    lockQueryTimer_.restart();
+    return state;
+}
+
+bool ScreenCapturer::shouldDeclareLocked()
+{
+    const int st = realLockState();
+    if (st == 0) {
+        // 采集持续失败/黑帧但系统并未锁屏（典型：Wayland 会话下 X11 回落到
+        // XWayland，root 无内容）→ 不声明锁屏，纠正既有状态，避免前端误弹
+        // 解锁界面。
+        if (screenLocked_) {
+            screenLocked_ = false;
+            emit screenLocked(false);
+            qInfo() << "ScreenCapturer: capture unavailable but session NOT locked, clearing lock state";
+        }
+        return false;
+    }
+    // 已锁屏（1）或无法查询（-1）→ 维持旧启发式行为
+    return true;
 }
 
 // sudo apt install libx11-dev libxtst-dev libxdamage-dev libxcomposite-dev libxrender-dev
@@ -447,8 +562,16 @@ bool ScreenCapturer::start(int fps)
     cleanupPlatform();
 
 #ifdef HAVE_PIPEWIRE
-    // 当 WAYLAND_DISPLAY 存在时优先使用 Wayland PipeWire 捕获
-    if (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
+    // 优先 Wayland PipeWire 捕获。除了显式 WAYLAND_DISPLAY，还探测
+    // $XDG_RUNTIME_DIR/wayland-* socket：SSH/systemd 启动的服务进程通常缺
+    // WAYLAND_DISPLAY，但桌面会话（Wayland）的合成器 socket 仍在——补设后
+    // Wayland 客户端即可连上真实桌面；纯 X11 桌面无此 socket，行为不变。
+    const QString wlSock = detectWaylandSocketName();
+    if (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") || !wlSock.isEmpty()) {
+        if (qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") && !wlSock.isEmpty()) {
+            qputenv("WAYLAND_DISPLAY", wlSock.toUtf8());
+            qInfo() << "ScreenCapturer: detected Wayland socket, set WAYLAND_DISPLAY =" << wlSock;
+        }
         waylandCapturer_ = new WaylandCapturer();
         useWayland_ = waylandCapturer_->initialize();
         if (useWayland_) {
@@ -488,7 +611,10 @@ void ScreenCapturer::captureFrame()
         bool updated = true;
         if (!x11Capturer_->captureFrame(frame, &updated)) {
             captureFailCount_++;
-            if (captureFailCount_ >= 5 && !screenLocked_) {
+            if (captureFailCount_ == 5 || captureFailCount_ % 300 == 0)
+                qWarning() << "ScreenCapturer: X11 captureFrame FAIL #" << captureFailCount_
+                           << "(lock declaration now verified via logind/gnome-screensaver)";
+            if (captureFailCount_ >= 5 && !screenLocked_ && shouldDeclareLocked()) {
                 screenLocked_ = true;
                 emit screenLocked(true);
             }
@@ -506,7 +632,7 @@ void ScreenCapturer::captureFrame()
         }
 
         if (isFrameBlack(frame)) {
-            if (!screenLocked_) {
+            if (!screenLocked_ && shouldDeclareLocked()) {
                 screenLocked_ = true;
                 emit screenLocked(true);
             }
@@ -557,7 +683,7 @@ void ScreenCapturer::captureFrame()
                            << "screenLocked_=" << screenLocked_
                            << "timerActive=" << captureTimer_->isActive()
                            << "interval=" << captureTimer_->interval();
-            if (captureFailCount_ >= 5 && !screenLocked_) {
+            if (captureFailCount_ >= 5 && !screenLocked_ && shouldDeclareLocked()) {
                 screenLocked_ = true;
                 emit screenLocked(true);
                 qWarning() << "ScreenCapturer: EMIT screenLocked(true) after" << captureFailCount_ << "fails";
@@ -576,7 +702,7 @@ void ScreenCapturer::captureFrame()
         }
 
         if (isFrameBlack(frame)) {
-            if (!screenLocked_) {
+            if (!screenLocked_ && shouldDeclareLocked()) {
                 screenLocked_ = true;
                 emit screenLocked(true);
             }
@@ -617,7 +743,7 @@ void ScreenCapturer::captureFrame()
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
     if (isFrameBlack(frame)) {
-        if (!screenLocked_) {
+        if (!screenLocked_ && shouldDeclareLocked()) {
             screenLocked_ = true;
             emit screenLocked(true);
         }
