@@ -36,15 +36,28 @@ if(WIN32)
     # 编译每个源文件时前置 include windows.h，解决 OpenSSL 1.0.2 X509_NAME 宏冲突
     target_compile_options(${WEBRTC_SESSION} PRIVATE -include windows.h)
 else()
-    # ---- Linux/macOS: 系统 OpenSSL(1.1) + zlib + POSIX 系统库 ----
-    # 注意：Linux 下 Qt 5.9 的 RPATH 目录 /opt/Qt*/.../lib 里可能有旧版 OpenSSL(1.0) 符号链接，
-    # find_package(OpenSSL) 默认会优先找到它们，导致 metaRTC 需要的 OpenSSL 1.1 符号
-    # (SSL_set_options/HMAC_CTX_new/X509_getm_notBefore 等) 链接失败。
-    # 这里直接定位系统 OpenSSL 1.1 库"文件"，彻底绕过 CMake 的 OpenSSL imported target 缓存。
+    # ---- Linux/macOS: OpenSSL 链接 ----
+    # 方案2（VENDOR_OPENSSL_102=ON，仅 Qt5.9/243 场景）：统一进程内 OpenSSL 为 vendored
+    # 1.0.2u（openssl102_install），与 Qt 5.9 QSslSocket 的 1.0.x ABI 对齐，避免系统内 1.1.1
+    # （metaRTC DTLS 旧链接）与 Qt 1.0.x 同进程 ABI 冲突导致 TLS 握手静默失败。
+    # 默认（未启用）：沿用系统 OpenSSL（RK3588/Qt5.12/Qt6 等）。
     find_package(ZLIB REQUIRED)
 
-    # Linux 常见路径优先（避免吞到 /opt 里 Qt 的 1.0）
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(VENDOR_OPENSSL_102)
+        # 直接用 vendored 1.0.2u 的"库文件"与头，绕过 find_package 的 imported target 缓存。
+        set(_OSSL102_LIB "${BUILD_OUTPUT_DIR}/openssl102_install/lib")
+        set(_OSSL102_INC "${BUILD_OUTPUT_DIR}/openssl102_install/include")
+        if(NOT EXISTS "${_OSSL102_LIB}/libssl.so.1.0.0" OR NOT EXISTS "${_OSSL102_LIB}/libcrypto.so.1.0.0")
+            message(FATAL_ERROR
+                "VENDOR_OPENSSL_102=ON 但 vendored OpenSSL 1.0.2u 未找到: "
+                "${_OSSL102_LIB}/libssl.so.1.0.0 / libcrypto.so.1.0.0\n"
+                "请先构建 OpenSSL 1.0.2u（ExternalProject openssl102_ep，或 cmake --build . --target openssl102_ep）。")
+        endif()
+        set(SYS_OPENSSL_SSL "${_OSSL102_LIB}/libssl.so.1.0.0")
+        set(SYS_OPENSSL_CRYPTO "${_OSSL102_LIB}/libcrypto.so.1.0.0")
+        set(SYS_OPENSSL_INCLUDE "${_OSSL102_INC}")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # 原有系统 OpenSSL 1.1 定位逻辑（绕过 Qt 自带 1.0）
         if(EXISTS "/usr/lib64/libssl.so.1.1")
             set(SYS_OPENSSL_SSL "/usr/lib64/libssl.so.1.1")
         elseif(EXISTS "/usr/lib/x86_64-linux-gnu/libssl.so")
@@ -60,14 +73,17 @@ else()
             set(SYS_OPENSSL_CRYPTO "/usr/lib/aarch64-linux-gnu/libcrypto.so")
         endif()
     endif()
-    # 未命中或 macOS：用 find_library 按系统默认规则找（mac 下优先 Homebrew / System OpenSSL 1.1）
+
+    # 未命中 Linux 特例或 macOS：用 find_library 按系统默认规则找
     if(NOT SYS_OPENSSL_SSL)
         find_library(SYS_OPENSSL_SSL NAMES ssl REQUIRED)
     endif()
     if(NOT SYS_OPENSSL_CRYPTO)
         find_library(SYS_OPENSSL_CRYPTO NAMES crypto REQUIRED)
     endif()
-    find_path(SYS_OPENSSL_INCLUDE NAMES openssl/ssl.h REQUIRED)
+    if(NOT SYS_OPENSSL_INCLUDE)
+        find_path(SYS_OPENSSL_INCLUDE NAMES openssl/ssl.h REQUIRED)
+    endif()
     target_include_directories(${WEBRTC_SESSION} PUBLIC "${SYS_OPENSSL_INCLUDE}")
     target_link_libraries(${WEBRTC_SESSION} PUBLIC
         "${SYS_OPENSSL_SSL}"

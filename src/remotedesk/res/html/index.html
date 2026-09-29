@@ -1373,13 +1373,14 @@
                 this.ms = new MediaSource();
                 v.src = URL.createObjectURL(this.ms);
                 v.play().catch(() => {});
-                // 追边：播放位置因网络抖动/静态桌面后恢复而落后于缓冲前沿时，
+                // 低延迟追边：播放位置因网络抖动/静态桌面后恢复而落后于缓冲前沿时，
                 // 跳到最新帧。远程桌面要求“永远看最新画面”，与图片模式行为一致。
+                // 留 0.1s 余量（而非 0.02），避免贴边导致视频反复在缓冲前沿 waiting。
                 v.addEventListener('waiting', () => {
                     try {
                         const b = v.buffered;
                         if (b.length && b.end(b.length - 1) > v.currentTime + 0.05)
-                            v.currentTime = b.end(b.length - 1) - 0.02;
+                            v.currentTime = b.end(b.length - 1) - 0.1;
                     } catch (e) {}
                 });
                 v.addEventListener('error', function(e) {
@@ -1422,12 +1423,14 @@
                                     console.error('MSE updateend appendBuffer error:', e.name, e.message);
                                 }
                             }
-                            // 延迟守卫：缓冲积压超过 1s（长时间静止后恢复等）时跳到接近前沿，
-                            // 防止播放位置落后导致画面延迟持续增长
+                            // 低延迟追边（LL-MSE）：缓冲领先播放位置超过 0.3s 即跳到前沿，
+                            // 留 0.1s 余量防止贴边反复 waiting。把 MSE 固有缓冲从 ~1-2s
+                            // 压到 ~0.3s，让 http 部署下 FFmpeg 模式刷新频率贴近 WebRTC/图片模式。
+                            // （https 部署时 WebCodecs 可用、零缓冲，本守卫仅作兜底。）
                             try {
                                 const el = this.videoEl;
                                 const b = el && el.buffered;
-                                if (el && b && b.length && b.end(b.length - 1) - el.currentTime > 1.0)
+                                if (el && b && b.length && b.end(b.length - 1) - el.currentTime > 0.3)
                                     el.currentTime = b.end(b.length - 1) - 0.1;
                             } catch (e) {}
                         });

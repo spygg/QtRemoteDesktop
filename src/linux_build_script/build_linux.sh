@@ -487,6 +487,7 @@ cmake_configure() {
     cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_THIRDPARTY=ON \
+        -DVENDOR_OPENSSL_102="$VENDOR_SSL102" \
         "${qarg[@]}"
 }
 
@@ -516,6 +517,24 @@ verify() {
 }
 
 detect_qt
+
+# ---- 方案2：Qt5.9 自动启用 vendored OpenSSL 1.0.2u ----
+# Qt5.9 的 QSslSocket 仅认 OpenSSL 1.0.x ABI；系统内若有 1.1.x（metaRTC DTLS 依赖）同进程
+# 加载会导致 TLS 握手静默失败。Qt<5.10 时统一改链 vendored 1.0.2u（openssl102_install）。
+VENDOR_SSL102=OFF
+if [ -n "$QT_PREFIX" ] && [ -x "$QT_PREFIX/bin/qmake" ]; then
+    QT_VER="$("$QT_PREFIX/bin/qmake" -query QT_VERSION 2>/dev/null)"
+elif command -v qmake >/dev/null 2>&1; then
+    QT_VER="$(qmake -query QT_VERSION 2>/dev/null)"
+fi
+if echo "$QT_VER" | grep -qE '^5\.[0-9]+\.'; then
+    QT_MINOR="$(echo "$QT_VER" | cut -d. -f2)"
+    if [ -n "$QT_MINOR" ] && [ "$QT_MINOR" -lt 10 ] 2>/dev/null; then
+        VENDOR_SSL102=ON
+        echo "[openssl] 检测到 Qt $QT_VER (<5.10)，自动启用 vendored OpenSSL 1.0.2u (VENDOR_OPENSSL_102=ON)"
+    fi
+fi
+
 check_deps
 
 if [ $CHECK_DEPS -eq 1 ]; then

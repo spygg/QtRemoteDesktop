@@ -21,8 +21,14 @@ if(WIN32)
     add_definitions(-D_TIMESPEC_DEFINED)
     set(_WIN_INCLUDE "${HOME_BASE}/thirdparty/include/win/include")
 else()
-    find_package(OpenSSL REQUIRED)
-    set(OPENSSL_102_INCLUDE "${OPENSSL_INCLUDE_DIR}")
+    if(VENDOR_OPENSSL_102)
+        # 方案2：直接用 vendored 1.0.2u 头，避免 find_package 解析到系统 1.1.x/3.x。
+        # 仅记录 include 路径（静态库不链接；最终由 webrtcsession 链 1.0.0 .so）。
+        set(OPENSSL_102_INCLUDE "${BUILD_OUTPUT_DIR}/openssl102_install/include")
+    else()
+        find_package(OpenSSL REQUIRED)
+        set(OPENSSL_102_INCLUDE "${OPENSSL_INCLUDE_DIR}")
+    endif()
     set(_WIN_INCLUDE "")
 endif()
 

@@ -234,13 +234,13 @@ SSL_CTX* yang_build_dtls_ctx(YangDtlsSession *dtls, char *role) {
 #else
 	if (dtls->version == YangDtlsVersion1_2) {
 		if (yang_strcmp(role, "active") == 0) {
-			dtls_ctx = SSL_CTX_new(DTLS_client_method());
+			dtls_ctx = SSL_CTX_new(DTLSv1_2_client_method());
 		} else {
-			dtls_ctx = SSL_CTX_new(DTLS_server_method());
+			dtls_ctx = SSL_CTX_new(DTLSv1_2_server_method());
 		}
 	} else {
 		// YangDtlsVersionAuto, use version-flexible DTLS methods
-		dtls_ctx = SSL_CTX_new(DTLS_method());
+		dtls_ctx = SSL_CTX_new(DTLSv1_2_method());
 	}
 #endif
 

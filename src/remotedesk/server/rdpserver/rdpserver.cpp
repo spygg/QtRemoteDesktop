@@ -712,7 +712,7 @@ void RDPServer::setupHttpServer()
 
 void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
 {
-    if (useSsl_ && QSslSocket::supportsSsl()) {
+    if (useSsl_ && QSslSocket::supportsSsl() && sslConfiguration_) {
         QSslSocket* sslSocket = new QSslSocket(this);
         if (!sslSocket->setSocketDescriptor(socketDescriptor)) {
             qWarning() << "Failed to set socket descriptor to QSslSocket";
@@ -720,16 +720,29 @@ void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
             return;
         }
         sslSocket->setSslConfiguration(*sslConfiguration_);
-        sslSocket->startServerEncryption();
+        // 延迟一帧到事件循环启动服务端加密：在 incomingConnection 内同步调用
+        // startServerEncryption 时，Qt5.9/OpenSSL1.0.2 下底层读通知尚未就绪，
+        // 握手不会真正发起（客户端收不到 ServerHello，encrypted/sslErrors 均不触发）。
+        // 延迟到事件循环后读通知生效，握手正常完成。
+        QTimer::singleShot(0, sslSocket, [sslSocket]() {
+            sslSocket->startServerEncryption();
+        });
         connect(sslSocket, &QSslSocket::readyRead, this, &RDPServer::onHttpRequest);
         connect(sslSocket, &QSslSocket::encrypted, this, [this, sslSocket]() {
             if (sslSocket->bytesAvailable() > 0)
                 onHttpRequest();
         });
+        // 自签名证书会触发 sslErrors；与 helper / secure-input 客户端一致，
+        // 服务端忽略之以完成握手（浏览器仍会提示自签名警告，用户手动信任一次即可）。
+        // 原先此处直接 disconnectFromHost() 会在 ServerHello 前掐断握手，导致 HTTPS 页面打不开。
         connect(sslSocket, QOverload<const QList<QSslError>&>::of(&QSslSocket::sslErrors),
             [sslSocket](const QList<QSslError>& errors) {
-                qWarning() << "SSL errors, closing connection:" << errors;
-                sslSocket->disconnectFromHost();
+                qWarning() << "SSL errors (ignored, self-signed cert):" << errors;
+                sslSocket->ignoreSslErrors();
+            });
+        connect(sslSocket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+            [sslSocket](QAbstractSocket::SocketError) {
+                qWarning() << "HTTPS socket error:" << sslSocket->errorString();
             });
         connect(sslSocket, &QSslSocket::disconnected, sslSocket, &QSslSocket::deleteLater);
     } else {
