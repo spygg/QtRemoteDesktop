@@ -2086,7 +2086,11 @@
                     }
                     break;
                 case 'file_list':
-                    if (msg.items) renderFileList(msg.items);
+                    if (msg.items) {
+                        // 先记下本列表对应的真实目录，渲染出的每一行都以它拼路径
+                        lastListRealPath = msg.realPath || msg.path || '';
+                        renderFileList(msg.items);
+                    }
                     if (msg.path || msg.realPath) {
                         // 优先用服务端下发的真实绝对路径 realPath，避免把虚拟根下的
                         // 子目录显示成 "/Documents" 这种缺失 home 前缀的假路径。
@@ -2957,6 +2961,11 @@
 
         // ==================== 文件传输 ====================
         let currentRemotePath = '/';
+        // 最近一次 file_list 响应里服务端下发的真实目录：渲染列表与拖拽/下载都以它为
+        // 基准。currentRemotePath 在响应到达前仍是请求时的旧值（初始 '/' 或快速连点），
+        // 若直接用它拼行路径会得到 "/sounding_server/..." 这类虚拟路径，拖出直链 403，
+        // 表现为"拖到本机没效果"。以渲染时的真实路径为准可彻底避免这种失同步。
+        let lastListRealPath = '';
         const CHUNK_SIZE = 64 * 1024; // 64KB chunks
         let uploadQueue = [];
         let isUploading = false;
@@ -3299,9 +3308,12 @@
         function renderFileList(items) {
             const container = document.getElementById('file-list');
             container.innerHTML = '';
+            // 渲染基准：用本列表对应的真实目录（服务端下发），而不是可能尚未同步的
+            // currentRemotePath——否则快速操作时会拼出 "/xxx" 虚拟路径。
+            const basePath = lastListRealPath || currentRemotePath;
             // Parent dir
-            if (currentRemotePath !== '/') {
-                const parentPath = parentDir(currentRemotePath);
+            if (basePath !== '/' && basePath !== '') {
+                const parentPath = parentDir(basePath);
                 const item = document.createElement('div');
                 item.className = 'file-item';
                 item.onclick = () => navigateTo(parentPath);
@@ -3312,9 +3324,10 @@
             const dirs = items.filter(i => i.isDir).sort((a, b) => a.name.localeCompare(b.name));
             const files = items.filter(i => !i.isDir).sort((a, b) => a.name.localeCompare(b.name));
             for (const item of dirs) {
-                const fullPath = joinPath(currentRemotePath, item.name);
+                const fullPath = joinPath(basePath, item.name);
                 const div = document.createElement('div');
                 div.className = 'file-item';
+                div.dataset.rpath = fullPath; // 拖拽/下载使用的真实路径
                 div.innerHTML = '<span class="icon">📁</span><span class="name"></span><span class="size"><button class="file-action-btn">⬇</button></span>';
                 div.querySelector('.name').textContent = item.name;
                 // 单击文件夹整行即进入该目录（下载按钮通过 stopPropagation 不会触发）
@@ -3325,9 +3338,10 @@
                 container.appendChild(div);
             }
             for (const item of files) {
-                const filePath = joinPath(currentRemotePath, item.name);
+                const filePath = joinPath(basePath, item.name);
                 const div = document.createElement('div');
                 div.className = 'file-item';
+                div.dataset.rpath = filePath;
                 div.onclick = () => downloadFile(item.name, filePath, false);
                 div.innerHTML = '<span class="icon">📄</span><span class="name"></span><span class="size"></span>';
                 div.querySelector('.name').textContent = item.name;
@@ -3346,7 +3360,9 @@
         function makeRemoteItemDraggable(div, item) {
             div.draggable = true;
             div.addEventListener('dragstart', (e) => {
-                const path = joinPath(currentRemotePath, item.name);
+                // 行渲染时记录的真实路径：即使 currentRemotePath 尚未同步（初始 '/'、
+                // 快速连点），拖出直链也不会拼出 "/xxx" 虚拟路径导致 403 没效果。
+                const path = div.dataset.rpath || joinPath(currentRemotePath, item.name);
                 e.dataTransfer.effectAllowed = 'copy';
                 // 内部拖放携带完整远端路径（此前只带文件名，导致只能下载当前目录下的同名文件）
                 e.dataTransfer.setData(REMOTE_DRAG_MIME, path);
@@ -3585,7 +3601,9 @@
         function handleFileUpload(fileList, targetDir) {
             // 本机拖入/选择文件的默认落点：拖到目录项上 → 该目录；否则落到桌面用户桌面
             // （state.remoteDesktopPath 由服务端下发，避免 root 服务把文件写进 /root）。
-            const dir = targetDir || state.remoteDesktopPath || currentRemotePath;
+            // lastListRealPath 兜底：currentRemotePath 未同步时（初始 '/'）不能把文件
+            // 传到 "/xxx" 虚拟路径。
+            const dir = targetDir || state.remoteDesktopPath || lastListRealPath || currentRemotePath;
             for (const file of fileList) {
                 uploadQueue.push({ file: file, dir: dir });
             }
@@ -3602,7 +3620,7 @@
         }
 
         async function uploadFileChunked(file, targetDir) {
-            const baseDir = targetDir || currentRemotePath;
+            const baseDir = targetDir || lastListRealPath || currentRemotePath;
             // 拖拽上传目录时 _relPath 携带相对路径（含子目录），远端据此建同名结构
             const relativePath = file._relPath || file.webkitRelativePath || file.name;
             const remotePath = joinPath(baseDir, relativePath);
