@@ -33,27 +33,34 @@ static inline int mppAlign16(int v) { return (v + 15) & ~15; }
 // MPP 1.1.0 编码器出包不设置 MPP_PACKET_FLAG_INTRA（内部头常量已无代码引用），
 // 关键帧必须从 NAL 头判断，否则前端 WebCodecs 会一直等待 keyframe 而不配置解码器。
 // H264: 5=IDR (7/8=SPS/PPS 随 IDR 同包)；HEVC: 19=IDR_W_RADL 20=IDR_N_LP 21=CRA
+// [P0 fix] 必须遍历全部 NAL：HEADER_MODE_EACH_IDR 下 HEVC 每个关键帧包 = VPS(32)+SPS(33)+PPS(34)+IDR，
+// 旧逻辑只解析首个 NAL → HEVC 关键帧恒判为非关键帧（90 机 HEVC 黑屏级根因）；
+// H264 因首个 NAL 恰为 SPS 碰巧正确。
 static bool isKeyframeNal(const QByteArray& data, bool hevc)
 {
-    int i = 0;
     const int n = data.size();
+    int i = 0;
     while (i < n - 3) {
-        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
-            break;
-        i++;
+        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+            int h = i + 3;
+            if (h < n) {
+                uint8_t nal = static_cast<uint8_t>(data[h]);
+                if (hevc) {
+                    int type = (nal >> 1) & 0x3f;
+                    if (type == 19 || type == 20 || type == 21)
+                        return true;
+                } else {
+                    int type = nal & 0x1f;
+                    if (type == 5 || type == 7)
+                        return true;
+                }
+            }
+            i = h > i ? h : i + 1;
+        } else {
+            i++;
+        }
     }
-    if (i >= n - 3)
-        return false;
-    int h = i + 3;
-    if (h >= n)
-        return false;
-    uint8_t nal = static_cast<uint8_t>(data[h]);
-    if (hevc) {
-        int type = (nal >> 1) & 0x3f;
-        return type == 19 || type == 20 || type == 21;
-    }
-    int type = nal & 0x1f;
-    return type == 5 || type == 7;
+    return false;
 }
 
 MppEncoder::MppEncoder() {}

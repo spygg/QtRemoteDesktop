@@ -67,8 +67,14 @@ void WebSocketServer::broadcastCodecConfig(const QByteArray& extra)
 
 void WebSocketServer::onNewConnection()
 {
-    QWebSocket* socket = server_->nextPendingConnection();
+    // While 循环取完全部 pending 连接；对端完成握手后立即断开的竞态下
+    // nextPendingConnection() 可能返回 nullptr，必须判空后才能解引用。
+    while (QWebSocket* socket = server_->nextPendingConnection())
+        handleNewSocket(socket);
+}
 
+void WebSocketServer::handleNewSocket(QWebSocket* socket)
+{
     QUrl url = socket->requestUrl();
     // 只记 path，不打完整 URL：URL 的 ?token= 携带会话令牌，写入日志文件会泄漏；
     // 连接属低频事件，降为 qDebug 避免默认日志噪音
@@ -223,6 +229,9 @@ void WebSocketServer::onTextMessageReceived(const QString& message)
     } else if (type == "set_mode") { // 处理模式切换请求
         QString mode = obj["mode"].toString();
         emit modeChangeRequested(mode);
+    } else if (type == "ping") {
+        // [B12] 心跳应答：前端每 15s 一跳，45s 无任何服务端消息即判半开连接自愈
+        sendJson(clientId, QJsonObject{ { "type", "pong" } });
     } else {
         emit inputReceived(clientId, obj);
     }
@@ -232,6 +241,11 @@ void WebSocketServer::onBinaryMessageReceived(const QByteArray& message)
 {
     if (message.size() < 1) return;
     quint8 frameType = static_cast<quint8>(message[0]);
+
+    // 上传数据块必须绑定来源客户端：二进制帧本身不带身份，从 socket 反查
+    QString clientId;
+    if (frameType == 0x10)
+        clientId = socketToId_.value(qobject_cast<QWebSocket*>(sender()));
 
     if (frameType == 0x10) {
         // 文件上传数据块: [0x10][4-byte path length][path UTF8][4-byte data length][data]
@@ -250,7 +264,7 @@ void WebSocketServer::onBinaryMessageReceived(const QByteArray& message)
         QString path = QString::fromUtf8(message.constData() + 9, pathLen);
         QByteArray data(message.constData() + 9 + pathLen, dataLen);
 
-        emit fileChunkReceived(path, data);
+        emit fileChunkReceived(clientId, path, data);
     }
     // Other binary types ignored
 }

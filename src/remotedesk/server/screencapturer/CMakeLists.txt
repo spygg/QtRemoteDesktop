@@ -39,6 +39,22 @@ if(HAVE_PIPEWIRE)
     target_compile_definitions(${SCREEN_CAPTURER} PRIVATE HAVE_PIPEWIRE=1)
 endif()
 
+# XShm（MIT-SHM）抓屏加速：装有 libXext-devel 时启用（HAVE_XSHM=1）。
+# X11 全量/大面积抓取走共享内存直读，消除 XGetImage 的 socket 逐像素回传；
+# 缺包时自动回退 XGetImage，不影响编译与运行。
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    find_path(XSHM_INCLUDE_DIR X11/extensions/XShm.h)
+    find_library(XEXT_LIBRARY Xext)
+    if(XSHM_INCLUDE_DIR AND XEXT_LIBRARY)
+        target_include_directories(${SCREEN_CAPTURER} PRIVATE ${XSHM_INCLUDE_DIR})
+        target_link_libraries(${SCREEN_CAPTURER} PUBLIC ${XEXT_LIBRARY})
+        target_compile_definitions(${SCREEN_CAPTURER} PRIVATE HAVE_XSHM=1)
+        message(STATUS "ScreenCapturer: XShm found, MIT-SHM capture enabled")
+    else()
+        message(STATUS "ScreenCapturer: XShm/Xext not found, XGetImage fallback")
+    endif()
+endif()
+
 # XRandR 多屏枚举为可选能力：装有 libXrandr-devel 时启用进程内 XRR 枚举
 # （HAVE_XRANDR=1）；未安装时自动回退到 `xrandr --query` 子进程枚举，
 # 保证缺开发包的系统（如最小化 Anolis/RHEL）也能正常编译与运行。

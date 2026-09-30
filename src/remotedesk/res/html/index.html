@@ -1120,9 +1120,9 @@
             webrtcState._to = setTimeout(() => {
                 console.log('RD-TIMER timeout fired, pc=', !!webrtcState.pc, 'active=', webrtcState.active);
                 if (webrtcState.pc && !webrtcState.active) {
-                    try { pc.close(); } catch (e) {}
-                    webrtcState.pc = null;
-                    send({ type: 'signal_close' });
+                    // [B22] 用 webrtcClose 统一清理：旧代码只 pc.close()，auto 模式下
+                    // intending 永不清除 → WS 视频帧被 handleBinary 持续忽略 → 永久黑屏。
+                    webrtcClose();
                     if (state.currentConfig.videomode === 'webrtc') {
                         fallbackToImage('WebRTC 连接超时，已切换图片模式');
                     }
@@ -1198,10 +1198,13 @@
         // MediaSource Extensions（MSE）是标准 API，http 下可用，浏览器原生解码 H.264。
         // 服务端 FFmpeg 模式经 WS 发 annexb ES 流，这里转 avcc（length-prefixed）喂 MSE。
         // annexb: [start code][NAL][start code][NAL]... -> avcc: [4B BE len][NAL]...
+        // [perf] 两遍法：先扫 NAL 边界算总长，再一次性分配 + subarray 批量拷贝。
+        // 旧实现逐字节 out.push，每帧百万级 JS 数组操作（MSE 模式每帧都跑）。
         function annexbToAvcc(data) {
             const n = data.length;
             if (!n) return data;
-            const out = [];
+            const bounds = [];
+            let total = 0;
             let i = 0;
             while (i < n) {
                 let sc = 0;
@@ -1216,12 +1219,23 @@
                 }
                 const nalLen = end - (i + sc);
                 if (nalLen > 0) {
-                    out.push((nalLen >>> 24) & 0xff, (nalLen >>> 16) & 0xff, (nalLen >>> 8) & 0xff, nalLen & 0xff);
-                    for (let k = i + sc; k < end; k++) out.push(data[k]);
+                    bounds.push(i + sc, nalLen);
+                    total += 4 + nalLen;
                 }
                 i = end;
             }
-            return new Uint8Array(out);
+            const out = new Uint8Array(total);
+            let o = 0;
+            for (let k = 0; k < bounds.length; k += 2) {
+                const start = bounds[k], nalLen = bounds[k + 1];
+                out[o] = (nalLen >>> 24) & 0xff;
+                out[o + 1] = (nalLen >>> 16) & 0xff;
+                out[o + 2] = (nalLen >>> 8) & 0xff;
+                out[o + 3] = nalLen & 0xff;
+                out.set(data.subarray(start, start + nalLen), o + 4);
+                o += 4 + nalLen;
+            }
+            return out;
         }
 
         // ---------- 最小 fMP4 封装器 ----------
@@ -1828,6 +1842,29 @@
 
         // ==================== WebSocket 连接 ====================
         let wsReconnectCount = 0;
+        let wsHeartbeatTimer = null;
+        let wsLastAliveMs = 0;
+        let wsOpenedAtMs = 0;
+
+        // [B12] 心跳保活：NAT/防火墙会静默掐断空闲 WS（半开连接），此后输入
+        // 石沉大海且 onclose 永远不触发。每 15s 发 ping（服务端回 pong），
+        // 超过 45s 没有任何服务端消息则主动 close 触发重连判定。
+        function startWsHeartbeat() {
+            stopWsHeartbeat();
+            wsLastAliveMs = Date.now();
+            wsHeartbeatTimer = setInterval(() => {
+                if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+                if (Date.now() - wsLastAliveMs > 45000) {
+                    console.warn('WS heartbeat timeout (no server message in 45s), closing stale connection');
+                    try { state.ws.close(); } catch (e) {}
+                    return;
+                }
+                send({ type: 'ping' });
+            }, 15000);
+        }
+        function stopWsHeartbeat() {
+            if (wsHeartbeatTimer) { clearInterval(wsHeartbeatTimer); wsHeartbeatTimer = null; }
+        }
 
         function connect() {
             const overlay = document.getElementById('overlay');
@@ -1841,6 +1878,8 @@
             state.ws.onopen = () => {
                 state.connected = true;
                 state.modeRestored = false;
+                wsOpenedAtMs = Date.now();
+                startWsHeartbeat();
                 if (state.showFps) updateStatus('🟢 已连接');
                 else updateStatus('');
                 overlay.classList.remove('active');
@@ -1866,15 +1905,20 @@
             };
 
             state.ws.onclose = () => {
+                stopWsHeartbeat();
                 state.connected = false;
                 webrtcClose();
-                if (!wsStable) {
-                    wsReconnectCount++;
+                // [B12] 以连接存活时长判定稳定性：旧逻辑"收到任何消息就清零计数"，
+                // 服务端在 auth 失败时先推一条消息再踢人，计数被清零 → session
+                // 过期时无限重连、永远回不到登录页。存活 >30s 才算稳定连接。
+                const aliveMs = Date.now() - wsOpenedAtMs;
+                if (aliveMs > 30000) {
+                    wsReconnectCount = 0;
                 } else {
-                    wsReconnectCount = 1;
+                    wsReconnectCount++;
                 }
                 wsStable = false;
-                if (wsReconnectCount > 3) {
+                if (wsReconnectCount > 5) {
                     window.location.href = '/login';
                     return;
                 }
@@ -1888,6 +1932,7 @@
             };
 
             state.ws.onmessage = (event) => {
+                wsLastAliveMs = Date.now(); // [B12] 心跳判活依据
                 wsReconnectCount = 0;
                 wsStable = true;
                 if (event.data instanceof ArrayBuffer) {
@@ -1916,17 +1961,19 @@
             if (frameType === 0x03) {
                 // 图片模式：JPEG 帧
                 const dataLength = view.getUint32(1, false);
-                const jpegData = data.slice(5, 5 + dataLength);
+                // [P2] subarray 零拷贝视图（每条 WS 消息独占 ArrayBuffer，无跨帧钉住）；
+                // slice 每帧深拷贝一整幅 JPEG 纯浪费
+                const jpegData = data.subarray(5, 5 + dataLength);
                 displayJpegFrame(jpegData);
             } else if (frameType === 0x12) {
                 // 分块下载数据: [0x12][4-path len][path UTF8][8-offset][4-chunk len][data]
                 if (data.length < 17) return;
                 let pos = 1;
                 const pathLen = view.getUint32(pos, false); pos += 4;
-                const pathStr = new TextDecoder().decode(data.slice(pos, pos + pathLen)); pos += pathLen;
+                const pathStr = new TextDecoder().decode(data.subarray(pos, pos + pathLen)); pos += pathLen;
                 const offset = Number(view.getBigUint64(pos, false)); pos += 8;
                 const chunkLen = view.getUint32(pos, false); pos += 4;
-                const chunkData = new Uint8Array(data.slice(pos, pos + chunkLen));
+                const chunkData = data.subarray(pos, pos + chunkLen); // [P2] 零拷贝视图，set() 时才真正拷贝
 
                 const entry = downloadBuffers[pathStr];
                 if (entry && offset + chunkLen <= entry.data.length) {
@@ -1953,7 +2000,7 @@
                 if (data.length < 13) return;
                 const dataLength = view.getUint32(1, false);
                 const timestamp = view.getBigInt64(5, false);
-                const h264Data = data.slice(13, 13 + dataLength);
+                const h264Data = data.subarray(13, 13 + dataLength); // [P2] 零拷贝视图（解码器/MSE 内部会拷贝）
                 const isKeyframe = frameType === 0x01;
 
                 if (msePlayer.using) {
@@ -1966,8 +2013,8 @@
                 if (data.length < 9) return;
                 const pathLen = view.getUint32(1, false);
                 const dataLen = view.getUint32(5 + pathLen, false);
-                const pathStr = new TextDecoder().decode(data.slice(5, 5 + pathLen));
-                const fileData = data.slice(9 + pathLen, 9 + pathLen + dataLen);
+                const pathStr = new TextDecoder().decode(data.subarray(5, 5 + pathLen));
+                const fileData = data.subarray(9 + pathLen, 9 + pathLen + dataLen); // [P2] 零拷贝视图，Blob 构造时才拷贝
                 // Trigger browser download
                 const blob = new Blob([fileData]);
                 const url = URL.createObjectURL(blob);
@@ -1975,7 +2022,7 @@
                 a.href = url;
                 a.download = pathStr.split('/').pop();
                 a.click();
-                URL.revokeObjectURL(url);
+                setTimeout(() => URL.revokeObjectURL(url), 10000); // [B14] 延迟释放，避免中断未开始的下载
                 showTransferStatus(`下载完成: ${a.download}`, 2000);
             } else {
                 console.warn('Unknown frame type:', frameType);
@@ -2089,6 +2136,13 @@
                     }
                     break;
                 case 'file_list':
+                    // [B15] 乱序防护：快速连续导航时旧目录的响应可能后到，
+                    // 若与本机最近一次请求的目录都对不上则丢弃，避免旧列表覆盖新列表
+                    if (fileListLastReqPath !== null) {
+                        const respPath = msg.path || msg.realPath || '';
+                        if (respPath && respPath !== fileListLastReqPath)
+                            break;
+                    }
                     if (msg.items) {
                         // 先记下本列表对应的真实目录，渲染出的每一行都以它拼路径
                         lastListRealPath = msg.realPath || msg.path || '';
@@ -2136,7 +2190,7 @@
                         if (waiter) {
                             // 预取完成：生成 blob URL 供拖出（DownloadURL）或点击下载复用
                             const url = URL.createObjectURL(new Blob([dlEntry.data]));
-                            fileFetchCache[msg.path] = { url: url, mime: 'application/octet-stream', name: dlEntry.name };
+                            cacheFileFetch(msg.path, { url: url, mime: 'application/octet-stream', name: dlEntry.name });
                             delete downloadBuffers[msg.path];
                             delete fetchWaiters[msg.path];
                             waiter.resolve(fileFetchCache[msg.path]);
@@ -2147,7 +2201,9 @@
                             a.href = url;
                             a.download = dlEntry.name;
                             a.click();
-                            URL.revokeObjectURL(url);
+                            // [B14] 同步 revoke 会中断部分浏览器尚未真正开始的下载，
+                            // 延迟释放（blob 由 a.href 持有引用，10s 足够任何浏览器启动下载）
+                            setTimeout(() => URL.revokeObjectURL(url), 10000);
                             showTransferStatus(`下载完成: ${dlEntry.name}`, 2000);
                             delete downloadBuffers[msg.path];
                         }
@@ -2537,6 +2593,12 @@
 
             window.addEventListener('keyup', (e) => {
                 if (isLockInputFocused()) return;
+                // [B13] IME 组合期间的 keyup 不下发：keydown 已过滤 isComposing，
+                // 若 keyup 放行会造出"孤立 keyup"，中文输入时远端键位错乱/卡键
+                if (e.isComposing || e.keyCode === 229) {
+                    state.keysPressed.delete(e.code);
+                    return;
+                }
                 state.keysPressed.delete(e.code);
                 send({
                     type: 'keyup',
@@ -2721,6 +2783,8 @@
         }
 
         function updateRemoteCursor(x, y) {
+            // [B15] screen_info 未到达时除零 → NaN transform 使光标消失
+            if (state.screenWidth <= 0 || state.screenHeight <= 0) return;
             const cursor = document.getElementById('remote-cursor');
             const rect = state.canvas.getBoundingClientRect();
             cursor.style.display = 'block';
@@ -2979,6 +3043,7 @@
         // 若直接用它拼行路径会得到 "/sounding_server/..." 这类虚拟路径，拖出直链 403，
         // 表现为"拖到本机没效果"。以渲染时的真实路径为准可彻底避免这种失同步。
         let lastListRealPath = '';
+        let fileListLastReqPath = null; // [B15] 最近一次 file_list 请求的目录（null=尚无请求，不过滤）
         const CHUNK_SIZE = 64 * 1024; // 64KB chunks
         let uploadQueue = [];
         let isUploading = false;
@@ -2991,6 +3056,18 @@
 
         // WS 分块下载结果缓存：remote path -> {url,mime,name}（仅在无法使用直链时作为兜底路径）
         const fileFetchCache = {};
+        const FILE_FETCH_CACHE_MAX = 32; // [P2] LRU 上限：缓存的是整文件 blob，无上限会随浏览量吃光内存
+        function cacheFileFetch(path, entry) {
+            fileFetchCache[path] = entry;
+            // FIFO 驱逐（插入序）：超过上限回收最旧条目的 blob URL
+            const keys = Object.keys(fileFetchCache);
+            if (keys.length > FILE_FETCH_CACHE_MAX) {
+                for (const k of keys.slice(0, keys.length - FILE_FETCH_CACHE_MAX)) {
+                    try { URL.revokeObjectURL(fileFetchCache[k].url); } catch (e) { }
+                    delete fileFetchCache[k];
+                }
+            }
+        }
         // 下载中的请求：remote path -> Promise
         const fileFetchInflight = {};
         // 下载等待回调：remote path -> {resolve,reject,name}
@@ -3248,7 +3325,8 @@
             }
             const preview = kind === 'image'
                 ? '远端剪贴板：图片'
-                : '远端剪贴板：' + (state.clip.remoteText.length > 24
+                // [XSS] remoteText 来自远端剪贴板（远端可被任意控制），必须转义后再进 innerHTML
+                : '远端剪贴板：' + escapeHtml(state.clip.remoteText.length > 24
                     ? state.clip.remoteText.slice(0, 24) + '…' : state.clip.remoteText);
             panel.innerHTML = '<div style="margin-bottom:8px;">' + preview + '</div>'
                 + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
@@ -3286,10 +3364,12 @@
             currentRemotePath = path;
             document.getElementById('file-path-input').value = path;
             clearFileFetchCache(); // 切换目录后旧的预取 blob 失效，释放内存
+            fileListLastReqPath = path; // [B15] 记录最新请求，过滤乱序旧响应
             send({ type: 'file_list', path: path });
         }
 
         function refreshFileList() {
+            fileListLastReqPath = currentRemotePath; // [B15] 记录最新请求，过滤乱序旧响应
             send({ type: 'file_list', path: currentRemotePath });
         }
 
@@ -3804,6 +3884,17 @@
 
                 let offset = 0;
                 while (offset < file.size) {
+                    if (!state.ws || state.ws.readyState !== WebSocket.OPEN)
+                        throw new Error('WebSocket closed during upload');
+
+                    // [B14] 背压等待：bufferedAmount 无上限时，慢网大文件会把
+                    // 发送队列全堆在标签页内存里 → OOM。超过 4MB 暂停投喂。
+                    while (state.ws.bufferedAmount > 4 * 1024 * 1024) {
+                        await new Promise(r => setTimeout(r, 50));
+                        if (!state.ws || state.ws.readyState !== WebSocket.OPEN)
+                            throw new Error('WebSocket closed during upload');
+                    }
+
                     const end = Math.min(offset + CHUNK_SIZE, file.size);
                     const blob = file.slice(offset, end);
                     const buffer = await blob.arrayBuffer();
@@ -3828,8 +3919,9 @@
                     showTransferMonitor('⬆', file.name, offset, file.size, 0);
                     showTransferStatus(`上传: ${file.name} (${pct}%)`);
 
-                    // Yield to let WebSocket drain
-                    await new Promise(r => setTimeout(r, 10));
+                    // [P5] 不再固定 sleep(10ms)（吞吐上限被钉死在 ~6.4MB/s）：
+                    // 背压由上方 bufferedAmount 循环负责，await arrayBuffer()
+                    // 本身已让出事件循环
                 }
 
                 send({ type: 'file_upload_done', path: remotePath, name: file.name });

@@ -72,7 +72,7 @@ signals:
     void inputReceived(const QString& clientId, const QJsonObject& data);
     void codecChangeRequested(const QString& codec);
     void modeChangeRequested(const QString& mode);
-    void fileChunkReceived(const QString& path, const QByteArray& data);
+    void fileChunkReceived(const QString& clientId, const QString& path, const QByteArray& data);
     void captureFrameReceived(const QByteArray& jpegData);
     void captureMessageReceived(const QJsonObject& msg);
     void captureSourceConnected();
@@ -85,6 +85,8 @@ private slots:
     void onBinaryMessageReceived(const QByteArray& message);
 
 private:
+    // 单个已完成握手的 socket 的路由与挂接（onNewConnection 逐个 pending 调用）
+    void handleNewSocket(QWebSocket* socket);
     QWebSocketServer* server_;
     QMap<QString, QWebSocket*> clients_;
     QSet<QString> mediaExcludedClients_;

@@ -60,6 +60,7 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #include <QTimer>
 #include <QPointer>
 #include <QUrl>
+#include <thread>
 #include <QUrlQuery>
 #include <QSslCertificate>
 #include <string>
@@ -72,6 +73,8 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #ifdef Q_OS_LINUX
 #include <QDBusConnection>
 #include <QDBusMessage>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDBusUnixFileDescriptor>
 #include <fcntl.h>
 #include <unistd.h>
@@ -178,6 +181,9 @@ RDPServer::RDPServer(QObject* parent)
     , useSsl_(true) // 默认启用 HTTPS/WSS（与头文件声明一致；构造列表会覆盖头文件默认值）
     , sslConfiguration_(nullptr)
 {
+    // IME 工作线程结果回传：工作线程 emit（auto 连接 → queued 投递到主线程执行）
+    connect(this, &RDPServer::imeResultReady, this, &RDPServer::onImeResultReady);
+
     // 周期关键帧：只要有视频客户端（WebRTC/RTP 或 WS-MSE/WebCodecs）在线，
     // 每 2s 强制一帧 IDR。静态桌面下编码器不会再自然产 IDR，若不定时补帧，
     // 任何在 GOP 中途加入、或刚重置等帧门的客户端（videoStarted_）会永远
@@ -187,8 +193,12 @@ RDPServer::RDPServer(QObject* parent)
     connect(webrtcKfTimer_, &QTimer::timeout, this, [this]() {
         // 注意：不能只看 webrtcSessions_。ffmpeg/MSE 模式下 WS 客户端同样需要
         // 关键帧，而它不在 webrtcSessions_ 里（旧逻辑导致 MSE 静态冻结）。
-        const bool hasVideoClient = !webrtcSessions_.isEmpty()
-                || (wsServer_ && wsServer_->hasVideoClients());
+        const bool hasVideoClient =
+#ifdef USE_WEBRTC
+                !webrtcSessions_.isEmpty()
+                ||
+#endif
+                (wsServer_ && wsServer_->hasVideoClients());
         if (!hasVideoClient)
             return;
 #ifdef USE_FFMPEG
@@ -211,18 +221,32 @@ RDPServer::~RDPServer()
     // 或主线程 captureTimer 仍在向 jpegCompressor_->enqueue 时对象已被销毁，
     // 会造成 use-after-free（QMetaObject::activate 访问 d_ptr=0 崩溃）。
     // 故须逆数据流显式停机：先停采集（不再产生新帧/入队），排空已投递事件，再停编码线程。
+    // [P2] 去抖落盘的配置先强制刷盘，避免退出丢配置
+    if (configSaveTimer_ && configSaveTimer_->isActive()) {
+        configSaveTimer_->stop();
+        saveServerConfig(QString());
+    }
     if (screenCapturer_)
         screenCapturer_->stop();
     if (jpegCompressor_)
         jpegCompressor_->shutdown(); // 幂等：线程已退出时立即返回
 
+    // [B10] wait 超时后不能继续析构：QThread 对象销毁时若仍在运行会直接 abort，
+    // 且 worker 可能正访问已销毁的成员。线程卡在大文件 IO/拖拽轮询时阻塞析构
+    // 优于崩溃，故超时后无限等待。
     if (transferThread_ && transferThread_->isRunning()) {
         transferThread_->quit();
-        transferThread_->wait(3000);
+        if (!transferThread_->wait(3000)) {
+            qWarning() << "RDPServer: transfer thread did not stop in 3s, waiting...";
+            transferThread_->wait();
+        }
     }
     if (xdndThread_ && xdndThread_->isRunning()) {
         xdndThread_->quit();
-        xdndThread_->wait(3000);
+        if (!xdndThread_->wait(3000)) {
+            qWarning() << "RDPServer: xdnd thread did not stop in 3s, waiting...";
+            xdndThread_->wait();
+        }
     }
     if (sslConfiguration_) {
         delete sslConfiguration_;
@@ -325,6 +349,20 @@ void RDPServer::loadServerConfig(const QString& configPath)
     qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_
             << "fps =" << configFps_ << "quality =" << configQuality_ << "scale =" << configScale_
             << "codec =" << codecToString(configCodec_) << "hw_encode =" << (configHwEncodeMode_ == HwEncodeMode::On ? "on" : configHwEncodeMode_ == HwEncodeMode::Off ? "off" : "auto");
+}
+
+// [P2] 配置去抖落盘
+void RDPServer::scheduleSaveConfig()
+{
+    if (!configSaveTimer_) {
+        configSaveTimer_ = new QTimer(this);
+        configSaveTimer_->setSingleShot(true);
+        configSaveTimer_->setInterval(800);
+        connect(configSaveTimer_, &QTimer::timeout, this, [this]() {
+            saveServerConfig(QString());
+        });
+    }
+    configSaveTimer_->start();
 }
 
 void RDPServer::saveServerConfig(const QString& configPath)
@@ -630,6 +668,15 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 }
 #endif
                 screenLocked_ = locked;
+                // [B16] 与 startCapture 的处理器保持一致：坐标归一化基准 + 锁屏
+                // 焦点抓取开关。前台路径缺这两个调用 → 锁屏密码输入失焦逻辑失效、
+                // 坐标回退物理像素错位。
+                if (inputManager_)
+                    inputManager_->setScreenSize(screenCapturer_->width(), screenCapturer_->height());
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+                if (inputManager_)
+                    inputManager_->setScreenLocked(locked);
+#endif
                 wsServer_->broadcastJson(QJsonObject {
                     { "type", "screen_locked" },
                     { "locked", locked },
@@ -979,9 +1026,15 @@ void RDPServer::handleApiFileDownload(QTcpSocket* socket, const QString& path, c
     QString displayName;
 
     if (fi.isDir()) {
-        // 目录：与 WS 下载一致的 tar 打包（保留目录树）
-        st->payload = FileTransferService::createTarForDirectory(safePath);
-        st->totalSize = st->payload.size();
+        // 目录：tar 打包（保留目录树）。[P1 perf] 改为流式生成：此处只收集条目
+        // 清单（每条几百字节），文件内容在泵送阶段按需读盘——GB 级目录不再
+        // 整树 readAll 进内存（旧行为 = OOM + 主线程冻结）。tar 总大小可精确
+        // 预估，Content-Length 依旧准确。不支持 Range（流式生成器不可随机
+        // 寻址），浏览器对无 Range 响应整体下载即可。
+        qint64 tarTotal = 0;
+        st->tarQueue = FileTransferService::collectTarEntries(safePath, &tarTotal);
+        st->tarStream = true;
+        st->totalSize = tarTotal;
         displayName = fi.fileName() + ".tar";
     } else {
         if (!fi.isFile() || !fi.isReadable()) {
@@ -1075,6 +1128,12 @@ void RDPServer::handleApiFileDownload(QTcpSocket* socket, const QString& path, c
     }
     end = qMin(end, st->totalSize - 1);
     partial = (start != 0 || end != st->totalSize - 1);
+    if (st->tarStream) {
+        // tar 流式生成不可随机寻址：忽略 Range，整体 200 下载
+        start = 0;
+        end = st->totalSize - 1;
+        partial = false;
+    }
     st->offset = start;
     st->end = end;
     if (st->file && !st->file->seek(start)) {
@@ -1139,15 +1198,93 @@ void RDPServer::pumpFileDownload(QTcpSocket* socket)
         if (socket->bytesToWrite() > kBacklogLimit)
             return;
         const int n = (int)qMin(kChunk, st->end - st->offset + 1);
-        QByteArray buf = st->file ? st->file->read(n) : st->payload.mid((int)st->offset, n);
-        if (buf.isEmpty())
+        QByteArray buf;
+        if (st->tarStream)
+            buf = generateTarChunk(st, n);
+        else if (st->file)
+            buf = st->file->read(n);
+        else
+            buf = st->payload.mid((int)st->offset, n);
+        if (buf.isEmpty()) {
+            // 读失败不是正常 EOF：不打日志的话表现为"浏览器下载截断"却无从排查
+            if (st->file && st->file->error() != QFileDevice::NoError)
+                qWarning() << "File download read error:" << st->file->errorString()
+                           << "at offset" << st->offset << "/" << st->totalSize;
             break;
+        }
         socket->write(buf);
         st->offset += buf.size();
     }
 
     cleanupHttpDownload(socket);
     socket->disconnectFromHost();
+}
+
+// 目录 tar 流式生成：按需产出最多 maxBytes 字节，状态机推进 tarQueue。
+// 产出总长度与 collectTarEntries 计算的 totalSize 严格一致——读失败/提前 EOF
+// 用零补齐，绝不短于 Content-Length（否则浏览器会一直挂起等待）。
+QByteArray RDPServer::generateTarChunk(HttpDownloadState* st, int maxBytes)
+{
+    static const char kZeros[512] = { 0 };
+    QByteArray out;
+    out.reserve(maxBytes);
+
+    while (out.size() < maxBytes) {
+        if (!st->pendingHeader.isEmpty()) {
+            const int take = qMin<int>(st->pendingHeader.size(), maxBytes - out.size());
+            out.append(st->pendingHeader.constData(), take);
+            st->pendingHeader.remove(0, take);
+            continue;
+        }
+        if (st->tarPadRemaining > 0) {
+            const int take = qMin(st->tarPadRemaining, maxBytes - out.size());
+            out.append(kZeros, take);
+            st->tarPadRemaining -= take;
+            continue;
+        }
+        if (st->tarFileRemaining > 0) {
+            const qint64 want = qMin<qint64>(maxBytes - out.size(), st->tarFileRemaining);
+            QByteArray buf = st->file ? st->file->read(want) : QByteArray();
+            if (buf.isEmpty())
+                buf = QByteArray(int(want), '\0'); // 打不开/读失败：零补齐保长度
+            out.append(buf);
+            st->tarFileRemaining -= buf.size();
+            continue;
+        }
+        if (st->file) {
+            // 当前成员文件读完 → 记录 512B 对齐填充并释放句柄
+            st->tarPadRemaining = int((512 - (st->curEntrySize % 512)) % 512);
+            st->file.reset();
+            continue;
+        }
+        if (st->tarQueueIdx >= st->tarQueue.size()) {
+            if (!st->tarEndSent) {
+                st->tarEndSent = true;
+                st->tarPadRemaining = 1024; // tar 结束块
+                continue;
+            }
+            break; // 生成完毕
+        }
+        const FileTransferService::TarEntry& e = st->tarQueue[st->tarQueueIdx++];
+        if (e.isDir) {
+            st->pendingHeader = FileTransferService::tarHeaderFor(
+                e.tarName + QLatin1Char('/'), 0, '5');
+        } else {
+            st->pendingHeader = FileTransferService::tarHeaderFor(e.tarName, e.size, '0');
+            st->curEntrySize = e.size;
+            st->tarFileRemaining = e.size;
+            if (e.size > 0) {
+                auto f = std::make_unique<QFile>(e.absPath);
+                if (!f->open(QIODevice::ReadOnly)) {
+                    qWarning() << "Tar stream: cannot open" << e.absPath
+                               << "- zero-filling" << e.size << "bytes";
+                } else {
+                    st->file = std::move(f);
+                }
+            }
+        }
+    }
+    return out;
 }
 
 void RDPServer::cleanupHttpDownload(QTcpSocket* socket)
@@ -1199,7 +1336,9 @@ void RDPServer::handleLoginPost(QTcpSocket* socket, const QByteArray& body)
         result["error"] = error;
 
     QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
-    QString cookie = QString("session=%1; path=/; max-age=86400; SameSite=Lax").arg(token);
+    // HttpOnly：会话令牌不允许 JS 读取，防 XSS 窃取（login.html 的 document.cookie
+    // 兜底写法对 HttpOnly cookie 无效，不冲突——仅当服务器没发 Set-Cookie 时才有意义）
+    QString cookie = QString("session=%1; path=/; max-age=86400; SameSite=Lax; HttpOnly").arg(token);
     if (useSsl_)
         cookie += "; Secure";
     QString extraHeaders = "Set-Cookie: " + cookie;
@@ -1406,7 +1545,7 @@ void RDPServer::onHttpRequest()
                 socket->disconnectFromHost();
                 return;
             }
-            handleShellExec(socket, body);
+            handleShellExec(socket, body, token);
             return;
         }
 
@@ -1523,7 +1662,8 @@ void RDPServer::onHttpRequest()
 
     if (path == "/api/shell/cwd" || path.startsWith("/api/shell/cwd?")) {
         QJsonObject cwdResp;
-        cwdResp["cwd"] = shellCurrentDir_;
+        // [B9] 按会话返回各自的工作目录
+        cwdResp["cwd"] = shellCwdFor(extractSessionToken(request));
         QByteArray jsonResp = QJsonDocument(cwdResp).toJson(QJsonDocument::Compact);
         QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
         socket->write(resp);
@@ -1668,7 +1808,10 @@ void RDPServer::onShellConnected(QWebSocket* socket)
     }
     InteractiveShell* shell = InteractiveShell::create(socket, this);
     if (!shell) {
+        // 必须同时 deleteLater：此刻尚未连接 disconnected 清理钩子，
+        // 只 close() 会把 QWebSocket 对象永久悬挂（内存泄漏 + 死连接）
         socket->close();
+        socket->deleteLater();
         return;
     }
 
@@ -1701,7 +1844,26 @@ void RDPServer::onShellConnected(QWebSocket* socket)
     qInfo() << "Interactive shell session started";
 }
 
-void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
+// [B9] 按会话令牌隔离的 shell 工作目录
+QString RDPServer::shellCwdFor(const QString& sessionToken)
+{
+    auto it = shellCwdByToken_.constFind(sessionToken);
+    if (it != shellCwdByToken_.constEnd())
+        return it.value();
+    // 首次访问：以服务进程启动目录为默认 CWD（与旧 shellCurrentDir_ 语义一致）
+    shellCwdByToken_.insert(sessionToken, shellCurrentDir_);
+    return shellCurrentDir_;
+}
+
+void RDPServer::setShellCwd(const QString& sessionToken, const QString& path)
+{
+    // 防御无效/过期会话导致 map 无限增长：超上限整体重置（各会话回默认目录）
+    if (shellCwdByToken_.size() > 256)
+        shellCwdByToken_.clear();
+    shellCwdByToken_.insert(sessionToken, path);
+}
+
+void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body, const QString& sessionToken)
 {
     QJsonDocument doc = QJsonDocument::fromJson(body);
     QJsonObject result;
@@ -1731,6 +1893,10 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         return;
     }
 
+    // [B9] 每会话独立 CWD：不再用进程级 QDir::setCurrent（会污染全进程工作目录，
+    // 且多客户端/多标签页的 cd 互相干扰）。后续 QProcess 一律 setWorkingDirectory。
+    const QString cwd = shellCwdFor(sessionToken);
+
     // 处理 cd 命令：服务器端切换目录，确保 cd 跨命令持久
     // 支持: cd, cd ~, cd path, cd "path", cd .., cd.., cd.
     // 不认识的 cd 变体（如 c:\ 等）会通过 QProcess 由原生 shell 处理
@@ -1738,7 +1904,7 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         // cd / cd. -> stay in current dir, just return cwd
         result["success"] = true;
         result["exitCode"] = 0;
-        result["cwd"] = shellCurrentDir_;
+        result["cwd"] = cwd;
         QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
         QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
         socket->write(resp);
@@ -1748,11 +1914,10 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
     }
 
     if (command == "cd~") {
-        QDir::setCurrent(QDir::homePath());
-        shellCurrentDir_ = QDir::currentPath();
+        setShellCwd(sessionToken, QDir::homePath());
         result["success"] = true;
         result["exitCode"] = 0;
-        result["cwd"] = shellCurrentDir_;
+        result["cwd"] = shellCwdFor(sessionToken);
         QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
         QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
         socket->write(resp);
@@ -1762,12 +1927,11 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
     }
 
     if (command == "cd.." || command.startsWith("cd.. ")) {
-        // cd.. -> cd ..
-        QDir::setCurrent("..");
-        shellCurrentDir_ = QDir::currentPath();
+        // cd.. -> cd ..（基于本会话 CWD 解析，不动进程 CWD）
+        setShellCwd(sessionToken, QDir::cleanPath(QDir(cwd).absoluteFilePath("..")));
         result["success"] = true;
         result["exitCode"] = 0;
-        result["cwd"] = shellCurrentDir_;
+        result["cwd"] = shellCwdFor(sessionToken);
         QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
         QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
         socket->write(resp);
@@ -1797,17 +1961,18 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
         if (arg == "~")
             arg = QDir::homePath();
 
-        bool ok = QDir::setCurrent(arg);
+        // 相对路径基于本会话 CWD 解析；绝对路径 absoluteFilePath 会原样返回
+        QString target = QDir::cleanPath(QDir(cwd).absoluteFilePath(arg));
+        bool ok = QFileInfo(target).isDir();
 #ifdef _WIN32
         // Windows drive letter switch: "D:" -> switch to D:\ current dir
         if (!ok && arg.length() == 2 && arg[1] == ':') {
-            QString orig = QDir::currentPath();
-            QDir::setCurrent(arg + "\\");
-            ok = QDir::currentPath() != orig;
+            target = arg + "\\";
+            ok = QFileInfo(target).isDir();
         }
 #endif
         if (ok) {
-            shellCurrentDir_ = QDir::currentPath();
+            setShellCwd(sessionToken, target);
             result["success"] = true;
             result["stdout"] = "";
             result["stderr"] = "";
@@ -1816,7 +1981,7 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
             result["success"] = false;
             result["error"] = "无法切换到目录: " + arg;
         }
-        result["cwd"] = shellCurrentDir_;
+        result["cwd"] = shellCwdFor(sessionToken);
         QByteArray jsonResp = QJsonDocument(result).toJson(QJsonDocument::Compact);
         QByteArray resp = buildHttpResponse(200, "OK", "application/json; charset=utf-8", jsonResp);
         socket->write(resp);
@@ -1828,7 +1993,7 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
     // 异步执行：避免在主线程用 waitForStarted/waitForFinished 同步阻塞（最长 5 分钟），
     // 否则会冻结整个服务（屏幕捕获、WebSocket、所有客户端全部卡死）。
     QProcess* proc = new QProcess(this);
-    proc->setWorkingDirectory(shellCurrentDir_);
+    proc->setWorkingDirectory(shellCwdFor(sessionToken));
 
     // 跟踪 socket 生命周期，防止重复响应/悬空写入
     QPointer<QTcpSocket> sockGuard(socket);
@@ -1857,22 +2022,22 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
     };
 
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, proc, responded, respond, cleanup](int exitCode, QProcess::ExitStatus status) {
+            this, [this, proc, responded, respond, cleanup, sessionToken](int exitCode, QProcess::ExitStatus status) {
         Q_UNUSED(status);
         QJsonObject result;
         result["success"] = true;
         result["stdout"] = QString::fromLocal8Bit(proc->readAllStandardOutput());
         result["stderr"] = QString::fromLocal8Bit(proc->readAllStandardError());
         result["exitCode"] = exitCode;
-        result["cwd"] = shellCurrentDir_;
+        result["cwd"] = shellCwdFor(sessionToken);
         respond(result);
         cleanup();
     });
-    connect(proc, &QProcess::errorOccurred, this, [this, proc, responded, respond, cleanup](QProcess::ProcessError) {
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, responded, respond, cleanup, sessionToken](QProcess::ProcessError) {
         QJsonObject result;
         result["success"] = false;
         result["error"] = "启动命令失败: " + proc->errorString();
-        result["cwd"] = shellCurrentDir_;
+        result["cwd"] = shellCwdFor(sessionToken);
         respond(result);
         cleanup();
     });
@@ -1880,13 +2045,13 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body)
     // 超时 5 分钟：交互式命令（su/ssh）长时间无输出不应卡死服务，超时则杀掉并返回
     QTimer* killTimer = new QTimer(proc);
     killTimer->setSingleShot(true);
-    connect(killTimer, &QTimer::timeout, proc, [this, proc, responded, respond, cleanup]() {
+    connect(killTimer, &QTimer::timeout, proc, [this, proc, responded, respond, cleanup, sessionToken]() {
         QJsonObject result;
         result["success"] = false;
         result["error"] = "命令执行超时（5分钟）—— 注意：交互式命令（如 su/ssh）需要输入，当前 Web Shell 不支持";
         result["stdout"] = QString::fromLocal8Bit(proc->readAllStandardOutput());
         result["stderr"] = QString::fromLocal8Bit(proc->readAllStandardError());
-        result["cwd"] = shellCurrentDir_;
+        result["cwd"] = shellCwdFor(sessionToken);
         respond(result);
         proc->kill();
         cleanup();
@@ -2097,102 +2262,16 @@ void RDPServer::updateSleepInhibit(bool active)
     sleepInhibitActive_ = active;
 
 #ifdef Q_OS_LINUX
+    // [P1 perf] 原 DBus 后端链为三个 BlockWithGui(3000) 同步调用，最坏阻塞主线程
+    // 9s（期间采集/WS/输入处理全部停摆）→ 改为 QDBusPendingCallWatcher 异步链：
+    // 非阻塞逐级回退；每个回调里复查 sleepInhibitActive_（等待期间会话可能已
+    // 断开，此时中止后续后端，避免"已断开仍持有 inhibit"泄漏）。
     if (active) {
         if (sleepInhibitBackend_ != InhibitBackend::None)
             return;
-        // 1) GNOME SessionManager.Inhibit（Electron powerSaveBlocker 同款）：
-        //    flags: 4=InhibitSuspend, 8=InhibitIdle（阻止挂起与熄屏）。
-        //    login1.Inhibit 需要活跃会话/root（polkit），systemd 服务进程会被
-        //    AccessDenied 拒绝，因此这里走 session bus 的 SessionManager。
-        QDBusMessage msg = QDBusMessage::createMethodCall(
-            QStringLiteral("org.gnome.SessionManager"),
-            QStringLiteral("/org/gnome/SessionManager"),
-            QStringLiteral("org.gnome.SessionManager"),
-            QStringLiteral("Inhibit"));
-        msg << QStringLiteral("QtRemoteDesktop")
-            << quint32(0)
-            << QStringLiteral("Remote desktop session active")
-            << quint32(12);
-        QDBusMessage reply = QDBusConnection::sessionBus().call(msg, QDBus::BlockWithGui, 3000);
-        if (reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty()) {
-            sleepInhibitCookie_ = reply.arguments().first().toUInt();
-            sleepInhibitBackend_ = InhibitBackend::SessionManager;
-            qInfo() << "Sleep inhibit acquired (gnome SessionManager cookie" << sleepInhibitCookie_ << ")";
-            return;
-        }
-        qWarning() << "SessionManager Inhibit failed:"
-                   << reply.errorName() << reply.errorMessage();
-
-        // 2) 通用 ScreenSaver 接口（阻止熄屏，部分环境不支持挂起抑制）
-        QDBusMessage msg2 = QDBusMessage::createMethodCall(
-            QStringLiteral("org.freedesktop.ScreenSaver"),
-            QStringLiteral("/org/freedesktop/ScreenSaver"),
-            QStringLiteral("org.freedesktop.ScreenSaver"),
-            QStringLiteral("Inhibit"));
-        msg2 << QStringLiteral("QtRemoteDesktop")
-             << QStringLiteral("Remote desktop session active");
-        QDBusMessage reply2 = QDBusConnection::sessionBus().call(msg2, QDBus::BlockWithGui, 3000);
-        if (reply2.type() == QDBusMessage::ReplyMessage && !reply2.arguments().isEmpty()) {
-            sleepInhibitCookie_ = reply2.arguments().first().toUInt();
-            sleepInhibitBackend_ = InhibitBackend::ScreenSaver;
-            qInfo() << "Sleep inhibit acquired (ScreenSaver cookie" << sleepInhibitCookie_ << ")";
-            return;
-        }
-        qWarning() << "ScreenSaver Inhibit failed:"
-                   << reply2.errorName() << reply2.errorMessage();
-
-        // 3) 最后手段：login1 Inhibit（多数无活跃会话场景会被 polkit 拒绝）
-        QDBusMessage msg3 = QDBusMessage::createMethodCall(
-            QStringLiteral("org.freedesktop.login1"),
-            QStringLiteral("/org/freedesktop/login1"),
-            QStringLiteral("org.freedesktop.login1.Manager"),
-            QStringLiteral("Inhibit"));
-        msg3 << QStringLiteral("sleep:idle")
-             << QStringLiteral("QtRemoteDesktop")
-             << QStringLiteral("Remote desktop session active")
-             << QStringLiteral("block");
-        QDBusMessage reply3 = QDBusConnection::systemBus().call(msg3, QDBus::BlockWithGui, 3000);
-        if (reply3.type() == QDBusMessage::ReplyMessage && !reply3.arguments().isEmpty()) {
-            QDBusUnixFileDescriptor fd =
-                qvariant_cast<QDBusUnixFileDescriptor>(reply3.arguments().first());
-            if (fd.isValid()) {
-                int dupFd = ::dup(fd.fileDescriptor());
-                if (dupFd >= 0) {
-                    sleepInhibitFd_ = dupFd;
-                    sleepInhibitBackend_ = InhibitBackend::Login1;
-                    qInfo() << "Sleep inhibit acquired (login1 fd" << dupFd << ")";
-                    return;
-                }
-            }
-        }
-        qWarning() << "All sleep-inhibit backends failed ("
-                   << reply.errorName() << reply3.errorName() << ")";
+        inhibitAcquireSessionManager();
     } else if (sleepInhibitBackend_ != InhibitBackend::None) {
-        if (sleepInhibitBackend_ == InhibitBackend::SessionManager) {
-            QDBusMessage msg = QDBusMessage::createMethodCall(
-                QStringLiteral("org.gnome.SessionManager"),
-                QStringLiteral("/org/gnome/SessionManager"),
-                QStringLiteral("org.gnome.SessionManager"),
-                QStringLiteral("Uninhibit"));
-            msg << sleepInhibitCookie_;
-            QDBusConnection::sessionBus().call(msg, QDBus::BlockWithGui, 3000);
-            qInfo() << "Sleep inhibit released (SessionManager cookie" << sleepInhibitCookie_ << ")";
-        } else if (sleepInhibitBackend_ == InhibitBackend::ScreenSaver) {
-            QDBusMessage msg = QDBusMessage::createMethodCall(
-                QStringLiteral("org.freedesktop.ScreenSaver"),
-                QStringLiteral("/org/freedesktop/ScreenSaver"),
-                QStringLiteral("org.freedesktop.ScreenSaver"),
-                QStringLiteral("UnInhibit"));
-            msg << sleepInhibitCookie_;
-            QDBusConnection::sessionBus().call(msg, QDBus::BlockWithGui, 3000);
-            qInfo() << "Sleep inhibit released (ScreenSaver cookie" << sleepInhibitCookie_ << ")";
-        } else if (sleepInhibitBackend_ == InhibitBackend::Login1 && sleepInhibitFd_ >= 0) {
-            ::close(sleepInhibitFd_);
-            sleepInhibitFd_ = -1;
-            qInfo() << "Sleep inhibit released (login1 fd)";
-        }
-        sleepInhibitCookie_ = 0;
-        sleepInhibitBackend_ = InhibitBackend::None;
+        inhibitRelease();
     }
 #elif defined(_WIN32)
     // ES_SYSTEM_REQUIRED 阻止睡眠、ES_DISPLAY_REQUIRED 阻止熄屏
@@ -2216,6 +2295,135 @@ void RDPServer::updateSleepInhibit(bool active)
     }
 #endif
 }
+
+#ifdef Q_OS_LINUX
+// ---- 防睡眠 DBus 后端异步链（[P1 perf]，原同步 BlockWithGui 链最坏阻塞主线程 9s）----
+void RDPServer::inhibitAcquireSessionManager()
+{
+    // GNOME SessionManager.Inhibit（Electron powerSaveBlocker 同款）：
+    // flags: 4=InhibitSuspend, 8=InhibitIdle（阻止挂起与熄屏）。
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.gnome.SessionManager"),
+        QStringLiteral("/org/gnome/SessionManager"),
+        QStringLiteral("org.gnome.SessionManager"),
+        QStringLiteral("Inhibit"));
+    msg << QStringLiteral("QtRemoteDesktop")
+        << quint32(0)
+        << QStringLiteral("Remote desktop session active")
+        << quint32(12);
+    auto* watcher = new QDBusPendingCallWatcher(
+        QDBusConnection::sessionBus().asyncCall(msg), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this](QDBusPendingCallWatcher* w) {
+        w->deleteLater();
+        if (!sleepInhibitActive_ || sleepInhibitBackend_ != InhibitBackend::None)
+            return; // 会话已结束或已由其他后端接管
+        QDBusPendingReply<quint32> reply = *w;
+        if (!reply.isError()) {
+            sleepInhibitCookie_ = reply.value();
+            sleepInhibitBackend_ = InhibitBackend::SessionManager;
+            qInfo() << "Sleep inhibit acquired (gnome SessionManager cookie" << sleepInhibitCookie_ << ")";
+            return;
+        }
+        qWarning() << "SessionManager Inhibit failed:"
+                   << reply.error().name() << reply.error().message();
+        inhibitAcquireScreenSaver(); // 回退 2) 通用 ScreenSaver 接口
+    });
+}
+
+void RDPServer::inhibitAcquireScreenSaver()
+{
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.ScreenSaver"),
+        QStringLiteral("/org/freedesktop/ScreenSaver"),
+        QStringLiteral("org.freedesktop.ScreenSaver"),
+        QStringLiteral("Inhibit"));
+    msg << QStringLiteral("QtRemoteDesktop")
+        << QStringLiteral("Remote desktop session active");
+    auto* watcher = new QDBusPendingCallWatcher(
+        QDBusConnection::sessionBus().asyncCall(msg), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this](QDBusPendingCallWatcher* w) {
+        w->deleteLater();
+        if (!sleepInhibitActive_ || sleepInhibitBackend_ != InhibitBackend::None)
+            return;
+        QDBusPendingReply<quint32> reply = *w;
+        if (!reply.isError()) {
+            sleepInhibitCookie_ = reply.value();
+            sleepInhibitBackend_ = InhibitBackend::ScreenSaver;
+            qInfo() << "Sleep inhibit acquired (ScreenSaver cookie" << sleepInhibitCookie_ << ")";
+            return;
+        }
+        qWarning() << "ScreenSaver Inhibit failed:"
+                   << reply.error().name() << reply.error().message();
+        inhibitAcquireLogin1(); // 回退 3) login1（多数无活跃会话场景被 polkit 拒绝）
+    });
+}
+
+void RDPServer::inhibitAcquireLogin1()
+{
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.login1"),
+        QStringLiteral("/org/freedesktop/login1"),
+        QStringLiteral("org.freedesktop.login1.Manager"),
+        QStringLiteral("Inhibit"));
+    msg << QStringLiteral("sleep:idle")
+        << QStringLiteral("QtRemoteDesktop")
+        << QStringLiteral("Remote desktop session active")
+        << QStringLiteral("block");
+    auto* watcher = new QDBusPendingCallWatcher(
+        QDBusConnection::systemBus().asyncCall(msg), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this](QDBusPendingCallWatcher* w) {
+        w->deleteLater();
+        if (!sleepInhibitActive_ || sleepInhibitBackend_ != InhibitBackend::None)
+            return;
+        QDBusPendingReply<QDBusUnixFileDescriptor> reply = *w;
+        if (!reply.isError()) {
+            const QDBusUnixFileDescriptor fd = reply.value();
+            if (fd.isValid()) {
+                int dupFd = ::dup(fd.fileDescriptor());
+                if (dupFd >= 0) {
+                    sleepInhibitFd_ = dupFd;
+                    sleepInhibitBackend_ = InhibitBackend::Login1;
+                    qInfo() << "Sleep inhibit acquired (login1 fd" << dupFd << ")";
+                    return;
+                }
+            }
+        }
+        qWarning() << "All sleep-inhibit backends failed (login1 last)";
+    });
+}
+
+void RDPServer::inhibitRelease()
+{
+    if (sleepInhibitBackend_ == InhibitBackend::SessionManager) {
+        QDBusMessage msg = QDBusMessage::createMethodCall(
+            QStringLiteral("org.gnome.SessionManager"),
+            QStringLiteral("/org/gnome/SessionManager"),
+            QStringLiteral("org.gnome.SessionManager"),
+            QStringLiteral("Uninhibit"));
+        msg << sleepInhibitCookie_;
+        QDBusConnection::sessionBus().asyncCall(msg);
+        qInfo() << "Sleep inhibit released (SessionManager cookie" << sleepInhibitCookie_ << ")";
+    } else if (sleepInhibitBackend_ == InhibitBackend::ScreenSaver) {
+        QDBusMessage msg = QDBusMessage::createMethodCall(
+            QStringLiteral("org.freedesktop.ScreenSaver"),
+            QStringLiteral("/org/freedesktop/ScreenSaver"),
+            QStringLiteral("org.freedesktop.ScreenSaver"),
+            QStringLiteral("UnInhibit"));
+        msg << sleepInhibitCookie_;
+        QDBusConnection::sessionBus().asyncCall(msg);
+        qInfo() << "Sleep inhibit released (ScreenSaver cookie" << sleepInhibitCookie_ << ")";
+    } else if (sleepInhibitBackend_ == InhibitBackend::Login1 && sleepInhibitFd_ >= 0) {
+        ::close(sleepInhibitFd_);
+        sleepInhibitFd_ = -1;
+        qInfo() << "Sleep inhibit released (login1 fd)";
+    }
+    sleepInhibitCookie_ = 0;
+    sleepInhibitBackend_ = InhibitBackend::None;
+}
+#endif
 
 void RDPServer::connectSleepSignals()
 {
@@ -2326,70 +2534,86 @@ void RDPServer::handleImeCycle(const QString& clientId)
         };
     }
 
-    // 执行一条完整命令（prefix 非空时包装为 sudo -u ... env ...），返回 exit code
-    auto runCmd = [&prefix](const QStringList& cmd, int timeoutMs, QString* out) -> int {
-        QProcess p;
-        if (prefix.isEmpty())
-            p.start(cmd.first(), cmd.mid(1));
-        else
-            p.start(prefix.first(), prefix.mid(1) + cmd);
-        p.waitForFinished(timeoutMs);
-        if (out)
-            *out = QString::fromUtf8(p.readAllStandardOutput());
-        return (p.exitStatus() == QProcess::NormalExit) ? p.exitCode() : -1;
-    };
+    // [P1 perf] 命令链（ibus/gsettings 各 2~3s，最坏 2+2+3+2=9s）原先在主线程
+    // waitForFinished 同步等待，期间采集/WS/输入全部停摆 → 整体移到工作线程；
+    // 结果经 imeResultReady 信号（auto=queued）回主线程发送（sendJson 操作
+    // QWebSocket，必须留在主线程）。RDPServer 为应用级单例，退出窗口极小，
+    // QPointer 复查缩小风险。
+    QPointer<RDPServer> self(this);
+    const QString cid = clientId;
+    std::thread([self, cid, prefix]() {
+        // 执行一条完整命令（prefix 非空时包装为 sudo -u ... env ...），返回 exit code
+        auto runCmd = [&prefix](const QStringList& cmd, int timeoutMs, QString* out) -> int {
+            QProcess p;
+            if (prefix.isEmpty())
+                p.start(cmd.first(), cmd.mid(1));
+            else
+                p.start(prefix.first(), prefix.mid(1) + cmd);
+            p.waitForFinished(timeoutMs);
+            if (out)
+                *out = QString::fromUtf8(p.readAllStandardOutput());
+            return (p.exitStatus() == QProcess::NormalExit) ? p.exitCode() : -1;
+        };
 
-    // 1) 当前 engine（无焦点窗口时可能为空）
-    QString cur;
-    runCmd({ QStringLiteral("ibus"), QStringLiteral("engine") }, 2000, &cur);
-    cur = cur.trimmed();
+        // 1) 当前 engine（无焦点窗口时可能为空）
+        QString cur;
+        runCmd({ QStringLiteral("ibus"), QStringLiteral("engine") }, 2000, &cur);
+        cur = cur.trimmed();
 
-    // 2) preload-engines 列表（gsettings 输出形如 ['libpinyin', 'pinyin']）
-    QString raw;
-    runCmd({ QStringLiteral("gsettings"), QStringLiteral("get"),
-             QStringLiteral("org.freedesktop.ibus.general"),
-             QStringLiteral("preload-engines") }, 2000, &raw);
-    QStringList engines;
-    raw.remove(QLatin1Char('[')).remove(QLatin1Char(']'))
-       .remove(QLatin1Char('\'')).remove(QLatin1Char('"'));
-    const QStringList parts = raw.split(QLatin1Char(','));
-    for (const QString& item : parts) {
-        const QString e = item.trimmed();
-        if (!e.isEmpty())
-            engines << e;
-    }
+        // 2) preload-engines 列表（gsettings 输出形如 ['libpinyin', 'pinyin']）
+        QString raw;
+        runCmd({ QStringLiteral("gsettings"), QStringLiteral("get"),
+                 QStringLiteral("org.freedesktop.ibus.general"),
+                 QStringLiteral("preload-engines") }, 2000, &raw);
+        QStringList engines;
+        raw.remove(QLatin1Char('[')).remove(QLatin1Char(']'))
+           .remove(QLatin1Char('\'')).remove(QLatin1Char('"'));
+        const QStringList parts = raw.split(QLatin1Char(','));
+        for (const QString& item : parts) {
+            const QString e = item.trimmed();
+            if (!e.isEmpty())
+                engines << e;
+        }
 
-    if (engines.size() < 2) {
-        qInfo() << "IME switch: no switchable engines (preload =" << engines << ")";
-        wsServer_->sendJson(clientId, QJsonObject {
-            { "type", "ime_state" },
-            { "engine", cur },
-            { "error", engines.isEmpty() ? "no_engines" : "single_engine" },
-        });
-        return;
-    }
+        if (engines.size() < 2) {
+            qInfo() << "IME switch: no switchable engines (preload =" << engines << ")";
+            if (self)
+                emit self->imeResultReady(cid, QJsonObject {
+                    { "type", "ime_state" },
+                    { "engine", cur },
+                    { "error", engines.isEmpty() ? "no_engines" : "single_engine" },
+                });
+            return;
+        }
 
-    // 3) 计算下一个 engine（循环切换；当前 engine 不在列表时落到第一个）
-    const int idx = engines.indexOf(cur);
-    const QString next = engines[(idx + 1) % engines.size()];
+        // 3) 计算下一个 engine（循环切换；当前 engine 不在列表时落到第一个）
+        const int idx = engines.indexOf(cur);
+        const QString next = engines[(idx + 1) % engines.size()];
 
-    // 4) 应用切换并读回验证（实测 ibus CLI set 后 exit code 可能为非 0 但切换
-    //    实际生效，故以读回结果为准，不用 exit code 判定）
-    runCmd({ QStringLiteral("ibus"), QStringLiteral("engine"), next }, 3000, nullptr);
-    QString verify;
-    runCmd({ QStringLiteral("ibus"), QStringLiteral("engine") }, 2000, &verify);
-    const QString now = verify.trimmed();
-    const bool ok = !now.isEmpty();
+        // 4) 应用切换并读回验证（实测 ibus CLI set 后 exit code 可能为非 0 但切换
+        //    实际生效，故以读回结果为准，不用 exit code 判定）
+        runCmd({ QStringLiteral("ibus"), QStringLiteral("engine"), next }, 3000, nullptr);
+        QString verify;
+        runCmd({ QStringLiteral("ibus"), QStringLiteral("engine") }, 2000, &verify);
+        const QString now = verify.trimmed();
+        const bool ok = !now.isEmpty();
 
-    qInfo() << "IME switch:" << cur << "->" << next << "now =" << now;
-    wsServer_->sendJson(clientId, QJsonObject {
-        { "type", "ime_state" },
-        { "engine", now.isEmpty() ? next : now },
-        { "ok", ok },
-    });
+        qInfo() << "IME switch:" << cur << "->" << next << "now =" << now;
+        if (self)
+            emit self->imeResultReady(cid, QJsonObject {
+                { "type", "ime_state" },
+                { "engine", now.isEmpty() ? next : now },
+                { "ok", ok },
+            });
+    }).detach();
 #else
     Q_UNUSED(clientId);
 #endif
+}
+
+void RDPServer::onImeResultReady(const QString& clientId, const QJsonObject& state)
+{
+    wsServer_->sendJson(clientId, state);
 }
 
 void RDPServer::handleSystemAction(const QString& action, const QString& clientId)
@@ -2874,8 +3098,10 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             if (isInputEventLogged(type))
                 qDebug() << "Service: forwarding input to helper, type =" << type;
             
-            if (type != "config")
-                wsServer_->sendToCaptureSource(input);
+            // [B17] config 也要转发：服务模式下 JPEG 质量/缩放/帧率都由 helper
+            // 侧执行，本地 jpegCompressor_ 不在视频路径上，旧代码跳过 config
+            // → 画质/帧率热更新静默失效。helper 对未知类型安全忽略。
+            wsServer_->sendToCaptureSource(input);
             if (screenLocked_ && secureInputRunning_)
                 wsServer_->sendToSecureInput(input);
             // config/set_resolution 跳过转发，由下面的本地逻辑处理
@@ -2957,13 +3183,20 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     (void)input;
 #else
     if (!serviceMode_) {
-        BOOL ssRunning = FALSE;
-        SystemParametersInfo(0x0072, 0, &ssRunning, 0);
-        if (ssRunning) {
-            INPUT esc[2] = {};
-            esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
-            esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(2, esc, sizeof(INPUT));
+        // [P6] SystemParametersInfo 是每输入事件一次的同步系统调用（含 60Hz
+        // mousemove），主线程白白消耗；屏保状态变化是秒级事件，500ms 节流足够。
+        static DWORD lastSpiCheckMs = 0;
+        const DWORD nowMs = ::GetTickCount();
+        if (nowMs - lastSpiCheckMs >= 500) {
+            lastSpiCheckMs = nowMs;
+            BOOL ssRunning = FALSE;
+            SystemParametersInfo(0x0072, 0, &ssRunning, 0);
+            if (ssRunning) {
+                INPUT esc[2] = {};
+                esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
+                esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(2, esc, sizeof(INPUT));
+            }
         }
     }
 #endif
@@ -3042,7 +3275,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             configFps_ = newFps;
             if (screenCapturer_)
                 screenCapturer_->setFps(newFps);
-            saveServerConfig(QString());
+            scheduleSaveConfig(); // [P2] 去抖落盘
 #ifdef USE_FFMPEG
             // 帧率改变需按新 fps 重建编码器，否则 time_base/gop_size 仍是旧值，
             // 导致 IDR 间隔与捕获帧率不匹配
@@ -3056,7 +3289,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             configScale_ = newScale;
             if (jpegCompressor_)
                 jpegCompressor_->setScalePercent(newScale);
-            saveServerConfig(QString());
+            scheduleSaveConfig(); // [P2] 去抖落盘
 #ifdef USE_FFMPEG
             // 视频模式下缩放档位改变需按新尺寸重建编码器，
             // 否则始终全分辨率 H.264 软编（CPU 高且 scale 无效）
@@ -3076,7 +3309,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             CodecType c = codecFromString(codecStr);
             if (c != configCodec_) {
                 configCodec_ = c;
-                saveServerConfig(QString());
+                scheduleSaveConfig(); // [P2] 去抖落盘
 #ifdef USE_FFMPEG
                 if (currentMode_ == ServerMode::Video && videoEncoder_ && !webrtcBusy) {
                     reinitVideoEncoderForScale();
@@ -3093,7 +3326,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             else if (hwModeStr == "off") m = HwEncodeMode::Off;
             if (m != configHwEncodeMode_) {
                 configHwEncodeMode_ = m;
-                saveServerConfig(QString());
+                scheduleSaveConfig(); // [P2] 去抖落盘
 #ifdef USE_FFMPEG
                 if (currentMode_ == ServerMode::Video && videoEncoder_ && !webrtcBusy) {
                     reinitVideoEncoderForScale();
@@ -3291,12 +3524,14 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
 #ifdef USE_WEBRTC
     // 通过 RTP 发给所有已连通的 WebRTC 客户端。
     // 注意：sendFrame() 内部可能同步 emit failed()/closed() → stopWebRtcSession()
-    // 把当前会话从 webrtcSessions_ 中 erase；此时再对迭代器执行 ++it 即迭代器失效
-    // （std::map 语义下 UB，release 下表现为读野指针/崩溃）。
-    // 因此先快照 key 列表，再按 key 重新查表，已移除的会话自然跳过。
-    const QList<QString> webrtcIds = webrtcSessions_.keys();
-    for (const QString& id : webrtcIds) {
-        if (WebRtcSession* s = webrtcSessions_.value(id))
+    // 把当前会话从 webrtcSessions_ 中 erase。QMap 节点式容器：erase 只失效指向
+    // 被删元素的迭代器，因此"先推进迭代器再 sendFrame"即可安全遍历，
+    // 且免去旧快照 keys() 方案每帧一次的 QList 堆分配（30fps 下纯浪费）。
+    auto it = webrtcSessions_.begin();
+    while (it != webrtcSessions_.end()) {
+        WebRtcSession* s = it.value();
+        ++it; // 先推进：sendFrame 可能同步移除当前会话
+        if (s)
             s->sendFrame(data, isKeyframe);
     }
 #endif

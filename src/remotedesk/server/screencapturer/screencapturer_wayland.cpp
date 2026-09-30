@@ -129,22 +129,24 @@ spa_pod* buildVideoFormat(struct spa_pod_builder* b, uint32_t format, int w, int
 // ---------------------------------------------------------------------------
 void WaylandCapturer::onStreamStateChanged(int oldState, int newState, const char* error)
 {
-    const char* stateNames[] = {"UNCONNECTED","CONNECTING","IDLE","PAUSED","STREAMING"};
-    const char* oldName = (oldState >= 0 && oldState <= 4) ? stateNames[oldState] : "UNKNOWN";
-    const char* newName = (newState >= 0 && newState <= 4) ? stateNames[newState] : "UNKNOWN";
+    // [P2] pw_stream_state 实际枚举：ERROR=-2, UNCONNECTED=0, CONNECTING=1,
+    // PAUSED=2, STREAMING=3。旧表 {"UNCONNECTED","CONNECTING","IDLE","PAUSED",
+    // "STREAMING"} 把 2 当 IDLE、3 当 PAUSED：日志全错，且 pw_stream_set_active
+    // 挂在错误的 3（实为 STREAMING）上——真正的 PAUSED(2) 永远不触发激活。
+    // （此前该 bug 被 stream 节点 NODE_ALWAYS_PROCESS 属性掩盖：不激活也推流。）
+    static const char* stateNames[] = {"UNCONNECTED","CONNECTING","PAUSED","STREAMING"};
+    const char* oldName = (oldState == -2) ? "ERROR"
+        : (oldState >= 0 && oldState <= 3) ? stateNames[oldState] : "UNKNOWN";
+    const char* newName = (newState == -2) ? "ERROR"
+        : (newState >= 0 && newState <= 3) ? stateNames[newState] : "UNKNOWN";
     qInfo() << "WaylandCapturer:" << oldName << "->" << newName
             << "error:" << (error ? error : "none")
             << "activated:" << activated_ << "frameCount:" << frameCount_;
 
-    if (newState == 2 /*IDLE*/ && mutterMode_ && !linkCreated_) {
-        uint32_t myNodeId = pw_stream_get_node_id(stream_);
-        qInfo() << "WaylandCapturer: stream IDLE, node" << myNodeId;
-        linkCreated_ = true;
-    }
-
-    if (newState == 3 /*PAUSED*/ && !activated_) {
+    if (newState == 2 /*PAUSED*/ && !activated_) {
         activated_ = true;
-        qInfo() << "WaylandCapturer: stream PAUSED, calling pw_stream_set_active(true)";
+        qInfo() << "WaylandCapturer: stream PAUSED, node" << pw_stream_get_node_id(stream_)
+                << ", calling pw_stream_set_active(true)";
         int res = pw_stream_set_active(stream_, true);
         qInfo() << "WaylandCapturer: pw_stream_set_active returned" << res;
     }
@@ -663,17 +665,20 @@ void WaylandCapturer::streamProcess()
     struct spa_data* d = &sbuf->datas[0];
     if (d && d->data) {
         int stride = (d->chunk && d->chunk->stride > 0) ? d->chunk->stride : width_ * 4;
-        // 实际尺寸自适应：mutter 实际输出的 stride/尺寸可能与我们记录的 width_/height_
-        // 不一致（例如协商为 1714x918 而 width_ 仍是 1920x1080）。若用错误的 width_
-        // 构造 QImage，stride < width_*4 会导致 QImage 为空图，进而被上层误判为锁屏。
-        // 以 chunk 的 stride/size 反推实际像素宽高（格式为 BGRx/BGRA/RGBx，32bpp）。
+        // [B5] 协商尺寸（parseFormatParam 设置的 width_/height_）是权威值，QImage 允许
+        // bytesPerLine 大于 width*4（stride 对齐填充无害）。不得用 stride/4 反推宽度——
+        // mutter 对某些缓冲做行对齐填充时会把 padding 当像素，画面错位且污染
+        // InputManager 依赖的 QTRD_WAYLAND_WIDTH。只有两种不一致才降级推导：
+        //   a) stride < width_*4：真实行宽比协商窄（mutter 分数缩放，buffer 小于协商）；
+        //   b) chunk->size < stride*height_：真实行数比协商少。
         int realW = width_;
         int realH = height_;
-        if (stride > 0 && (stride % 4) == 0)
+        if (stride < width_ * 4 && stride > 0 && (stride % 4) == 0)
             realW = stride / 4;
-        if (d->chunk && d->chunk->size > 0 && stride > 0) {
-            int h = d->chunk->size / stride;
-            if (h > 0 && h <= 4096)
+        const qint64 bufSize = (d->chunk && d->chunk->size > 0) ? (qint64)d->chunk->size : 0;
+        if (bufSize > 0 && stride > 0 && bufSize < qint64(stride) * height_) {
+            int h = (int)(bufSize / stride);
+            if (h > 0 && h <= 8192)
                 realH = h;
         }
         if (realW <= 0 || realH <= 0 || stride < realW * 4) {
@@ -752,7 +757,16 @@ bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
         if (updated) *updated = false;
         return false;
     }
-    outImage = frame_.copy();
+    // [P1 perf] 帧未更新时直接返回：静止桌面 PipeWire 不产新帧，旧逻辑每 tick
+    // 仍 outImage = frame_.copy() 白拷一整帧 8.3MB（30fps ≈ +250MB/s 带宽）。
+    if (frameCount_ == lastDeliveredFrame_) {
+        if (updated) *updated = false;
+        return true; // 采集通道正常，仅无新帧（与 X11 damage 空帧语义一致）
+    }
+    lastDeliveredFrame_ = frameCount_;
+    // QImage 是 COW 浅共享：这里不发生深拷贝；仅当消费方写像素时才在写侧触发 detach。
+    // streamProcess 写 frame_ 是整块替换（不写共享数据），不会强制消费方 detach。
+    outImage = frame_;
     if (updated) *updated = true;
     return true;
 }

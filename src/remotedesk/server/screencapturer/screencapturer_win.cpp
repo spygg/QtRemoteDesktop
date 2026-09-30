@@ -229,8 +229,10 @@ public:
                 return true; // 跳过本帧，下次再试
         }
 
-        // 增加超时时间，Win11 可能需要更长时间
-        HRESULT hr = deskDupl_->AcquireNextFrame(100, &frameInfo, &desktopResource);
+        // [P1 perf] 超时从 100ms 降到 16ms：AcquireNextFrame 是同步等待，超时即阻塞采集线程。
+        // 100ms 会把 33ms 定时器节拍拖成 10Hz（静止桌面每 tick 白等 100ms）；
+        // 未到期的新帧由下一个 tick 自然取到，不影响帧完整性。
+        HRESULT hr = deskDupl_->AcquireNextFrame(16, &frameInfo, &desktopResource);
 
         if (FAILED(hr)) {
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
@@ -313,8 +315,17 @@ public:
 
         // BGRA 直通输出 RGB32（小端=BGRA），与 X11 捕获一致。
         // 全帧 RGB888 转换已移到编码线程，避免主线程每帧全帧转换。
+        // [B24] 尺寸以当前帧纹理为准：分辨率热切换后 width_/height_ 陈旧，
+        // 用旧尺寸构造 QImage 会越界读（RowPitch 已是新纹理的）。同时回写成员，
+        // 让 screen_info/坐标映射跟上新分辨率。
         const uchar* src = static_cast<const uchar*>(mapped.pData);
         const int srcStep = mapped.RowPitch;
+        if (static_cast<int>(desc.Width) != width_ || static_cast<int>(desc.Height) != height_) {
+            qInfo() << "DXGI: resolution changed" << width_ << "x" << height_
+                    << "->" << desc.Width << "x" << desc.Height;
+            width_ = static_cast<int>(desc.Width);
+            height_ = static_cast<int>(desc.Height);
+        }
         QImage rawImg(src, width_, height_, srcStep, QImage::Format_RGB32);
         outImage = rawImg.copy();
 
@@ -551,6 +562,11 @@ bool ScreenCapturer::start(int fps)
         if (dxgiCapturer_->initialize()) {
             useDXGI_ = true;
             qInfo() << "Using DXGI capture, output" << outIdx;
+        } else {
+            // [B6] 初始化失败立即销毁：DXGICapturer 持有 D3D COM 资源，
+            // 留着会滞留适配器引用、干扰 GDI 回退
+            delete dxgiCapturer_;
+            dxgiCapturer_ = nullptr;
         }
     }
 #endif

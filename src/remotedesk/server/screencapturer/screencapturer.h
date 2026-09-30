@@ -57,7 +57,7 @@ inline quint16 quickFrameChecksum(const QImage& frame)
 class GdiCapturer;
 #endif
 
-#if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+#if defined(Q_OS_WIN)
 class DXGICapturer;
 #endif
 
@@ -170,7 +170,10 @@ private:
     bool winApplyOutput(int index);   // 应用到指定输出（GDI 区域 / DXGI 输出号）并重建捕获器
 #endif
 
-#if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+// [ODR] 不能用 _WIN32_WINNT 作守卫：rdpserver 等包含本头的 TU 与 ScreenCapturer
+// 目标的 _WIN32_WINNT 定义不同（0x0A00 vs 未定义/0x0601），会编译出两种类布局
+// → ODR 违规、随机崩溃。成员声明无代价，平台可用性判断留给 .cpp 运行期。
+#if defined(Q_OS_WIN)
     PlatformCapturer* dxgiCapturer_ = nullptr;
     bool useDXGI_ = false;
     bool initDXGI();

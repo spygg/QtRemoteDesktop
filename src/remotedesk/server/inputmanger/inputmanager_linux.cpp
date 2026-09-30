@@ -221,7 +221,8 @@ namespace {
 // 常缺 WAYLAND_DISPLAY，但 socket 依然存在；纯 X11 桌面没有该 socket。
 bool InputManager::desktopSessionIsWayland()
 {
-    if (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))
+    // [compat] qEnvironmentVariableIsEmpty 是 Qt 5.10 API，Qt 5.9 用 qgetenv
+    if (!qgetenv("WAYLAND_DISPLAY").isEmpty())
         return true;
     const QByteArray rt = qgetenv("XDG_RUNTIME_DIR");
     if (rt.isEmpty())
@@ -667,8 +668,11 @@ bool InputManager::sendUinputMouseButton(int button, bool isDown)
 {
     if (uinputMouseFd_ < 0)
         return false;
+    // 前端约定 button: 0=左 1=中 2=右（e.button）。旧映射把 1→BTN_RIGHT、
+    // 2→BTN_MIDDLE，Wayland/uinput 路径中右键互换；X11 路径
+    //（Button1/2/3=左/中/右）本来就对，这里对齐为相同语义。
     unsigned short code = (button == 0) ? BTN_LEFT
-                        : (button == 1) ? BTN_RIGHT : BTN_MIDDLE;
+                        : (button == 1) ? BTN_MIDDLE : BTN_RIGHT;
     struct input_event ev = {};
     ev.type = EV_KEY; ev.code = code; ev.value = isDown ? 1 : 0;
     if (write(uinputMouseFd_, &ev, sizeof(ev)) != static_cast<ssize_t>(sizeof(ev)))
@@ -1035,6 +1039,11 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
 }
 
 void InputManager::updateModifiers(bool ctrl, bool alt, bool shift) {
+    // [B14] 首个按键的修饰键会被丢弃：sendXModifier 的 XTest 路径依赖 xDisplay_，
+    // 旧代码在 injectSym 内才 ensureXDisplay，首个 keydown 走到这里时 display
+    // 尚未打开 → 修饰键注入空转，但 ctrlDown_ 已更新（状态失同步，后续不再补发）。
+    // ensureXDisplay 幂等且轻量，统一提前。
+    ensureXDisplay();
     bool needFlush = false;
     if (ctrl != ctrlDown_) {
         sendXModifier(static_cast<X11KeySym>(XK_Control_L), ctrl);

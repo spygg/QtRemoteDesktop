@@ -31,6 +31,21 @@ public:
     // 目录 → tar 包（内存数据）。WS 下载与 HTTP 直链下载共用，保证两处产物一致。
     static QByteArray createTarForDirectory(const QString& dirPath);
 
+    // ---- 目录 tar 流式生成（[P1 perf]）----
+    // GB 级目录的 HTTP 直链下载不再整包进内存：只收集条目清单，文件内容由
+    // HTTP 泵送阶段按需读盘。条目顺序与 createTarForDirectory 产物严格一致
+    //（深度优先、名称序，首元素为根目录自身）；totalSize 为精确 tar 长度
+    //（512B header/条 + 文件内容 + 512B 对齐填充 + 1024B 结束块）。
+    struct TarEntry {
+        QString absPath;  // 磁盘绝对路径（目录/文件）
+        QString tarName;  // tar 内路径（根目录名起头，目录不带 '/' 后缀）
+        bool isDir = false;
+        qint64 size = 0;  // 文件字节数（目录为 0）
+    };
+    static QList<TarEntry> collectTarEntries(const QString& dirPath, qint64* totalSize);
+    // 生成单个条目的 512B tar header（type: '0'=文件，'5'=目录，目录名须带 '/' 后缀）
+    static QByteArray tarHeaderFor(const QString& name, qint64 size, char type);
+
     // 默认上传目录（本机拖入时的落点）：优先取「实际登录桌面的用户」的 Desktop，
     // 而不是服务进程自身的 home（服务常以 root 运行，home=/root 对桌面用户无意义）。
     // 推导：loginctl 找 seat0 上的 x11/wayland 会话用户 → 退回最小非 0 uid 普通用户
@@ -41,7 +56,7 @@ public slots:
     void processFileList(const QString& clientId, const QString& path);
     void processDownload(const QString& clientId, const QString& path);
     void processUploadStart(const QString& clientId, const QString& path, qint64 size);
-    void processUploadChunk(const QString& path, const QByteArray& data);
+    void processUploadChunk(const QString& clientId, const QString& path, const QByteArray& data);
     void processUploadDone(const QString& clientId, const QString& path);
 
 signals:
@@ -62,7 +77,14 @@ private:
         QFile* file = nullptr;
         qint64 totalSize = 0;
         qint64 receivedSize = 0;
+        bool failed = false; // 写盘失败/超出声明大小后置位，后续块丢弃，done 时回报错误
     };
+    // 上传会话 key = clientId + '\n' + 安全路径：两个客户端上传同一目标路径
+    // 互不干扰（按 path 单 key 会互相顶掉、数据交错写坏文件）
+    static QString uploadKey(const QString& clientId, const QString& safePath)
+    {
+        return clientId + QLatin1Char('\n') + safePath;
+    }
     QMap<QString, UploadState> activeUploads_;
 };
 

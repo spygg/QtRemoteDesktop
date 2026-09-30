@@ -183,6 +183,11 @@ bool ScreenCapturer::shouldDeclareLocked()
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xrender.h>
 #include <X11/extensions/Xfixes.h>
+#ifdef HAVE_XSHM
+#include <X11/extensions/XShm.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#endif
 #ifdef HAVE_XRANDR
 #include <X11/extensions/Xrandr.h>
 #endif
@@ -221,6 +226,14 @@ class X11Capturer : public PlatformCapturer {
     // 的损伤不会上报到根窗口，导致全屏缓冲该区域停留在初始全黑→顽固黑块。
     // 定期强制一次全量抓取可自愈这类区域（≤ ~0.8s 的短暂黑块可接受）。
     std::chrono::steady_clock::time_point lastFullRefresh_ = std::chrono::steady_clock::now();
+#ifdef HAVE_XSHM
+    // MIT-SHM 全区抓取（[P1 perf]）：XGetImage 走 X socket 逐像素回传
+    //（1080p@30fps ≈ 500MB/s 的往返），XShmGetImage 由 X server 直写共享内存，
+    // 全量/大面积抓取零 socket 像素传输，是帧路径最大单点收益。
+    XShmSegmentInfo shminfo_{};
+    XImage* shmImage_ = nullptr;
+    bool shmOk_ = false;
+#endif
 
 public:
     // 输出枚举（多屏切换）
@@ -261,6 +274,17 @@ public:
         }
 
         fullFrame_ = QImage(primaryW_, primaryH_, QImage::Format_RGB32);
+        // [B25] 必须清零：damage 路径只回写损伤矩形，未清零的堆内存会随
+        // 画面帧外发（未初始化内存泄漏 + 花屏）。applyOutput 重建路径已有
+        // fill(0)，这里是 initialize 直建路径的补齐。
+        fullFrame_.fill(0);
+
+#ifdef HAVE_XSHM
+        // resolvePrimaryOutput → applyOutput 已按需建过 shm（尺寸匹配时）；
+        // 走了"整屏回退"分支（无输出枚举）时这里补建
+        if (!shmImage_ && !shmOk_)
+            setupShm();
+#endif
 
         // 检查并初始化 Damage 扩展
         int damageEvent, damageError;
@@ -308,7 +332,54 @@ public:
             }
             if (!empty && rectCount > 0) {
                 // 只抓取变化区域，更新到全屏缓冲（大幅降低 XGetImage 的传输与拷贝量）
+                // [P1 perf] 先统计裁剪后变化总面积决定策略：
+                //   大面积（≥1/8 屏）→ 一次 MIT-SHM 全区抓取（共享内存直读，无
+                //   socket 像素传输），矩形直接从 shm 缓冲 memcpy；
+                //   小面积 → 逐矩形 XGetImage（传输量小，socket 往返成本占比更低）。
+                qint64 totalArea = 0;
+                for (int i = 0; i < rectCount; ++i) {
+                    const XRectangle& r = rects[i];
+                    const int x1 = qMin<int>(r.x + r.width, offsetX_ + primaryW_);
+                    const int y1 = qMin<int>(r.y + r.height, offsetY_ + primaryH_);
+                    const int x0 = qMax<int>(r.x, offsetX_);
+                    const int y0 = qMax<int>(r.y, offsetY_);
+                    if (x1 > x0 && y1 > y0)
+                        totalArea += qint64(x1 - x0) * (y1 - y0);
+                }
+
                 int copied = 0;
+                bool shmGrabbed = false;
+#ifdef HAVE_XSHM
+                if (shmOk_ && totalArea >= qint64(primaryW_) * primaryH_ / 8) {
+                    if (XShmGetImage(display_, rootWindow_, shmImage_,
+                                     offsetX_, offsetY_, AllPlanes)) {
+                        shmGrabbed = true;
+                        const uchar* base = reinterpret_cast<const uchar*>(shmImage_->data);
+                        const int stride = shmImage_->bytes_per_line;
+                        for (int i = 0; i < rectCount; ++i) {
+                            const XRectangle& r = rects[i];
+                            const int x0 = qMax<int>(r.x, offsetX_);
+                            const int y0 = qMax<int>(r.y, offsetY_);
+                            const int x1 = qMin<int>(r.x + r.width, offsetX_ + primaryW_);
+                            const int y1 = qMin<int>(r.y + r.height, offsetY_ + primaryH_);
+                            if (x1 <= x0 || y1 <= y0)
+                                continue;
+                            const int dstX = x0 - offsetX_;
+                            const int dstY = y0 - offsetY_;
+                            const int cw = x1 - x0;
+                            const int ch = y1 - y0;
+                            for (int yy = 0; yy < ch; ++yy) {
+                                memcpy(fullFrame_.scanLine(dstY + yy) + dstX * 4,
+                                       base + (y0 - offsetY_ + yy) * stride
+                                           + (x0 - offsetX_) * 4,
+                                       static_cast<size_t>(cw) * 4);
+                            }
+                            ++copied;
+                        }
+                    }
+                }
+#endif
+                if (!shmGrabbed) {
                 for (int i = 0; i < rectCount; ++i) {
                     XRectangle& r = rects[i];
                     if (r.width <= 0 || r.height <= 0)
@@ -360,11 +431,20 @@ public:
                     XDestroyImage(ximage);
                     ++copied;
                 }
+                }
+                // [P0 fix] 释放后立即置空：copied==0 落到下方出口时由空指针守卫兜底，
+                // 杜绝双重释放（原代码在 copied==0 时对同一指针 XFree 两次 → glibc 堆损坏）。
                 XFree(rects);
+                rects = nullptr;
                 XFixesDestroyRegion(display_, region);
+                region = 0; // XserverRegion 是整数句柄（非指针），用 0 置空
                 if (copied > 0) {
                     if (updated) *updated = true;
-                    outImage = fullFrame_.copy();
+                    // [P1 perf] COW 浅共享替代整帧 .copy()（1080p≈8.3MB）：
+                    // 消费方（编码/压缩线程）不写像素则零拷贝；若采集线程随后写
+                    // fullFrame_，QImage 自动在写侧 detach，成本不高于旧显式拷贝，
+                    // 而静态场景（缓冲不再被写、直接被下一帧替换）完全省掉。
+                    outImage = fullFrame_;
                     emptyDamageCount_ = 0;
                     regionDirty_ = true;
                     return true;
@@ -374,7 +454,8 @@ public:
             }
             if (rects)
                 XFree(rects);
-            XFixesDestroyRegion(display_, region);
+            if (region)
+                XFixesDestroyRegion(display_, region);
             if (empty) {
                 // 真实 Xorg 下 Damage 可靠。静止时不做全量抓取，避免主线程空转。
                 // 仅每 ~2 秒试探一次全量抓取（兼容 xrdp 等不报告 Damage 的驱动），
@@ -394,8 +475,10 @@ public:
         if (updated) *updated = true;
         regionDirty_ = false; // 全屏抓取，仍用校验和判断是否有变化
 
-        XImage* ximage = XGetImage(display_, rootWindow_, offsetX_, offsetY_,
-            primaryW_, primaryH_, AllPlanes, ZPixmap);
+        // [P1 perf] 全量抓取优先 MIT-SHM（grabPrimary）：XGetImage 的 socket 逐像素
+        // 回传在 1080p@30fps 下 ≈ 500MB/s，XShm 由 X server 直写共享内存后零传输
+        bool fromShm = false;
+        XImage* ximage = grabPrimary(&fromShm);
         if (!ximage) {
             return false;
         }
@@ -423,7 +506,8 @@ public:
             fullFrame_ = outImage.convertToFormat(QImage::Format_RGB32);
         }
 
-        XDestroyImage(ximage);
+        if (!fromShm)
+            XDestroyImage(ximage); // shm 路径的 shmImage_ 复用，禁止 destroy
         return true;
     }
 
@@ -512,6 +596,106 @@ public:
         regionDirty_ = false;
         emptyDamageCount_ = 0;
         lastProbe_ = std::chrono::steady_clock::now();
+#ifdef HAVE_XSHM
+        // 捕获区域尺寸变化 → 重建匹配尺寸的 shm 图像
+        setupShm();
+#endif
+    }
+
+#ifdef HAVE_XSHM
+    void setupShm()
+    {
+        teardownShm();
+        if (!display_ || primaryW_ <= 0 || primaryH_ <= 0)
+            return;
+        if (!XShmQueryExtension(display_)) {
+            qInfo() << "X11Capturer: MIT-SHM extension unavailable, using XGetImage";
+            return;
+        }
+        Screen* scr = DefaultScreenOfDisplay(display_);
+        shmImage_ = XShmCreateImage(display_, DefaultVisualOfScreen(scr),
+                                    DefaultDepthOfScreen(scr), ZPixmap,
+                                    nullptr, &shminfo_, primaryW_, primaryH_);
+        if (!shmImage_) {
+            qInfo() << "X11Capturer: XShmCreateImage failed, using XGetImage";
+            return;
+        }
+        if (shmImage_->bits_per_pixel != 32) {
+            // 非 32bpp 布局不在 shm 路径做逐像素转换，整体回退 XGetImage 路径
+            XDestroyImage(shmImage_);
+            shmImage_ = nullptr;
+            return;
+        }
+        const size_t segSize = size_t(shmImage_->bytes_per_line) * shmImage_->height;
+        shminfo_.shmid = shmget(IPC_PRIVATE, segSize, IPC_CREAT | 0600);
+        if (shminfo_.shmid == -1) {
+            XDestroyImage(shmImage_);
+            shmImage_ = nullptr;
+            return;
+        }
+        shminfo_.shmaddr = static_cast<char*>(shmat(shminfo_.shmid, nullptr, 0));
+        if (shminfo_.shmaddr == reinterpret_cast<char*>(-1)) {
+            shmctl(shminfo_.shmid, IPC_RMID, nullptr);
+            shminfo_.shmid = -1;
+            XDestroyImage(shmImage_);
+            shmImage_ = nullptr;
+            return;
+        }
+        shmImage_->data = shminfo_.shmaddr;
+        shminfo_.readOnly = False;
+        if (!XShmAttach(display_, &shminfo_)) {
+            shmdt(shminfo_.shmaddr);
+            shminfo_.shmaddr = nullptr;
+            shmctl(shminfo_.shmid, IPC_RMID, nullptr);
+            shminfo_.shmid = -1;
+            XDestroyImage(shmImage_);
+            shmImage_ = nullptr;
+            return;
+        }
+        XSync(display_, False);
+        // 提前 RMID：段由本进程持有，退出即自动回收，不会泄漏到系统
+        shmctl(shminfo_.shmid, IPC_RMID, nullptr);
+        shmOk_ = true;
+        qInfo() << "X11Capturer: MIT-SHM capture enabled" << primaryW_ << "x" << primaryH_
+                << "(" << (segSize / 1024) << "KB shm)";
+    }
+
+    void teardownShm()
+    {
+        if (shmImage_) {
+            if (shmOk_ && display_)
+                XShmDetach(display_, &shminfo_);
+            // XShm 图像的 destroy_image 不释放 shm 段（数据由下方 shmdt/shmctl 管理）
+            XDestroyImage(shmImage_);
+            shmImage_ = nullptr;
+        }
+        if (shminfo_.shmaddr && shminfo_.shmaddr != reinterpret_cast<char*>(-1))
+            shmdt(shminfo_.shmaddr);
+        if (shminfo_.shmid != -1)
+            shmctl(shminfo_.shmid, IPC_RMID, nullptr);
+        shmOk_ = false;
+        shminfo_.shmaddr = nullptr;
+        shminfo_.shmid = -1;
+    }
+#endif
+
+    // 全区（primaryW_×primaryH_）抓取：优先 MIT-SHM（零 socket 像素传输），
+    // 失败回退 XGetImage。shm 路径返回复用的 shmImage_（调用方禁止 destroy），
+    // XGetImage 路径返回新分配的 XImage（调用方负责 XDestroyImage）。
+    XImage* grabPrimary(bool* fromShm)
+    {
+        *fromShm = false;
+#ifdef HAVE_XSHM
+        if (shmOk_) {
+            if (XShmGetImage(display_, rootWindow_, shmImage_, offsetX_, offsetY_, AllPlanes)) {
+                *fromShm = true;
+                return shmImage_;
+            }
+            // 偶发失败（分辨率热切换等）：回退 XGetImage
+        }
+#endif
+        return XGetImage(display_, rootWindow_, offsetX_, offsetY_,
+                         primaryW_, primaryH_, AllPlanes, ZPixmap);
     }
 
     bool resolvePrimaryOutput()
@@ -567,6 +751,9 @@ public:
 
     ~X11Capturer()
     {
+#ifdef HAVE_XSHM
+        teardownShm();
+#endif
         if (s_oldXErrorHandler)
             XSetErrorHandler(s_oldXErrorHandler);
         if (display_) {
@@ -593,8 +780,9 @@ bool ScreenCapturer::start(int fps)
     // WAYLAND_DISPLAY，但桌面会话（Wayland）的合成器 socket 仍在——补设后
     // Wayland 客户端即可连上真实桌面；纯 X11 桌面无此 socket，行为不变。
     const QString wlSock = detectWaylandSocketName();
-    if (!qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") || !wlSock.isEmpty()) {
-        if (qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") && !wlSock.isEmpty()) {
+    // [compat] qEnvironmentVariableIsEmpty 是 Qt 5.10 API（243 用 Qt 5.9.7），用 qgetenv 等价替代
+    if (!qgetenv("WAYLAND_DISPLAY").isEmpty() || !wlSock.isEmpty()) {
+        if (qgetenv("WAYLAND_DISPLAY").isEmpty() && !wlSock.isEmpty()) {
             qputenv("WAYLAND_DISPLAY", wlSock.toUtf8());
             qInfo() << "ScreenCapturer: detected Wayland socket, set WAYLAND_DISPLAY =" << wlSock;
         }
@@ -607,6 +795,10 @@ bool ScreenCapturer::start(int fps)
             return true;
         }
         qWarning() << "Wayland PipeWire init failed, falling back to X11";
+        // [B6] 初始化失败的实例必须销毁：WaylandCapturer 内部的 pw_thread_loop
+        // 已在跑，不销毁 = mutter 白白推流 + 线程空转（泄漏连接与线程）
+        delete waylandCapturer_;
+        waylandCapturer_ = nullptr;
     }
 #endif
 
@@ -617,7 +809,7 @@ bool ScreenCapturer::start(int fps)
         qInfo() << "Using X11 optimized capture";
     } else {
         // 两者都不可用且无显示环境 → 无头模式
-        if (qEnvironmentVariableIsEmpty("DISPLAY") && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
+        if (qgetenv("DISPLAY").isEmpty() && qgetenv("WAYLAND_DISPLAY").isEmpty()) {
             qWarning() << "No X11/Wayland display, screen capture disabled (headless mode)";
             delete x11Capturer_;
             x11Capturer_ = nullptr;

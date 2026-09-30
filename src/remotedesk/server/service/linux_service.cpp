@@ -286,7 +286,6 @@ static bool detectUserX11Env()
             "/run/lightdm/lightdm/xauthority",
             "/run/user/1000/gdm/Xauthority",
             "/run/user/1000/xauth",
-            "/var/run/gdm/auth-for-spygg/database",
             nullptr
         };
         for (int i = 0; authCandidates[i]; ++i) {

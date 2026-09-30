@@ -35,8 +35,12 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
     QString wsScheme = useSsl ? "wss" : "ws";
 
     QWebSocket ws;
+    // [P2] 修饰键状态必须随连接生命周期走：static 变量跨重连存活，断线时若
+    // Ctrl/Alt/Shift 正"按下"，重连后本地状态与真实按键不符 → 修饰键卡死。
+    bool ctrlHeld = false, altHeld = false, shiftHeld = false;
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "SecureInput: connected to service";
+        ctrlHeld = altHeld = shiftHeld = false;
     });
     QObject::connect(&ws, &QWebSocket::disconnected, &app, [&]() {
         qWarning() << "SecureInput: disconnected, exiting";
@@ -89,8 +93,6 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
             }
             return;
         }
-
-        static bool ctrlHeld = false, altHeld = false, shiftHeld = false;
 
         if (type == "keydown" || type == "keyup") {
             int keycode = obj["keycode"].toInt();

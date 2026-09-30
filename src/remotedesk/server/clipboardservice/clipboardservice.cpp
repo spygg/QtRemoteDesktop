@@ -126,7 +126,6 @@ void ClipboardCliWorker::write(const QString& mime, const QByteArray& data)
         return;
     }
     owner->write(data);
-    owner->closeWriteChannel();
     owner_ = owner;
     // xclip 读完 stdin 后可能 fork 到后台并让前台进程退出，或失去 selection
     // （其他应用复制）后自行退出；这里统一清理成员指针。
@@ -137,11 +136,26 @@ void ClipboardCliWorker::write(const QString& mime, const QByteArray& data)
                 owner_ = nullptr;
             owner->deleteLater();
         });
+    owner->closeWriteChannel();
+    // [P2] 大数据必须等全部写入管道：管道缓冲仅 64KB，旧代码一次
+    // waitForBytesWritten(1000) 只能冲刷一小部分，closeWriteChannel 后剩余
+    // 字节被截断 → 远端粘贴内容缺斤短两，却恒报成功。
+    const int kFlushTimeoutMs = 30000;
+    int waited = 0;
+    while (owner->bytesToWrite() > 0 && waited < kFlushTimeoutMs) {
+        const bool progressed = owner->waitForBytesWritten(500);
+        waited += 500;
+        if (!progressed && owner->error() == QProcess::WriteError)
+            break; // 管道写错误，继续等也不会成功
+    }
+    const bool flushed = (owner->bytesToWrite() == 0);
     // 确保数据已写入管道：xclip 若在读全 stdin 后 fork，数据未送达时会以空内容
     // 成为 selection owner。xsel 不 fork、常驻前台，waitForFinished 超时返回。
-    owner->waitForBytesWritten(1000);
     owner->waitForFinished(200);
-    emit contentWritten(true, mime, data);
+    if (!flushed)
+        qWarning("ClipboardService: clipboard write truncated (%lld bytes pending)",
+                 (long long)owner->bytesToWrite());
+    emit contentWritten(flushed, mime, data);
 }
 #endif // Q_OS_LINUX
 
@@ -216,7 +230,8 @@ bool ClipboardService::initCliBackend()
         return available_;
     if (qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
         return false; // GUI 模式走 QClipboard，不需要 CLI 后端
-    if (qEnvironmentVariableIsEmpty("DISPLAY"))
+    // [compat] qEnvironmentVariableIsEmpty 是 Qt 5.10 API，Qt 5.9 用 qgetenv
+    if (qgetenv("DISPLAY").isEmpty())
         return false; // 服务启动早期 DISPLAY 可能尚未设置，留给后续惰性初始化
 
     QString bin = QStandardPaths::findExecutable(QStringLiteral("xclip"));

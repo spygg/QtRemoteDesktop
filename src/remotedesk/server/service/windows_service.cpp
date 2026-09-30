@@ -26,9 +26,16 @@ void WINAPI WindowsService::serviceCtrlHandler(DWORD ctrlCode)
     switch (ctrlCode) {
     case SERVICE_CONTROL_STOP:
     case SERVICE_CONTROL_SHUTDOWN:
+        // [P2] STOP_PENDING 必须带 dwWaitHint 并推进 dwCheckPoint：
+        // 退出链路（停采集/编码线程/断开客户端）可能超过 SCM 默认宽限，
+        // 不报 WaitHint 会被 SCM 直接强杀（错误 1053）。
         s_status.dwCurrentState = SERVICE_STOP_PENDING;
+        s_status.dwCheckPoint = 1;
+        s_status.dwWaitHint = 15000;
         SetServiceStatus(s_statusHandle, &s_status);
         SetEvent(s_stopEvent);
+        break;
+    default:
         break;
     }
 }
@@ -215,6 +222,13 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
 
     CloseHandle(s_stopEvent);
     s_stopEvent = NULL;
+
+    // [P2] serviceMain 返回前必须显式报 SERVICE_STOPPED，否则 SCM 等到超时
+    // 才认为服务已停（事件查看器记 7031/1053）。
+    s_status.dwCurrentState = SERVICE_STOPPED;
+    s_status.dwCheckPoint = 0;
+    s_status.dwWaitHint = 0;
+    SetServiceStatus(s_statusHandle, &s_status);
 }
 
 bool WindowsService::isAdmin()
@@ -235,7 +249,9 @@ bool WindowsService::install()
     GetModuleFileNameW(NULL, path, MAX_PATH);
 
     wchar_t cmdLine[MAX_PATH + 32];
-    swprintf(cmdLine, L"\"%S\" --service", path);
+    // [B8] 宽字符 printf 格式必须用 %ls：%S 在 MSVC 宽格式里表示窄字符串，
+    // 传入 wchar_t* 是 UB，服务安装路径会损坏（MinGW 下同样不可依赖）。
+    swprintf(cmdLine, L"\"%ls\" --service", path);
 
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
     if (!scm) {
@@ -252,7 +268,7 @@ bool WindowsService::install()
         cmdLine, NULL, NULL, NULL, NULL, NULL);
 
     if (svc) {
-        wprintf(L"Service '%S' installed successfully.\n", SERVICE_NAME);
+        wprintf(L"Service '%ls' installed successfully.\n", SERVICE_NAME);
         CloseServiceHandle(svc);
         CloseServiceHandle(scm);
         return TRUE;

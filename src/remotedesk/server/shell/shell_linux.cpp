@@ -3,6 +3,7 @@
 #include <QWebSocket>
 #include <QDebug>
 #include <fcntl.h>
+#include <cerrno>
 #include <pty.h>
 #include <utmp.h>
 #include <sys/ioctl.h>
@@ -78,11 +79,16 @@ void LinuxInteractiveShell::start()
     notifier_ = new QSocketNotifier(masterFd_, QSocketNotifier::Read, this);
     connect(notifier_, &QSocketNotifier::activated, this, [this](int fd) {
         char buf[16384];
-        int n = read(fd, buf, sizeof(buf));
+        int n;
+        // [P2] EINTR/EAGAIN 不是 EOF：信号中断或非阻塞暂无数据时重试/返回，
+        // 旧代码把 read()==-1 一律当 EOF 处理，信号一来自然断开用户 shell
+        do {
+            n = read(fd, buf, sizeof(buf));
+        } while (n < 0 && (errno == EINTR || errno == EAGAIN));
         if (n > 0) {
             // 用二进制帧发送原始终端字节，避免 UTF-8 多字节序列被拆成多帧导致乱码
             ws_->sendBinaryMessage(QByteArray(buf, n));
-        } else {
+        } else if (n == 0 || (n < 0 && errno != EINTR)) {
             ws_->close();
         }
     });
@@ -109,8 +115,10 @@ void LinuxInteractiveShell::stop()
     if (notifier_) { notifier_->setEnabled(false); }
     if (childPid_ > 0) {
         kill(childPid_, SIGTERM);
-        // 有限等待子进程退出并回收（WNOHANG 只回收已退出的，会残留僵尸）
-        for (int i = 0; i < 20; ++i) {
+        // 有限等待子进程退出并回收。[P2] 旧实现最多在主线程阻塞 1s（20×50ms），
+        // 会话多时 stop() 明显卡顿。bash 收 SIGTERM 通常 <100ms 退出；
+        // 没退就 SIGKILL（回收近似瞬时）。
+        for (int i = 0; i < 2; ++i) {
             if (waitpid(childPid_, nullptr, WNOHANG) == childPid_) {
                 childPid_ = 0;
                 break;

@@ -58,6 +58,7 @@ private:
     int height_ = 0;
     bool initialized_ = false;
     uint64_t frameCount_ = 0;
+    uint64_t lastDeliveredFrame_ = 0; // 已交付给上层的帧序号（静止桌面去重，避免空拷贝）
 
     // 最新帧（PipeWire 线程写入，capture 线程读取）
     QImage frame_;

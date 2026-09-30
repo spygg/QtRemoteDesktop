@@ -462,6 +462,9 @@ void VideoEncoder::encode(const QImage& frame)
 
 void VideoEncoder::encodingLoop()
 {
+    // [P2] AVPacket 跨帧复用：旧代码每帧 av_packet_alloc/av_packet_free 各一次
+    //（30fps = 每秒 60 次堆操作），packet 生命周期只在 receive 循环内，复用安全。
+    AVPacket* packet = av_packet_alloc();
     while (!abort_) {
     QImage image;
     {
@@ -513,6 +516,12 @@ void VideoEncoder::encodingLoop()
             bool key = false;
             if (mpp_->encode(image, out, key)) {
                 mppFailCount_ = 0;
+                // [B18] MPP 分支同样要置 hasIdr_：上层 pumpKeyframe 依赖它判定
+                // "编码器从未产出过 IDR"。旧代码只在 FFmpeg 分支置位，MPP 路径
+                // hasIdr() 永假 → 每 4s 整套重建编码器（RK3588 周期性卡顿，
+                // MPP 反复 init/free 有固件崩溃风险）。
+                if (key)
+                    hasIdr_.store(true);
                 qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
                 emit encodedFrame(out, key, timestamp);
                 updateOverloadState(encodeStart);
@@ -578,29 +587,28 @@ void VideoEncoder::encodingLoop()
             continue;
         }
 
-        AVPacket* packet = av_packet_alloc();
+        AVPacket* pkt = packet; // [P2] 复用循环外分配的 packet
         while (ret >= 0) {
-            ret = avcodec_receive_packet(codecCtx_, packet);
+            ret = avcodec_receive_packet(codecCtx_, pkt);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
                 break;
             if (ret < 0)
                 break;
 
-            bool isKeyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0;
+            bool isKeyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
             if (isKeyframe)
                 hasIdr_.store(true);
-            QByteArray data(reinterpret_cast<char*>(packet->data), packet->size);
+            QByteArray data(reinterpret_cast<char*>(pkt->data), pkt->size);
             qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
 
             emit encodedFrame(data, isKeyframe, timestamp);
 
-            av_packet_unref(packet);
+            av_packet_unref(pkt);
         }
-        av_packet_free(&packet);
 
-        qint64 encodeMs = QDateTime::currentMSecsSinceEpoch() - encodeStart;
-        encodeEmaMs_ = (encodeEmaMs_ == 0) ? encodeMs : (encodeEmaMs_ * 0.8 + encodeMs * 0.2);
-        double frameIntervalMs = fps_ > 0 ? 1000.0 / fps_ : 33.0;
+        // EMA 与过载判定统一在 updateOverloadState 内完成。
+        // [B7] 旧代码在这里先更新一次 encodeEmaMs_，updateOverloadState 里又更新一次，
+        // 等于每帧双重平滑（新样本权重 0.36 而非 0.2），过载判定系统性偏移。
         // 冷启动前几帧含编码器预热（首帧必然慢），跳过过载判定避免启动时误降码率
         if (frameCount_ <= 5) {
             if (codecCtx_->gop_size == 1)
@@ -613,6 +621,7 @@ void VideoEncoder::encodingLoop()
         if (codecCtx_->gop_size == 1)
             codecCtx_->gop_size = fps_;
     }
+    av_packet_free(&packet); // [P2] 复用的 packet 在线程退出时统一释放
 }
 
 void VideoEncoder::updateOverloadState(qint64 encodeStartMs)
@@ -680,9 +689,16 @@ void VideoEncoder::shutdown()
         encoderThread_.requestInterruption();
         encoderThread_.quit();          // 线程无事件循环时无效，仅作兜底
         stopped = encoderThread_.wait(8000);
-        if (!stopped)
-            qWarning() << "Encoder thread did not stop within 8s; skip resource release "
-                          "to avoid use-after-free (no terminate: it would deadlock mutex_)";
+        if (!stopped) {
+            qWarning() << "Encoder thread did not stop within 8s; waiting indefinitely — "
+                          "proceeding would destroy the QThread while running (hard abort) "
+                          "and the loop would UAF members. No terminate: it would deadlock mutex_.";
+            // [B7] 超时后不能继续：encoderThread_ 是成员 QThread，析构时若仍在运行
+            // 直接 abort；且 encodingLoop 挂在 this 上，成员销毁后继续访问 = UAF。
+            // 编码循环阻塞通常在硬件编码调用里，阻塞 shutdown 优于崩溃。
+            encoderThread_.wait();
+            stopped = true;
+        }
     }
 
     // 只有线程确实停了才释放资源，避免与仍在运行的编码线程竞争（UAF）

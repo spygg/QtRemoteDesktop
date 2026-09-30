@@ -3,6 +3,8 @@
 #include <QDirIterator>
 #include <QJsonDocument>
 #include <QProcess>
+#include <QList>
+#include <functional>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -366,6 +368,11 @@ void FileTransferService::addToTar(QByteArray& tarData, const QDir& dir, const Q
     QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
 
     for (const QFileInfo& fi : entries) {
+        // 安全：跳过符号链接。QFileInfo::isDir()/size() 会跟随链接目标，
+        // 若不跳过，共享目录里一个指向 / 的软链会让 tar 以 root 权限读出
+        // 受限根之外的任意文件（越权读取），链接环还会导致无限递归。
+        if (fi.isSymLink())
+            continue;
         QString entryName = prefix.isEmpty() ? fi.fileName() : prefix + "/" + fi.fileName();
 
         if (fi.isDir()) {
@@ -396,6 +403,61 @@ QByteArray FileTransferService::createTarForDirectory(const QString& dirPath)
     tarData.append(QByteArray(1024, '\0'));
 
     return tarData;
+}
+
+QByteArray FileTransferService::tarHeaderFor(const QString& name, qint64 size, char type)
+{
+    QByteArray header;
+    writeTarHeader(header, name, size, type); // 恰好追加 512 字节
+    return header;
+}
+
+QList<FileTransferService::TarEntry>
+FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize)
+{
+    QList<TarEntry> out;
+    qint64 total = 0;
+
+    QDir root(dirPath);
+    const QString rootName = root.dirName();
+
+    // 根目录自身条目（与 createTarForDirectory 的首 header 对应）
+    TarEntry rootEntry;
+    rootEntry.absPath = root.absolutePath();
+    rootEntry.tarName = rootName;
+    rootEntry.isDir = true;
+    out.append(rootEntry);
+    total += 512;
+
+    // 深度优先先序遍历，条目顺序与 addToTar 的写入顺序一致
+    std::function<void(const QDir&, const QString&)> walk =
+            [&](const QDir& dir, const QString& prefix) {
+        const QFileInfoList entries = dir.entryInfoList(
+            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QFileInfo& fi : entries) {
+            // 与 addToTar 一致：跳过符号链接（防越权读 + 链接环无限递归）
+            if (fi.isSymLink())
+                continue;
+            TarEntry e;
+            e.absPath = fi.absoluteFilePath();
+            e.tarName = prefix.isEmpty() ? fi.fileName() : prefix + "/" + fi.fileName();
+            e.isDir = fi.isDir();
+            e.size = e.isDir ? 0 : fi.size();
+            out.append(e);
+            total += 512; // header
+            if (e.isDir) {
+                walk(QDir(e.absPath), e.tarName);
+            } else {
+                total += e.size + ((512 - (e.size % 512)) % 512); // 内容 + 对齐填充
+            }
+        }
+    };
+    walk(root, rootName);
+
+    total += 1024; // tar 结束块
+    if (totalSize)
+        *totalSize = total;
+    return out;
 }
 
 void FileTransferService::processFileList(const QString& clientId, const QString& path)
@@ -521,9 +583,13 @@ void FileTransferService::processDownload(const QString& clientId, const QString
 
     // Directory: create tar archive
     if (fi.isDir()) {
-        QByteArray tarData = createTarForDirectory(safePath);
+        // [P1] 流式打包：旧实现 createTarForDirectory 把整棵树读进内存再切块，
+        // GB 级目录直接 OOM。改为 collectTarEntries 清单 + 按需读盘：
+        // 累积到 512KB 即 emit，任意时刻内存占用只有单个 chunk 缓冲。
+        // 总长度与旧 tar 完全一致（header/内容/对齐/结束块顺序相同）。
         QString tarName = fi.fileName() + ".tar";
-        qint64 totalSize = tarData.size();
+        qint64 totalSize = 0;
+        const QList<TarEntry> entries = collectTarEntries(safePath, &totalSize);
 
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_download_start"},
@@ -534,30 +600,84 @@ void FileTransferService::processDownload(const QString& clientId, const QString
         });
 
         static const int CHUNK_SIZE = 512 * 1024;
+        QByteArray pend;
+        pend.reserve(CHUNK_SIZE + 1024);
         qint64 offset = 0;
         QElapsedTimer progressTimer;
         progressTimer.start();
         qint64 lastBytes = 0;
+        bool readError = false;
 
-        while (offset < totalSize) {
-            int chunkSize = qMin(CHUNK_SIZE, (int)(totalSize - offset));
-            QByteArray chunk = tarData.mid(offset, chunkSize);
-            emit downloadChunkReady(clientId, tarName, offset, chunk, totalSize);
-            offset += chunkSize;
-
-            if (progressTimer.elapsed() >= 200) {
-                double elapsed = progressTimer.elapsed() / 1000.0;
-                double speed = elapsed > 0 ? (offset - lastBytes) / 1024.0 / elapsed : 0;
-                emit transferProgress(clientId, tarName, offset, totalSize, speed);
-                progressTimer.restart();
-                lastBytes = offset;
+        // 累冲满一块（或 force 时冲残余）即发；进度节流沿用 200ms
+        auto flush = [&](bool force) {
+            while (pend.size() >= CHUNK_SIZE || (force && !pend.isEmpty())) {
+                const int n = force ? pend.size() : CHUNK_SIZE;
+                const QByteArray chunk = pend.left(n);
+                pend.remove(0, n);
+                emit downloadChunkReady(clientId, tarName, offset, chunk, totalSize);
+                offset += n;
+                if (progressTimer.elapsed() >= 200) {
+                    double elapsed = progressTimer.elapsed() / 1000.0;
+                    double speed = elapsed > 0 ? (offset - lastBytes) / 1024.0 / elapsed : 0;
+                    emit transferProgress(clientId, tarName, offset, totalSize, speed);
+                    progressTimer.restart();
+                    lastBytes = offset;
+                }
             }
+        };
+
+        for (const TarEntry& e : entries) {
+            // header（根条目 tarName 与 addToTar 一致：目录带尾斜杠）
+            pend += tarHeaderFor(e.isDir ? e.tarName + "/" : e.tarName,
+                                 e.isDir ? 0 : e.size, e.isDir ? '5' : '0');
+            flush(false);
+            if (e.isDir)
+                continue;
+
+            QFile f(e.absPath);
+            if (!f.open(QIODevice::ReadOnly)) {
+                // 读失败：零填充保持总长一致（前端按 totalSize 拼包），并如实告警
+                qWarning() << "WS tar: open failed" << e.absPath << f.errorString();
+                readError = true;
+                pend += QByteArray(int(((512 - (e.size % 512)) % 512) + e.size), '\0');
+                flush(false);
+                continue;
+            }
+            qint64 remain = e.size;
+            char buf[256 * 1024];
+            while (remain > 0) {
+                const qint64 n = f.read(buf, qMin<qint64>(sizeof(buf), remain));
+                if (n <= 0) {
+                    qWarning() << "WS tar: short read" << e.absPath
+                               << "remain" << remain << f.errorString();
+                    readError = true;
+                    break;
+                }
+                pend.append(buf, int(n));
+                remain -= n;
+                flush(false);
+            }
+            if (remain > 0)
+                pend += QByteArray(int(remain), '\0'); // 短读补零保长
+            pend += QByteArray(int((512 - (e.size % 512)) % 512), '\0'); // 对齐填充
+            flush(false);
         }
 
-        emit jsonResponse(clientId, QJsonObject{
-            {"type", "file_download_end"},
-            {"path", tarName}
-        });
+        pend += QByteArray(1024, '\0'); // tar 结束块
+        flush(true);
+
+        if (offset != totalSize)
+            qWarning() << "WS tar: size mismatch" << tarName
+                       << "sent" << offset << "expected" << totalSize;
+        if (readError)
+            emit jsonResponse(clientId, QJsonObject{
+                {"type", "file_download_end"}, {"path", tarName},
+                {"warning", "部分文件读取失败，已以零字节占位"}
+            });
+        else
+            emit jsonResponse(clientId, QJsonObject{
+                {"type", "file_download_end"}, {"path", tarName}
+            });
         emit transferProgress(clientId, tarName, totalSize, totalSize, 0);
         return;
     }
@@ -591,9 +711,15 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     qint64 lastBytes = 0;
 
     while (offset < totalSize) {
-        int chunkSize = qMin(CHUNK_SIZE, (int)(totalSize - offset));
+        // [B8] 必须先按 qint64 求差再收窄：≥2GiB 文件剩余量超 INT_MAX，
+        // 直接 (int) 强转回绕为负 → qMin 得负 → read 负数 → 提前断流截断。
+        int chunkSize = (int)qMin<qint64>(CHUNK_SIZE, totalSize - offset);
         QByteArray chunk = file.read(chunkSize);
-        if (chunk.isEmpty()) break;
+        if (chunk.isEmpty()) {
+            if (file.error() != QFileDevice::NoError)
+                qWarning() << "WS download: read error" << safePath << file.errorString();
+            break;
+        }
 
         emit downloadChunkReady(clientId, path, offset, chunk, totalSize);
         offset += chunk.size();
@@ -617,7 +743,6 @@ void FileTransferService::processDownload(const QString& clientId, const QString
 
 void FileTransferService::processUploadStart(const QString& clientId, const QString& path, qint64 size)
 {
-    Q_UNUSED(clientId);
     QString safePath = sanitizeFilePath(path);
     if (safePath.isEmpty()) {
         emit jsonResponse(clientId, QJsonObject{
@@ -640,7 +765,7 @@ void FileTransferService::processUploadStart(const QString& clientId, const QStr
             | QFile::ReadOther | QFile::ExeOther);
     }
 
-    auto existing = activeUploads_.find(safePath);
+    auto existing = activeUploads_.find(uploadKey(clientId, safePath));
     if (existing != activeUploads_.end()) {
         existing.value().file->close();
         delete existing.value().file;
@@ -662,23 +787,43 @@ void FileTransferService::processUploadStart(const QString& clientId, const QStr
         return;
     }
 
-    activeUploads_[safePath] = us;
-    qInfo() << "Upload started:" << safePath << "size:" << size;
+    activeUploads_[uploadKey(clientId, safePath)] = us;
+    qInfo() << "Upload started:" << safePath << "size:" << size << "client:" << clientId;
 }
 
-void FileTransferService::processUploadChunk(const QString& path, const QByteArray& data)
+void FileTransferService::processUploadChunk(const QString& clientId, const QString& path, const QByteArray& data)
 {
     QString safePath = sanitizeFilePath(path);
     if (safePath.isEmpty())
         return;
-    auto it = activeUploads_.find(safePath);
+    auto it = activeUploads_.find(uploadKey(clientId, safePath));
     if (it == activeUploads_.end()) {
-        qWarning() << "Upload chunk for unknown file:" << safePath;
+        qWarning() << "Upload chunk for unknown upload:" << safePath << "client:" << clientId;
         return;
     }
 
-    it.value().file->write(data);
-    it.value().receivedSize += data.size();
+    UploadState& us = it.value();
+    if (us.failed)
+        return; // 已判失败的会话：丢弃后续块，等 done 时统一回报
+
+    // 超出声明大小的数据直接拒绝：防止 totalsize 谎报/消息错乱导致静默损坏
+    if (us.totalSize > 0 && us.receivedSize + data.size() > us.totalSize) {
+        qWarning() << "Upload chunk exceeds declared size:" << safePath
+                   << "received" << us.receivedSize << "+" << data.size()
+                   << "> declared" << us.totalSize;
+        us.failed = true;
+        return;
+    }
+
+    // 写盘失败（磁盘满等）必须显式失败：静默丢字节 = 文件损坏
+    const qint64 written = us.file->write(data);
+    if (written != data.size()) {
+        qWarning() << "Upload write failed (" << us.file->errorString() << "):" << safePath
+                   << "wrote" << written << "of" << data.size();
+        us.failed = true;
+        return;
+    }
+    us.receivedSize += written;
 }
 
 void FileTransferService::processUploadDone(const QString& clientId, const QString& path)
@@ -686,7 +831,7 @@ void FileTransferService::processUploadDone(const QString& clientId, const QStri
     QString safePath = sanitizeFilePath(path);
     if (safePath.isEmpty())
         return;
-    auto it = activeUploads_.find(safePath);
+    auto it = activeUploads_.find(uploadKey(clientId, safePath));
     if (it == activeUploads_.end()) {
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_upload_done"},
@@ -698,7 +843,20 @@ void FileTransferService::processUploadDone(const QString& clientId, const QStri
     it.value().file->close();
     delete it.value().file;
     qint64 received = it.value().receivedSize;
+    const qint64 declared = it.value().totalSize;
+    const bool failed = it.value().failed
+        || (declared > 0 && received != declared); // 字节数不符 = 损坏，不伪装成功
     activeUploads_.erase(it);
+
+    if (failed) {
+        qWarning() << "Upload finished with size mismatch:" << safePath
+                   << "received" << received << "declared" << declared;
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_upload_done"},
+            {"error", QString("上传数据不完整（收到 %1 / 声明 %2 字节）").arg(received).arg(declared)}
+        });
+        return;
+    }
 
     // 落盘后改为所有用户可读写（0666）：服务常以 root 运行，写出的文件 owner 是 root，
     // 桌面用户默认只有只读/无权限，改 0666 后桌面用户也能正常读写拖入的文件。

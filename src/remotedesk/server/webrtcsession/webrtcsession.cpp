@@ -188,8 +188,10 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
     // 但 pushVideo 的上层（yang_pushVideo_getData）对 I 帧要求完整 Annex-B 帧，
     // 详见下方发送逻辑说明。FFmpeg 软/硬编码器输出是 Annex-B(00 00 00 01 起始码
     // 包裹 SPS/PPS/IDR 多 NALU)，先拆分 NALU 再按下方策略合成发送。
+    // [P2] 去掉每帧无条件 detach 深拷贝（30fps × 8KB-1MB = 纯浪费的带宽/延迟）：
+    // QByteArray COW 下 buf(data) 只浅共享；只有真正写 buf（下方 wbase 重写 NALU）
+    // 时才会惰性 detach。纯读路径（单 NALU 直发）零拷贝。
     QByteArray buf(data);
-    buf.detach();
     const uint8_t* base = reinterpret_cast<const uint8_t*>(buf.constData());
     const int n = buf.size();
 
@@ -207,8 +209,10 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
         if (!sc) { ++i; continue; }
         int start = i + scLen;
         int j = start;
-        while (j + 2 < n) {
-            if (base[j] == 0x00 && base[j + 1] == 0x00 &&
+        // [B21] 必须扫到缓冲末尾：旧条件 j+2<n 使末尾 NALU 恒丢最后 2 字节
+        //（起始码探测本身需要 j+2/j+3 越界保护，见下）。
+        while (j < n) {
+            if (j + 2 < n && base[j] == 0x00 && base[j + 1] == 0x00 &&
                 (base[j + 2] == 0x01 || (j + 3 < n && base[j + 2] == 0x00 && base[j + 3] == 0x01)))
                 break;
             ++j;
@@ -218,7 +222,7 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
             nalus.append({start, j - start, t});
         }
         i = j;
-        if (j + 2 >= n) break;
+        if (i >= n) break;
     }
 
     if (nalus.isEmpty()) {

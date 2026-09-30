@@ -24,6 +24,7 @@
 #include "videoencoder.h"
 
 #include "shell.h"
+#include "filetransferservice.h" // TarEntry（目录 tar 流式下载）
 
 class WebSocketServer;
 class ScreenCapturer;
@@ -87,11 +88,20 @@ private:
 // 一次性 write 整份数据会让主线程长时间阻塞（数 GB 文件 = 整个远程会话冻结），
 // 因此按 socket 的写缓冲背压，配合 bytesWritten 信号持续泵送。
 struct HttpDownloadState {
-    std::unique_ptr<QFile> file; // 单文件：从磁盘流式读
-    QByteArray payload;          // 目录 tar：一次性在内存中的整包数据
+    std::unique_ptr<QFile> file; // 单文件：从磁盘流式读；tar 流模式下为当前正在读取的成员文件
+    QByteArray payload;          // 兼容保留（旧整包路径）；HTTP 目录下载已改走 tarQueue_ 流式生成
     qint64 totalSize = 0;        // 未分片时的完整长度（用于 Content-Range: bytes s-e/total）
     qint64 offset = 0;           // 下一个待写字节位置
     qint64 end = 0;              // 本次响应最后一个字节位置（含）
+    // ---- [P1 perf] 目录 tar 流式生成状态（GB 级目录不再整包进内存）----
+    bool tarStream = false;      // true 时由 generateTarChunk 按需产出字节
+    QList<FileTransferService::TarEntry> tarQueue; // 待打包条目（collectTarEntries 产出）
+    int tarQueueIdx = 0;
+    qint64 tarFileRemaining = 0; // 当前成员文件剩余字节（file 为空时按零填充保持长度）
+    qint64 curEntrySize = 0;     // 当前成员文件声明大小（对齐填充计算用）
+    int tarPadRemaining = 0;     // 当前条目的对齐填充 / tar 结束块剩余字节
+    QByteArray pendingHeader;    // 待发的 512B tar header（可分片发出）
+    bool tarEndSent = false;
 };
 
 class RDPServer : public QObject {
@@ -126,6 +136,8 @@ private slots:
     void onShellConnected(QWebSocket* socket);
     // logind PrepareForSleep（Linux）：挂起前暂停捕获、恢复后重建捕获流
     void onPrepareForSleep(bool sleeping);
+    // IME 工作线程结果落地（主线程）：sendJson 操作 QWebSocket 必须在主线程
+    void onImeResultReady(const QString& clientId, const QJsonObject& state);
 #ifdef USE_WEBRTC
     void onWebRtcMessage(const QString& clientId, const QJsonObject& msg);
 #endif
@@ -135,6 +147,8 @@ signals:
     void requestDownload(const QString& clientId, const QString& path);
     void requestUploadStart(const QString& clientId, const QString& path, qint64 size);
     void requestUploadDone(const QString& clientId, const QString& path);
+    // IME 工作线程 → 主线程结果回传（auto=跨线程 queued 投递）
+    void imeResultReady(const QString& clientId, const QJsonObject& state);
 
 private:
     void setupHttpServer();
@@ -145,7 +159,11 @@ private:
     void handleApiUsers(QTcpSocket* socket);
     void handleApiAddUser(QTcpSocket* socket, const QByteArray& body);
     void handleApiDeleteUser(QTcpSocket* socket, const QByteArray& body);
-    void handleShellExec(QTcpSocket* socket, const QByteArray& body);
+    void handleShellExec(QTcpSocket* socket, const QByteArray& body, const QString& sessionToken);
+    // [B9] 按会话令牌隔离的 shell 工作目录（旧实现用进程级 QDir::setCurrent +
+    // 单一 shellCurrentDir_，多客户端 cd 互相干扰且污染全进程 CWD）
+    QString shellCwdFor(const QString& sessionToken);
+    void setShellCwd(const QString& sessionToken, const QString& path);
     QString extractSessionToken(const QByteArray& request);
 
     // HTTP 直链文件下载：GET /api/file?path=<受限根内的绝对路径>
@@ -156,6 +174,8 @@ private:
     void handleApiFileDownload(QTcpSocket* socket, const QString& path, const QString& headerText);
     // 按 socket 写缓冲背压泵送下一批数据（bytesWritten 触发）
     void pumpFileDownload(QTcpSocket* socket);
+    // 目录 tar 流式生成：按需产出最多 maxBytes 字节（长度与 totalSize 严格一致）
+    QByteArray generateTarChunk(HttpDownloadState* st, int maxBytes);
     void cleanupHttpDownload(QTcpSocket* socket);
     int videoBitrateFor(int encW, int encH, int fps, CodecType codec = CodecType::H264) const;
     QByteArray buildHttpResponse(int statusCode, const QString& statusText,
@@ -234,6 +254,7 @@ private:
     bool secureInputRunning_ = false;
     bool captureAvailable_ = true;
     QString shellCurrentDir_;
+    QMap<QString, QString> shellCwdByToken_; // [B9] 会话令牌 → shell CWD
 
     // 每个 HTTP 连接的请求解析状态（跨 readyRead 累积，避免主线程阻塞）
     QHash<QTcpSocket*, HttpParseState> httpParseState_;
@@ -261,6 +282,10 @@ private:
 
     void loadServerConfig(const QString& configPath);
     void saveServerConfig(const QString& configPath);
+    QTimer* configSaveTimer_ = nullptr; // [P2] 去抖落盘定时器
+    // [P2] 配置去抖落盘：单条 config 消息可同时改 fps/scale/codec/hw_encode，
+    // 逐字段同步写盘 = 一条消息 4 次全量 JSON 序列化+文件 IO。聚合到 800ms 一次。
+    void scheduleSaveConfig();
     void startSecureInputProcess();
     void stopSecureInputProcess();
     void injectPasteShortcut();
@@ -289,6 +314,11 @@ private:
     InhibitBackend sleepInhibitBackend_ = InhibitBackend::None;
     quint32 sleepInhibitCookie_ = 0; // org.gnome.SessionManager / ScreenSaver 返回的 cookie
     int sleepInhibitFd_ = -1;        // login1 Inhibit 返回的 fd（最后手段），关闭即释放
+    // [P1 perf] DBus 后端链异步化（原 BlockWithGui 同步调用最坏阻塞主线程 3s×3）
+    void inhibitAcquireSessionManager();
+    void inhibitAcquireScreenSaver();
+    void inhibitAcquireLogin1();
+    void inhibitRelease();
 #endif
     QProcess* sleepInhibitProcess_ = nullptr; // macOS: caffeinate 子进程
 

@@ -53,7 +53,15 @@ add_subdirectory(thridparty/breakpad)
 
 # ---- WebRTC session (optional, needs FFmpeg) ----
 if(BUILD_THIRDPARTY)
+    # [P12] third_party_src（metaRTC/usrsctp/ffmpeg/openh264/mpp，数千个 C 文件）
+    # 无任何 Q_OBJECT，关闭 AUTOMOC/AUTORCC 免除全树 moc 预扫描（显著缩短配置
+    # 时间）；systemsleeper/breakpad 仍保留（systemsleepblocker.h 有 Q_OBJECT）。
+    set(CMAKE_AUTOMOC OFF)
+    set(CMAKE_AUTORCC OFF)
+    set(CMAKE_AUTOUIC OFF)
     add_subdirectory(thridparty/third_party_src)
+    set(CMAKE_AUTOMOC ON)
+    set(CMAKE_AUTORCC ON)
 endif()
 
 if(FFMPEG_FOUND)

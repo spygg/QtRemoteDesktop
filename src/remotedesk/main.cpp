@@ -132,7 +132,8 @@ int main(int argc, char* argv[])
 
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // 无 X 环境时使用 offscreen 平台插件，让 QApplication 正常启动
-    if (qEnvironmentVariableIsEmpty("DISPLAY"))
+    // [compat] qEnvironmentVariableIsEmpty 是 Qt 5.10 API，Qt 5.9 用 qgetenv
+    if (qgetenv("DISPLAY").isEmpty())
         qputenv("QT_QPA_PLATFORM", "offscreen");
 #endif
 

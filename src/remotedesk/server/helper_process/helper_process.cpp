@@ -76,19 +76,17 @@ int HelperProcess::run(int argc, char* argv[])
     // 固定的主线程栈地址、避免被捕获路径的越界写命中，改为堆分配。
     std::unique_ptr<JpegCompressor> compressor(new JpegCompressor(nullptr));
 
-    bool screenInfoSent = false;
     bool quitting = false;   // 退出标志：退出流程启动后禁止再访问/重连栈对象
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
-        if (!screenInfoSent) {
-            screenInfoSent = true;
-            QJsonObject info;
-            info["type"] = "screen_info";
-            info["width"] = capturer.width();
-            info["height"] = capturer.height();
-            ws.sendTextMessage(QString::fromUtf8(QJsonDocument(info).toJson(QJsonDocument::Compact)));
-        }
+        // [P2] 每次连接都上报：服务端内存态在 helper 重连期间可能已变（或服务重启），
+        // 只发一次会让重连后的会话拿不到尺寸 → 鼠标坐标映射错位。
+        QJsonObject info;
+        info["type"] = "screen_info";
+        info["width"] = capturer.width();
+        info["height"] = capturer.height();
+        ws.sendTextMessage(QString::fromUtf8(QJsonDocument(info).toJson(QJsonDocument::Compact)));
     });
     QObject::connect(&ws, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
         &app, [&](QAbstractSocket::SocketError err) {
@@ -385,6 +383,31 @@ int HelperProcess::run(int argc, char* argv[])
                 return;
             }
 
+            // [B17] 画质/帧率配置：服务模式下压缩/缩放/采集节拍都在 helper 侧，
+            // 必须在锁屏门前处理（非输入类，锁屏中也应生效）。档位映射与服务端
+            // 本地分支一致（high=80/100、medium=60、low=35、verylow=20）。
+            if (type == "config") {
+                QString qname = obj["quality"].toString();
+                int jpegQ = qname == "high" ? 80
+                          : qname == "medium" ? 60
+                          : qname == "low" ? 35
+                          : qname == "verylow" ? 20 : -1;
+                if (jpegQ > 0) {
+                    compressor->setQuality(jpegQ);
+                    int scale = obj["scale"].toInt();
+                    if (qname == "high")
+                        scale = 100;
+                    if (scale >= 10 && scale <= 100)
+                        compressor->setScalePercent(scale);
+                    qInfo() << "Helper: config applied, quality" << jpegQ << "scale"
+                            << (scale >= 10 && scale <= 100 ? scale : 100);
+                }
+                int fps = obj["fps"].toInt();
+                if (fps >= 1)
+                    capturer.setFps(fps);
+                return;
+            }
+
             if (locked) return;
 
             if (type == "mousemove") {
@@ -397,7 +420,8 @@ int HelperProcess::run(int argc, char* argv[])
                     type == "keydown", obj["ctrl"].toBool(),
                     obj["alt"].toBool(), obj["shift"].toBool(),
                     isWin7 && locked,
-                    obj["isChar"].toBool());
+                    obj["isChar"].toBool(),
+                    obj["meta"].toBool()); // [B15] Win/Super 必须透传，否则服务模式 Win 键全失效
             } else if (type == "wheel") {
                 inputMgr.injectWheel(obj["delta"].toInt());
             }

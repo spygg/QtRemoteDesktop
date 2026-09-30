@@ -39,8 +39,20 @@ class MacCapturer : public PlatformCapturer {
     CGDirectDisplayID displayID_ = 0;
     int width_ = 0;
     int height_ = 0;
+    // [P1 perf] 位图上下文/色彩空间跨帧复用：旧实现每帧 CGBitmapContextCreate
+    // 分配 ~8.3MB（1080p）再释放 + CGColorSpaceCreateDeviceRGB，纯浪费。
+    CGColorSpaceRef colorSpace_ = nullptr;
+    CGContextRef drawCtx_ = nullptr;
+    size_t ctxW_ = 0;
+    size_t ctxH_ = 0;
 
 public:
+    ~MacCapturer() override
+    {
+        if (drawCtx_) CFRelease(drawCtx_);
+        if (colorSpace_) CFRelease(colorSpace_);
+    }
+
     bool initialize() override
     {
         displayID_ = CGMainDisplayID();
@@ -63,28 +75,33 @@ public:
         size_t w = CGImageGetWidth(cgImage);
         size_t h = CGImageGetHeight(cgImage);
 
-        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-        CGContextRef ctx = CGBitmapContextCreate(
-            nullptr, w, h, 8, w * 4, colorSpace,
-            kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
-        if (!ctx) {
-            CGImageRelease(cgImage);
-            CGColorSpaceRelease(colorSpace);
-            return false;
+        if (!colorSpace_)
+            colorSpace_ = CGColorSpaceCreateDeviceRGB();
+        // 分辨率变化（外接显示器/模式切换）时重建上下文
+        if (!drawCtx_ || ctxW_ != w || ctxH_ != h) {
+            if (drawCtx_) { CFRelease(drawCtx_); drawCtx_ = nullptr; }
+            drawCtx_ = CGBitmapContextCreate(
+                nullptr, w, h, 8, w * 4, colorSpace_,
+                kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
+            if (!drawCtx_) {
+                CGImageRelease(cgImage);
+                return false;
+            }
+            ctxW_ = w;
+            ctxH_ = h;
         }
 
-        CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImage);
+        CGContextDrawImage(drawCtx_, CGRectMake(0, 0, w, h), cgImage);
+        CGImageRelease(cgImage);
 
         // BGRA -> RGB888 (使用 Qt 内置 SIMD 优化转换)
-        QImage rawImg(static_cast<uchar*>(CGBitmapContextGetData(ctx)),
+        QImage rawImg(static_cast<uchar*>(CGBitmapContextGetData(drawCtx_)),
                       static_cast<int>(w), static_cast<int>(h),
-                      static_cast<int>(CGBitmapContextGetBytesPerRow(ctx)),
+                      static_cast<int>(CGBitmapContextGetBytesPerRow(drawCtx_)),
                       QImage::Format_RGB32);
+        // [P1 perf] convertToFormat 产出的独立缓冲即为交付帧，不存在与绘制缓冲
+        // 的别名问题，可在下一帧绘制前安全消费。
         outImage = rawImg.convertToFormat(QImage::Format_RGB888);
-
-        CGContextRelease(ctx);
-        CGColorSpaceRelease(colorSpace);
-        CGImageRelease(cgImage);
         return true;
     }
 

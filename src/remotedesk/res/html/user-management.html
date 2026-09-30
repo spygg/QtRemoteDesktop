@@ -100,6 +100,11 @@
             return resp.json();
         }
 
+        function escapeHtml(str) {
+            return String(str ?? '').replace(/[&<>"']/g,
+                c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+        }
+
         async function loadUsers() {
             const data = await api('GET', '/api/users');
             const tbody = document.getElementById('user-list');
@@ -107,14 +112,22 @@
                 tbody.innerHTML = data.users.map(u => {
                     const hasPwd = u.hasPassword ? '是' : '否';
                     const canDelete = data.canDelete;
+                    // [XSS] username 是存储型注入点（服务端无字符白名单）：
+                    // 文本经 escapeHtml 转义，用户名本体放 data 属性（同样转义），
+                    // 不再内联 onclick 拼字符串（HTML 解码后仍会破坏 JS 引号）
+                    const safeName = escapeHtml(u.username);
+                    const safeAttr = escapeHtml(u.username).replace(/`/g, '&#96;');
                     return `<tr>
-                        <td>${u.username}</td>
+                        <td>${safeName}</td>
                         <td>${hasPwd}</td>
                         <td class="user-actions">
-                            ${canDelete ? `<button class="btn btn-danger" onclick="deleteUser('${u.username}')">删除</button>` : ''}
+                            ${canDelete ? `<button class="btn btn-danger" data-username="${safeAttr}">删除</button>` : ''}
                         </td>
                     </tr>`;
                 }).join('');
+                tbody.querySelectorAll('button[data-username]').forEach(btn => {
+                    btn.addEventListener('click', () => deleteUser(btn.dataset.username));
+                });
             } else {
                 tbody.innerHTML = '<tr><td class="empty" colspan="3">暂无用户</td></tr>';
             }
