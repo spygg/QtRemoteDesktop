@@ -45,6 +45,7 @@ add_subdirectory(server/singleapplication)
 add_subdirectory(server/helper_process)
 add_subdirectory(server/secure_input_process)
 add_subdirectory(server/service)
+add_subdirectory(server/xdndmonitor)
 # add_subdirectory(thridparty/startup)
 add_subdirectory(thridparty/systemsleepblocker)
 # Google Breakpad 崩溃转储（crashhandler.h / Breakpad::CrashHandler）

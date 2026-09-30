@@ -12,6 +12,7 @@
 #include <QObject>
 #include <QQueue>
 #include <QSet>
+#include <QStringList>
 #include <QSslKey>
 #include <QSslSocket>
 #include <QTcpServer>
@@ -29,6 +30,7 @@ class ScreenCapturer;
 class AuthManager;
 class FileTransferService;
 class ClipboardService;
+class XdndMonitor;
 class QProcess;
 
 #ifdef USE_FFMPEG
@@ -195,6 +197,15 @@ private:
     std::unique_ptr<InputManager> inputManager_;
     std::unique_ptr<JpegCompressor> jpegCompressor_;
     std::unique_ptr<ClipboardService> clipboardService_;
+
+    // 远端屏幕文件拖拽侦测（XDND）：拖远端文件到屏幕边缘 → 浏览器下载。
+    // 专用线程轮询 XdndSelection 所有权（见 server/xdndmonitor/xdndmonitor.h）。
+    QThread* xdndThread_ = nullptr;
+    XdndMonitor* xdndWorker_ = nullptr;
+    QJsonObject lastRemoteDragMsg_;   // 最近一次拖拽状态广播（新客户端接入时补发）
+    // 剪贴板读取是异步的（CLI 模式在工作线程里跑 xclip），这些是新接入、
+    // 正等待初始剪贴板内容的客户端：读取结果回来后一次性推送。
+    QStringList pendingClipboardClientIds_;
 
     AuthManager* authManager_ = nullptr;
     FileTransferService* fileTransferService_ = nullptr;

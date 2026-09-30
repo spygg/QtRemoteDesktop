@@ -89,6 +89,10 @@ private:
     QMap<QString, QWebSocket*> clients_;
     QSet<QString> mediaExcludedClients_;
     QSet<QString> videoStarted_;
+    // 每客户端“已交给套接字但尚未写出”的字节数（QWebSocket 5.9 未公开 bytesToWrite，
+    // 用 sendXxxMessage 的返回值累加、bytesWritten 递减来估算）。用于慢客户端背压：
+    // 超过阈值即丢弃其媒体帧，避免发送队列无限增长吃光内存。
+    QMap<QString, qint64> pendingBytes_;
     QMap<QWebSocket*, QString> socketToId_;
     QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;

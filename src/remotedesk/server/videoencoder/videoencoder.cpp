@@ -453,7 +453,10 @@ void VideoEncoder::encode(const QImage& frame)
     QMutexLocker locker(&mutex_);
     if (frameQueue_.size() >= kMaxFrameQueueSize)
         frameQueue_.dequeue();
-    frameQueue_.enqueue(frame);
+    // 必须深拷贝再入队：X11 全量抓取路径把持久缓冲 fullFrame_ 浅共享给上层，
+    // 而 Damage 区域抓取路径会在同一缓冲上 memcpy 原地改写。若这里只存 QImage 引用，
+    // 编码线程出队时可能读到被捕获线程并发改写的半新半旧帧 → 画面撕裂/花屏。
+    frameQueue_.enqueue(frame.copy());
     condition_.wakeOne();
 }
 

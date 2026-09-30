@@ -6,6 +6,7 @@
 #include "inputmanager.h"
 #include "screencapturer.h"
 #include "websocketserver.h"
+#include "xdndmonitor.h"
 
 #ifdef USE_FFMPEG
 #include "videoencoder.h"
@@ -47,6 +48,7 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #include <QCursor>
 #include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -187,8 +189,17 @@ RDPServer::RDPServer(QObject* parent)
         // 关键帧，而它不在 webrtcSessions_ 里（旧逻辑导致 MSE 静态冻结）。
         const bool hasVideoClient = !webrtcSessions_.isEmpty()
                 || (wsServer_ && wsServer_->hasVideoClients());
-        if (hasVideoClient)
+        if (!hasVideoClient)
+            return;
+#ifdef USE_FFMPEG
+        // 仅在编码器尚未产出过任何关键帧时才周期驱动：持续强制抓帧让首个 IDR
+        // 尽快出来（卡住则由 pumpKeyframe 内部冷却重建兜底）。一旦 hasIdr_=true
+        // 就不再每 2s 空转全量抓取+编码——静态桌面下这纯粹是浪费；中途接入的
+        // 客户端已由 onClientConnected 回放缓存关键帧并 pumpKeyframe()，
+        // 以及前端 request_keyframe 兜底，不依赖这里的周期性强制抓帧。
+        if (currentMode_ == ServerMode::Video && videoEncoder_ && !videoEncoder_->hasIdr())
             pumpKeyframe();
+#endif
     });
     webrtcKfTimer_->start();
 }
@@ -208,6 +219,10 @@ RDPServer::~RDPServer()
     if (transferThread_ && transferThread_->isRunning()) {
         transferThread_->quit();
         transferThread_->wait(3000);
+    }
+    if (xdndThread_ && xdndThread_->isRunning()) {
+        xdndThread_->quit();
+        xdndThread_->wait(3000);
     }
     if (sslConfiguration_) {
         delete sslConfiguration_;
@@ -467,6 +482,27 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         this, [this](const QString& mime, const QByteArray& data) {
             wsServer_->broadcastJson(clipboardPayload(mime, data));
         });
+    // 读取剪贴板是异步的（CLI 模式走工作线程，避免阻塞主线程）：结果回来后
+    // 推送给所有处于等待中的新客户端。
+    connect(clipboardService_.get(), &ClipboardService::contentReady,
+        this, [this](const QString& mime, const QByteArray& data) {
+            const QStringList ids = pendingClipboardClientIds_;
+            pendingClipboardClientIds_.clear();
+            if (data.isEmpty())
+                return;
+            const QJsonObject payload = clipboardPayload(mime, data);
+            for (const QString& id : ids)
+                wsServer_->sendJson(id, payload);
+        });
+    // 客户端内容写入剪贴板成功后：广播给所有客户端（含发送者）保持多端一致，
+    // 并在远端触发一次 Ctrl+V 粘贴。
+    connect(clipboardService_.get(), &ClipboardService::contentApplied,
+        this, [this](bool ok, const QString& mime, const QByteArray& data) {
+            if (!ok)
+                return;
+            wsServer_->broadcastJson(clipboardPayload(mime, data));
+            injectPasteShortcut();
+        });
 
     connect(wsServer_.get(), &WebSocketServer::modeChangeRequested,
         this, &RDPServer::onModeChangeRequested);
@@ -495,6 +531,50 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     // Upload chunk signal directly from WebSocket to service
     connect(wsServer_.get(), &WebSocketServer::fileChunkReceived,
         fileTransferService_, &FileTransferService::processUploadChunk);
+
+#ifdef Q_OS_LINUX
+    // 远端屏幕文件拖拽侦测（Linux/X11，XDND 协议）：
+    // 用户在远端桌面里拖住文件时，把可下载项广播给浏览器端 —— 指针拖到
+    // 屏幕边缘即触发本机下载（Wayland 桌面无公开的拖拽侦测接口，跳过）。
+    if (!InputManager::desktopSessionIsWayland()) {
+        xdndThread_ = new QThread(this);
+        xdndWorker_ = new XdndMonitor();   // 无 parent：moveToThread 后归线程管理
+        xdndWorker_->moveToThread(xdndThread_);
+        connect(xdndThread_, &QThread::started, xdndWorker_, &XdndMonitor::start);
+        connect(xdndThread_, &QThread::finished, xdndWorker_, &QObject::deleteLater);
+        connect(xdndWorker_, &XdndMonitor::dragChanged, this,
+            [this](bool active, const QStringList& files) {
+                QJsonObject msg;
+                msg["type"] = "remote_drag";
+                msg["active"] = active;
+                QJsonArray arr;
+                if (active) {
+                    for (const QString& raw : files) {
+                        // 与 WS/HTTP 下载同一条越权校验：受限根外的拖拽项不下发
+                        const QString safe = FileTransferService::sanitizeFilePath(raw);
+                        if (safe.isEmpty())
+                            continue;
+                        QFileInfo fi(safe);
+                        QJsonObject item;
+                        item["path"] = safe;
+                        item["name"] = fi.fileName();
+                        item["isDir"] = fi.isDir();
+                        arr.append(item);
+                    }
+                }
+                // 文件一个都解析不出来时不下发，避免前端空弹提示
+                if (active && arr.isEmpty())
+                    return;
+                msg["files"] = arr;
+                lastRemoteDragMsg_ = msg;   // 供新接入客户端补发快照
+                wsServer_->broadcastJson(msg);
+            });
+        xdndThread_->start();
+        qInfo() << "XdndMonitor: remote file drag detection enabled (X11)";
+    } else {
+        qInfo() << "XdndMonitor: Wayland desktop, remote file drag detection disabled";
+    }
+#endif
 
     // Service responses -> WebSocket sends (main thread)
     connect(fileTransferService_, &FileTransferService::jsonResponse,
@@ -2571,15 +2651,17 @@ void RDPServer::onClientConnected(const QString& clientId)
         wsServer_->sendToCaptureSource(msg);
     }
 
-    // 发送当前剪贴板内容（若有，文本/图片）
+    // 发送当前剪贴板内容（若有，文本/图片）。读取是异步的，结果回来后
+    // 由 contentReady 处理器按 pendingClipboardClientIds_ 推送。
     if (clipboardService_) {
-        QString mime;
-        QByteArray clipData;
-        clipboardService_->content(mime, clipData);
-        if (!clipData.isEmpty()) {
-            wsServer_->sendJson(clientId, clipboardPayload(mime, clipData));
-        }
+        pendingClipboardClientIds_.append(clientId);
+        clipboardService_->requestContent();
     }
+
+    // 补发当前远端拖拽状态：remote_drag 只在状态变化时广播，后接入的
+    // 客户端必须拿到"此刻正在拖拽"的快照，否则错过边缘下载时机。
+    if (!lastRemoteDragMsg_.isEmpty())
+        wsServer_->sendJson(clientId, lastRemoteDragMsg_);
 
     // 发送屏幕分辨率
     if (screenCapturer_) {
@@ -2745,13 +2827,10 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             wsServer_->broadcastJson(clipboardPayload(mime, clipData));
             return;
         }
-        // 直接模式：浏览器粘贴/同步 → 写入远端系统剪贴板，并在远端触发一次 Ctrl+V 粘贴
+        // 直接模式：浏览器粘贴/同步 → 写入远端系统剪贴板，并在远端触发一次 Ctrl+V 粘贴。
+        // 写入是异步的（CLI 模式走工作线程），成功后由 contentApplied 处理器广播 + 注入按键。
         if (clipboardService_) {
-            if (clipboardService_->setContentFromClient(mime, clipData)) {
-                // 广播给所有客户端（含发送者），保持多端一致；发送者前端按内容去重
-                wsServer_->broadcastJson(clipboardPayload(mime, clipData));
-                injectPasteShortcut();
-            }
+            clipboardService_->requestSetContent(mime, clipData);
         }
         return;
     }
@@ -2866,7 +2945,10 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         if (type == "keydown" || type == "keyup")
             return;
 #else
-        qInfo() << "Screen locked, injecting input directly via InputManager";
+        // 非 Windows（Linux）锁屏时无需额外处理：输入已在上方 helper/直连路径投递。
+        // 这里不再打日志——该分支对每个输入事件都会走到（含前端 60Hz mousemove），
+        // 逐条 qInfo 会刷爆日志文件并造成主线程 IO。
+        (void)input;
 #endif
     }
 

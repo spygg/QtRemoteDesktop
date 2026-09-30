@@ -2109,7 +2109,11 @@
                     // 初始化分块下载缓冲区（限 2GB，防止异常/恶意 totalSize 一次性分配超大数组导致浏览器 OOM）
                     if (!(msg.totalSize > 0 && msg.totalSize <= 2 * 1024 * 1024 * 1024)) {
                         showTransferStatus('下载失败：文件大小异常(' + (msg.totalSize || '未知') + '字节)', 4000);
-                        delete fetchWaiters[msg.path];
+                        const badWaiter = fetchWaiters[msg.path];
+                        if (badWaiter) {
+                            delete fetchWaiters[msg.path];
+                            if (badWaiter.reject) badWaiter.reject(new Error('bad size'));
+                        }
                         break;
                     }
                     downloadBuffers[msg.path] = {
@@ -2170,6 +2174,12 @@
                         if (w) { delete fetchWaiters[msg.path]; if (w.reject) w.reject(new Error(msg.error)); }
                         alert('下载失败: ' + msg.error);
                     }
+                    break;
+                case 'remote_drag':
+                    // 远端屏幕文件拖拽侦测（XDND）：用户在远端桌面里拖住文件时，
+                    // 服务端解析出可下载项广播过来。指针拖到本页视口边缘即触发
+                    // 下载（此路径不在 HTML5 拖拽模态中，程序化下载必然生效）。
+                    updateRemoteDragState(msg);
                     break;
                 case 'screen_locked':
                     document.getElementById('lock-overlay').classList.toggle('active', msg.locked);
@@ -2998,6 +3008,8 @@
         // 本次拖拽是否落在页面内部（落在内部则说明是“拖到页面下载”，不该再触发一次拖出下载）
         let internalDropHappened = false;
         let dragLastUrl = '', dragLastName = '';
+        // 拖拽远端文件项时，指针到达视口边缘即视为“拖到本机”，已触发过一次直链下载
+        let dragEdgeDownloaded = false;
         // 拖入时当前悬停的远端目录（null = 放到当前目录）
         let dropTargetDir = null;
 
@@ -3371,6 +3383,7 @@
                 e.dataTransfer.setData(REMOTE_DRAG_MIME, path);
                 e.dataTransfer.setData('text/plain', item.name);
                 internalDropHappened = false;
+                dragEdgeDownloaded = false;
                 const url = remoteDirectUrl(path);
                 if (url) {
                     // DownloadURL 格式：<mime>:<filename>:<url>
@@ -3388,13 +3401,22 @@
                 }
             });
             div.addEventListener('dragend', () => {
-                if (internalDropHappened || !dragLastUrl) { dragLastUrl = ''; return; }
-                // 没有 DownloadURL 支持 → 拖出到系统桌面不会有任何效果，兜底触发常规下载
-                if (!SUPPORTS_DOWNLOAD_URL) {
-                    saveDirectUrl(dragLastUrl, dragLastName);
-                    showTransferStatus('已下载（本浏览器不支持拖到桌面，已保存到下载目录）', 3000);
+                // dragend = 拖拽会话已结束（松手/取消），此时程序化触发下载必然生效。
+                // 拖拽进行中（drag/dragover）浏览器处于拖拽模态，锚点点击会被静默忽略
+                // ——这正是"拖到屏幕边缘也没下载"的根因，所以边缘只登记意图（见
+                // maybeAutoDownloadAtEdge），统一在这里兑现。
+                const url = dragLastUrl, name = dragLastName;
+                const edgeIntent = dragEdgeDownloaded;
+                dragLastUrl = ''; dragLastName = '';
+                dragEdgeDownloaded = false;
+                if (internalDropHappened || !url) return;
+                // 拖到边缘/窗口外松手：无论浏览器是否支持原生拖出（Chrome 的
+                // DownloadURL 拖到桌面经常静默失败），都兜底触发一次直链下载；
+                // Firefox/Safari 等不支持 DownloadURL 的浏览器：常规兜底。
+                if (edgeIntent || !SUPPORTS_DOWNLOAD_URL) {
+                    saveDirectUrl(url, name);
+                    showTransferStatus('已开始下载：' + name, 3000);
                 }
-                dragLastUrl = '';
             });
         }
 
@@ -3429,16 +3451,27 @@
             });
         }
 
-        // 经 WebSocket 分块下载（直链不可用时的兜底：例如页面不是 http(s) 打开）
+        // 经 WebSocket 分块下载（直链不可用时的兜底：例如页面不是 http(s) 打开）。
+        // Promise 带 60s 超时：服务端异常（如 start/end 事件丢失）时不至于永久悬挂，
+        // 调用方（downloadFile）能走到"下载失败"提示而不是无声无息。
         function fetchRemoteFileViaWs(path) {
             if (fileFetchCache[path]) return Promise.resolve(fileFetchCache[path]);
             if (fileFetchInflight[path]) return fileFetchInflight[path];
             const p = new Promise((resolve, reject) => {
                 fetchWaiters[path] = { resolve: resolve, reject: reject, name: path.split('/').pop() };
                 send({ type: 'file_download', path: path, name: path.split('/').pop() });
+                fetchWaiters[path].timer = setTimeout(() => {
+                    const w = fetchWaiters[path];
+                    if (w) { delete fetchWaiters[path]; w.reject(new Error('WS download timeout')); }
+                }, 60000);
             });
             fileFetchInflight[path] = p;
-            p.catch(() => { }).then(() => { delete fileFetchInflight[path]; });
+            p.catch(() => { }).then(() => {
+                const w = fetchWaiters[path];
+                if (w && w.timer) clearTimeout(w.timer);
+                delete fetchWaiters[path];
+                delete fileFetchInflight[path];
+            });
             return p;
         }
 
@@ -3456,6 +3489,24 @@
             const saveName = isDir ? fileName.replace(/[/\\]+$/, '') + '.tar' : fileName;
             const url = remoteDirectUrl(filePath);
             if (url) {
+                // 直链可用性预检（HEAD，同源自动带 cookie）：会话过期 / 路径越界 /
+                // 文件消失时，浏览器会把 401/403/404 的错误内容当成下载文件存下来，
+                // 用户看到的就是"下载失败"（还多出一个损坏文件）。先探测，失败自动
+                // 回退 WS 分块下载并把真实原因提示出来。HEAD 由服务端 /api/file 原生
+                // 支持，局域网内开销可忽略。
+                try {
+                    const probe = await fetch(url, { method: 'HEAD', credentials: 'include' });
+                    if (!probe.ok) {
+                        showTransferStatus('直链不可用(HTTP ' + probe.status + ')，改用WS通道…', 3000);
+                        try {
+                            const r = await fetchRemoteFileViaWs(filePath);
+                            saveBlobUrl(r.url, saveName);
+                        } catch (err) {
+                            showTransferStatus('下载失败: ' + fileName, 3000);
+                        }
+                        return;
+                    }
+                } catch (e) { /* 探测本身失败（如网络瞬断）：仍尝试直链，让浏览器自行处理 */ }
                 saveDirectUrl(url, saveName);
                 return;
             }
@@ -3575,6 +3626,26 @@
                 dragDepth--;
                 if (dragDepth === 0) { dropTargetDir = null; hideDropOverlay(); }
             });
+            // 远端文件项拖拽：指针到达视口边缘即登记"拖到本机"意图，dragend（松手）
+            // 时统一触发浏览器下载。不能在 drag/dragover 里直接点击锚点——拖拽模态
+            // 中程序化下载会被浏览器静默忽略，表现为"拖到边缘什么都没发生"。
+            // 同时挂 drag 与 dragover 两个事件：真实拖拽中二者都会持续携带指针坐标，
+            // 但不同浏览器对 drag 事件的派发时机不完全一致，双挂更稳妥。
+            const EDGE_TRIGGER_PX = 16;
+            const maybeAutoDownloadAtEdge = (e) => {
+                if (!dragLastUrl || internalDropHappened || dragEdgeDownloaded) return;
+                if (!isRemoteFileDrag(e)) return;
+                const w = window.innerWidth, h = window.innerHeight;
+                const x = e.clientX, y = e.clientY;
+                if (x <= EDGE_TRIGGER_PX || y <= EDGE_TRIGGER_PX
+                    || x >= w - EDGE_TRIGGER_PX || y >= h - EDGE_TRIGGER_PX) {
+                    dragEdgeDownloaded = true;   // 意图登记，dragend 时兑现下载
+                    hideDropOverlay();
+                    showTransferStatus('松开鼠标即下载「' + dragLastName + '」到本机', 5000);
+                }
+            };
+            document.addEventListener('drag', maybeAutoDownloadAtEdge);
+            document.addEventListener('dragover', maybeAutoDownloadAtEdge);
             document.addEventListener('drop', (e) => {
                 if (!state.connected) return;
                 if (!isLocalFileDrag(e) && !isRemoteFileDrag(e)) return;
@@ -3584,6 +3655,10 @@
                 hideDropOverlay();
                 internalDropHappened = true;
                 if (isRemoteFileDrag(e)) {
+                    // 落在页面内 = 明确的"拖到本机"终点，触发直链下载。
+                    // dragEdgeDownloaded 此时只是边缘意图（下载尚未发生），一并清掉；
+                    // dragend 看到 internalDropHappened=true 不会再兜底，不会重复。
+                    dragEdgeDownloaded = false;
                     // REMOTE_DRAG_MIME 里带的是完整远端路径，落在页面内即触发下载
                     const remotePath = e.dataTransfer.getData(REMOTE_DRAG_MIME) ||
                         e.dataTransfer.getData('text/plain');
@@ -3598,6 +3673,97 @@
                     if (list && list.length)
                         handleFileUpload(list, targetDir || state.remoteDesktopPath || currentRemotePath);
                 });
+            });
+        }
+
+        // ==================== 远端屏幕文件拖拽 → 本机下载（XDND 侦测） ====================
+        // 服务端在远端 X11 会话里侦测文件拖拽（XdndSelection），把被拖文件经
+        // remote_drag 消息下发。用户把指针拖到浏览器窗口边缘（或松手前越过
+        // 边缘）即触发下载 —— 浏览器页面此时不在拖拽模态中，程序化下载必然生效。
+        const remoteDrag = { active: false, files: [], done: {} };
+        const DRAG_DL_EDGE_PX = 24;
+
+        function updateRemoteDragState(msg) {
+            remoteDrag.active = !!msg.active;
+            remoteDrag.files = (msg.active && Array.isArray(msg.files)) ? msg.files : [];
+            remoteDrag.done = {};
+            if (remoteDrag.active && remoteDrag.files.length) {
+                const names = remoteDrag.files.map(f => f.name).join('、');
+                showRemoteDragBanner('🖱 正在拖拽远端文件：' + names + ' —— 拖到屏幕边缘即下载到本机');
+            } else if (remoteDrag.active) {
+                showRemoteDragBanner('🖱 检测到远端拖拽（文件不可识别）');
+            } else {
+                hideRemoteDragBanner();
+            }
+        }
+
+        function showRemoteDragBanner(text) {
+            let el = document.getElementById('remote-drag-banner');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'remote-drag-banner';
+                el.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:99998;'
+                    + 'background:rgba(30,120,220,.92);color:#fff;padding:7px 16px;border-radius:20px;'
+                    + 'font-size:13px;box-shadow:0 3px 12px rgba(0,0,0,.35);pointer-events:none;white-space:nowrap;';
+                document.body.appendChild(el);
+            }
+            el.textContent = text;
+            el.style.display = 'block';
+        }
+
+        function hideRemoteDragBanner() {
+            const el = document.getElementById('remote-drag-banner');
+            if (el) el.style.display = 'none';
+        }
+
+        // 指针进入视口边缘（真实鼠标移动，非 HTML5 拖拽）→ 触发下载所有未下载项。
+        // 双触发条件，避免"路过边缘"误触（如拖文件去远端底部任务栏）：
+        //   1) 指针真正离开浏览器窗口（拖出去甩到桌面上）；
+        //   2) 在边缘区域停留 ≥300ms（刻意向边缘拖并停住）。
+        const remoteDragEdge = { since: 0 };
+        function maybeDownloadDraggedAtEdge(x, y) {
+            if (!remoteDrag.active || !remoteDrag.files.length) return;
+            const w = window.innerWidth, h = window.innerHeight;
+            const inZone = x <= DRAG_DL_EDGE_PX || y <= DRAG_DL_EDGE_PX
+                || x >= w - DRAG_DL_EDGE_PX || y >= h - DRAG_DL_EDGE_PX;
+            const now = Date.now();
+            if (!inZone) {
+                remoteDragEdge.since = 0;
+                return;
+            }
+            if (!remoteDragEdge.since) {
+                remoteDragEdge.since = now;
+                return;
+            }
+            if (now - remoteDragEdge.since < 300) return;
+            triggerDraggedDownload();
+        }
+
+        function triggerDraggedDownload() {
+            if (!remoteDrag.active || !remoteDrag.files.length) return;
+            let triggered = false;
+            for (const f of remoteDrag.files) {
+                if (remoteDrag.done[f.path]) continue;
+                remoteDrag.done[f.path] = true;
+                triggered = true;
+                downloadFile(f.name, f.path, !!f.isDir);
+            }
+            if (triggered) {
+                hideRemoteDragBanner();
+                const first = remoteDrag.files[0];
+                showTransferStatus('已开始下载：' + first.name
+                    + (remoteDrag.files.length > 1 ? ' 等 ' + remoteDrag.files.length + ' 项' : ''), 3000);
+            }
+        }
+
+        function initRemoteDragMonitor() {
+            document.addEventListener('mousemove', (e) => {
+                maybeDownloadDraggedAtEdge(e.clientX, e.clientY);
+            });
+            // 指针拖出浏览器窗口（relatedTarget=null 表示已离开文档）
+            document.addEventListener('mouseout', (e) => {
+                if (!e.relatedTarget && remoteDrag.active)
+                    triggerDraggedDownload();
             });
         }
 
@@ -3718,6 +3884,7 @@
         window.onload = () => {
             setupInputs();
             initFileDragDrop();
+            initRemoteDragMonitor();
             connect();
             updateQualityLabel();
 

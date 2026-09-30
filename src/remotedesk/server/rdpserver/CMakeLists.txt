@@ -23,6 +23,7 @@ target_link_libraries(${RDP_SERVER} PUBLIC
     ScreenCapturer
     FileTransferService
     Clipboardservice
+    XdndMonitor
 )
 
 if(FFMPEG_FOUND)

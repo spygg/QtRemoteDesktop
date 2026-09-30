@@ -6,6 +6,12 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+// 单客户端待发缓冲上限：慢客户端（网络拥塞、标签页被挂起/切到后台）会导致
+// sendBinaryMessage 的发送队列无限增长，最终吃光服务端内存。超过该阈值时主动
+// 丢弃该客户端的媒体帧（图像/视频），待其把积压发完再自然恢复。
+// 只作用于媒体广播，不碰控制类 JSON（体量小且不能丢）。
+static const qint64 kMaxSocketBacklogBytes = 8 * 1024 * 1024;
+
 WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent)
     : QObject(parent)
     , server_(new QWebSocketServer(QStringLiteral("RemoteDesktopServer"),
@@ -159,6 +165,14 @@ void WebSocketServer::onNewConnection()
     connect(socket, &QWebSocket::disconnected, this, &WebSocketServer::onSocketDisconnected);
     connect(socket, &QWebSocket::textMessageReceived, this, &WebSocketServer::onTextMessageReceived);
     connect(socket, &QWebSocket::binaryMessageReceived, this, &WebSocketServer::onBinaryMessageReceived);
+    // 背压估算：套接字每写出 n 字节，就从该客户端的待发计数中扣减。
+    connect(socket, &QWebSocket::bytesWritten, this, [this, socket](qint64 n) {
+        const QString id = socketToId_.value(socket);
+        if (id.isEmpty())
+            return;
+        const qint64 v = pendingBytes_.value(id) - n;
+        pendingBytes_[id] = v > 0 ? v : 0;
+    });
 
     emit clientConnected(clientId);
 }
@@ -172,6 +186,7 @@ void WebSocketServer::onSocketDisconnected()
     QString clientId = socketToId_.take(socket);
     clients_.remove(clientId);
     videoStarted_.remove(clientId);
+    pendingBytes_.remove(clientId);
     // clientId 是每条连接新建的 UUID，若不清理 clientTokens_，
     // 每次断线都会残留一条 token→会话映射，长期运行（含频繁重连）单调增长。
     clientTokens_.remove(clientId);
@@ -254,6 +269,7 @@ void WebSocketServer::dropClient(const QString& clientId)
     socketToId_.remove(socket);
     clientTokens_.remove(clientId);
     videoStarted_.remove(clientId);
+    pendingBytes_.remove(clientId);
     socket->close(QWebSocketProtocol::CloseCodeNormal, "Authentication failed");
     socket->deleteLater();
     emit clientDisconnected(clientId);
@@ -320,6 +336,13 @@ void WebSocketServer::broadcastFrame(const QByteArray& data, bool isKeyframe, qi
         if (socket->state() != QAbstractSocket::ConnectedState)
             continue;
 
+        // 慢客户端背压：积压超过上限则丢弃本帧，并清除其“已开始收流”标记，
+        // 使其等到下一个关键帧再干净恢复（直接丢 P 帧会造成花屏）。
+        if (pendingBytes_.value(it.key()) > kMaxSocketBacklogBytes) {
+            videoStarted_.remove(it.key());
+            continue;
+        }
+
         // 每客户端从关键帧起点开始收流：
         // 在收到下一个 IDR 之前丢弃 P 帧，避免从 GOP 中间加入导致黑屏/花屏。
         if (!videoStarted_.contains(it.key())) {
@@ -327,7 +350,7 @@ void WebSocketServer::broadcastFrame(const QByteArray& data, bool isKeyframe, qi
                 continue; // 还没到关键帧，跳过纯增量帧
             videoStarted_.insert(it.key());
         }
-        socket->sendBinaryMessage(packet);
+        pendingBytes_[it.key()] += qMax<qint64>(0, socket->sendBinaryMessage(packet));
     }
 }
 
@@ -336,7 +359,8 @@ void WebSocketServer::sendJson(const QString& clientId, const QJsonObject& data)
     QWebSocket* socket = clients_.value(clientId);
     if (socket && socket->state() == QAbstractSocket::ConnectedState) {
         QJsonDocument doc(data);
-        socket->sendTextMessage(QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+        pendingBytes_[clientId] += qMax<qint64>(0,
+            socket->sendTextMessage(QString::fromUtf8(doc.toJson(QJsonDocument::Compact))));
     }
 }
 
@@ -348,6 +372,9 @@ void WebSocketServer::sendFrameToClient(const QString& clientId, const QByteArra
         return;
     if (mediaExcludedClients_.contains(clientId))
         return; // 走 WebRTC 的客户端由 RTP 收流，不回放 WS 帧
+    // 慢客户端背压：积压过高时跳过（关键帧重放会由后续 pumpKeyframe 再补）
+    if (pendingBytes_.value(clientId) > kMaxSocketBacklogBytes)
+        return;
 
     QByteArray packet;
     QDataStream stream(&packet, QIODevice::WriteOnly);
@@ -359,7 +386,7 @@ void WebSocketServer::sendFrameToClient(const QString& clientId, const QByteArra
 
     if (isKeyframe)
         videoStarted_.insert(clientId); // 关键帧已就位，后续 P 帧不再丢弃
-    socket->sendBinaryMessage(packet);
+    pendingBytes_[clientId] += qMax<qint64>(0, socket->sendBinaryMessage(packet));
 }
 
 void WebSocketServer::broadcastJson(const QJsonObject& data)
@@ -373,7 +400,8 @@ void WebSocketServer::broadcastJson(const QJsonObject& data)
     for (auto it = clients_.constBegin(); it != clients_.constEnd(); ++it) {
         QWebSocket* socket = it.value();
         if (socket->state() == QAbstractSocket::ConnectedState) {
-            socket->sendTextMessage(QString::fromUtf8(message));
+            pendingBytes_[it.key()] += qMax<qint64>(0,
+                socket->sendTextMessage(QString::fromUtf8(message)));
         }
     }
 }
@@ -384,10 +412,15 @@ void WebSocketServer::broadcastBinary(const QByteArray& data)
         return;
 
     for (auto it = clients_.constBegin(); it != clients_.constEnd(); ++it) {
+        if (mediaExcludedClients_.contains(it.key()))
+            continue; // 走 WebRTC 的客户端由 RTP 收流，跳过 WS 图像帧（与视频路径一致）
         QWebSocket* socket = it.value();
-        if (socket->state() == QAbstractSocket::ConnectedState) {
-            socket->sendBinaryMessage(data);
-        }
+        if (socket->state() != QAbstractSocket::ConnectedState)
+            continue;
+        // 慢客户端背压：图像帧为帧内编码，丢一帧不影响后续解码，直接跳过即可。
+        if (pendingBytes_.value(it.key()) > kMaxSocketBacklogBytes)
+            continue;
+        pendingBytes_[it.key()] += qMax<qint64>(0, socket->sendBinaryMessage(data));
     }
 }
 
@@ -395,6 +428,6 @@ void WebSocketServer::sendBinaryToClient(const QString& clientId, const QByteArr
 {
     QWebSocket* socket = clients_.value(clientId);
     if (socket && socket->state() == QAbstractSocket::ConnectedState) {
-        socket->sendBinaryMessage(data);
+        pendingBytes_[clientId] += qMax<qint64>(0, socket->sendBinaryMessage(data));
     }
 }
