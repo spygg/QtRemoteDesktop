@@ -201,8 +201,10 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     frameCount_ = 0;
     startTime_ = 0;
     pendingBitrate_.store(0);
+    appliedBitrate_.store(0);   // [H18] 新编码器按参数码率打开，旧 applied 值残留会让 encode() 误判已生效
     forceKeyframe_.store(false);
     mppBroken_.store(false);
+    mppFailCount_ = 0;          // [H18] 上一轮累计的失败计数不清零，新实例再失败 1 次即被永久禁用
     encodeEmaMs_ = 0;
     lastOverloadLogMs_ = 0;
     overloaded_ = false;
@@ -690,14 +692,16 @@ void VideoEncoder::shutdown()
         encoderThread_.quit();          // 线程无事件循环时无效，仅作兜底
         stopped = encoderThread_.wait(8000);
         if (!stopped) {
-            qWarning() << "Encoder thread did not stop within 8s; waiting indefinitely — "
-                          "proceeding would destroy the QThread while running (hard abort) "
-                          "and the loop would UAF members. No terminate: it would deadlock mutex_.";
-            // [B7] 超时后不能继续：encoderThread_ 是成员 QThread，析构时若仍在运行
-            // 直接 abort；且 encodingLoop 挂在 this 上，成员销毁后继续访问 = UAF。
-            // 编码循环阻塞通常在硬件编码调用里，阻塞 shutdown 优于崩溃。
-            encoderThread_.wait();
-            stopped = true;
+            // [H14] 不能无限 wait（调用方全在主线程，冻结 = 整个服务失联），
+            // 也不能超时后继续销毁（QThread 析构 abort / 编码循环 UAF 成员）。
+            // 折中：再给 25s 宽限（覆盖慢盘/驱动瞬时恢复）；仍不停说明卡死在
+            // 驱动层编码调用里。服务由 systemd 托管（Restart=on-failure），
+            // 主动 abort 换来自动重启恢复，优于静默永久卡死。
+            qCritical() << "Encoder thread did not stop within 8s; granting 25s grace...";
+            stopped = encoderThread_.wait(25000);
+            if (!stopped)
+                qFatal("VideoEncoder: encoding thread wedged in a driver-level call; "
+                       "aborting so systemd can restart the service");
         }
     }
 

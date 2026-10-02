@@ -10,6 +10,7 @@
 #include <QMap>
 #include <QObject>
 #include <QThread>
+#include <functional>
 
 class FileTransferService : public QObject
 {
@@ -17,6 +18,10 @@ class FileTransferService : public QObject
 public:
     explicit FileTransferService(QObject* parent = nullptr);
     ~FileTransferService();
+
+    // [C5-①] 注入下游背压查询（由 RDPServer 提供：WS 发送队列未写出字节数）。
+    // 工作线程产出目录 tar/单文件分块前轮询，超过阈值就暂停，避免 OOM。
+    void setBackpressureQuery(std::function<qint64()> q) { backpressureQuery_ = std::move(q); }
 
     // 文件传输根目录约束（防越权读写）。默认限制在当前用户 home；
     // 传入 "/"（或空）表示显式放开全盘（不推荐，仅内网可信环境使用）。
@@ -70,6 +75,7 @@ signals:
 private:
     static QString s_rootPath;
     static bool s_enforceRoot;
+    std::function<qint64()> backpressureQuery_; // [C5-①] 下游 WS 积压查询（可空）
     static void writeTarHeader(QByteArray& data, const QString& name, qint64 size, char type);
     static void addToTar(QByteArray& tarData, const QDir& dir, const QString& prefix);
 

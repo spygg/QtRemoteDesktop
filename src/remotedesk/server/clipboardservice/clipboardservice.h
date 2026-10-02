@@ -63,6 +63,12 @@ public:
 
     void start();
 
+    // [N1] 挂起/恢复系统剪贴板同步。服务模式下 helper 进程有自己的 QClipboard
+    // 通道（dataChanged 即时上报），service 进程的 xclip 1.2s 轮询会造成同一内容
+    // 双通道重复广播 + 无谓的进程开销。helper 连接期间挂起本服务，断开即恢复。
+    void setSuspended(bool s);
+    bool isSuspended() const { return suspended_; }
+
     // 请求读取当前系统剪贴板内容，结果经 contentReady 返回（无论有无内容都会应答）。
     void requestContent();
     // 请求把客户端内容写入系统剪贴板，结果经 contentApplied 返回（ok 表示是否真正写入）。
@@ -94,6 +100,7 @@ private slots:
 
 private:
     bool available_ = false;
+    bool suspended_ = false;    // [N1] helper 通道活跃时挂起 xclip 轮询与广播
     QString lastMime_;          // 上次已推送/已写入的内容指纹，用于去重，避免回声循环
     QByteArray lastData_;
     QString pendingMime_;       // 待广播内容（去抖缓冲）
@@ -110,6 +117,7 @@ private:
     QString clipBin_;           // xclip 或 xsel 的绝对路径
     QThread* cliThread_ = nullptr;
     ClipboardCliWorker* cliWorker_ = nullptr;
+    QTimer* cliPollTimer_ = nullptr; // [N1] 轮询定时器句柄（挂起/恢复用）
     bool cliReadInFlight_ = false;   // 上一轮读取尚未返回 → 不再重复发起
     bool cliPushPending_ = false;    // 读取进行中又有客户端接入，需要补发一次 contentReady
 

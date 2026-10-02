@@ -271,10 +271,35 @@ bool ClipboardService::initCliBackend()
     // 它只发一个跨线程请求，不做任何阻塞等待。
     QTimer* poll = new QTimer(this);
     connect(poll, &QTimer::timeout, this, &ClipboardService::pollClipboard);
-    poll->start(kCliPollMs);
+    cliPollTimer_ = poll;
+    if (suspended_)
+        poll->stop(); // helper 通道活跃时不启动轮询
+    else
+        poll->start(kCliPollMs);
     return true;
 }
 #endif
+
+// [N1] helper 通道活跃时挂起本服务的轮询与广播（由 RDPServer 调用）。
+// 仅对 CLI（xclip 轮询）模式有意义；GUI 模式无轮询，标记即可。
+void ClipboardService::setSuspended(bool s)
+{
+    if (suspended_ == s)
+        return;
+    suspended_ = s;
+#ifdef Q_OS_LINUX
+    if (cliMode_ && cliPollTimer_) {
+        if (s) {
+            cliPollTimer_->stop();
+            qInfo() << "ClipboardService: suspended (helper channel active)";
+        } else {
+            cliReadInFlight_ = false;
+            cliPollTimer_->start(kCliPollMs);
+            qInfo() << "ClipboardService: resumed (helper channel gone)";
+        }
+    }
+#endif
+}
 
 void ClipboardService::readSystemClipboard(QString& mime, QByteArray& data) const
 {

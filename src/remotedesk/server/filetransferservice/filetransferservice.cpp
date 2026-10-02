@@ -571,6 +571,14 @@ void FileTransferService::processFileList(const QString& clientId, const QString
 
 void FileTransferService::processDownload(const QString& clientId, const QString& path)
 {
+    // [C5-①] 下游积压超限时暂停产出：WS 发送队列/主线程信号队列无法无限吸收
+    // GB 级目录的分块。工作线程阻塞等待排空；断线时回调返回 0（不会死等）。
+    static const qint64 kWsBacklogLimit = 4 * 1024 * 1024;
+    auto waitBackpressure = [this]() {
+        while (backpressureQuery_ && backpressureQuery_() > kWsBacklogLimit)
+            QThread::msleep(20);
+    };
+
     QString safePath = sanitizeFilePath(path);
     if (safePath.isEmpty()) {
         emit jsonResponse(clientId, QJsonObject{
@@ -611,6 +619,7 @@ void FileTransferService::processDownload(const QString& clientId, const QString
         // 累冲满一块（或 force 时冲残余）即发；进度节流沿用 200ms
         auto flush = [&](bool force) {
             while (pend.size() >= CHUNK_SIZE || (force && !pend.isEmpty())) {
+                waitBackpressure();
                 const int n = force ? pend.size() : CHUNK_SIZE;
                 const QByteArray chunk = pend.left(n);
                 pend.remove(0, n);
@@ -623,6 +632,17 @@ void FileTransferService::processDownload(const QString& clientId, const QString
                     progressTimer.restart();
                     lastBytes = offset;
                 }
+            }
+        };
+
+        // [C5-③] 大块零填充必须分块追加：QByteArray(int) 构造在尺寸 >INT_MAX 时
+        // int 溢出（>2GB 文件 open 失败/短读时触发）。按 256KB 分块并沿途 flush。
+        auto appendZeros = [&pend, &flush](qint64 n) {
+            while (n > 0) {
+                const int take = int(qMin<qint64>(n, 256 * 1024));
+                pend += QByteArray(take, '\0');
+                n -= take;
+                flush(false);
             }
         };
 
@@ -639,8 +659,7 @@ void FileTransferService::processDownload(const QString& clientId, const QString
                 // 读失败：零填充保持总长一致（前端按 totalSize 拼包），并如实告警
                 qWarning() << "WS tar: open failed" << e.absPath << f.errorString();
                 readError = true;
-                pend += QByteArray(int(((512 - (e.size % 512)) % 512) + e.size), '\0');
-                flush(false);
+                appendZeros(e.size + ((512 - (e.size % 512)) % 512));
                 continue;
             }
             qint64 remain = e.size;
@@ -658,7 +677,7 @@ void FileTransferService::processDownload(const QString& clientId, const QString
                 flush(false);
             }
             if (remain > 0)
-                pend += QByteArray(int(remain), '\0'); // 短读补零保长
+                appendZeros(remain);   // 短读补零保长
             pend += QByteArray(int((512 - (e.size % 512)) % 512), '\0'); // 对齐填充
             flush(false);
         }
@@ -683,6 +702,16 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     }
 
     // Regular file: chunked read
+    // [C5-②] 必须是常规文件：FIFO/socket 等特殊文件 open(ReadOnly) 会永久阻塞
+    // 工作线程（HTTP 路径已有 isFile 校验，WS 路径此前漏了）
+    if (!fi.isFile()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_download"},
+            {"path", path},
+            {"error", "Not a regular file: " + safePath}
+        });
+        return;
+    }
     QFile file(safePath);
     if (!file.open(QIODevice::ReadOnly)) {
         emit jsonResponse(clientId, QJsonObject{
@@ -721,6 +750,7 @@ void FileTransferService::processDownload(const QString& clientId, const QString
             break;
         }
 
+        waitBackpressure();
         emit downloadChunkReady(clientId, path, offset, chunk, totalSize);
         offset += chunk.size();
 

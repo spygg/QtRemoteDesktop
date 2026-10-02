@@ -65,6 +65,9 @@ void ScreenCapturer::forceNextFrame()
 void ScreenCapturer::setFps(int fps)
 {
     if (fps < 1) return;
+    // [H22] 上界保护：1000/fps 整数除法在 fps>1000 时得 0ms 定时器 → 忙转；
+    // 客户端可发任意 fps 触发定时器忙转 + 编码器重建风暴（可控 DoS）
+    if (fps > 60) fps = 60;
     fps_ = fps;
     if (captureTimer_->isActive())
         captureTimer_->setInterval(1000 / fps_);

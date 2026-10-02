@@ -5,14 +5,18 @@
 #include "screencapturer.h"
 
 #include <QApplication>
+#include <QBuffer>
 #include <QClipboard>
+#include <QCryptographicHash>
 #include <QDataStream>
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
+#include <QImage>
 #include <QIODevice>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMimeData>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QThread>
@@ -150,6 +154,29 @@ int HelperProcess::run(int argc, char* argv[])
 
     // 共享剪贴板：监听用户会话剪贴板变化，去抖后上报给服务端（服务端广播给所有客户端）
     QString lastClipText;
+    // [N2] 图片剪贴板：与 service xclip 通道能力对齐。回声抑制用图像内容签名
+    // （写入时记录，dataChanged 后重算比对—— setImage 回读再编码 PNG 字节可能不同，
+    //  但像素内容一致）。
+    QByteArray lastClipImageSig;
+    auto clipImageSig = [](const QImage& img) -> QByteArray {
+        if (img.isNull())
+            return QByteArray();
+        QCryptographicHash h(QCryptographicHash::Md5);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        h.addData(reinterpret_cast<const char*>(img.constBits()),
+                  qsizetype(img.sizeInBytes()));
+#else
+        // Qt5：sizeInBytes() 为 qint64（5.10+），byteCount() 为 int（<5.10，Qt6 已删）
+#if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
+        h.addData(reinterpret_cast<const char*>(img.constBits()),
+                  int(img.sizeInBytes()));
+#else
+        h.addData(reinterpret_cast<const char*>(img.constBits()),
+                  int(img.byteCount()));
+#endif
+#endif
+        return h.result();
+    };
     QTimer* clipTimer = new QTimer(&app);
     clipTimer->setSingleShot(true);
     clipTimer->setInterval(150);
@@ -157,10 +184,35 @@ int HelperProcess::run(int argc, char* argv[])
         clipTimer->start();
     });
     QObject::connect(clipTimer, &QTimer::timeout, &app, [&]() {
+        // [N2] 图片优先：hasImage 时上报 image/png（base64），与前端/service 协议一致
+        const QMimeData* md = QGuiApplication::clipboard()->mimeData();
+        if (md && md->hasImage()) {
+            QImage img = qvariant_cast<QImage>(md->imageData());
+            if (!img.isNull()) {
+                const QByteArray sig = clipImageSig(img);
+                if (sig == lastClipImageSig)
+                    return;  // 自己写入的回声
+                QBuffer buf;
+                buf.open(QIODevice::WriteOnly);
+                if (img.save(&buf, "PNG") && !buf.data().isEmpty()) {
+                    lastClipImageSig = sig;
+                    lastClipText.clear();
+                    if (ws.state() != QAbstractSocket::ConnectedState)
+                        return;
+                    QJsonObject msg;
+                    msg["type"] = "clipboard";
+                    msg["mime"] = "image/png";
+                    msg["data"] = QString::fromLatin1(buf.data().toBase64());
+                    ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
+                    return;
+                }
+            }
+        }
         QString t = QGuiApplication::clipboard()->text();
         if (t.isEmpty() || t == lastClipText)
             return;
         lastClipText = t;
+        lastClipImageSig.clear();
         if (ws.state() != QAbstractSocket::ConnectedState)
             return;
         QJsonObject msg;
@@ -205,6 +257,9 @@ int HelperProcess::run(int argc, char* argv[])
                 if (ScreenCapturer::changeDisplayResolution(w, h)) {
                     capturer.stop();
                     capturer.start(30);
+                    // [H9] 输入归一化基准必须同步更新：仅在启动时 setScreenSize 一次，
+                    // 切分辨率后仍是旧尺寸 → 服务模式鼠标系统性偏移
+                    inputMgr.setScreenSize(w, h);
                     // 更新配置文件中的当前分辨率
                     {
                         QFile cfgFile(QGuiApplication::applicationDirPath() + "/server_config.json");
@@ -235,13 +290,34 @@ int HelperProcess::run(int argc, char* argv[])
 
             if (type == "clipboard") {
                 // 客户端粘贴 → 写入用户会话剪贴板，并在远端注入一次 Ctrl+V
+                // [B20] 支持图片（mime:"image/png" + data:base64）：服务模式此前只
+                // 处理 text 字段，图片被静默丢弃。
+                QClipboard* cb = QGuiApplication::clipboard();
+                if (obj["mime"].toString() == QLatin1String("image/png")) {
+                    const QByteArray png = QByteArray::fromBase64(
+                        obj["data"].toString().toLatin1());
+                    QImage img;
+                    if (png.isEmpty() || !img.loadFromData(png, "PNG") || !cb)
+                        return;
+                    cb->setImage(img);
+                    lastClipText.clear();
+                    lastClipImageSig = clipImageSig(img);  // 避免监听到自己的写入后重复上报
+                    if (!locked) {
+                        QTimer::singleShot(250, &app, [&inputMgr]() {
+                            inputMgr.injectKeyboard(86, "KeyV", true, true, false, false, false, false);
+                            inputMgr.injectKeyboard(86, "KeyV", false, true, false, false, false, false);
+                            inputMgr.updateModifiers(false, false, false);
+                        });
+                    }
+                    return;
+                }
                 QString text = obj["text"].toString();
                 if (text.isEmpty())
                     return;
-                QClipboard* cb = QGuiApplication::clipboard();
                 if (cb)
                     cb->setText(text);
                 lastClipText = text;  // 避免监听到自己的写入后重复上报
+                lastClipImageSig.clear();
                 if (!locked) {
                     // setText 后延时注入 Ctrl+V：X11 下剪贴板 owner 就绪有短暂异步窗口，
                     // 立即注入可能让远端应用粘贴到旧内容

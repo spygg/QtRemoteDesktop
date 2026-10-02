@@ -1020,7 +1020,18 @@
 
         function initWebRTC() {
             console.log('RD-INIT initWebRTC called, active=', webrtcState.active, 'pc=', !!webrtcState.pc);
-            if (!window.RTCPeerConnection || webrtcState.active || webrtcState.pc) return;
+            if (webrtcState.active || webrtcState.pc) return;
+            // [H26] 浏览器不支持 RTCPeerConnection：intending 已被 applyStreamMode
+            // 置真，但下面没有任何超时定时器会兜底清理 → WS 帧（handleBinary 按
+            // intending 丢弃）被永久忽略 → 黑屏。与 15s 超时路径行为对齐：清
+            // intending；显式 webrtc 模式再降级图片。
+            if (!window.RTCPeerConnection) {
+                webrtcState.intending = false;
+                if (state.currentConfig.videomode === 'webrtc') {
+                    fallbackToImage('当前浏览器不支持 WebRTC，已切换图片模式');
+                }
+                return;
+            }
             // 注意:WebRTC 用 <video> 播放,走浏览器原生 H.264 解码,不依赖 WebCodecs。
             // 即使 WebCodecs 不可用也应先尝试 WebRTC;失败后再降级 WS视频/图片。
             // 内网直连场景不配 STUN：外网 STUN（stun.l.google.com）在隔离网络中
@@ -1948,6 +1959,15 @@
         }
 
         function handleBinary(data) {
+            // [H24] 整体兜底：长度字段越界等异常只影响当前帧，不许中断后续消息
+            try {
+                handleBinaryInner(data);
+            } catch (e) {
+                console.warn('handleBinary error:', e);
+            }
+        }
+
+        function handleBinaryInner(data) {
             const view = new DataView(data.buffer);
             const frameType = data[0]; // 第一个字节
 
@@ -1960,6 +1980,7 @@
 
             if (frameType === 0x03) {
                 // 图片模式：JPEG 帧
+                if (data.length < 5) return; // [H24] 4 字节长度字段必须存在
                 const dataLength = view.getUint32(1, false);
                 // [P2] subarray 零拷贝视图（每条 WS 消息独占 ArrayBuffer，无跨帧钉住）；
                 // slice 每帧深拷贝一整幅 JPEG 纯浪费
@@ -1970,6 +1991,8 @@
                 if (data.length < 17) return;
                 let pos = 1;
                 const pathLen = view.getUint32(pos, false); pos += 4;
+                // [H24] path/offset/chunkLen 均不可信：越界直接丢弃本帧
+                if (pos + pathLen + 12 > data.length) return;
                 const pathStr = new TextDecoder().decode(data.subarray(pos, pos + pathLen)); pos += pathLen;
                 const offset = Number(view.getBigUint64(pos, false)); pos += 8;
                 const chunkLen = view.getUint32(pos, false); pos += 4;
@@ -2079,12 +2102,23 @@
             // 画布内部保持 1920x1080（坐标映射不变），bitmap 绘制时拉伸到画布尺寸。
             if (state.screenWidth > 0 && window.createImageBitmap) {
                 let dispW = state.canvas.width, dispH = state.canvas.height;
-                if (dispW > 0 && dispH > 0) {
+                // [P7] 100% 缩放时解码尺寸==画布尺寸，带 resize 参数仍会触发高质量
+                // 重采样（4K/高帧率下每帧 CPU 密集）。此时直接解码直出，绘制时由
+                // drawImage 对齐画布即可；仅非 100% 时才做预缩放。
+                if (dispW > 0 && dispH > 0 && (state.currentConfig.scale || 100) !== 100) {
                     createImageBitmap(blob, {
                         resizeWidth: dispW,
                         resizeHeight: dispH,
                         resizeQuality: 'high',
                     }).then(bmp => {
+                        finish({ bmp, width: bmp.width, height: bmp.height }, true);
+                        bmp.close();
+                    }).catch(() => {
+                        img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
+                        img.src = url;
+                    });
+                } else if (dispW > 0 && dispH > 0 && window.createImageBitmap) {
+                    createImageBitmap(blob).then(bmp => {
                         finish({ bmp, width: bmp.width, height: bmp.height }, true);
                         bmp.close();
                     }).catch(() => {
@@ -2577,7 +2611,10 @@
 
                 // 防止远程输入重复
                 e.preventDefault();
-                if (state.keysPressed.has(e.code)) return;
+                // [B18] 长按按键浏览器会发 repeat=true 的连续 keydown：这些必须继续
+                // 转发，远端才有自动重复语义（否则长按只出一个字符）。
+                // keysPressed 去重只拦截非 repeat 的重复事件。
+                if (state.keysPressed.has(e.code) && !e.repeat) return;
 
                 state.keysPressed.add(e.code);
                 send({
@@ -2664,7 +2701,7 @@
                         return;
                     }
                     state.clip.localCopyTs = Date.now();
-                    state.clip.lastLocalSent = 'img:' + localB64;
+                    state.clip.lastLocalSent = imgFp(localB64);
                     state.clip.remoteMime = 'image/png';
                     state.clip.remoteData = localB64;
                     send({ type: 'clipboard', mime: 'image/png', data: localB64 });
@@ -2743,7 +2780,7 @@
         // 用于"本机剪贴板是旧内容"的场景：远端剪贴板里本来就是这份，再发一次即可完成粘贴。
         function sendClipboardToRemote(kind) {
             if (kind === 'image' && state.clip.remoteData) {
-                state.clip.lastLocalSent = 'img:' + state.clip.remoteData;
+                state.clip.lastLocalSent = imgFp(state.clip.remoteData);
                 send({ type: 'clipboard', mime: 'image/png', data: state.clip.remoteData });
                 return;
             }
@@ -3133,9 +3170,17 @@
             localStorage.setItem('rd_clip_autosync', v);
         }
 
+        // [P8] 图片指纹：抽样哈希代替全量 base64（lastLocalSent/lastOsWritten 会长期
+        // 持有指纹，全量 base64 可达数 MB 常驻内存）
+        function imgFp(b64) {
+            let h = 5381;
+            for (let i = 0; i < b64.length; i += 61) h = ((h << 5) + h + b64.charCodeAt(i)) | 0;
+            return 'img:' + b64.length + ':' + (h >>> 0).toString(36);
+        }
+
         function clipFingerprint() {
             return state.clip.remoteMime === 'image/png'
-                ? ('img:' + state.clip.remoteData)
+                ? imgFp(state.clip.remoteData)
                 : state.clip.remoteText;
         }
 
@@ -3147,7 +3192,7 @@
 
         function onRemoteClipboard(msg) {
             const isImage = !!(msg && msg.mime === 'image/png' && msg.data);
-            const fp = isImage ? ('img:' + msg.data) : ((msg && msg.text) || '');
+            const fp = isImage ? imgFp(msg.data) : ((msg && msg.text) || '');
             if (!fp) return;
             // 忽略自己刚发送的内容（服务端广播回来的回声）
             if (fp === state.clip.lastLocalSent) return;
@@ -3190,7 +3235,12 @@
             if (!fp) return Promise.resolve(false);
             if (isImage) {
                 return writeImageToOsClipboard(state.clip.remoteData).then((ok) => {
-                    if (ok) markOsWritten(fp);
+                    if (ok) {
+                        markOsWritten(fp);
+                        // [P8] 图片已成功写入本机系统剪贴板，base64（数 MB 级）不再需要，
+                        // 及时释放避免长会话内存常驻（指纹已存 lastOsWritten 供去重）
+                        state.clip.remoteData = '';
+                    }
                     return ok;
                 });
             }
@@ -3278,13 +3328,35 @@
                     + 'border:1px solid #444;border-radius:8px;padding:10px;box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:280px;font-size:12px;';
                 document.body.appendChild(panel);
             }
-            const url = 'data:image/png;base64,' + b64;
-            panel.innerHTML = '<div style="margin-bottom:6px;">🖼 远端剪贴板为图片</div>'
-                + '<img src="' + url + '" style="max-width:256px;max-height:160px;display:block;border-radius:4px;margin-bottom:8px;background:#111;">'
-                + '<div style="display:flex;gap:8px;">'
-                + '<a id="rcip-dl" href="' + url + '" download="remote-clipboard.png" style="flex:1;text-align:center;background:#4a9eff;color:#fff;padding:6px;border-radius:4px;text-decoration:none;">下载图片</a>'
-                + '<span id="rcip-close" style="flex:0 0 auto;cursor:pointer;background:#333;padding:6px 10px;border-radius:4px;">关闭</span>'
-                + '</div>';
+            // [C2] b64 是远端可控内容：先做 base64 字符白名单校验（防止引号闭合属性
+            // 注入 onerror 等事件），再全部用 DOM 构造，不经 innerHTML 拼接
+            const clean = String(b64 || '').replace(/\s+/g, '');
+            if (!/^[A-Za-z0-9+/]+={0,2}$/.test(clean) || clean.length < 16) return;
+            const url = 'data:image/png;base64,' + clean;
+            panel.textContent = '';
+            const tip = document.createElement('div');
+            tip.style.marginBottom = '6px';
+            tip.textContent = '🖼 远端剪贴板为图片';
+            const img = document.createElement('img');
+            img.src = url;
+            img.style.cssText = 'max-width:256px;max-height:160px;display:block;border-radius:4px;margin-bottom:8px;background:#111;';
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:8px;';
+            const dl = document.createElement('a');
+            dl.id = 'rcip-dl';
+            dl.href = url;
+            dl.setAttribute('download', 'remote-clipboard.png');
+            dl.style.cssText = 'flex:1;text-align:center;background:#4a9eff;color:#fff;padding:6px;border-radius:4px;text-decoration:none;';
+            dl.textContent = '下载图片';
+            const close = document.createElement('span');
+            close.id = 'rcip-close';
+            close.style.cssText = 'flex:0 0 auto;cursor:pointer;background:#333;padding:6px 10px;border-radius:4px;';
+            close.textContent = '关闭';
+            row.appendChild(dl);
+            row.appendChild(close);
+            panel.appendChild(tip);
+            panel.appendChild(img);
+            panel.appendChild(row);
             panel.style.display = 'block';
             document.getElementById('rcip-close').onclick = () => { panel.style.display = 'none'; };
             clearTimeout(showRemoteImagePanel._t);

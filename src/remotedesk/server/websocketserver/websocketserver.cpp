@@ -106,6 +106,7 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             qWarning() << "Helper disconnected from /capture";
             if (captureSource_ == socket) {
                 captureSource_ = nullptr;
+                emit captureSourceDisconnected();
             }
             socket->deleteLater();
         });
@@ -162,6 +163,22 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
         QUrlQuery query(url);
         token = query.queryItemValue("token");
     #endif
+    if (token.isEmpty()) {
+        // 兜底：session cookie 现为 HttpOnly（防 XSS 窃取），前端 JS 读不到，
+        // 无法拼 ?token=。浏览器对同源 WS 握手会自动携带 Cookie 头，这里
+        // 直接从握手请求里解析 session=，保证 HttpOnly 后登录仍可用。
+        const QByteArray cookieHeader = socket->request().rawHeader(QByteArrayLiteral("Cookie"));
+        if (!cookieHeader.isEmpty()) {
+            const QList<QByteArray> pairs = cookieHeader.split(';');
+            for (const QByteArray& pair : pairs) {
+                const QByteArray trimmed = pair.trimmed();
+                if (trimmed.startsWith(QByteArrayLiteral("session="))) {
+                    token = QString::fromUtf8(trimmed.mid(8));
+                    break;
+                }
+            }
+        }
+    }
 
     clients_[clientId] = socket;
     socketToId_[socket] = clientId;
@@ -178,6 +195,14 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             return;
         const qint64 v = pendingBytes_.value(id) - n;
         pendingBytes_[id] = v > 0 ? v : 0;
+        // [C5-①] 同步扣减下载未写出字节数（近似：字节总量对账，限流用途足够）
+        qint64 cur = downloadBacklog_.load(std::memory_order_relaxed);
+        while (cur > 0) {
+            const qint64 take = qMin(n, cur);
+            if (downloadBacklog_.compare_exchange_weak(cur, cur - take,
+                    std::memory_order_relaxed))
+                break;
+        }
     });
 
     emit clientConnected(clientId);
@@ -193,6 +218,9 @@ void WebSocketServer::onSocketDisconnected()
     clients_.remove(clientId);
     videoStarted_.remove(clientId);
     pendingBytes_.remove(clientId);
+    // [C5-①] 断线时清零下载积压：工作线程的背压轮询依赖该值下降退出，
+    // 不清零会对已消失的连接死等（查询回调同时返回 0，双保险）
+    downloadBacklog_.store(0, std::memory_order_relaxed);
     // clientId 是每条连接新建的 UUID，若不清理 clientTokens_，
     // 每次断线都会残留一条 token→会话映射，长期运行（含频繁重连）单调增长。
     clientTokens_.remove(clientId);
@@ -440,8 +468,13 @@ void WebSocketServer::broadcastBinary(const QByteArray& data)
 
 void WebSocketServer::sendBinaryToClient(const QString& clientId, const QByteArray& data)
 {
+    // [C5-①] 下载分块通道：唯一调用方是文件下载。绝不能因积压超限丢弃——
+    // tar/分块流丢一块就是流损坏。丢弃改为上游节流（工作线程轮询
+    // downloadBacklog() 暂停产出），这里无条件排队并累加未写出计数。
     QWebSocket* socket = clients_.value(clientId);
     if (socket && socket->state() == QAbstractSocket::ConnectedState) {
-        pendingBytes_[clientId] += qMax<qint64>(0, socket->sendBinaryMessage(data));
+        const qint64 queued = qMax<qint64>(0, socket->sendBinaryMessage(data));
+        pendingBytes_[clientId] += queued;
+        addDownloadBacklog(queued);
     }
 }

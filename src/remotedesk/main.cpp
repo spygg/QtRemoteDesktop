@@ -18,6 +18,8 @@
 #include <QTimer>
 
 #include <cstring>
+#include <cerrno>
+#include <cstdio>
 
 // 默认级别：debug 构建全量记录，release 构建只记 info 及以上
 // （release 部署如需全量调试，显式传 --log-level debug）。
@@ -104,8 +106,14 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
         if (s_log.isOpen())
             s_log.close();
         s_log.setFileName(logFile);
-        if (!s_log.open(QIODevice::WriteOnly | QIODevice::Append | QFile::Text))
+        if (!s_log.open(QIODevice::WriteOnly | QIODevice::Append | QFile::Text)) {
+            // [B22] open 失败不能完全静默：否则 logs 目录只读/被占用时整段日志
+            // 无声丢失。stderr 告警一次（s_logDate 不更新，之后每次重试仍会再告警）。
+            fprintf(stderr, "log open failed: %s (%s)\n",
+                    logFile.toUtf8().constData(), strerror(errno));
+            fflush(stderr);
             return;
+        }
         s_logDate = date;
     }
 

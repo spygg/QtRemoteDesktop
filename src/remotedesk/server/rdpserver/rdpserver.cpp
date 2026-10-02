@@ -15,6 +15,7 @@
 #ifdef USE_WEBRTC
 #include "webrtcsession.h"
 #include <QSet>
+#include <memory> // std::unique_ptr / std::move（勿依赖 Qt 头传递包含）
 #endif
 
 #include <QBuffer>
@@ -518,6 +519,9 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     clipboardService_->start();
     connect(clipboardService_.get(), &ClipboardService::contentChanged,
         this, [this](const QString& mime, const QByteArray& data) {
+            // [N1] 服务模式下 helper 通道已上报同一内容，这里不再重复广播
+            if (serviceMode_ && wsServer_->isCaptureSourceConnected())
+                return;
             wsServer_->broadcastJson(clipboardPayload(mime, data));
         });
     // 读取剪贴板是异步的（CLI 模式走工作线程，避免阻塞主线程）：结果回来后
@@ -640,6 +644,11 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         this, [this](const QString& clientId, const QString& path, qint64 transferred, qint64 total, double speedKBps) {
             wsServer_->sendJson(clientId, QJsonObject { { "type", "transfer_progress" }, { "path", path }, { "transferred", transferred }, { "total", total }, { "speedKBps", speedKBps } });
         });
+
+    // [C5-①] 给文件传输工作线程注入 WS 背压查询：下游积压超限时暂停产出
+    fileTransferService_->setBackpressureQuery([this]() {
+        return wsServer_ ? wsServer_->downloadBacklog() : qint64(0);
+    });
 
     transferThread_->start();
 
@@ -768,10 +777,20 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
             this, [this]() {
                 bool hasClients = !wsServer_->clients().isEmpty();
                 qInfo() << "Service: capture source connected, hasClients =" << hasClients;
+                // [N1] helper 自带剪贴板通道，挂起 service 进程的 xclip 轮询，
+                // 避免双通道重复广播 + 无谓的轮询进程开销
+                if (clipboardService_)
+                    clipboardService_->setSuspended(true);
                 QJsonObject msg;
                 msg["type"] = "capture_control";
                 msg["action"] = hasClients ? "resume" : "pause";
                 wsServer_->sendToCaptureSource(msg);
+            });
+        connect(wsServer_.get(), &WebSocketServer::captureSourceDisconnected,
+            this, [this]() {
+                // [N1] helper 断开 → 恢复 service 通道剪贴板同步
+                if (clipboardService_)
+                    clipboardService_->setSuspended(false);
             });
     }
 
@@ -1249,11 +1268,14 @@ QByteArray RDPServer::generateTarChunk(HttpDownloadState* st, int maxBytes)
                 buf = QByteArray(int(want), '\0'); // 打不开/读失败：零补齐保长度
             out.append(buf);
             st->tarFileRemaining -= buf.size();
+            // [C4] 数据段耗尽即计算 512B 对齐填充——不能放在"file 收尾"分支：
+            // open 失败时 file 为空，填充会被跳过 → 后续成员整体错位、tar 流损坏
+            if (st->tarFileRemaining <= 0)
+                st->tarPadRemaining = int((512 - (st->curEntrySize % 512)) % 512);
             continue;
         }
         if (st->file) {
-            // 当前成员文件读完 → 记录 512B 对齐填充并释放句柄
-            st->tarPadRemaining = int((512 - (st->curEntrySize % 512)) % 512);
+            // 当前成员文件读完 → 释放句柄（填充已在数据段耗尽处设置）
             st->file.reset();
             continue;
         }
@@ -1274,7 +1296,9 @@ QByteArray RDPServer::generateTarChunk(HttpDownloadState* st, int maxBytes)
             st->curEntrySize = e.size;
             st->tarFileRemaining = e.size;
             if (e.size > 0) {
-                auto f = std::make_unique<QFile>(e.absPath);
+                // 用 unique_ptr(new) 而非 std::make_unique：make_unique 是 C++14，
+                // Qt5.7 时代的旧编译器（GCC4.9/MSVC2013）不可用；unique_ptr 构造为 C++11
+                std::unique_ptr<QFile> f(new QFile(e.absPath));
                 if (!f->open(QIODevice::ReadOnly)) {
                     qWarning() << "Tar stream: cannot open" << e.absPath
                                << "- zero-filling" << e.size << "bytes";
@@ -1799,6 +1823,22 @@ void RDPServer::onShellConnected(QWebSocket* socket)
     // /api/shell/ws 就能拿到服务进程权限的 shell（常为 root/SYSTEM）。
     {
         QString token = QUrlQuery(socket->requestUrl()).queryItemValue(QStringLiteral("token"));
+        if (token.isEmpty()) {
+            // 兜底：session cookie 为 HttpOnly，前端 JS 读不到，无法拼 ?token=。
+            // 浏览器同源 WS 握手自动携带 Cookie，直接解析 session=。
+            const QByteArray cookieHeader =
+                socket->request().rawHeader(QByteArrayLiteral("Cookie"));
+            if (!cookieHeader.isEmpty()) {
+                const QList<QByteArray> pairs = cookieHeader.split(';');
+                for (const QByteArray& pair : pairs) {
+                    const QByteArray trimmed = pair.trimmed();
+                    if (trimmed.startsWith(QByteArrayLiteral("session="))) {
+                        token = QString::fromUtf8(trimmed.mid(8));
+                        break;
+                    }
+                }
+            }
+        }
         if (token.isEmpty() || !authManager_->validateSession(token)) {
             qWarning() << "Shell WS rejected: invalid or missing session token";
             socket->close();
@@ -2877,7 +2917,9 @@ void RDPServer::onClientConnected(const QString& clientId)
 
     // 发送当前剪贴板内容（若有，文本/图片）。读取是异步的，结果回来后
     // 由 contentReady 处理器按 pendingClipboardClientIds_ 推送。
-    if (clipboardService_) {
+    // [N6] 服务模式下 helper 通道活跃时跳过：上方 capture_control resume 会让
+    // helper 上报初始剪贴板（否则 xclip 轮询 + helper 双路各推一份）
+    if (clipboardService_ && !(serviceMode_ && wsServer_->isCaptureSourceConnected())) {
         pendingClipboardClientIds_.append(clientId);
         clipboardService_->requestContent();
     }
@@ -3271,6 +3313,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 screenCapturer_->forceNextFrame();
         }
         int newFps = input["fps"].toInt();
+        // [H22] 配置侧同步钳制（configFps_ 也参与编码器 GOP/间隔计算）
+        if (newFps > 60) newFps = 60;
         if (newFps >= 1) {
             configFps_ = newFps;
             if (screenCapturer_)

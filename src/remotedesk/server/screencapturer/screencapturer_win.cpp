@@ -436,8 +436,13 @@ void ScreenCapturer::captureFrame()
                 screenLocked_ = false;
                 emit screenLocked(false);
             }
-            if (updated)
+            if (updated) {
+                // [H21] 有新帧必须复位 idle 计数并退出降频，否则静止 2s 进入
+                // 4fps 节流后，画面再变化仍恒为 4fps（GDI/X11 路径均正确复位）
+                idleCount_ = 0;
+                leaveIdleThrottle();
                 emit frameCaptured(frame);
+            }
             else {
                 // 无新帧（DXGI 无桌面更新）：同样递增 idle 计数并降频，
                 // 避免静止时 capture timer 保持全帧率空转消耗 CPU。

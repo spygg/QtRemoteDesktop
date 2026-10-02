@@ -9,6 +9,7 @@
 #include <QUuid>
 #include <QWebSocket>
 #include <QWebSocketServer>
+#include <atomic>
 
 class WebSocketServer : public QObject {
     Q_OBJECT
@@ -41,6 +42,12 @@ public:
     }
     QString clientToken(const QString& clientId) const;
     void dropClient(const QString& clientId);
+
+    // [C5-①] 下载分块背压：sendBinaryToClient 排入下载字节时累加，
+    // socket 实际写出时扣减。文件传输工作线程在产出下一块前轮询该值，
+    // 低于阈值才继续——否则 GB 级目录会把信号队列 + 套接字写队列撑爆（OOM）。
+    void addDownloadBacklog(qint64 delta) { downloadBacklog_.fetch_add(delta, std::memory_order_relaxed); }
+    qint64 downloadBacklog() const { return downloadBacklog_.load(std::memory_order_relaxed); }
 
     void broadcastCodecConfig(const QByteArray& extra);
     void broadcastJson(const QJsonObject& data);
@@ -76,6 +83,7 @@ signals:
     void captureFrameReceived(const QByteArray& jpegData);
     void captureMessageReceived(const QJsonObject& msg);
     void captureSourceConnected();
+    void captureSourceDisconnected();
     void shellConnected(QWebSocket* socket);
 
 private slots:
@@ -95,6 +103,8 @@ private:
     // 用 sendXxxMessage 的返回值累加、bytesWritten 递减来估算）。用于慢客户端背压：
     // 超过阈值即丢弃其媒体帧，避免发送队列无限增长吃光内存。
     QMap<QString, qint64> pendingBytes_;
+    // [C5-①] 下载分块未写出字节数（跨线程原子量：工作线程读，主线程增减）
+    std::atomic<qint64> downloadBacklog_{0};
     QMap<QWebSocket*, QString> socketToId_;
     QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;
