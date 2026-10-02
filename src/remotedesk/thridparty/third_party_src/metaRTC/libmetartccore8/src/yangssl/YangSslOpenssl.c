@@ -42,17 +42,21 @@ int32_t yang_hmac_encode(const char *algo, const char *key,
         return yang_error_wrap(ERROR_TLS, "hmac init faied");
     }
 
-    if (HMAC_Init_ex(&hctx, key, key_length, engine, NULL) < 0) {
+    // [FIX] 原为 &output_length（uint32_t**）——HMAC_Final 把长度写进栈上指针
+    // 变量而非调用方缓冲，调用方 hmac_buf_len 恒为 0 → STUN 响应 MESSAGE-INTEGRITY
+    // 属性长度为 0 → 浏览器 ICE 校验失败丢包 → WebRTC 在 OpenSSL 1.0.x 构建下不可用。
+    // 另外 HMAC_* 返回 0 表示失败（非 <0），一并修正判断。
+    if (HMAC_Init_ex(&hctx, key, key_length, engine, NULL) <= 0) {
         HMAC_CTX_cleanup(&hctx);
         return yang_error_wrap(ERROR_TLS, "hmac init faied");
     }
 
-    if (HMAC_Update(&hctx, (const uint8_t*)input, input_length) < 0) {
+    if (HMAC_Update(&hctx, (const uint8_t*)input, input_length) <= 0) {
         HMAC_CTX_cleanup(&hctx);
         return yang_error_wrap(ERROR_TLS, "hmac update faied");
     }
 
-    if (HMAC_Final(&hctx, (uint8_t*)output, &output_length) < 0) {
+    if (HMAC_Final(&hctx, (uint8_t*)output, (unsigned int*)output_length) <= 0) {
         HMAC_CTX_cleanup(&hctx);
         return yang_error_wrap(ERROR_TLS, "hmac final faied");
     }
