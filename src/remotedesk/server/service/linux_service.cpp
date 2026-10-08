@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
@@ -24,6 +25,83 @@ static bool isPidDir(struct dirent* entry)
     if (entry->d_type != DT_UNKNOWN && entry->d_type != DT_DIR) return false;
     // DT_UNKNOWN or DT_DIR — verify with stat
     return true; // /proc only contains dirs
+}
+
+// X 授权文件是否“有内容”。必须看文件大小，不能用 access(R_OK)：
+// LightDM 登录完成后会把 /run/lightdm/lightdm/xauthority 保留成一个
+// **0 字节**文件（存在、可读、但不含任何 MIT-MAGIC-COOKIE-1）。若把它当
+// 有效 XAUTHORITY，XOpenDisplay 会直接失败并打印 "No protocol specified"，
+// 表现为整机远程鼠标/键盘/画面全部失效（243 上"鼠标偶发不起作用"的根因）。
+static bool xauthHasContent(const char* path)
+{
+    if (!path || !path[0]) return false;
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    if (!S_ISREG(st.st_mode) || st.st_size <= 0) return false;
+    // 还必须真正可读：X server 的 -auth 文件（如 /run/lightdm/root/:0）是
+    // root 600，非 root 运行时能 stat 到却读不出 cookie，同样会导致失败。
+    return access(path, R_OK) == 0;
+}
+
+// 从正在运行的 X server 进程 cmdline 取 `-auth <path>`。
+// 这是最可靠的 XAUTHORITY 来源：display manager 显式把它传给 X server，
+// 该文件必然含有有效 cookie（LightDM 下为 /run/lightdm/root/:0）。
+// 服务以 root 运行时可读该文件；读不到就返回 false，交给调用方继续兜底。
+static bool probeXserverAuthFile(char* out, size_t outSize)
+{
+    DIR* proc = opendir("/proc");
+    if (!proc) return false;
+
+    bool found = false;
+    struct dirent* entry;
+    while (!found && (entry = readdir(proc)) != nullptr) {
+        if (!isPidDir(entry)) continue;
+        char cmdPath[64];
+        snprintf(cmdPath, sizeof(cmdPath), "/proc/%s/cmdline", entry->d_name);
+        FILE* f = fopen(cmdPath, "rb");
+        if (!f) continue;
+        char buf[4096];
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (n < 5) continue;
+        buf[n] = '\0';
+
+        // 只认 X server 本体（Xorg / X / Xwayland），避免误取其它进程的 -auth
+        bool isXserver = false;
+        for (size_t i = 0; i < n; ) {
+            const char* arg = buf + i;
+            size_t len = strlen(arg);
+            if (len == 0) { ++i; continue; }
+            const char* base = strrchr(arg, '/');
+            base = base ? base + 1 : arg;
+            if (strcmp(base, "Xorg") == 0 || strcmp(base, "X") == 0 ||
+                strcmp(base, "Xwayland") == 0) {
+                isXserver = true;
+                break;
+            }
+            i += len + 1;
+        }
+        if (!isXserver) continue;
+
+        // argv 以 NUL 分隔：定位 "-auth"，取紧随其后的那一段
+        for (size_t i = 0; i < n; ) {
+            const char* arg = buf + i;
+            size_t len = strlen(arg);
+            if (len == 0) { ++i; continue; }
+            if (strcmp(arg, "-auth") == 0) {
+                const char* val = (i + len + 1 < n) ? buf + i + len + 1 : "";
+                if (xauthHasContent(val)) {
+                    strncpy(out, val, outSize - 1);
+                    out[outSize - 1] = '\0';
+                    found = true;
+                }
+                break;
+            }
+            i += len + 1;
+        }
+    }
+    closedir(proc);
+    return found;
 }
 
 // Read /proc/<pid>/environ, return null-terminated copy (or nullptr on failure)
@@ -154,7 +232,7 @@ static bool detectUserX11Env()
         DisplayEntry& base = entries[entryCount++];
         strncpy(base.display, curDpy, sizeof(base.display) - 1);
         base.display[sizeof(base.display) - 1] = '\0';
-        if (curXauth && curXauth[0]) {
+        if (curXauth && curXauth[0] && xauthHasContent(curXauth)) {
             strncpy(base.xauth, curXauth, sizeof(base.xauth) - 1);
             base.xauth[sizeof(base.xauth) - 1] = '\0';
         }
@@ -200,8 +278,10 @@ static bool detectUserX11Env()
                         entries[idx].score = sc;
                         entries[idx].uid = uid;
                     }
-                    // Prefer a non-empty XAUTHORITY, especially under /home/.
-                    if (xa && xa[0]) {
+                    // Prefer a non-empty XAUTHORITY（且确实含 cookie），尤其 /home/ 下的。
+                    // 0 字节文件（LightDM 登录后清空留下的 lightdm/xauthority 残留）
+                    // 必须排除，否则后面 XOpenDisplay 必失败。
+                    if (xa && xa[0] && xauthHasContent(xa)) {
                         if (entries[idx].xauth[0] == '\0' || strstr(xa, "/home/")) {
                             strncpy(entries[idx].xauth, xa, sizeof(entries[idx].xauth) - 1);
                             entries[idx].xauth[sizeof(entries[idx].xauth) - 1] = '\0';
@@ -238,7 +318,7 @@ static bool detectUserX11Env()
         if (oldA) { strncpy(prevXauth, oldA, sizeof(prevXauth) - 1); prevXauth[sizeof(prevXauth) - 1] = '\0'; }
 
         setenv("DISPLAY", entries[bestIdx].display, 1);
-        if (entries[bestIdx].xauth[0]) {
+        if (xauthHasContent(entries[bestIdx].xauth)) {
             setenv("XAUTHORITY", entries[bestIdx].xauth, 1);
         } else if (entries[bestIdx].uid >= 1000) {
             // No XAUTHORITY env var on any process for this display. The
@@ -249,7 +329,7 @@ static bool detectUserX11Env()
             if (pw && pw->pw_dir && pw->pw_dir[0]) {
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/.Xauthority", pw->pw_dir);
-                if (access(path, R_OK) == 0)
+                if (xauthHasContent(path))
                     setenv("XAUTHORITY", path, 1);
             }
         }
@@ -279,24 +359,73 @@ static bool detectUserX11Env()
         }
     }
 
-    // ── Fallback XAUTHORITY: probe well-known paths ──
+    // ── Fallback XAUTHORITY：当前值无效时重新探测 ──
+    // 触发条件必须包含“已有值但它是空文件”的情况：LightDM 的
+    // /run/lightdm/lightdm/xauthority 正是“存在且可读的 0 字节文件”。若这里
+    // 只判断空字符串，服务就会永久自锁在这个无效 auth 上（每 3 秒重扫也救不
+    // 回来），直到手动重启服务/系统 —— 这正是 243 上"鼠标偶发全不起作用"
+    // 的根因（重启后碰巧命中有效窗口，所以看起来"自己好了"）。
     if (getenv("DISPLAY") && getenv("DISPLAY")[0] &&
-        (!getenv("XAUTHORITY") || !getenv("XAUTHORITY")[0])) {
-        const char* authCandidates[] = {
-            "/run/lightdm/lightdm/xauthority",
-            "/run/user/1000/gdm/Xauthority",
-            "/run/user/1000/xauth",
-            nullptr
-        };
-        for (int i = 0; authCandidates[i]; ++i) {
-            if (access(authCandidates[i], R_OK) == 0) {
-                setenv("XAUTHORITY", authCandidates[i], 1);
-                break;
+        !xauthHasContent(getenv("XAUTHORITY"))) {
+        char authBefore[1024] = {};
+        const char* b = getenv("XAUTHORITY");
+        if (b) {
+            strncpy(authBefore, b, sizeof(authBefore) - 1);
+            authBefore[sizeof(authBefore) - 1] = '\0';
+        }
+
+        // 1) 最可靠：X server 自己的 -auth（LightDM 下为 /run/lightdm/root/:0）。
+        //    该文件必然含有效 cookie，root 运行时直接可读。
+        char xserverAuth[1024] = {};
+        if (probeXserverAuthFile(xserverAuth, sizeof(xserverAuth)))
+            setenv("XAUTHORITY", xserverAuth, 1);
+
+        // 2) 会话级 auth：LightDM 把每个会话的 cookie 放在
+        //    /run/lightdm/<user>/xauthority。先按探测到的会话 uid 推导用户名，
+        //    再通用地扫 /run/lightdm/*/xauthority，最后退到固定路径列表。
+        //    注意这些路径都可能"存在但是 0 字节"，一律要求有内容。
+        if (!xauthHasContent(getenv("XAUTHORITY"))) {
+            char candidates[8][512];
+            int nc = 0;
+            if (bestIdx >= 0 && entries[bestIdx].uid >= 1000) {
+                struct passwd* pw = getpwuid(entries[bestIdx].uid);
+                if (pw && pw->pw_name && pw->pw_name[0]) {
+                    snprintf(candidates[nc], sizeof(candidates[nc]),
+                             "/run/lightdm/%s/xauthority", pw->pw_name);
+                    ++nc;
+                }
+            }
+            DIR* ldm = opendir("/run/lightdm");
+            if (ldm) {
+                struct dirent* le;
+                while ((le = readdir(ldm)) != nullptr && nc < 6) {
+                    if (le->d_name[0] == '.') continue;
+                    snprintf(candidates[nc], sizeof(candidates[nc]),
+                             "/run/lightdm/%s/xauthority", le->d_name);
+                    ++nc;
+                }
+                closedir(ldm);
+            }
+            const char* fixed[] = {
+                "/run/lightdm/lightdm/xauthority",
+                "/run/user/1000/gdm/Xauthority",
+                "/run/user/1000/xauth",
+                nullptr
+            };
+            for (int i = 0; fixed[i] && nc < 8; ++i) {
+                snprintf(candidates[nc], sizeof(candidates[0]), "%s", fixed[i]);
+                ++nc;
+            }
+            for (int i = 0; i < nc; ++i) {
+                if (xauthHasContent(candidates[i])) {
+                    setenv("XAUTHORITY", candidates[i], 1);
+                    break;
+                }
             }
         }
 
-        // Fallback: scan /home/*/.Xauthority
-        if (!getenv("XAUTHORITY") || !getenv("XAUTHORITY")[0]) {
+        // 3) 最后兜底：扫 /home/*/.Xauthority（同样要求非空）
+        if (!xauthHasContent(getenv("XAUTHORITY"))) {
             DIR* home = opendir("/home");
             if (home) {
                 struct dirent* ue;
@@ -304,7 +433,7 @@ static bool detectUserX11Env()
                     if (ue->d_name[0] == '.') continue;
                     char path[512];
                     snprintf(path, sizeof(path), "/home/%s/.Xauthority", ue->d_name);
-                    if (access(path, R_OK) == 0) {
+                    if (xauthHasContent(path)) {
                         setenv("XAUTHORITY", path, 1);
                         break;
                     }
@@ -312,6 +441,12 @@ static bool detectUserX11Env()
                 closedir(home);
             }
         }
+
+        // 只在真正修复了的时候打一条，避免每 3 秒刷屏
+        const char* authNow = getenv("XAUTHORITY");
+        if (authNow && strcmp(authBefore, authNow) != 0)
+            qInfo() << "detectUserX11Env: XAUTHORITY repaired by fallback:"
+                    << (authBefore[0] ? authBefore : "(none)") << "->" << authNow;
     }
 
     return getenv("DISPLAY") && getenv("DISPLAY")[0];
