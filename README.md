@@ -6,7 +6,7 @@ QtRemoteDesktop is a self-hosted, open-source remote desktop solution. The **cli
 
 > 🇨🇳 中文版见 [下半部分](#中文版chinese)
 
-[![Language: C++](https://img.shields.io/badge/language-C%2B%2B%2FQt-blue)](#) [![Platform: Windows/Linux/macOS/Android](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-lightgrey)](#) [![Client: Browser](https://img.shields.io/badge/client-Browser%20(no%20install)-green)](#) [![Transport: WebRTC/MSE/JPEG](https://img.shields.io/badge/transport-WebRTC%20%7C%20MSE%20%7C%20JPEG-orange)](#)
+[![GitHub stars](https://img.shields.io/github/stars/spygg/QtRemoteDesktop)](https://github.com/spygg/QtRemoteDesktop) [![GitHub forks](https://img.shields.io/github/forks/spygg/QtRemoteDesktop)](https://github.com/spygg/QtRemoteDesktop) [![Language: C++](https://img.shields.io/badge/language-C%2B%2B%2FQt-blue)](https://github.com/spygg/QtRemoteDesktop) [![Platform: Windows/Linux/macOS/Android](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-lightgrey)](https://github.com/spygg/QtRemoteDesktop) [![Client: Browser](https://img.shields.io/badge/client-Browser%20(no%20install)-green)](https://github.com/spygg/QtRemoteDesktop) [![Transport: WebRTC/MSE/JPEG](https://img.shields.io/badge/transport-WebRTC%20%7C%20MSE%20%7C%20JPEG-orange)](https://github.com/spygg/QtRemoteDesktop)
 
 ---
 
