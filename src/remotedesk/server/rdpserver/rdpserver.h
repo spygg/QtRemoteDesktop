@@ -245,6 +245,11 @@ private:
 
     bool useSsl_ = true; // 默认启用 HTTPS/WSS：WebRTC 需安全上下文；无 OpenSSL 时自动降级
     bool serviceMode_ = false;
+    // 服务模式：helper 上报的视频能力（capture_caps）。captureVideoCapable_ 为 true
+    // 表示 helper 侧可编 H.264，服务端据此允许进入视频模式（编码帧由 helper 上报）。
+    bool captureVideoCapable_ = false;
+    bool captureHwEncode_ = false;
+    QString captureCodecName_ = QStringLiteral("h264");
     int configFps_ = 30;
     int configQuality_ = 60;
     int configScale_ = 75;
@@ -280,6 +285,16 @@ private:
     bool switchToVideoMode();
     void reinitVideoEncoderForScale();
     bool hwEncodeAvailable() const;
+    // 服务端能否进入视频模式（H.264 编码）：
+    //  ① 本地原始帧源可用（直连 / Linux 服务模式进程内捕获）→ 支持；
+    //  ② 服务模式下画面在 helper 进程，若 helper 已连且声明具备视频能力 → 支持
+    //     （编码在 helper 侧完成，编码帧经 /capture 上报）。
+    bool videoModeSupported() const;
+    // 服务模式远端视频源是否可用：helper 已连且声明支持视频（capture_caps.video=true）
+    bool remoteVideoSourceAvailable() const;
+    // 服务模式：向 helper 下发视频参数（codec/hw_encode/fps/scale/quality）与
+    // capture_control 动作（video_on/video_off）。helper 据此进入/退出 H.264 编码。
+    void sendVideoParamsToCaptureSource(const QString& action);
     // 创建 VideoEncoder 并接好全部信号（此前两处创建点接线不一致，
     // 前台模式那处漏了 encoderReady/encoderOverload/reinitRequired）
     void createVideoEncoder();

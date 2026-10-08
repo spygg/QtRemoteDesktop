@@ -851,9 +851,9 @@
                 <button data-value="image">图片</button>
             </div>
         </div>
-        <div class="dropdown-section">
+        <div class="dropdown-section" id="codec-section">
             <div class="dropdown-title">编码协议</div>
-            <div class="dropdown-note">FFmpeg/WS 视频模式生效；WebRTC 固定 H.264。浏览器不支持的解码项自动禁用</div>
+            <div class="dropdown-note">FFmpeg/WS 视频模式生效；WebRTC 固定 H.264。H.265 需硬件加速；浏览器不支持的解码项自动禁用</div>
             <div class="dropdown-options" id="codec-options" data-key="codec"></div>
         </div>
         <div class="dropdown-section">
@@ -984,6 +984,13 @@
             modeRestored: false, // 刷新后是否已按持久化模式恢复过一次
             serverCodec: '', // 服务端当前编码协议（mode_changed 回传，切视频模式时优先对齐）
             hwEncode: false, // 服务端是否有 H.264 硬件编码（auto 模式据此选路）
+            // 服务端能否进入视频模式（mode_changed 回传）：false 表示只能图片模式。
+            // 服务模式下画面在 helper 进程，helper 具备 H.264 编码能力并启用视频通道时
+            // 服务端会上报 videoSupported=true；helper 未连/未启用时才为 false，前端据此降级。
+            videoSupported: null,
+            // 因"服务端暂时无视频源"被降级时，记住用户原本想要的模式；
+            // 待服务端恢复视频能力（videoSupported 变回 true，如 helper 重连就绪）自动回到该模式。
+            pendingVideoRetry: null,
             showFps: false,
             mouseX: 0,
             mouseY: 0,
@@ -1627,6 +1634,15 @@
         }
 
         function applyStreamMode(mode) {
+            // 服务端已明确无法提供视频流（videoSupported===false，如 helper 未连或未启用视频通道）：
+            // webrtc/ffmpeg/auto 三条视频路线都不成立，直接降级图片模式并提示。
+            // 关键：必须在启动 MSE/WebRTC 之前拦下——否则 MSE 会建出全屏 <video>(黑底
+            // z-index:1) 盖住 canvas，而服务端只发 JPEG，客户端永远等不到 H.264 → 黑屏。
+            if (state.videoSupported === false && mode !== 'image') {
+                state.pendingVideoRetry = (mode === 'auto' ? 'auto' : mode);
+                fallbackToImage('当前无法提供视频流，已使用图片模式');
+                return;
+            }
             // 无 WebCodecs（WS 视频解不了 WebCodecs 通道）时：
             //  - ffmpeg：尝试 MSE（浏览器原生解码 H.264，http 可用），MSE 也不支持则图片；
             //  - auto：仍优先尝试 WebRTC（浏览器原生解码，不依赖 WebCodecs），失败再降级。
@@ -2340,6 +2356,30 @@
                 case 'mode_changed':
                     if (typeof msg.hwEncode === 'boolean')
                         state.hwEncode = msg.hwEncode;
+                    if (typeof msg.videoSupported === 'boolean')
+                        state.videoSupported = msg.videoSupported;
+                    // 服务端恢复视频能力（如 helper 重连并上报可编码）：若此前是被
+                    // "暂时无视频源"降级的，自动回到用户原本选的模式，无需手动重选。
+                    if (msg.videoSupported === true && state.pendingVideoRetry &&
+                        state.currentConfig.videomode === 'image') {
+                        const want = state.pendingVideoRetry;
+                        state.pendingVideoRetry = null;
+                        setTimeout(() => { if (state.videoSupported === true) applyStreamMode(want); }, 50);
+                        return;
+                    }
+                    // 服务端明确回"无法提供视频流"（如请求 set_mode:video 被拒，helper 未连/
+                    // 未启用视频通道）：若前端正处于视频路线的尝试中（MSE 已建 / WebRTC
+                    // 活动或协商中），必须立即退出——否则 MSE 的全屏 <video>(黑底 z-index:1)
+                    // 会永久盖住 canvas，服务端只发 JPEG，客户端永远等不到 H.264 分段 → 黑屏。
+                    // 仅在确有视频尝试时降级：已停在图片模式则不动（避免重复提示/抖动）。
+                    if (msg.videoSupported === false &&
+                        state.currentConfig.videomode !== 'image' &&
+                        (msePlayer.using || webrtcState.active || webrtcState.pc || webrtcState.intending)) {
+                        if (state.currentConfig.videomode !== 'image')
+                            state.pendingVideoRetry = state.currentConfig.videomode;
+                        fallbackToImage('当前无法提供视频流，已使用图片模式');
+                        return;
+                    }
                     // 服务端主动切回图片模式（如编码器初始化失败回退）时，本地必须同步
                     // 停掉 MSE/WebRTC：否则残留的全屏 <video> 盖住 canvas，JPEG 帧画在
                     // 底下不可见，画面冻结在最后一帧视频。
@@ -2899,6 +2939,22 @@
                 hwBtn.textContent = cfg.hw_encode === 'auto'
                     ? 'auto(' + (state.hwEncode ? '硬编' : '软编') + ')'
                     : 'auto';
+            }
+            // 编码硬件加速=off（禁用硬编）→ 服务端软编仅有 H.264（FFmpeg 仅编译
+            // libopenh264，无 x264/x265/vp9/av1 软编），HEVC 只能走硬编，
+            // 此时"编码协议"的选择无实际意义 → 整块隐藏（固定 H.264）。
+            const codecSection = document.getElementById('codec-section');
+            if (codecSection) {
+                const hwOff = (cfg.hw_encode === 'off');
+                codecSection.style.display = hwOff ? 'none' : '';
+                // 隐藏期间若残留非 H.264 协议，主动回落 H.264：否则服务端会拿 hevc
+                // 初始化失败→回退 h264，触发编码器双重重建（画面闪断）。
+                if (hwOff && cfg.codec !== 'h264') {
+                    cfg.codec = 'h264';
+                    try { localStorage.setItem('rd_codec', 'h264'); } catch (e) {}
+                    state.decoder = new H264Decoder('h264');
+                    send({ type: 'config', codec: 'h264' });
+                }
             }
             document.querySelectorAll('#config-dropdown .dropdown-options').forEach(group => {
                 const key = group.dataset.key;
@@ -4078,6 +4134,7 @@
             initRemoteDragMonitor();
             connect();
             updateQualityLabel();
+            updateDropdownActive(); // 初始化"编码协议"区显隐（hw=off 时隐藏）
 
             // 窗口大小改变时更新缩放
             window.addEventListener('resize', updateScale);

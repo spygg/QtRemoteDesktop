@@ -117,8 +117,16 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             quint8 frameType;
             quint32 dataLen;
             stream >> frameType >> dataLen;
-            if (frameType != 0x03) return;
-            emit captureFrameReceived(msg.mid(5));
+            if (frameType == 0x03) {
+                // JPEG：[0x03][u32 len][jpeg]
+                emit captureFrameReceived(msg.mid(5));
+            } else if (frameType == 0x01 || frameType == 0x02) {
+                // H.264：[0x01|0x02][u32 len][i64 ts][data]（13 字节头，与服务端→浏览器一致）
+                if (msg.size() < 13) return;
+                qint64 ts = 0;
+                stream >> ts;
+                emit captureVideoFrameReceived(msg.mid(13), frameType == 0x01, ts);
+            }
         });
         connect(socket, &QWebSocket::textMessageReceived, this, [this](const QString& text) {
             QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());

@@ -148,24 +148,31 @@ void JpegCompressor::processLoop()
         buffer.open(QIODevice::WriteOnly);
 
         // JPEG 线程内先缩放再压缩，主线程只需入队（避免全帧缩放阻塞输入处理）。
-        // 图片模式编码分辨率上限 75%：全分辨率 1920x1080 的 JPEG 软编要 300-500ms，
-        // 是远程控制延迟的主瓶颈（无 WebCodecs/WebRTC 受限的浏览器只能走图片模式）。
-        // 缩到 75% 后编码耗时约减半，远程操控画质仍足够；视频模式不受此限制。
-        const int cfgScale = scalePercent_.load();
-        int effScale = cfgScale < 75 ? cfgScale : 75;
+        //
+        // 这里只做 [10,100] 的取值保护，**不再按“编码耗时”二次夹取档位**。
+        // 背景（2026-10-08 修复）：此前此处硬编码 effScale<=75、q<=70，而档位映射层
+        // 给“高”档的取值是 scale=100 / q=80，于是用户点「高」被静默压成 75%/q70 ——
+        // 画面先缩到 75% 再由浏览器放大回物理分辨率显示，必然发虚，即用户反馈的
+        // “画质切到高还是很模糊”。性能权衡交给档位映射层承担（medium/low/verylow
+        // 的档位值本身就低，且 verylow 另行钳制分辨率上限），而「高」档的语义就是
+        // 画质优先、允许更大的单帧编码开销（队列只保留最新帧，不会累积延迟）。
+        // 实测（2560x1600 屏）：高=2560x1600/869KB，中=1920x1200/394KB，
+        // 极低=1280x800/92KB。
+        const int effScale = qBound(10, scalePercent_.load(), 100);
+        const int q = qBound(10, quality_.load(), 100);
         if (effScale < 100) {
             int sw = image.width() * effScale / 100;
             int sh = image.height() * effScale / 100;
             if (sw > 0 && sh > 0)
-                // [V-5] FastTransformation：Smooth 双线性过滤对全帧缩放耗时不小且
-                // 拉长单帧编码耗时 → 丢帧率升高；JPEG 再压缩会抹平差异，肉眼难辨。
-                image = image.scaled(sw, sh, Qt::KeepAspectRatio, Qt::FastTransformation);
+                // 高画质档用双线性（Smooth）保住细节，避免缩小后的锯齿/像素丢失；
+                // 其余档仍用最近邻（Fast），不为低画质档白增单帧缩放耗时。
+                // effScale==100 时不进入此分支，无缩放、无插值损失。
+                image = image.scaled(sw, sh, Qt::KeepAspectRatio,
+                                     q >= 75 ? Qt::SmoothTransformation
+                                             : Qt::FastTransformation);
         }
 
-        // 图片模式画质上限 70：q80 以上 JPEG 编码耗时急剧上升但肉眼提升有限，
-        // q70 编码快约 30%，远程操控更跟手。
-        const int q = quality_.load();
-        if (!image.save(&buffer, "JPEG", q < 70 ? q : 70)) {
+        if (!image.save(&buffer, "JPEG", q)) {
             qWarning() << "JpegCompressor: failed to compress frame";
             continue;
         }
@@ -470,7 +477,22 @@ void RDPServer::onModeChangeRequested(const QString& mode)
         switchToImageMode();
     } else if (mode == "video" || mode == "webrtc") {
         // webrtc/video 都切到视频模式；是否建立 RTP 会话由前端 signal_start 发起
-        switchToVideoMode();
+        if (!switchToVideoMode()) {
+            // 服务端无法进入视频模式（无本地捕获源且 helper 未连/不具视频能力）。
+            // 旧逻辑忽略返回值且不回包，前端会一直对着 MSE/WebRTC 的全屏 <video>
+            // 黑屏干等。这里显式广播一次 mode_changed，带上 videoSupported=false，
+            // 前端据此立即优雅降级为图片模式并提示用户。
+            QJsonObject note;
+            note["type"] = "mode_changed";
+            note["mode"] = "image";
+            note["videoSupported"] = false;
+            note["hwEncode"] = hwEncodeAvailable();
+            note["codec"] = codecToString(configCodec_);
+            note["reason"] = "no_video_source";
+            wsServer_->broadcastJson(note);
+            qWarning() << "set_mode video rejected: no video source available "
+                          "(no local capturer and no video-capable helper)";
+        }
     }
 }
 
@@ -770,19 +792,56 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 packet.append(jpegData);
                 wsServer_->broadcastBinary(packet);
             });
+        // 服务模式视频：helper 侧完成 H.264 编码，编码帧经 /capture 上报（0x01/0x02），
+        // 服务进程直接复用 onEncodedFrame()（广播浏览器 + 喂 WebRTC RTP），无需二次编码。
+        connect(wsServer_.get(), &WebSocketServer::captureVideoFrameReceived,
+            this, [this](const QByteArray& data, bool isKeyframe, qint64 timestamp) {
+                if (currentMode_ != ServerMode::Video)
+                    return;
+                onEncodedFrame(data, isKeyframe, timestamp);
+            });
         connect(wsServer_.get(), &WebSocketServer::captureMessageReceived,
             this, [this](const QJsonObject& msg) {
+                const QString t = msg["type"].toString();
                 // 低频控制消息记 qDebug；cursor_pos 高频事件不打日志
-                if (msg["type"].toString() != "cursor_pos")
-                    qDebug() << "Service: capture msg =" << msg;
-                if (msg["type"].toString() == "screen_info") {
+                if (t != "cursor_pos")
+                    qDebug() << "Service: capture msg =" << t;
+                if (t == "screen_info") {
                     lastScreenInfo_ = msg;
-                } else if (msg["type"].toString() == "screen_locked") {
+                } else if (t == "screen_locked") {
                     screenLocked_ = msg["locked"].toBool();
                     if (screenLocked_)
                         startSecureInputProcess();
                     else
                         stopSecureInputProcess();
+                } else if (t == "capture_caps") {
+                    // helper 视频能力上报：仅服务端内部决策用，绝不能泄漏给浏览器
+                    captureVideoCapable_ = msg["video"].toBool();
+                    captureHwEncode_ = msg["hwEncode"].toBool();
+                    const QString codec = msg["codec"].toString();
+                    if (!codec.isEmpty())
+                        captureCodecName_ = codec;
+                    qInfo() << "Service: capture caps video =" << captureVideoCapable_
+                            << "hw =" << captureHwEncode_ << "codec =" << captureCodecName_
+                            << "reason =" << msg["reason"].toString();
+                    // 能力变化 → 重新广播模式信息，前端据此更新 videoSupported/hwEncode
+                    if (!wsServer_->clients().isEmpty()) {
+                        QJsonObject mode;
+                        mode["type"] = "mode_changed";
+                        mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
+                        mode["hwEncode"] = hwEncodeAvailable();
+                        mode["videoSupported"] = videoModeSupported();
+                        mode["codec"] = captureCodecName_;
+                        mode["webrtc"] = remoteVideoSourceAvailable();
+                        wsServer_->broadcastJson(mode);
+                    }
+                    // helper 明确表示无法编码 → 若正在视频模式则回退图片
+                    if (!captureVideoCapable_ && currentMode_ == ServerMode::Video)
+                        switchToImageMode();
+                    return;
+                } else if (t == "codec_config") {
+                    // helper 上报 SPS/PPS：缓存供新客户端补发，然后照常广播给浏览器
+                    lastCodecExtra_ = QByteArray::fromBase64(msg["extradata"].toString().toLatin1());
                 }
                 wsServer_->broadcastJson(msg);
             });
@@ -798,12 +857,21 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 msg["type"] = "capture_control";
                 msg["action"] = hasClients ? "resume" : "pause";
                 wsServer_->sendToCaptureSource(msg);
+                // helper 重连：若服务端仍处于视频模式，需重新下发视频参数并进入编码，
+                // 否则 helper 会回 JPEG 而服务端仍在等 H.264 → 画面冻结。
+                if (currentMode_ == ServerMode::Video && captureVideoCapable_)
+                    sendVideoParamsToCaptureSource(QStringLiteral("video_on"));
             });
         connect(wsServer_.get(), &WebSocketServer::captureSourceDisconnected,
             this, [this]() {
                 // [N1] helper 断开 → 恢复 service 通道剪贴板同步
                 if (clipboardService_)
                     clipboardService_->setSuspended(false);
+                captureVideoCapable_ = false;
+                captureHwEncode_ = false;
+                // helper 掉线且当前在视频模式：回落图片模式并通知前端（否则画面冻结无提示）
+                if (currentMode_ == ServerMode::Video)
+                    switchToImageMode();
             });
     }
 
@@ -2277,6 +2345,7 @@ bool RDPServer::startCapture()
         mode["type"] = "mode_changed";
         mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
         mode["hwEncode"] = hwEncodeAvailable();
+        mode["videoSupported"] = true; // 本地采集已可用，视频模式必然可用
         mode["codec"] = codecToString(configCodec_);
 #if defined(USE_WEBRTC) && defined(USE_FFMPEG)
         mode["webrtc"] = true;
@@ -2996,12 +3065,13 @@ void RDPServer::onClientConnected(const QString& clientId)
     mode["type"] = "mode_changed";
     mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
     mode["hwEncode"] = hwEncodeAvailable();
+    mode["videoSupported"] = videoModeSupported();
 #if defined(USE_WEBRTC) && defined(USE_FFMPEG)
-    // WebRTC 需要 H.264 编码器和本地原始帧源。
-    // 直接模式自身捕获即可；服务模式若 Linux 本地捕获（非 helper JPEG）同样可用；
-    // Windows 服务模式只有 helper JPEG、无原始帧，则不支持（前端据此降级为视频/图片）。
-    bool rawCaptureSupported = screenCapturer_ && captureAvailable_
-            && screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
+    // WebRTC 需要 H.264 编码帧。直接模式/ Linux 服务模式由服务进程自身编码；
+    // 服务模式下若 helper 具备视频能力，则由 helper 侧编码并经 /capture 上报。
+    bool rawCaptureSupported = (screenCapturer_ && captureAvailable_
+            && screenCapturer_->width() > 0 && screenCapturer_->height() > 0)
+            || remoteVideoSourceAvailable();
     mode["webrtc"] = rawCaptureSupported;
 #else
     mode["webrtc"] = false;
@@ -3113,12 +3183,13 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     }
 
 #ifdef USE_WEBRTC
-    // WebRTC 信令（signal_*）：服务模式下仅当本地捕获可用（Linux 服务进程自身
-    // 通过 X11 捕获原始帧，可初始化 H.264 编码器）时才允许；Windows 服务模式
-    // 只有 helper JPEG、无本地帧，拒绝并让前端降级为视频/图片
+    // WebRTC 信令（signal_*）：需要 H.264 编码帧来源。直接模式 / Linux 服务模式由
+    // 服务进程自身编码；服务模式下若 helper 具备视频能力，则由 helper 侧编码并上报。
+    // 两者皆无（如 helper 未连）时拒绝，前端据 signal_state=unsupported 降级。
     if (type.startsWith("signal_")) {
-        bool rawCaptureSupported = screenCapturer_ && captureAvailable_
-                && screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
+        bool rawCaptureSupported = (screenCapturer_ && captureAvailable_
+                && screenCapturer_->width() > 0 && screenCapturer_->height() > 0)
+                || remoteVideoSourceAvailable();
         if (serviceMode_ && !rawCaptureSupported) {
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "signal_state" },
@@ -3652,7 +3723,20 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
 void RDPServer::pumpKeyframe(bool requestNewIdr)
 {
 #ifdef USE_FFMPEG
-    if (currentMode_ != ServerMode::Video || !videoEncoder_)
+    if (currentMode_ != ServerMode::Video)
+        return;
+
+    // 服务模式：编码在 helper 侧。请求 helper 产一帧新 IDR（它内部 requestKeyframe +
+    // forceNextFrame），服务端不做本地编码，也不应走下面的 videoEncoder_ 分支。
+    if (remoteVideoSourceAvailable()) {
+        QJsonObject rq;
+        rq["type"] = "request_keyframe";
+        wsServer_->sendToCaptureSource(rq);
+        Q_UNUSED(requestNewIdr);
+        return;
+    }
+
+    if (!videoEncoder_)
         return;
 
     if (requestNewIdr) {
@@ -3709,6 +3793,15 @@ void RDPServer::switchToImageMode()
     }
 #endif
 
+    // 服务模式：通知 helper 退出视频编码、恢复 JPEG 上报（否则 helper 继续发 H.264
+    // 而服务端已切图片模式，浏览器侧无对应解码通道 → 画面停滞）。
+    if (serviceMode_ && !screenCapturer_ && wsServer_ && wsServer_->isCaptureSourceConnected()) {
+        QJsonObject ctrl;
+        ctrl["type"] = "capture_control";
+        ctrl["action"] = "video_off";
+        wsServer_->sendToCaptureSource(ctrl);
+    }
+
     // 释放视频编码器（会调用析构，析构中调用 shutdown）
 #ifdef USE_FFMPEG
     // 如果视频编码器已初始化，停止它
@@ -3740,6 +3833,7 @@ void RDPServer::switchToImageMode()
     notification["type"] = "mode_changed";
     notification["mode"] = "image";
     notification["hwEncode"] = hwEncodeAvailable();
+    notification["videoSupported"] = videoModeSupported();
     notification["codec"] = codecToString(configCodec_);
     wsServer_->broadcastJson(notification);
 
@@ -3751,10 +3845,37 @@ bool RDPServer::switchToVideoMode()
     if (currentMode_ == ServerMode::Video)
         return true;
 
-    if (!screenCapturer_ || screenCapturer_->width() <= 0 || screenCapturer_->height() <= 0) {
-        // Windows 服务模式只有 helper JPEG、无本地捕获源，无法编码 H.264
-        qWarning() << "Cannot switch to video mode: no local raw frame source";
+    const bool localSource = screenCapturer_ && screenCapturer_->width() > 0
+        && screenCapturer_->height() > 0;
+
+    if (!localSource) {
+        // 服务模式：画面在 helper 进程。若 helper 已连且具备视频能力，则进入"远端编码"
+        // 视频模式——由 helper 完成 H.264 编码，编码帧经 /capture 上报（服务端不编码）。
+        if (!remoteVideoSourceAvailable()) {
+            qWarning() << "Cannot switch to video mode: no local raw frame source "
+                          "and no video-capable helper";
+            return false;
+        }
+#ifdef USE_FFMPEG
+        sendVideoParamsToCaptureSource(QStringLiteral("video_on"));
+        currentMode_ = ServerMode::Video;
+        // 上一轮会话的缓存全部作废（新编码器的 IDR/SPS/PPS 稍后由 helper 上报）
+        lastKeyframeData_.clear();
+        lastKeyframeTs_ = 0;
+        lastCodecExtra_.clear();
+
+        QJsonObject notification;
+        notification["type"] = "mode_changed";
+        notification["mode"] = "video";
+        notification["hwEncode"] = captureHwEncode_;
+        notification["videoSupported"] = true;
+        notification["codec"] = captureCodecName_;
+        wsServer_->broadcastJson(notification);
+        qInfo() << "Switched to video mode (helper-side H.264 encoding)";
+        return true;
+#else
         return false;
+#endif
     }
 
 #ifdef USE_FFMPEG
@@ -3803,6 +3924,7 @@ bool RDPServer::switchToVideoMode()
     notification["type"] = "mode_changed";
     notification["mode"] = "video";
     notification["hwEncode"] = hwEncodeAvailable();
+    notification["videoSupported"] = true; // 已成功进入视频模式
     notification["codec"] = codecToString(configCodec_);
     wsServer_->broadcastJson(notification);
 
@@ -3897,35 +4019,69 @@ void RDPServer::reinitVideoEncoderForScale()
 bool RDPServer::hwEncodeAvailable() const
 {
 #ifdef USE_FFMPEG
+    // 服务模式：画面与编码都在 helper 侧，以 helper 上报的能力为准
+    if (serviceMode_ && !screenCapturer_)
+        return captureHwEncode_;
     return VideoEncoder::isHwAcceleratedAvailable(configCodec_);
 #else
     return false;
 #endif
 }
 
+bool RDPServer::remoteVideoSourceAvailable() const
+{
+    // 服务模式 + 无本地捕获源 + helper 已连且声明支持视频
+    return serviceMode_ && !screenCapturer_
+        && captureVideoCapable_
+        && wsServer_ && wsServer_->isCaptureSourceConnected();
+}
+
+void RDPServer::sendVideoParamsToCaptureSource(const QString& action)
+{
+    if (!wsServer_ || !wsServer_->isCaptureSourceConnected())
+        return;
+    // 先下发 config（helper 据此确定 codec/hw_encode/fps/scale/画质），再发 capture_control。
+    // quality 用字符串档位，与前端 config 消息协议保持一致（helper 已支持前 3 项）。
+    QJsonObject cfg;
+    cfg["type"] = "config";
+    cfg["codec"] = codecToString(configCodec_);
+    cfg["hw_encode"] = (configHwEncodeMode_ == HwEncodeMode::On) ? QStringLiteral("on")
+                     : (configHwEncodeMode_ == HwEncodeMode::Off) ? QStringLiteral("off")
+                                                                  : QStringLiteral("auto");
+    cfg["fps"] = configFps_;
+    cfg["scale"] = configScale_;
+    cfg["quality"] = (configQuality_ >= 80) ? QStringLiteral("high")
+                   : (configQuality_ <= 15) ? QStringLiteral("verylow")
+                   : (configQuality_ <= 35) ? QStringLiteral("low")
+                                            : QStringLiteral("medium");
+    wsServer_->sendToCaptureSource(cfg);
+
+    QJsonObject ctrl;
+    ctrl["type"] = "capture_control";
+    ctrl["action"] = action;
+    wsServer_->sendToCaptureSource(ctrl);
+}
+
+bool RDPServer::videoModeSupported() const
+{
+    // ① 本地原始帧源可用（直连模式 / Linux 服务模式进程内捕获）→ 直接可编码
+    if (screenCapturer_ && screenCapturer_->width() > 0 && screenCapturer_->height() > 0)
+        return true;
+    // ② 服务模式：画面在 helper 进程，helper 具备视频能力即可（编码在 helper 侧完成）
+    return remoteVideoSourceAvailable();
+}
+
 // 依据编码分辨率、帧率与画质档位估算 H.264 码率，
 // 低分辨率/低画质下自动降低码率以节省单板 CPU，高分辨率下保证可用画质。
+// 公式已抽到 VideoEncoder::estimateBitrate()，与服务模式 helper 侧共用，避免漂移。
 int RDPServer::videoBitrateFor(int encW, int encH, int fps, CodecType codec) const
 {
-    double bitsPerPixel;
-    switch (configQuality_) {
-    case 80: bitsPerPixel = 0.20; break; // high：加大每像素码率，1080P60 下显著高于 medium
-    case 60: bitsPerPixel = 0.11; break; // medium
-    case 35: bitsPerPixel = 0.08; break; // low
-    case 15: bitsPerPixel = 0.035; break; // verylow：极低码率，叠加降分辨率可见
-    default: bitsPerPixel = 0.10; break;
-    }
-    // HEVC/VP9/AV1 压缩效率约为 H.264 的两倍，同画质下码率减半，节省带宽
-    if (codec == CodecType::HEVC || codec == CodecType::VP9 || codec == CodecType::AV1)
-        bitsPerPixel *= 0.5;
-    qint64 pixels = static_cast<qint64>(encW) * encH;
-    qint64 bitrate = static_cast<qint64>(pixels * bitsPerPixel * qMax(1, fps));
-    // 实际范围：150kbps ~ 25Mbps。
-    // 上限必须够大，否则 1080P60 下 high(0.20→24.9M) 与 medium(0.11→13.7M)
-    // 会被旧 10M 上限一起截断成相同码率，“高”档不清晰（比向日葵差）。
-    if (bitrate < 150000) bitrate = 150000;
-    if (bitrate > 25000000) bitrate = 25000000;
-    return static_cast<int>(bitrate);
+#ifdef USE_FFMPEG
+    return VideoEncoder::estimateBitrate(codec, encW, encH, fps, configQuality_);
+#else
+    Q_UNUSED(encW); Q_UNUSED(encH); Q_UNUSED(fps); Q_UNUSED(codec);
+    return 0;
+#endif
 }
 
 #ifdef USE_WEBRTC

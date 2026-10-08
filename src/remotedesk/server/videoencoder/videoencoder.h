@@ -68,6 +68,14 @@ public:
     // 上层据此在前端展示"硬件编码实际未生效"，避免用户以为开着硬编。
     static bool isMppDisabled();
 
+    // 指定编码类型当前是否可编码（硬件优先，否则探测软编编码器是否存在）。
+    // 服务模式 helper 侧据此上报"本机是否具备视频能力"，无需真正建立编码器。
+    static bool isCodecEncodable(CodecType type = CodecType::H264);
+
+    // 依据编码分辨率/帧率/画质档位估算目标码率（bps）。
+    // 抽成 static 供服务端本地编码与服务模式 helper 侧共用，避免两处公式漂移。
+    static int estimateBitrate(CodecType codec, int encW, int encH, int fps, int qualityLevel);
+
 signals:
     void encodedFrame(const QByteArray& data, bool keyframe, qint64 timestamp);
     void encoderReady();   // 编码器（重）初始化完成：请求捕获端强制推帧（静止桌面首帧兜底）

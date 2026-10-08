@@ -81,6 +81,9 @@ signals:
     void modeChangeRequested(const QString& mode);
     void fileChunkReceived(const QString& clientId, const QString& path, const QByteArray& data);
     void captureFrameReceived(const QByteArray& jpegData);
+    // 采集源（helper）上报的 H.264 编码帧：[1字节类型(0x01=IDR/0x02=P)][u32 长度][i64 时间戳][数据]
+    // 与服务端 → 浏览器的 13 字节头完全一致，服务端可直接复用 onEncodedFrame 分发。
+    void captureVideoFrameReceived(const QByteArray& data, bool isKeyframe, qint64 timestamp);
     void captureMessageReceived(const QJsonObject& msg);
     void captureSourceConnected();
     void captureSourceDisconnected();

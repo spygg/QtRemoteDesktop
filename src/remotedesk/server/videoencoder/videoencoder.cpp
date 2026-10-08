@@ -35,10 +35,21 @@ VideoEncoder::~VideoEncoder()
     shutdown();
 }
 
+// FFmpeg < 4.0 需要显式注册编解码器；而能力探测类 static 可能在 initialize() 之前
+// 被调用（如服务模式 helper 启动即上报 capture_caps），若不先注册，
+// avcodec_find_encoder() 会返回 nullptr → 误报"本机不支持视频"，前端被永久降级。
+static void ensureAvCodecsRegistered()
+{
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 0, 0)
+    static std::atomic<bool> done{ false };
+    if (!done.exchange(true))
+        avcodec_register_all();
+#endif
+}
+
 // 硬件编码器平台可用性粗筛（编码器存在 != 运行时可用；避免假阳性导致每次初始化
 // 都尝试 open 一个必然失败的编码器，从而产生无谓的延迟与告警日志）
-static bool hwPlatformAvailable(const char* encName)
-{
+static bool hwPlatformAvailable(const char* encName){
 #ifdef Q_OS_LINUX
     if (strstr(encName, "vaapi")) {
         // VAAPI 需要 DRM 渲染节点；无 /dev/dri 的板子直接跳过
@@ -60,6 +71,7 @@ static bool hwPlatformAvailable(const char* encName)
 // 按编码类型 + 平台返回硬件编码器候选链（优先板载/通用方案，最后才是厂商专有）
 static const char* findHwEncoder(CodecType type, HwEncodeMode mode)
 {
+    ensureAvCodecsRegistered();
     if (mode == HwEncodeMode::Off)
         return nullptr;
     const char* candidates[4] = { nullptr, nullptr, nullptr, nullptr };
@@ -180,6 +192,51 @@ QString VideoEncoder::hwEncoderName(CodecType type)
 QString VideoEncoder::activeEncoderName() const
 {
     return codecName_;
+}
+
+// CodecType → FFmpeg CodecID（与 initialize() 内的 switch 保持一致）
+static AVCodecID avCodecIdFor(CodecType type)
+{
+    switch (type) {
+    case CodecType::H264: return AV_CODEC_ID_H264;
+    case CodecType::HEVC: return AV_CODEC_ID_HEVC;
+    case CodecType::VP8:  return AV_CODEC_ID_VP8;
+    case CodecType::VP9:  return AV_CODEC_ID_VP9;
+    case CodecType::AV1:  return AV_CODEC_ID_AV1;
+    case CodecType::MPEG4:return AV_CODEC_ID_MPEG4;
+    case CodecType::MJPEG:return AV_CODEC_ID_MJPEG;
+    }
+    return AV_CODEC_ID_NONE;
+}
+
+bool VideoEncoder::isCodecEncodable(CodecType type)
+{
+    ensureAvCodecsRegistered();
+    if (isHwAcceleratedAvailable(type))
+        return true;
+    const AVCodecID id = avCodecIdFor(type);
+    return id != AV_CODEC_ID_NONE && avcodec_find_encoder(id) != nullptr;
+}
+
+int VideoEncoder::estimateBitrate(CodecType codec, int encW, int encH, int fps, int qualityLevel)
+{
+    double bitsPerPixel;
+    switch (qualityLevel) {
+    case 80: bitsPerPixel = 0.20; break; // high：加大每像素码率，1080P60 下显著高于 medium
+    case 60: bitsPerPixel = 0.11; break; // medium
+    case 35: bitsPerPixel = 0.08; break; // low
+    case 15: bitsPerPixel = 0.035; break; // verylow：极低码率，叠加降分辨率可见
+    default: bitsPerPixel = 0.10; break;
+    }
+    // HEVC/VP9/AV1 压缩效率约为 H.264 的两倍，同画质下码率减半，节省带宽
+    if (codec == CodecType::HEVC || codec == CodecType::VP9 || codec == CodecType::AV1)
+        bitsPerPixel *= 0.5;
+    qint64 pixels = static_cast<qint64>(encW) * encH;
+    qint64 bitrate = static_cast<qint64>(pixels * bitsPerPixel * qMax(1, fps));
+    // 实际范围：150kbps ~ 25Mbps（上限须够大，否则 1080P60 high/medium 被截断同码率）
+    if (bitrate < 150000) bitrate = 150000;
+    if (bitrate > 25000000) bitrate = 25000000;
+    return static_cast<int>(bitrate);
 }
 
 bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int encH, int fps, int bitrate,
