@@ -903,8 +903,8 @@
                 上传文件</button>
             <button class="file-action-btn" onclick="document.getElementById('folder-upload-input').click()">⬆
                 上传文件夹</button>
-            <input type="file" id="file-upload-input" multiple onchange="handleFileUpload(this.files, document.getElementById('file-path-input').value.replace(/\\/g, '/'))">
-            <input type="file" id="folder-upload-input" webkitdirectory onchange="handleFileUpload(this.files, document.getElementById('file-path-input').value.replace(/\\/g, '/'))">
+            <input type="file" id="file-upload-input" multiple onchange="handleFileUpload(this.files, uploadBaseDir())">
+            <input type="file" id="folder-upload-input" webkitdirectory onchange="handleFileUpload(this.files, uploadBaseDir())">
         </div>
     </div>
     <div id="transfer-status"></div>
@@ -2199,10 +2199,17 @@
                     break;
                 case 'file_list':
                     // [B15] 乱序防护：快速连续导航时旧目录的响应可能后到，
-                    // 若与本机最近一次请求的目录都对不上则丢弃，避免旧列表覆盖新列表
+                    // 若与本机最近一次请求的目录都对不上则丢弃，避免旧列表覆盖新列表。
+                    // 两处必须放宽，否则会把"正确的"响应整条丢掉（症状：文件管理空白、
+                    // 路径框停在 "/" 或盘符上）：
+                    //   1) 请求的是虚拟根（"/"、""、「此电脑」）时，服务端一定回真实
+                    //      路径（Linux=/home/xxx、Windows="C:\"），字符串永不相等；
+                    //   2) Windows 下服务端下发原生反斜杠路径（请求 "D:" → 回 "D:\"），
+                    //      分隔符/末尾分隔符差异与被比较的路径无关，先归一化再比。
                     if (fileListLastReqPath !== null) {
                         const respPath = msg.path || msg.realPath || '';
-                        if (respPath && respPath !== fileListLastReqPath)
+                        if (respPath && !isVirtualRootText(fileListLastReqPath)
+                            && normPathForCompare(respPath) !== normPathForCompare(fileListLastReqPath))
                             break;
                     }
                     if (msg.items) {
@@ -2210,7 +2217,15 @@
                         lastListRealPath = msg.realPath || msg.path || '';
                         renderFileList(msg.items);
                     }
-                    if (msg.path || msg.realPath) {
+                    if (msg.isRoot) {
+                        // Windows 的虚拟根是「此电脑」（驱动器列表），路径框显示成
+                        // rootLabel 而不是 "/"（"/" 在 Windows 上是"当前盘根目录"，
+                        // 显示成它会被误读成走错了盘）。currentRemotePath 仍记 "/"，
+                        // 所有路径拼接/回退逻辑不变。
+                        currentRemotePath = msg.realPath || msg.path || '/';
+                        driveListRoot = true;
+                        document.getElementById('file-path-input').value = msg.rootLabel || '此电脑';
+                    } else if (msg.path || msg.realPath) {
                         // 优先用服务端下发的真实绝对路径 realPath，避免把虚拟根下的
                         // 子目录显示成 "/Documents" 这种缺失 home 前缀的假路径。
                         const disp = msg.realPath || msg.path;
@@ -3164,6 +3179,9 @@
         // 表现为"拖到本机没效果"。以渲染时的真实路径为准可彻底避免这种失同步。
         let lastListRealPath = '';
         let fileListLastReqPath = null; // [B15] 最近一次 file_list 请求的目录（null=尚无请求，不过滤）
+        // 服务端已确认"/"是「此电脑」虚拟根（Windows 且未配置 fileRoot）：路径框在根页
+        // 显示「此电脑」，而不是容易被误读成"当前盘根目录"的 "/"。
+        let driveListRoot = false;
         const CHUNK_SIZE = 64 * 1024; // 64KB chunks
         let uploadQueue = [];
         let isUploading = false;
@@ -3515,9 +3533,42 @@
             if (panel) panel.style.display = 'none';
         }
 
+        // 虚拟根（Windows「此电脑」）。它是驱动器列表页的显示名，不是磁盘上的目录：
+        // "/"、"" 与服务端 isThisPcAlias() 的别名集合保持一致。任何要用作真实文件
+        // 路径的地方（跳转、上传落点）都必须先把它还原成 "/" 或换成真实目录。
+        // 比较两个路径是否指同一目录：统一分隔符、去掉末尾分隔符。
+        // Windows 下请求 "D:" 服务端回 "D:\"、"C:\Users" 回 "C:\Users"，
+        // 不做归一化就会被乱序防护误判成"旧响应"丢弃。
+        function normPathForCompare(p) {
+            return (p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+        }
+
+        function isVirtualRootText(v) {
+            const s = (v || '').trim();
+            return s === '' || s === '/' || s === '\\'
+                || s === '此电脑' || s === '我的电脑' || s === '计算机'
+                || s === 'This PC' || s === 'My Computer';
+        }
+
+        // 上传/拖入文件的落点目录。路径框在「此电脑」页显示的是虚拟根名字，且首个
+        // file_list 响应到达前 currentRemotePath 还是初始值，都不能直接当目录用
+        // （会把文件传到盘根或建出名为「此电脑」的目录）。逐级回退到真实目录。
+        function uploadBaseDir() {
+            const typed = (document.getElementById('file-path-input').value || '')
+                .replace(/\\/g, '/').trim();
+            if (!isVirtualRootText(typed))
+                return typed;
+            if (lastListRealPath && !isVirtualRootText(lastListRealPath))
+                return lastListRealPath;
+            return state.remoteDesktopPath || currentRemotePath || '/';
+        }
+
         function navigateTo(path) {
+            if (isVirtualRootText(path))
+                path = '/';   // 「此电脑」→ 服务端的驱动器列表
             currentRemotePath = path;
-            document.getElementById('file-path-input').value = path;
+            document.getElementById('file-path-input').value =
+                (path === '/' && driveListRoot) ? '此电脑' : path;
             clearFileFetchCache(); // 切换目录后旧的预取 blob 失效，释放内存
             fileListLastReqPath = path; // [B15] 记录最新请求，过滤乱序旧响应
             send({ type: 'file_list', path: path });
@@ -3578,13 +3629,26 @@
                 const div = document.createElement('div');
                 div.className = 'file-item';
                 div.dataset.rpath = fullPath; // 拖拽/下载使用的真实路径
-                div.innerHTML = '<span class="icon">📁</span><span class="name"></span><span class="size"><button class="file-action-btn">⬇</button></span>';
-                div.querySelector('.name').textContent = item.name;
-                // 单击文件夹整行即进入该目录（下载按钮通过 stopPropagation 不会触发）
+                // 驱动器（Windows「此电脑」下的 C: / D: …）：磁盘图标，显示卷标与可用
+                // 空间；不提供下载按钮也不允许拖出——整盘打成 tar 无意义且极易触发
+                // GB 级传输（服务端 processDownload 也拦了盘根）。
+                const isDrive = !!item.isDrive;
+                div.innerHTML = '<span class="icon">' + (isDrive ? '💽' : '📁') + '</span>'
+                    + '<span class="name"></span>'
+                    + '<span class="size">' + (isDrive ? '' : '<button class="file-action-btn">⬇</button>') + '</span>';
+                div.querySelector('.name').textContent = isDrive && item.label
+                    ? item.name + ' (' + item.label + ')' : item.name;
+                if (isDrive) {
+                    if (item.total > 0)
+                        div.querySelector('.size').textContent =
+                            '可用 ' + formatSize(item.free) + ' / ' + formatSize(item.total);
+                } else {
+                    // 单击文件夹整行即进入该目录（下载按钮通过 stopPropagation 不会触发）
+                    div.querySelector('.file-action-btn').onclick = (e) => { e.stopPropagation(); downloadFile(item.name, fullPath, true); };
+                    makeRemoteItemDraggable(div, item);
+                }
                 div.onclick = () => navigateTo(fullPath);
-                div.querySelector('.file-action-btn').onclick = (e) => { e.stopPropagation(); downloadFile(item.name, fullPath, true); };
-                makeRemoteItemDraggable(div, item);
-                makeDirectoryDropTarget(div, fullPath);
+                makeDirectoryDropTarget(div, fullPath);  // 拖入上传：盘根目录也可作为落点
                 container.appendChild(div);
             }
             for (const item of files) {
@@ -4054,7 +4118,9 @@
                     const blob = file.slice(offset, end);
                     const buffer = await blob.arrayBuffer();
 
-                    // Build binary packet: [0x10][4-byte path length][path UTF8][4-byte data length][data]
+                    // Build binary packet: [0x10][4-byte path length][4-byte data length][path UTF8][data]
+                    // 注意：pathLen 在前、dataLen 在其次（服务端 QDataStream 连续读两个 quint32，
+                    // path 起始于偏移 9），不是「path 之后跟 dataLen」。
                     const pathBytes = new TextEncoder().encode(remotePath);
                     const header = new ArrayBuffer(9);
                     const view = new DataView(header);

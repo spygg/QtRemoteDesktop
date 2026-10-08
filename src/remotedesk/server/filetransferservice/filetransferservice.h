@@ -23,15 +23,29 @@ public:
     // 工作线程产出目录 tar/单文件分块前轮询，超过阈值就暂停，避免 OOM。
     void setBackpressureQuery(std::function<qint64()> q) { backpressureQuery_ = std::move(q); }
 
-    // 文件传输根目录约束（防越权读写）。默认限制在当前用户 home；
-    // 传入 "/"（或空）表示显式放开全盘（不推荐，仅内网可信环境使用）。
+    // 文件传输根目录约束。**默认不限制**（局域网可信环境）：Windows 虚拟根是
+    // 「此电脑」全部盘符，Linux 根就是真实的 "/"，登录用户可浏览/读写整机文件。
+    // 需要收紧时传入某个目录（如 "/home/spygg"、"D:/share"）；传入 "/" 或空
+    // 表示解除限制（恢复默认语义）。
     void setRootPath(const QString& root);
     static QString rootPath() { return s_rootPath; }
+    static bool rootRestricted() { return s_enforceRoot; }
 
     // 路径安全校验：把外部传入的路径强制约束在受限根目录内（解析 ".." 与符号链接），
     // 返回空串表示越界，调用方必须按失败处理。HTTP 直链下载接口（/api/file）与 WS
     // 文件传输必须共用这一份校验，避免两条通道的安全级别不一致。
     static QString sanitizeFilePath(const QString& path);
+
+    // 「此电脑」类虚拟根别名（前端在驱动器列表页把路径框显示为「此电脑」，用户也可能
+    // 手输「计算机 / This PC」）。该名字只在 file_list 里代表驱动器列表（Windows），
+    // 落到文件读写层面必须拒绝，否则会被当成相对路径在服务进程 CWD 下建出垃圾目录。
+    // 别名集合与前端 isVirtualRootText() 一致，全平台生效（只匹配"整条路径 == 别名"）。
+    static bool isThisPcAlias(const QString& path);
+
+    // 提示用：当前文件根的展示名。未受限时 Windows 显示「此电脑(全部盘符)」、
+    // Linux 显示「/ (整机文件系统)」——此时 s_rootPath 仍是盘根字符串，直接
+    // 拼进错误信息会显示成 "C:/" 而看不出"已放开全盘"。
+    static QString rootDisplay();
 
     // 目录 → tar 包（内存数据）。WS 下载与 HTTP 直链下载共用，保证两处产物一致。
     static QByteArray createTarForDirectory(const QString& dirPath);

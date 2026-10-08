@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QProcess>
 #include <QList>
+#include <QStorageInfo>
 #include <functional>
 
 #ifdef Q_OS_WIN
@@ -70,37 +71,17 @@ static QString windowsDesktopUserHome()
 FileTransferService::FileTransferService(QObject* parent)
     : QObject(parent)
 {
-#ifdef Q_OS_LINUX
-    // 服务常以 root 运行：QDir::homePath() 变成 /root，对远程桌面用户不直观，
-    // 拖拽上传默认落 /root 会被误认为"磁盘根目录"。改为优先使用系统常规用户
-    // home（/home/xxx 下第一个可写目录）作为文件根；已有显式配置则不改动。
-    if (s_enforceRoot && s_rootPath == QDir::homePath()) {
-        QDir homeDir("/home");
-        if (homeDir.exists()) {
-            const QStringList users = homeDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-            for (const QString& u : users) {
-                if (u == "lost+found" || u.startsWith('.'))
-                    continue;
-                QString p = QDir::cleanPath("/home/" + u);
-                if (QFileInfo(p).isWritable()) {
-                    if (p != s_rootPath)
-                        setRootPath(p);
-                    return;
-                }
-            }
-        }
+    // 默认不限制文件根（局域网可信环境，需求是「文件管理能看到并读写整机文件」）：
+    //   Windows → 虚拟根是「此电脑」= 全部盘符。单一目录前缀表达不了多盘符
+    //             （C:/ 之下永远看不到 D:），因此不能走包含性检查。
+    //   Linux   → 根就是真实路径 "/"，sanitizeFilePath 只做绝对化不做包含性检查，
+    //             于是 "/" 直接列出真实根目录（以前被收窄到 /home/<第一个可写用户>）。
+    // 需要收紧时由调用方 setRootPath("<目录>") 显式配置。
+    if (!s_enforceRoot) {
+        s_rootPath = QDir::rootPath();
+        qInfo() << "FileTransfer: root restriction DISABLED; file root =" << rootDisplay()
+                << "- any file on this host may be read or overwritten";
     }
-#endif
-#ifdef Q_OS_WIN
-    // 服务跑在 SYSTEM（session 0）：文件根与默认上传目录同理落到
-    // systemprofile，桌面用户不可见。改为活动控制台会话用户的 profile；
-    // 已有显式配置则不改动。
-    if (s_enforceRoot && s_rootPath == QDir::homePath()) {
-        const QString u = windowsDesktopUserHome();
-        if (!u.isEmpty() && QFileInfo(u).isWritable() && u != s_rootPath)
-            setRootPath(u);
-    }
-#endif
 }
 
 FileTransferService::~FileTransferService()
@@ -114,9 +95,14 @@ FileTransferService::~FileTransferService()
     activeUploads_.clear();
 }
 
-// 文件根目录：默认限制在当前用户 home 目录，防止登录用户读写任意路径。
-QString FileTransferService::s_rootPath = QDir::homePath();
-bool FileTransferService::s_enforceRoot = true;
+// 文件根目录：默认**不限制**——局域网可信环境，登录用户可浏览/读写整机文件。
+//   Windows：s_rootPath 取盘根（rootPath()="C:/"），但虚拟根语义是「此电脑」，
+//            实际入口走 processFileList 的驱动器列表分支；
+//   Linux："/" 就是真实文件系统根，QDir("/") 直接列出 /home、/etc…
+// s_rootPath 仅在显式 setRootPath("<目录>") 之后才作为"受限根"参与包含性检查
+// （届时 s_enforceRoot=true）。
+QString FileTransferService::s_rootPath = QDir::rootPath();
+bool FileTransferService::s_enforceRoot = false;
 
 // 默认上传目录：本机拖入文件时的落点。
 // 服务进程常以 root 运行（systemd service），此时 QDir::homePath() 是 /root，
@@ -210,8 +196,9 @@ QString FileTransferService::defaultUploadDir()
 void FileTransferService::setRootPath(const QString& root)
 {
     QString r = root.trimmed();
-    if (r.isEmpty() || r == "/" || r == "\\") {
-        // 显式放开：仅应在完全可信的内网环境使用
+    if (r.isEmpty() || r == "/" || r == "\\" || isThisPcAlias(r)) {
+        // 显式放开：仅应在完全可信的内网环境使用。Windows 下这也正是默认值
+        // （根 = 「此电脑」全部盘符，见构造函数与 s_enforceRoot 定义）。
         s_enforceRoot = false;
         s_rootPath = QDir::rootPath();
         qWarning() << "FileTransfer: root restriction DISABLED (fileRoot=\"/\") - "
@@ -223,13 +210,83 @@ void FileTransferService::setRootPath(const QString& root)
     qInfo() << "FileTransfer: root path restricted to" << s_rootPath;
 }
 
+bool FileTransferService::isThisPcAlias(const QString& path)
+{
+    // 与前端 isVirtualRootText() 的别名集合保持一致，所有平台都拒绝：这些名字在任何
+    // 平台都不是目录名，一旦被当相对路径处理就会落到服务进程 CWD（Linux 曾出现
+    // /home/<user>/此电脑 这类垃圾目录）。只拒绝"整条路径恰好等于别名"的情形，
+    // 因此不影响 /home/x/此电脑 这种真实存在的目录。
+    const QString p = path.trimmed();
+    return p == QStringLiteral("此电脑") || p == QStringLiteral("我的电脑")
+        || p == QStringLiteral("计算机") || p == QStringLiteral("This PC")
+        || p == QStringLiteral("My Computer");
+}
+
+QString FileTransferService::rootDisplay()
+{
+    if (!s_enforceRoot) {
+#ifdef Q_OS_WIN
+        return QStringLiteral("此电脑(全部盘符)");
+#else
+        return QStringLiteral("/ (整机文件系统)");
+#endif
+    }
+    return s_rootPath;
+}
+
+#ifndef Q_OS_WIN
+// 拒绝 Windows 盘符风格的路径（"C:"、"C:/"、"C:\..."）。Linux/Unix 上 ':' 在文件名里
+// 合法，从 Windows 客户端误传的盘符路径会被当成相对路径，在服务进程 CWD 下建出名为
+// "C:" 的垃圾目录（90 上实测出现过 /home/neardi/C:）。这不是权限判断，而是这种输入
+// 在本平台没有可解释的含义。放开文件根之后仍必须保留：否则写盘目标会随 CWD 漂移。
+static bool looksLikeWindowsDrivePath(const QString& path)
+{
+    for (int i = 0; i + 1 < path.size(); ++i) {
+        if (path.at(i + 1) != QLatin1Char(':') || !path.at(i).isLetter())
+            continue;
+        const bool atBoundary = (i == 0)
+                                || path.at(i - 1) == QLatin1Char('/')
+                                || path.at(i - 1) == QLatin1Char('\\');
+        const QChar after = (i + 2 < path.size()) ? path.at(i + 2) : QChar();
+        const bool driveForm = after.isNull() || after == QLatin1Char('/')
+                               || after == QLatin1Char('\\');
+        if (atBoundary && driveForm)
+            return true;
+    }
+    return false;
+}
+#endif
+
 QString FileTransferService::sanitizeFilePath(const QString& path)
 {
-    // 旧实现只做 absolutePath()：客户端可传 "/etc/shadow"、"../../" 或 "C:/Windows/..."，
-    // 造成任意文件读写（配合上传还能覆盖任意可写文件）。这里把路径强制约束在根目录内，
-    // 并用 canonicalFilePath 解析符号链接，防止软链逃出根目录。越界一律返回空串，
-    // 调用方必须把空串当作失败处理。
+    // 两种模式：
+    //   ① 未受限（默认）：只做绝对化，"任何路径都放行"——局域网可信环境，
+    //      文件管理需要能读写整机文件（Linux 的 "/"、Windows 的「此电脑」）。
+    //   ② 受限（仅当调用方显式 setRootPath("<目录>")）：把路径强制约束在该目录内，
+    //      并用 canonicalFilePath 解析符号链接防止软链逃逸。越界返回空串，
+    //      调用方必须把空串当作失败处理。
+    // HTTP 直链下载（/api/file）、WS 传输、远端拖拽共用这一份判断。
+
+    // 「此电脑」等虚拟根名字只在 file_list 里代表驱动器列表，不是可读写的目录。
+    // 前端已用 uploadBaseDir() 兜底，这里再拦一道：否则它会被当作相对路径，在服务
+    // 进程 CWD（system32、程序目录…）下建出一个名为「此电脑」的目录。
+    if (isThisPcAlias(path)) {
+        qWarning() << "FileTransfer: virtual root alias rejected for file I/O:" << path;
+        return QString();
+    }
+
     if (!s_enforceRoot) {
+        // 非受限模式（默认，Windows 与 Linux 皆是）：只做绝对化，不做根内包含性检查。
+        // 但空路径必须显式映射到磁盘根：QDir("").absolutePath() 取的是**进程 CWD**，
+        // 服务进程的 CWD 可能是 C:\Windows\System32 / /，上传会莫名其妙落到那里。
+        if (path.isEmpty())
+            return QDir::rootPath();
+#ifndef Q_OS_WIN
+        if (looksLikeWindowsDrivePath(path)) {
+            qWarning() << "FileTransfer: windows drive-style path rejected:" << path;
+            return QString();
+        }
+#endif
         QDir dir(path);
         return dir.absolutePath();
     }
@@ -244,22 +301,9 @@ QString FileTransferService::sanitizeFilePath(const QString& path)
         return rootCanon;
 
 #ifndef Q_OS_WIN
-    // 拒绝 Windows 盘符风格的路径（"C:"、"C:/"、"C:\..."）。':' 在 Linux 文件名里
-    // 合法，Windows 客户端误传的盘符路径会在受限根里创建出名为 "C:" 的垃圾目录
-    // （90 上实测出现过 /home/neardi/C:）。
-    for (int i = 0; i + 1 < path.size(); ++i) {
-        if (path.at(i + 1) != QLatin1Char(':') || !path.at(i).isLetter())
-            continue;
-        const bool atBoundary = (i == 0)
-                                || path.at(i - 1) == QLatin1Char('/')
-                                || path.at(i - 1) == QLatin1Char('\\');
-        const QChar after = (i + 2 < path.size()) ? path.at(i + 2) : QChar();
-        const bool driveForm = after.isNull() || after == QLatin1Char('/')
-                               || after == QLatin1Char('\\');
-        if (atBoundary && driveForm) {
-            qWarning() << "FileTransfer: windows drive-style path rejected:" << path;
-            return QString();
-        }
+    if (looksLikeWindowsDrivePath(path)) {
+        qWarning() << "FileTransfer: windows drive-style path rejected:" << path;
+        return QString();
     }
 #endif
 
@@ -463,25 +507,45 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
 void FileTransferService::processFileList(const QString& clientId, const QString& path)
 {
 #ifdef Q_OS_WIN
-    // Windows: path "/" or empty → 未启用根目录约束时才列驱动器（放开全盘）
-    if ((path == "/" || path.isEmpty()) && !s_enforceRoot) {
-        QFileInfoList drives = QDir::drives();
+    // Windows 的虚拟根 = 「此电脑」→ 全部盘符（默认即此模式，见 s_enforceRoot 定义）。
+    // "/"、""、"\" 以及前端显示的「此电脑」都映射到驱动器列表；只有显式配置了
+    // fileRoot=<某目录>（s_enforceRoot=true）时才退回受限的目录浏览。
+    // 条目带卷标与容量，便于在列表里直接区分系统盘/数据盘/移动盘。
+    if (!s_enforceRoot
+        && (path.isEmpty() || path == "/" || path == "\\" || isThisPcAlias(path))) {
         QJsonArray items;
+        const QFileInfoList drives = QDir::drives();
         for (const QFileInfo& drive : drives) {
-            QJsonObject item;
-            // drive.absolutePath() returns "C:/", extract "C:"
+            // drive.absolutePath() → "C:/"，去掉尾分隔符得到 "C:"（前端据此拼盘符路径）
             QString driveName = QDir::toNativeSeparators(drive.absolutePath());
-            if (driveName.endsWith('\\'))
+            while (driveName.endsWith('\\') || driveName.endsWith('/'))
                 driveName.chop(1);
+            if (driveName.isEmpty())
+                continue;
+            QJsonObject item;
             item["name"] = driveName;
             item["isDir"] = true;
+            item["isDrive"] = true;   // 前端：磁盘图标，且不出下载按钮（不能整盘打包）
             item["size"] = 0;
+            const QStorageInfo si(drive.absoluteFilePath());
+            if (si.isValid()) {
+                // displayName() 在卷标为空时回退成挂载点（"C:/"），那不是卷标：
+                // 直接下发会渲染成「C: (C:/)」。只认真正的卷标。
+                const QString vol = si.displayName();
+                if (!vol.isEmpty() && !vol.startsWith(driveName, Qt::CaseInsensitive))
+                    item["label"] = vol;
+                // 用 double 承载：QJsonValue 对 qint64 会退化成 double，这里显式转换
+                item["total"] = static_cast<double>(si.bytesTotal());
+                item["free"] = static_cast<double>(si.bytesAvailable());
+            }
             items.append(item);
         }
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_list"},
-            {"path", "/"},
+            {"path", "/"},           // 虚拟根的路径表示保持 "/"：前端路径拼接逻辑不变
             {"realPath", "/"},
+            {"isRoot", true},        // 前端据此把路径框显示成 rootLabel
+            {"rootLabel", "此电脑"},
             {"items", items},
             {"desktopPath", defaultUploadDir()}
         });
@@ -492,7 +556,7 @@ void FileTransferService::processFileList(const QString& clientId, const QString
     if (safePath.isEmpty()) {
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_list"}, {"path", path},
-            {"error", "拒绝访问：路径超出允许范围 (" + s_rootPath + ")"}
+            {"error", "拒绝访问：路径超出允许范围 (" + rootDisplay() + ")"}
         });
         return;
     }
@@ -530,12 +594,15 @@ void FileTransferService::processFileList(const QString& clientId, const QString
         {"desktopPath", defaultUploadDir()}
     });
 #else
-    // Linux: 与 Windows 分支一致，先做根目录约束
+    // Linux: 默认不限制文件根（s_enforceRoot=false），"/" 就是真实文件系统根，
+    // sanitizeFilePath 只做绝对化 → 下面直接列出 /home、/etc、/opt… 全部内容。
+    // 若调用方显式 setRootPath("<目录>")，sanitizeFilePath 会改回受限映射：
+    // 客户端发的 "/" 被解析成该根目录（虚拟根语义），行为与旧版一致。
     QString safePath = sanitizeFilePath(path);
     if (safePath.isEmpty()) {
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_list"}, {"path", path},
-            {"error", "拒绝访问：路径超出允许范围 (" + s_rootPath + ")"}
+            {"error", "拒绝访问：路径超出允许范围 (" + rootDisplay() + ")"}
         });
         return;
     }
@@ -583,11 +650,22 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     if (safePath.isEmpty()) {
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_download"}, {"path", path},
-            {"error", "拒绝访问：路径超出允许范围 (" + s_rootPath + ")"}
+            {"error", "拒绝访问：路径超出允许范围 (" + rootDisplay() + ")"}
         });
         return;
     }
     QFileInfo fi(safePath);
+
+    // 磁盘根目录（Windows "C:/"、Linux "/"）不允许整包下载：tar 会把整个盘打包，
+    // 既无意义又极易触发 GB 级传输甚至卡死。Windows 的驱动器列表里每一行都是盘根，
+    // 必须拦在打包之前（前端也已去掉盘符行的下载按钮，这里是服务端兜底）。
+    if (fi.isDir() && QDir(QDir::cleanPath(safePath)).isRoot()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_download"}, {"path", path},
+            {"error", "不能下载磁盘根目录，请进入具体文件夹"}
+        });
+        return;
+    }
 
     // Directory: create tar archive
     if (fi.isDir()) {
@@ -777,7 +855,7 @@ void FileTransferService::processUploadStart(const QString& clientId, const QStr
     if (safePath.isEmpty()) {
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_upload_done"},
-            {"error", "拒绝上传：路径超出允许范围 (" + s_rootPath + ")"}
+            {"error", "拒绝上传：路径超出允许范围 (" + rootDisplay() + ")"}
         });
         return;
     }
