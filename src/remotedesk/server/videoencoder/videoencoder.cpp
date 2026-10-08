@@ -452,13 +452,20 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
 
 void VideoEncoder::encode(const QImage& frame)
 {
+    // [V-2] 深拷贝移出锁外：持锁做 8MB 级 copy 会阻塞编码线程出队与并发 encode。
+    // QImage 隐式共享下 copy() 仅在缓冲被共享时才真正复制；isDetached() 已独占
+    // （如 JpegCompressor 输出）则零拷贝直接入队。
+    QImage copy = frame.isDetached() ? frame : frame.copy();
     QMutexLocker locker(&mutex_);
-    if (frameQueue_.size() >= kMaxFrameQueueSize)
+    // [V-1] 队列过载时清到 ≤2（含本帧）：原实现丢最老 1 帧后剩余 9 帧仍按序
+    // 全编，编码偶发超时后延迟常驻 ~333ms 且白编过期帧。图片模式同场景已用
+    // kMaxQueueSize=1。积压意味着编码跟不上，丢弃过期帧换来低延迟。
+    while (frameQueue_.size() >= 2)
         frameQueue_.dequeue();
     // 必须深拷贝再入队：X11 全量抓取路径把持久缓冲 fullFrame_ 浅共享给上层，
     // 而 Damage 区域抓取路径会在同一缓冲上 memcpy 原地改写。若这里只存 QImage 引用，
     // 编码线程出队时可能读到被捕获线程并发改写的半新半旧帧 → 画面撕裂/花屏。
-    frameQueue_.enqueue(frame.copy());
+    frameQueue_.enqueue(copy);
     condition_.wakeOne();
 }
 

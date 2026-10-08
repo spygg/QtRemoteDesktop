@@ -157,7 +157,9 @@ void JpegCompressor::processLoop()
             int sw = image.width() * effScale / 100;
             int sh = image.height() * effScale / 100;
             if (sw > 0 && sh > 0)
-                image = image.scaled(sw, sh, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                // [V-5] FastTransformation：Smooth 双线性过滤对全帧缩放耗时不小且
+                // 拉长单帧编码耗时 → 丢帧率升高；JPEG 再压缩会抹平差异，肉眼难辨。
+                image = image.scaled(sw, sh, Qt::KeepAspectRatio, Qt::FastTransformation);
         }
 
         // 图片模式画质上限 70：q80 以上 JPEG 编码耗时急剧上升但肉眼提升有限，
@@ -300,7 +302,9 @@ void RDPServer::loadServerConfig(const QString& configPath)
         root["ssl"] = false;
         root["httpPort"] = 8080;
         root["console"] = false;
-        root["fps"] = 30;
+        // 默认 60fps：30fps 的 33ms 采样量化是运动不连贯的直接来源。静态桌面
+        // 有 checksum/XDamage 去重兜底不会白耗 CPU；已有配置文件不受影响。
+        root["fps"] = 60;
         root["quality"] = 60;
         root["scale"] = 75;
         root["codec"] = "h264";
@@ -517,6 +521,15 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     // 剪贴板服务：系统剪贴板变化（文本/图片）→ 广播给所有客户端
     clipboardService_ = std::unique_ptr<ClipboardService>(new ClipboardService(this));
     clipboardService_->start();
+
+    // [流畅度] 光标位置独立 33Hz 广播：与视频帧解耦（原挂在 onFrameCaptured，
+    // 静止桌面时 overlay 完全不更新、运动时上报率=帧率被抓屏延迟拖累）。
+    // XQueryPointer 本地往返 <0.1ms，33Hz 主线程开销可忽略；
+    // broadcastCursorPos 内部自带无客户端/位置未变跳过。
+    cursorTimer_ = new QTimer(this);
+    connect(cursorTimer_, &QTimer::timeout, this, &RDPServer::broadcastCursorPos);
+    cursorTimer_->start(30);
+
     connect(clipboardService_.get(), &ClipboardService::contentChanged,
         this, [this](const QString& mime, const QByteArray& data) {
             // [N1] 服务模式下 helper 通道已上报同一内容，这里不再重复广播
@@ -3032,6 +3045,29 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 {
     qInfo() << "Client disconnected:" << clientId;
 
+    // [B-1] 释放该客户端按下的所有键：断网/关标签页时前端 blur 兜底收不到，
+    // 远端按键会永久卡死（无限自动重复 / 修饰键卡住）。回放 keyup 带全 false
+    // 修饰键顺带复位修饰键状态；保留原 keycode 供 Windows VK 注入。
+    const QHash<QString, QJsonObject> pressed = pressedKeysByClient_.take(clientId);
+    if (!pressed.isEmpty()) {
+        qInfo() << "Releasing" << pressed.size() << "stuck key(s) for disconnected client";
+        for (auto it = pressed.constBegin(); it != pressed.constEnd(); ++it) {
+            QJsonObject up = it.value();
+            up["type"] = "keyup";
+            up["ctrl"] = false;
+            up["alt"] = false;
+            up["shift"] = false;
+            up["meta"] = false;
+            if (serviceMode_ && wsServer_->isCaptureSourceConnected())
+                wsServer_->sendToCaptureSource(up); // helper 消息为扁平结构，与转发路径一致
+            if (inputManager_)
+                inputManager_->injectKeyboard(up["keycode"].toInt(), it.key(), false,
+                                              false, false, false, false,
+                                              up["isChar"].toBool(), false);
+        }
+    }
+
+
 #ifdef USE_WEBRTC
     // 清理该客户端的 WebRTC 会话（并退出 WS 帧广播排除列表）
     if (webrtcSessions_.contains(clientId))
@@ -3056,6 +3092,25 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 {
     // config 和 set_resolution 需要在 service mode 转发前先本地处理
     QString type = input["type"].toString();
+
+    // [B-1] 记录本客户端按下的键（code 为唯一标识，存最近 keydown 完整载荷，
+    // Windows 端 keyup 需要原 keycode 作 VK）。isChar 的 Unicode 注入键也可能
+    // 卡住，一并跟踪。所有模式（直连/转发 helper）统一在此记录，断开时回放 keyup。
+    if (type == QLatin1String("keydown") || type == QLatin1String("keyup")) {
+        const QString code = input["code"].toString();
+        if (!code.isEmpty()) {
+            if (type == QLatin1String("keydown")) {
+                pressedKeysByClient_[clientId][code] = input;
+            } else {
+                auto it = pressedKeysByClient_.find(clientId);
+                if (it != pressedKeysByClient_.end()) {
+                    it->remove(code);
+                    if (it->isEmpty())
+                        pressedKeysByClient_.erase(it);
+                }
+            }
+        }
+    }
 
 #ifdef USE_WEBRTC
     // WebRTC 信令（signal_*）：服务模式下仅当本地捕获可用（Linux 服务进程自身
@@ -3397,6 +3452,13 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 screenCapturer_->stop();
             if (screenCapturer_ && !screenCapturer_->start(configFps_))
                 qWarning() << "Failed to restart capturer after resolution change";
+            // [B-4] 同步输入归一化基准：uinput 绝对定位按屏幕尺寸缩放 0..65535，
+            // 不同步会导致切分辨率后鼠标坐标系统性偏移（helper 路径已修、此处为直连路径）。
+            // 优先用抓屏器回报的实际尺寸（显示器可能未精确应用请求的模式）。
+            if (inputManager_)
+                inputManager_->setScreenSize(
+                    screenCapturer_ && screenCapturer_->width() > 0 ? screenCapturer_->width() : w,
+                    screenCapturer_ && screenCapturer_->height() > 0 ? screenCapturer_->height() : h);
 #ifdef USE_FFMPEG
             // 分辨率变化后必须重建编码器：sws/编码器上下文仍按旧尺寸建立，
             // 继续投帧会让 sws_scale 按旧宽度读新帧 → 堆越界读。
@@ -3515,13 +3577,17 @@ void RDPServer::onFrameCaptured(const QImage& frame)
         if (jpegCompressor_)
             jpegCompressor_->enqueue(frame);
     }
+}
 
-    // 鼠标光标位置广播（仅在位置变化时发送，避免每帧无意义传输）
-    // X11 下 QCursor::pos() 是 XQueryPointer 同步往返，节流到 ~20Hz 避免拖慢主线程
-    qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if (nowMs - lastCursorQueryMs_ < 50)
+void RDPServer::broadcastCursorPos()
+{
+    // [流畅度] 光标位置广播与视频帧解耦：原逻辑挂在 onFrameCaptured 里，
+    // 静止桌面（Damage 为空）时完全不上报 → 前端光标 overlay 卡死在旧位置；
+    // 运动时上报率 = 帧率且被整条抓屏路径延迟拖累。独立 33Hz 定时器后
+    // 光标 overlay 只滞后注入 ~30ms（+前端开环预测见 index.html）。
+    if (!wsServer_ || wsServer_->clients().isEmpty())
         return;
-    lastCursorQueryMs_ = nowMs;
+
     // Linux 服务模式为 QCoreApplication，QCursor::pos() 恒为 (0,0)；
     // 由 InputManager 用 XQueryPointer 提供真实光标位置
     QPoint cursorPos = inputManager_ ? inputManager_->cursorPosition() : QCursor::pos();

@@ -81,6 +81,8 @@ int HelperProcess::run(int argc, char* argv[])
     std::unique_ptr<JpegCompressor> compressor(new JpegCompressor(nullptr));
 
     bool quitting = false;   // 退出标志：退出流程启动后禁止再访问/重连栈对象
+    // [B-5] 前置声明：WS connected 处理器在重连后触发一次剪贴板重读
+    QTimer* clipTimer = nullptr;
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
@@ -91,6 +93,10 @@ int HelperProcess::run(int argc, char* argv[])
         info["width"] = capturer.width();
         info["height"] = capturer.height();
         ws.sendTextMessage(QString::fromUtf8(QJsonDocument(info).toJson(QJsonDocument::Compact)));
+        // [B-5] 重连后重读当前剪贴板：断线窗口内复制的内容此前因未发送成功
+        // 不记账（回声抑制只在发送成功后记录），此时补传。
+        if (clipTimer)
+            clipTimer->start();
     });
     QObject::connect(&ws, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
         &app, [&](QAbstractSocket::SocketError err) {
@@ -151,6 +157,7 @@ int HelperProcess::run(int argc, char* argv[])
     InputManager inputMgr;
     // 输入坐标归一化基准与上报前端的 screen_info 一致（高 DPI 缩放）
     inputMgr.setScreenSize(capturer.width(), capturer.height());
+    int captureFps = 30; // [B-6] 客户端配置的帧率缓存（config 消息更新）
 
     // 共享剪贴板：监听用户会话剪贴板变化，去抖后上报给服务端（服务端广播给所有客户端）
     QString lastClipText;
@@ -177,7 +184,7 @@ int HelperProcess::run(int argc, char* argv[])
 #endif
         return h.result();
     };
-    QTimer* clipTimer = new QTimer(&app);
+    clipTimer = new QTimer(&app); // [B-5] 赋值给前置声明的指针
     clipTimer->setSingleShot(true);
     clipTimer->setInterval(150);
     QObject::connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, &app, [&]() {
@@ -192,18 +199,20 @@ int HelperProcess::run(int argc, char* argv[])
                 const QByteArray sig = clipImageSig(img);
                 if (sig == lastClipImageSig)
                     return;  // 自己写入的回声
+                // [B-5] 断线时不记账：签名只在发送成功后记录，否则重连后该内容
+                // 会被误判为回声而永久丢失。
+                if (ws.state() != QAbstractSocket::ConnectedState)
+                    return;
                 QBuffer buf;
                 buf.open(QIODevice::WriteOnly);
                 if (img.save(&buf, "PNG") && !buf.data().isEmpty()) {
-                    lastClipImageSig = sig;
-                    lastClipText.clear();
-                    if (ws.state() != QAbstractSocket::ConnectedState)
-                        return;
                     QJsonObject msg;
                     msg["type"] = "clipboard";
                     msg["mime"] = "image/png";
                     msg["data"] = QString::fromLatin1(buf.data().toBase64());
                     ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
+                    lastClipImageSig = sig;
+                    lastClipText.clear();
                     return;
                 }
             }
@@ -211,10 +220,11 @@ int HelperProcess::run(int argc, char* argv[])
         QString t = QGuiApplication::clipboard()->text();
         if (t.isEmpty() || t == lastClipText)
             return;
-        lastClipText = t;
-        lastClipImageSig.clear();
+        // [B-5] 断线时不记账，重连后由 connected 处理器补传
         if (ws.state() != QAbstractSocket::ConnectedState)
             return;
+        lastClipText = t;
+        lastClipImageSig.clear();
         QJsonObject msg;
         msg["type"] = "clipboard";
         msg["text"] = t;
@@ -256,7 +266,10 @@ int HelperProcess::run(int argc, char* argv[])
                 qInfo() << "Helper: changing resolution to" << w << "x" << h;
                 if (ScreenCapturer::changeDisplayResolution(w, h)) {
                     capturer.stop();
-                    capturer.start(30);
+                    // [B-6] 用客户端配置的帧率重启（原硬编码 30 会让 fps 配置静默
+                    // 回退），start 失败必须告警——否则画面永久冻结且无任何线索。
+                    if (!capturer.start(captureFps))
+                        qWarning() << "Helper: capturer restart after resolution change FAILED";
                     // [H9] 输入归一化基准必须同步更新：仅在启动时 setScreenSize 一次，
                     // 切分辨率后仍是旧尺寸 → 服务模式鼠标系统性偏移
                     inputMgr.setScreenSize(w, h);
@@ -479,8 +492,10 @@ int HelperProcess::run(int argc, char* argv[])
                             << (scale >= 10 && scale <= 100 ? scale : 100);
                 }
                 int fps = obj["fps"].toInt();
-                if (fps >= 1)
+                if (fps >= 1) {
                     capturer.setFps(fps);
+                    captureFps = fps; // [B-6] 记住配置帧率，供切分辨率后重启使用
+                }
                 return;
             }
 

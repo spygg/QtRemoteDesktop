@@ -297,8 +297,11 @@ void InputManager::injectMouseMove(int x, int y) {
     }
     if (!xDisplay_) return;
     Display* d = xdisp(xDisplay_);
-    XWarpPointer(d, None, DefaultRootWindow(d), 0, 0, 0, 0, x, y);
-    XSync(d, False);
+    // XTest 真实设备语义（与按钮/键盘路径统一）+ XFlush 异步刷出：
+    // 原实现 XWarpPointer（程序传送语义，不经指针处理管线）+ XSync（同步往返，
+    // 60Hz mousemove 时主线程每秒阻塞等待 60 次）。
+    XTestFakeMotionEvent(d, -1, x, y, CurrentTime);
+    XFlush(d);
 }
 
 QPoint InputManager::cursorPosition() const
@@ -376,10 +379,15 @@ void InputManager::injectWheel(int delta) {
     // wheel 消息本身不带坐标：先把指针移到最近一次注入的位置，再发按钮事件
     if (lastInjX_ != 0 || lastInjY_ != 0)
         injectMouseMove(lastInjX_, lastInjY_);
+    // [I-2] 按幅度注入：X11 Button4/5 每对 press/release = 1 格，循环 |delta| 次
     unsigned int button = delta > 0 ? Button4 : Button5;
-    XTestFakeButtonEvent(xdisp(xDisplay_), button, True, CurrentTime);
-    XTestFakeButtonEvent(xdisp(xDisplay_), button, False, CurrentTime);
-    XFlush(xdisp(xDisplay_));
+    Display* d = xdisp(xDisplay_);
+    const int steps = qBound(1, qAbs(delta), 5);
+    for (int i = 0; i < steps; ++i) {
+        XTestFakeButtonEvent(d, button, True, CurrentTime);
+        XTestFakeButtonEvent(d, button, False, CurrentTime);
+    }
+    XFlush(d);
 }
 
 void InputManager::primeFocusWindow() {
@@ -491,7 +499,9 @@ bool InputManager::initUinput()
     ioctl(fd, UI_SET_EVBIT, EV_KEY);
     ioctl(fd, UI_SET_EVBIT, EV_SYN);
 
-    for (int i = 1; i <= 126; i++)
+    // 注册到 248（KEY_MIN_INTERESTING 内安全范围）：Menu 键映射 KEY_COMPOSE(127)，
+    // 原上限 126 会导致 UI_SET_KEYBIT 对 127 失败 → uinput 注入 Menu 键无效。
+    for (int i = 1; i <= 248; i++)
         ioctl(fd, UI_SET_KEYBIT, i);
 
 #ifdef UI_DEV_SETUP
@@ -546,6 +556,12 @@ bool InputManager::initUinputMouse()
 {
     if (uinputMouseFd_ >= 0 && uinputWheelFd_ >= 0)
         return true;
+
+    // [B-3] 修复泄漏：指针设备已在而滚轮设备缺失（如首次滚轮创建失败）时，
+    // 只补建滚轮设备。原实现重入会再开一个指针设备且旧 fd 未 close 即被覆盖，
+    // 每次滚轮事件泄漏一个设备 + fd 直至耗尽。
+    if (uinputMouseFd_ >= 0)
+        return initUinputWheelDevice();
 
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
@@ -606,33 +622,43 @@ bool InputManager::initUinputMouse()
     usleep(200000);
 
     // ---- 滚轮设备（EV_REL，独立设备避免与绝对定位冲突）----
-    int wfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
-    if (wfd < 0)
-        wfd = open("/dev/input/uinput", O_WRONLY | O_NONBLOCK);
-    if (wfd >= 0) {
-        ioctl(wfd, UI_SET_EVBIT, EV_REL);
-        ioctl(wfd, UI_SET_EVBIT, EV_SYN);
-        ioctl(wfd, UI_SET_RELBIT, REL_WHEEL);
-        ioctl(wfd, UI_SET_RELBIT, REL_HWHEEL);
-#ifdef UI_DEV_SETUP
-        struct uinput_setup wsetup = {};
-        wsetup.id.bustype = BUS_USB;
-        wsetup.id.vendor = 0x1234;
-        wsetup.id.product = 0x567A;
-        snprintf(wsetup.name, sizeof(wsetup.name), "QtRemoteDesktop Virtual Wheel");
-        ioctl(wfd, UI_DEV_SETUP, &wsetup);
-#endif
-        if (ioctl(wfd, UI_DEV_CREATE) < 0) {
-            close(wfd);
-            wfd = -1;
-        }
-        uinputWheelFd_ = wfd;
-        if (uinputWheelFd_ >= 0)
-            usleep(200000);  // 滚轮设备热插拔延迟，防首个滚轮事件丢失
-    }
+    initUinputWheelDevice();
 
     qInfo() << "InputManager: uinput mouse devices created (pointer" << uinputMouseFd_
             << "wheel" << uinputWheelFd_ << ")";
+    return true;
+}
+
+bool InputManager::initUinputWheelDevice()
+{
+    if (uinputWheelFd_ >= 0)
+        return true;
+    int wfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (wfd < 0)
+        wfd = open("/dev/input/uinput", O_WRONLY | O_NONBLOCK);
+    if (wfd < 0) {
+        qWarning() << "InputManager: cannot open uinput for wheel device";
+        return false;
+    }
+    ioctl(wfd, UI_SET_EVBIT, EV_REL);
+    ioctl(wfd, UI_SET_EVBIT, EV_SYN);
+    ioctl(wfd, UI_SET_RELBIT, REL_WHEEL);
+    ioctl(wfd, UI_SET_RELBIT, REL_HWHEEL);
+#ifdef UI_DEV_SETUP
+    struct uinput_setup wsetup = {};
+    wsetup.id.bustype = BUS_USB;
+    wsetup.id.vendor = 0x1234;
+    wsetup.id.product = 0x567A;
+    snprintf(wsetup.name, sizeof(wsetup.name), "QtRemoteDesktop Virtual Wheel");
+    ioctl(wfd, UI_DEV_SETUP, &wsetup);
+#endif
+    if (ioctl(wfd, UI_DEV_CREATE) < 0) {
+        close(wfd);
+        qWarning() << "InputManager: wheel UI_DEV_CREATE failed";
+        return false;
+    }
+    uinputWheelFd_ = wfd;
+    usleep(200000);  // 滚轮设备热插拔延迟，防首个滚轮事件丢失
     return true;
 }
 
@@ -685,8 +711,12 @@ bool InputManager::sendUinputWheel(int delta)
 {
     if (uinputWheelFd_ < 0)
         return false;
+    // [I-2] 保留滚动幅度：REL_WHEEL 的 value 即格数（正=上/负=下），
+    // 原实现 ±1 丢失幅度（触控板/高速滚动被压成单格）。钳制 ±5 防事件风暴。
+    if (delta > 5) delta = 5;
+    if (delta < -5) delta = -5;
     struct input_event ev = {};
-    ev.type = EV_REL; ev.code = REL_WHEEL; ev.value = delta > 0 ? 1 : -1;
+    ev.type = EV_REL; ev.code = REL_WHEEL; ev.value = delta;
     if (write(uinputWheelFd_, &ev, sizeof(ev)) != static_cast<ssize_t>(sizeof(ev)))
         return false;
     ev.type = EV_SYN; ev.code = SYN_REPORT; ev.value = 0;

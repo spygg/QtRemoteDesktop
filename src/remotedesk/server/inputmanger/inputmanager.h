@@ -77,6 +77,7 @@ private:
     bool sendUinputMouseButton(int button, bool isDown);
     bool sendUinputWheel(int delta);
     bool initUinputMouse();
+    bool initUinputWheelDevice(); // [B-3] 独立创建滚轮设备，补建时不再重开指针设备
     unsigned short keysymToLinuxKeycode(unsigned long ks);
     unsigned long lockScreenWindow_ = 0;
     qint64 focusCheckedMs_ = 0;

@@ -125,6 +125,7 @@ private slots:
     void onClientDisconnected(const QString& clientId);
     void onInputReceived(const QString& clientId, const QJsonObject& input);
     void onFrameCaptured(const QImage& frame);
+    void broadcastCursorPos(); // [流畅度] 光标位置独立定时器广播（与视频帧解耦）
     void onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp);
     void onHttpNewConnection();
     void onHttpRequest();
@@ -255,6 +256,10 @@ private:
     bool captureAvailable_ = true;
     QString shellCurrentDir_;
     QMap<QString, QString> shellCwdByToken_; // [B9] 会话令牌 → shell CWD
+    // [B-1] 客户端 → 按下的键集合（code → 最近 keydown 载荷，保留 keycode 供
+    // Windows VK 回放）。断开时逐个补发 keyup，否则按键永久卡死（无限自动
+    // 重复 / 修饰键卡住全部变组合键）。
+    QMap<QString, QHash<QString, QJsonObject>> pressedKeysByClient_;
 
     // 每个 HTTP 连接的请求解析状态（跨 readyRead 累积，避免主线程阻塞）
     QHash<QTcpSocket*, HttpParseState> httpParseState_;
@@ -283,6 +288,7 @@ private:
     void loadServerConfig(const QString& configPath);
     void saveServerConfig(const QString& configPath);
     QTimer* configSaveTimer_ = nullptr; // [P2] 去抖落盘定时器
+    QTimer* cursorTimer_ = nullptr;     // [流畅度] 光标位置 33Hz 独立广播定时器
     // [P2] 配置去抖落盘：单条 config 消息可同时改 fps/scale/codec/hw_encode，
     // 逐字段同步写盘 = 一条消息 4 次全量 JSON 序列化+文件 IO。聚合到 800ms 一次。
     void scheduleSaveConfig();

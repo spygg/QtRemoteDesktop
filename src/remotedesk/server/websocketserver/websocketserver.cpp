@@ -361,8 +361,22 @@ void WebSocketServer::broadcastFrame(const QByteArray& data, bool isKeyframe, qi
     if (clients_.isEmpty())
         return;
 
+    // [V-3] 先统计有资格收帧的客户端数：纯 WebRTC 场景（全部 mediaExcluded）
+    // 原实现仍无条件构建整帧 packet（关键帧 2MB × 30fps = 每秒 60MB 白拷贝）。
+    bool anyEligible = false;
+    for (auto it = clients_.constBegin(); it != clients_.constEnd(); ++it) {
+        if (!mediaExcludedClients_.contains(it.key())
+                && it.value()->state() == QAbstractSocket::ConnectedState) {
+            anyEligible = true;
+            break;
+        }
+    }
+    if (!anyEligible)
+        return;
+
     // 构造二进制包： [1字节帧类型] [4字节大端长度] [8字节大端时间戳] [数据]
     QByteArray packet;
+    packet.reserve(data.size() + 13);
     QDataStream stream(&packet, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
 
