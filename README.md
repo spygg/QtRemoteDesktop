@@ -6,7 +6,7 @@ QtRemoteDesktop is a self-hosted, open-source remote desktop solution. The **cli
 
 > 🇨🇳 中文版见 [下半部分](#中文版chinese)
 
-[![GitHub stars](https://img.shields.io/github/stars/spygg/QtRemoteDesktop)](https://github.com/spygg/QtRemoteDesktop) [![GitHub forks](https://img.shields.io/github/forks/spygg/QtRemoteDesktop)](https://github.com/spygg/QtRemoteDesktop) [![Language: C++](https://img.shields.io/badge/language-C%2B%2B%2FQt-blue)](https://github.com/spygg/QtRemoteDesktop) [![Platform: Windows/Linux/macOS/Android](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-lightgrey)](https://github.com/spygg/QtRemoteDesktop) [![Client: Browser](https://img.shields.io/badge/client-Browser%20(no%20install)-green)](https://github.com/spygg/QtRemoteDesktop) [![Transport: WebRTC/MSE/JPEG](https://img.shields.io/badge/transport-WebRTC%20%7C%20MSE%20%7C%20JPEG-orange)](https://github.com/spygg/QtRemoteDesktop)
+[![License: MIT](https://img.shields.io/github/license/spygg/QtRemoteDesktop)](https://github.com/spygg/QtRemoteDesktop) [![GitHub stars](https://img.shields.io/github/stars/spygg/QtRemoteDesktop)](https://github.com/spygg/QtRemoteDesktop) [![GitHub forks](https://img.shields.io/github/forks/spygg/QtRemoteDesktop)](https://github.com/spygg/QtRemoteDesktop) [![Language: C++](https://img.shields.io/badge/language-C%2B%2B%2FQt-blue)](https://github.com/spygg/QtRemoteDesktop) [![Platform: Windows/Linux/macOS/Android](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-lightgrey)](https://github.com/spygg/QtRemoteDesktop) [![Client: Browser](https://img.shields.io/badge/client-Browser%20(no%20install)-green)](https://github.com/spygg/QtRemoteDesktop) [![Transport: WebRTC/MSE/JPEG](https://img.shields.io/badge/transport-WebRTC%20%7C%20MSE%20%7C%20JPEG-orange)](https://github.com/spygg/QtRemoteDesktop)
 
 ---
 
@@ -171,7 +171,7 @@ Issues and Pull Requests are welcome. Please open an issue first for major chang
 
 ## 📄 License
 
-See the `LICENSE` file in the repository.
+This project is licensed under the **MIT License** — free to use, modify, distribute and sell, even commercially, as long as the copyright notice is retained. See the [LICENSE](LICENSE) file for details.
 
 ---
 ---
@@ -347,4 +347,4 @@ A: 锁屏后仍可操作：浏览器显示锁屏 UI，可输入密码或一键�
 
 ## 📄 许可证
 
-请见仓库内 `LICENSE` 文件。
+本项目采用 **MIT 许可证** —— 可免费用于使用、修改、分发甚至商业销售，只需保留版权声明。详见 [LICENSE](LICENSE) 文件。
