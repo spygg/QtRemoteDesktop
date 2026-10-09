@@ -97,7 +97,23 @@
                 opts.body = JSON.stringify(body);
             }
             const resp = await fetch(url, opts);
-            return resp.json();
+            // 会话失效时服务端返回登录页 HTML（非 JSON），其它 4xx/5xx 可能是纯文本。
+            // 旧实现直接 resp.json()：解析失败抛 SyntaxError 且无人 catch → 页面静默
+            // 无反应（点了按钮什么也没发生）。这里统一收敛成可读错误再由调用方展示。
+            const text = await resp.text();
+            let data = null;
+            try { data = text ? JSON.parse(text) : {}; } catch (e) { data = null; }
+            if (!resp.ok) {
+                if (resp.status === 401) throw new Error('会话已失效，请重新登录');
+                throw new Error((data && data.error) || ('请求失败 (HTTP ' + resp.status + ')'));
+            }
+            if (data === null) throw new Error('服务端返回了非 JSON 响应');
+            return data;
+        }
+
+        function showError(msg) {
+            const err = document.getElementById('error-msg');
+            if (err) { err.textContent = msg; err.classList.add('visible'); }
         }
 
         function escapeHtml(str) {
@@ -106,8 +122,15 @@
         }
 
         async function loadUsers() {
-            const data = await api('GET', '/api/users');
             const tbody = document.getElementById('user-list');
+            let data;
+            try {
+                data = await api('GET', '/api/users');
+            } catch (e) {
+                tbody.innerHTML = '<tr><td class="empty" colspan="3">加载失败</td></tr>';
+                showError(e.message || '加载用户列表失败');
+                return;
+            }
             if (data.users && data.users.length > 0) {
                 tbody.innerHTML = data.users.map(u => {
                     const hasPwd = u.hasPassword ? '是' : '否';
@@ -149,8 +172,16 @@
             }
 
             btn.disabled = true;
-            const result = await api('POST', '/api/users/add', { username, password });
-            btn.disabled = false;
+            let result;
+            try {
+                result = await api('POST', '/api/users/add', { username, password });
+            } catch (e) {
+                err.textContent = e.message || '添加失败';
+                err.classList.add('visible');
+                return;
+            } finally {
+                btn.disabled = false;
+            }
 
             if (result.success) {
                 suc.textContent = '用户 ' + username + ' 添加成功';
@@ -166,7 +197,13 @@
 
         async function deleteUser(username) {
             if (!confirm('确定要删除用户 "' + username + '" 吗？')) return;
-            const result = await api('POST', '/api/users/delete', { username });
+            let result;
+            try {
+                result = await api('POST', '/api/users/delete', { username });
+            } catch (e) {
+                showError(e.message || '删除失败');
+                return;
+            }
             if (result.success) {
                 loadUsers();
             } else {
@@ -174,7 +211,9 @@
             }
         }
 
-        loadUsers();
+        // 顶层调用：api() 现在会抛错，必须兜底，否则未捕获的 Promise rejection
+        // 会静默吞掉（控制台一条红字，页面看不出任何异常）。
+        loadUsers().catch(e => showError(e.message || '加载用户列表失败'));
     </script>
 </body>
 </html>

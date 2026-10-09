@@ -1,5 +1,6 @@
 #include "websocketserver.h"
 #include <QDataStream>
+#include <QDateTime>
 #include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -12,6 +13,21 @@
 // 只作用于媒体广播，不碰控制类 JSON（体量小且不能丢）。
 static const qint64 kMaxSocketBacklogBytes = 8 * 1024 * 1024;
 
+// 普通远程客户端连接数上限。每条连接都会在 clients_ / socketToId_ / pendingBytes_
+// 里留一份状态，且会被纳入视频广播列表；无上限时局域网内一堆（或失控脚本反复）
+// 连接会线性抬高每帧广播开销并吃掉内存。超出直接拒绝，不排队。
+static const int kMaxClients = 32;
+
+// 单条入站消息大小上限。上传/输入都是小块，采集帧也只有数 MB；超过此值基本可判为
+// 异常或恶意构造，丢弃而不是让它进入后续解析（大块解析本身就是内存放大点）。
+// Qt 5.15+ 另有 setMaxAllowedIncomingMessageSize 可在协议层直接掐断（见 handleNewSocket）。
+static const qint64 kMaxInboundMessageBytes = 16 * 1024 * 1024;
+static const int kMaxInboundTextBytes = 1024 * 1024;
+
+// 半开连接清理阈值：前端每 15s 发一次 ping，正常连接不可能 180s 无任何上行消息。
+static const qint64 kClientIdleTimeoutMs = 180000;
+static const int kIdleSweepIntervalMs = 30000;
+
 WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent)
     : QObject(parent)
     , server_(new QWebSocketServer(QStringLiteral("RemoteDesktopServer"),
@@ -20,10 +36,29 @@ WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent
 {
     connect(server_, &QWebSocketServer::newConnection,
         this, &WebSocketServer::onNewConnection);
+
+    idleTimer_.setInterval(kIdleSweepIntervalMs);
+    connect(&idleTimer_, &QTimer::timeout, this, [this]() {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const QStringList ids = clients_.keys();
+        for (const QString& id : ids) {
+            QWebSocket* s = clients_.value(id);
+            if (!s || s->state() != QAbstractSocket::ConnectedState)
+                continue;
+            const qint64 last = lastActivityMs_.value(id, now);
+            if (now - last > kClientIdleTimeoutMs) {
+                qWarning() << "WS client idle timeout, dropping:" << id;
+                // 复用 dropClient 的清理路径（断开信号连接 + 从各表摘除 + emit）
+                dropClient(id);
+            }
+        }
+    });
+    idleTimer_.start();
 }
 
 WebSocketServer::~WebSocketServer()
 {
+    idleTimer_.stop();
     // 先断开信号，防止删除时触发 onSocketDisconnected
     for (QWebSocket* socket : clients_.values()) {
         disconnect(socket, nullptr, this, nullptr);
@@ -162,6 +197,22 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
     }
 
     // 普通远程客户端
+    // 连接数上限：超限直接拒绝，避免无限连接抬高广播开销与内存占用
+    if (clients_.size() >= kMaxClients) {
+        qWarning() << "WS rejected: too many clients (" << clients_.size() << ")";
+        socket->close(QWebSocketProtocol::CloseCodePolicyViolated,
+                      QStringLiteral("too many connections"));
+        socket->deleteLater();
+        return;
+    }
+
+    // Qt 5.15+ 可在协议层限制入站消息大小（分片会在接收阶段就被拒绝）；
+    // 更早版本没有该 API，靠下面 onTextMessageReceived/onBinaryMessageReceived 的
+    // 手动长度检查兜底。
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    socket->setMaxAllowedIncomingMessageSize(kMaxInboundMessageBytes);
+#endif
+
     QString clientId = QUuid::createUuid().toString();
 
     QString token;
@@ -190,6 +241,7 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
 
     clients_[clientId] = socket;
     socketToId_[socket] = clientId;
+    lastActivityMs_[clientId] = QDateTime::currentMSecsSinceEpoch();
     if (!token.isEmpty())
         clientTokens_[clientId] = token;
 
@@ -203,17 +255,58 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             return;
         const qint64 v = pendingBytes_.value(id) - n;
         pendingBytes_[id] = v > 0 ? v : 0;
-        // [C5-①] 同步扣减下载未写出字节数（近似：字节总量对账，限流用途足够）
-        qint64 cur = downloadBacklog_.load(std::memory_order_relaxed);
-        while (cur > 0) {
-            const qint64 take = qMin(n, cur);
-            if (downloadBacklog_.compare_exchange_weak(cur, cur - take,
-                    std::memory_order_relaxed))
-                break;
+        // [C5-①] 扣减该客户端自己的下载未写出份额，再据此扣减全局总量
+        // （近似：字节总量对账，限流用途足够）。只扣自己的份额，避免
+        // 把别人的积压也算进来提前解除限流。
+        auto it = downloadBacklogByClient_.find(id);
+        if (it != downloadBacklogByClient_.end() && it.value() > 0) {
+            const qint64 take = qMin(n, it.value());
+            it.value() -= take;
+            qint64 cur = downloadBacklog_.load(std::memory_order_relaxed);
+            while (cur > 0) {
+                const qint64 t = qMin(take, cur);
+                if (downloadBacklog_.compare_exchange_weak(cur, cur - t,
+                        std::memory_order_relaxed))
+                    break;
+            }
+            if (it.value() <= 0)
+                downloadBacklogByClient_.erase(it);
         }
     });
 
     emit clientConnected(clientId);
+}
+
+void WebSocketServer::addDownloadBacklog(const QString& clientId, qint64 delta)
+{
+    if (delta == 0 || clientId.isEmpty())
+        return;
+    downloadBacklogByClient_[clientId] += delta;
+    downloadBacklog_.fetch_add(delta, std::memory_order_relaxed);
+}
+
+void WebSocketServer::releaseDownloadBacklog(const QString& clientId)
+{
+    auto it = downloadBacklogByClient_.find(clientId);
+    if (it == downloadBacklogByClient_.end())
+        return;
+    const qint64 own = it.value();
+    downloadBacklogByClient_.erase(it);
+    if (own <= 0)
+        return;
+    qint64 cur = downloadBacklog_.load(std::memory_order_relaxed);
+    while (cur > 0) {
+        const qint64 take = qMin(own, cur);
+        if (downloadBacklog_.compare_exchange_weak(cur, cur - take,
+                std::memory_order_relaxed))
+            break;
+    }
+}
+
+void WebSocketServer::touchClient(const QString& clientId)
+{
+    if (!clientId.isEmpty())
+        lastActivityMs_[clientId] = QDateTime::currentMSecsSinceEpoch();
 }
 
 void WebSocketServer::onSocketDisconnected()
@@ -226,9 +319,11 @@ void WebSocketServer::onSocketDisconnected()
     clients_.remove(clientId);
     videoStarted_.remove(clientId);
     pendingBytes_.remove(clientId);
-    // [C5-①] 断线时清零下载积压：工作线程的背压轮询依赖该值下降退出，
-    // 不清零会对已消失的连接死等（查询回调同时返回 0，双保险）
-    downloadBacklog_.store(0, std::memory_order_relaxed);
+    lastActivityMs_.remove(clientId);
+    // [C5-①] 只释放该客户端自己的下载积压份额。旧实现无条件全局清零，
+    // 会在多客户端并发下载时把别人的节流一并解除（大目录传输重新撑爆内存）。
+    // 若该客户端的传输任务仍在跑，工作线程的查询回调会返回其份额 0，不会死等。
+    releaseDownloadBacklog(clientId);
     // clientId 是每条连接新建的 UUID，若不清理 clientTokens_，
     // 每次断线都会残留一条 token→会话映射，长期运行（含频繁重连）单调增长。
     clientTokens_.remove(clientId);
@@ -246,6 +341,12 @@ void WebSocketServer::onTextMessageReceived(const QString& message)
     QString clientId = socketToId_.value(socket);
     if (clientId.isEmpty())
         return;
+    touchClient(clientId);
+
+    if (message.size() > kMaxInboundTextBytes) {
+        qWarning() << "Oversized text message from client, dropped:" << message.size();
+        return;
+    }
 
     QJsonParseError error;
     QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
@@ -276,12 +377,22 @@ void WebSocketServer::onTextMessageReceived(const QString& message)
 void WebSocketServer::onBinaryMessageReceived(const QByteArray& message)
 {
     if (message.size() < 1) return;
-    quint8 frameType = static_cast<quint8>(message[0]);
 
+    // 入站消息大小上限：上传/输入都是分块小消息，超大帧基本可判异常，丢弃即可
+    // （Qt < 5.15 没有协议层限制 API，这里是唯一防线）
+    if (message.size() > kMaxInboundMessageBytes) {
+        qWarning() << "Oversized binary message from client, dropped:" << message.size();
+        return;
+    }
+
+    QWebSocket* src = qobject_cast<QWebSocket*>(sender());
     // 上传数据块必须绑定来源客户端：二进制帧本身不带身份，从 socket 反查
     QString clientId;
-    if (frameType == 0x10)
-        clientId = socketToId_.value(qobject_cast<QWebSocket*>(sender()));
+    if (src)
+        clientId = socketToId_.value(src);
+    touchClient(clientId);
+
+    quint8 frameType = static_cast<quint8>(message[0]);
 
     if (frameType == 0x10) {
         // 文件上传数据块: [0x10][4-byte path length][path UTF8][4-byte data length][data]
@@ -320,6 +431,8 @@ void WebSocketServer::dropClient(const QString& clientId)
     clientTokens_.remove(clientId);
     videoStarted_.remove(clientId);
     pendingBytes_.remove(clientId);
+    lastActivityMs_.remove(clientId);
+    releaseDownloadBacklog(clientId);
     socket->close(QWebSocketProtocol::CloseCodeNormal, "Authentication failed");
     socket->deleteLater();
     emit clientDisconnected(clientId);
@@ -497,6 +610,6 @@ void WebSocketServer::sendBinaryToClient(const QString& clientId, const QByteArr
     if (socket && socket->state() == QAbstractSocket::ConnectedState) {
         const qint64 queued = qMax<qint64>(0, socket->sendBinaryMessage(data));
         pendingBytes_[clientId] += queued;
-        addDownloadBacklog(queued);
+        addDownloadBacklog(clientId, queued);
     }
 }

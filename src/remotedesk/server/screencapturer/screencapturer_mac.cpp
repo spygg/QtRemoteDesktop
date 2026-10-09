@@ -212,3 +212,12 @@ QJsonArray ScreenCapturer::enumerateSupportedResolutions()
     // macOS: 可通过 CGDisplayCopyAllDisplayModes 枚举，暂未实现
     return QJsonArray();
 }
+
+// 多屏输出枚举/切换（macOS 暂未实现）。
+// 这四个方法在 screencapturer.h 中无条件声明、且 rdpserver.cpp 无平台守卫直接调用，
+// 缺定义会在 macOS / Android 目标上链接失败（undefined reference）。
+// 这里给出空实现保持 ABI 一致；前端收到空 outputs 即不显示多屏选择。
+QJsonArray ScreenCapturer::enumerateOutputs() const { return QJsonArray(); }
+bool ScreenCapturer::refreshOutputs() { return false; }
+bool ScreenCapturer::switchOutput(int) { return false; }
+int ScreenCapturer::currentOutputIndex() const { return -1; }

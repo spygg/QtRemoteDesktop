@@ -16,6 +16,8 @@
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
 void applyLogLevelFromArgs(int argc, char* argv[]);
+// 日志角色后缀：secure-input 与 service 是独立进程，共用日志文件会互相交错
+void setLogRoleSuffix(const QString& suffix);
 
 int SecureInputProcess::run(int argc, char* argv[], int wsPort)
 {
@@ -26,6 +28,7 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
     QString logDir = QString("%1/logs").arg(QCoreApplication::applicationDirPath());
     QDir().mkpath(logDir);
     applyLogLevelFromArgs(argc, argv);
+    setLogRoleSuffix(QStringLiteral("_secure-input"));
     qInstallMessageHandler(logToFile);
 
     bool useSsl = false;

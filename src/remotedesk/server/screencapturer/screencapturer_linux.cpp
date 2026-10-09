@@ -516,6 +516,12 @@ public:
         // Damage already subtracted in captureFrame(), no-op
     }
 
+    // 请求下一次 captureFrame 走全量抓取。外部"强制帧"（新客户端接入、关键帧泵）
+    // 必须用它：XDamage 报告无变化时 damage 路径会直接回 updated=false，
+    // 上层若照旧 return，强制帧就被吃掉，静止桌面下最长要等 ~2s 才有画面。
+    // 覆写基类 PlatformCapturer::requestFullCapture（x11Capturer_ 以基类指针持有）。
+    void requestFullCapture() override { forceFull_ = true; }
+
     bool regionDirty() const { return regionDirty_; }
 
     int width() const { return primaryW_ > 0 ? primaryW_ : width_; }
@@ -839,6 +845,19 @@ void ScreenCapturer::captureFrame()
             return;
         }
         captureFailCount_ = 0;
+
+        // 强制帧不能被"无变化"吃掉：新客户端接入 / request_keyframe 时上层置了
+        // forceFrameCount_，此时若 XDamage 无变化（静止桌面）必须重试一次全量抓取，
+        // 否则要等到桌面下次真实变化才能出帧（最长 ~2s）。
+        if (!updated && forceFrameCount_ > 0) {
+            x11Capturer_->requestFullCapture();
+            updated = true;
+            if (!x11Capturer_->captureFrame(frame, &updated)) {
+                captureFailCount_++;
+                return;
+            }
+            captureFailCount_ = 0;
+        }
 
         if (!updated) {
             // 无新帧（如静止时 Damage 为空）：同样递增 idle 计数并降频，

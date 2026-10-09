@@ -1,5 +1,7 @@
 #include "filetransferservice.h"
 #include <QDebug>
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QDirIterator>
 #include <QJsonDocument>
 #include <QProcess>
@@ -12,10 +14,22 @@
 #endif
 
 #ifdef Q_OS_WIN
+// 两代 Windows 的 profile 根：Vista+ 是 <SystemDrive>/Users，
+// XP/2003 是 <SystemDrive>/Documents and Settings。只查前者会让 XP 上
+// 永远找不到用户 profile，上传落点回落到 SYSTEM 账户的 systemprofile
+// （181 实锤：拖拽上传落进 C:/WINDOWS/system32/config/systemprofile）。
+static QStringList windowsProfileRoots()
+{
+    const QString systemDrive = QString::fromLocal8Bit(qgetenv("SystemDrive"));
+    const QString drive = systemDrive.isEmpty() ? QStringLiteral("C:") : systemDrive;
+    return { drive + QStringLiteral("/Users"),
+             drive + QStringLiteral("/Documents and Settings") };
+}
+
 // 推导「桌面用户」的 profile 目录：Windows 服务模式跑在 SYSTEM 账户
 // （session 0），QDir::homePath() 指向 C:/Windows/system32/config/systemprofile，
 // 桌面用户完全看不到文件——与 Linux root 落 /root 同款问题。这里取活动控制台
-// 会话（物理屏前的会话）的登录用户名，映射到 C:/Users/<name>。
+// 会话（物理屏前的会话）的登录用户名，映射到其 profile 目录。
 // 动态加载 wtsapi32，避免新增构建链接依赖。失败返回空串。
 static QString windowsDesktopUserHome()
 {
@@ -46,25 +60,65 @@ static QString windowsDesktopUserHome()
                 freeMem(domainBuf);
             }
             if (!userName.isEmpty()) {
-                const QString systemDrive = QString::fromLocal8Bit(qgetenv("SystemDrive"));
-                const QString profilesRoot =
-                    (systemDrive.isEmpty() ? QStringLiteral("C:") : systemDrive) + QStringLiteral("/Users");
-                // 本地/微软账户：C:/Users/<name>；域账户可能是 <name>.<domain>
+                // 本地/微软账户：<root>/<name>；域账户可能是 <name>.<domain>
                 const QStringList candidates = domainName.isEmpty()
                     ? QStringList{ userName }
                     : QStringList{ userName, userName + QLatin1Char('.') + domainName };
-                for (const QString& name : candidates) {
-                    const QDir profile(profilesRoot + QLatin1Char('/') + name);
-                    if (profile.exists()) {
-                        home = profile.path();
-                        break;
+                for (const QString& root : windowsProfileRoots()) {
+                    for (const QString& name : candidates) {
+                        const QDir profile(root + QLatin1Char('/') + name);
+                        if (profile.exists()) {
+                            home = profile.path();
+                            break;
+                        }
                     }
+                    if (!home.isEmpty())
+                        break;
                 }
             }
         }
     }
     ::FreeLibrary(wts);
     return home;
+}
+
+// 会话用户取不到（XP 欢迎屏预登录、服务先于登录启动等）：扫描两代 profile 根，
+// 按 NTUSER.DAT（用户注册表 hive，登录/注销时都会更新）的最近修改时间挑
+// 最近使用过的真实用户 profile。这是**猜测**——调用方不得缓存该结果，
+// 用户真正登录后应由 windowsDesktopUserHome() 取到准确值。
+static QString windowsFallbackProfileHome()
+{
+    static const QStringList skip = {
+        QStringLiteral("all users"), QStringLiteral("default user"),
+        QStringLiteral("default"), QStringLiteral("public"),
+        QStringLiteral("localservice"), QStringLiteral("networkservice"),
+        QStringLiteral("defaultapppool"), QStringLiteral("all users.winnt"),
+        QStringLiteral("default user.winnt")
+    };
+    QString best;
+    QDateTime bestMtime;
+    for (const QString& root : windowsProfileRoots()) {
+        QDir d(root);
+        if (!d.exists())
+            continue;
+        const QStringList entries = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString& e : entries) {
+            if (skip.contains(e.toLower()))
+                continue;
+            const QString p = root + QLatin1Char('/') + e;
+            const QString hive = p + QStringLiteral("/NTUSER.DAT");
+            if (!QFile::exists(hive))
+                continue;   // 没有 NTUSER.DAT 的不是真实用户 profile（如公用目录）
+            QDateTime m = QFileInfo(hive).lastModified();
+            if (!m.isValid())
+                m = QFileInfo(p).lastModified();
+            if (m > bestMtime) {
+                bestMtime = m;
+                best = p;
+            }
+        }
+    }
+    return best;
 }
 #endif
 
@@ -91,6 +145,9 @@ FileTransferService::~FileTransferService()
             it.value().file->close();
             delete it.value().file;
         }
+        // 进程退出也要收掉半截临时文件，别把垃圾留在用户目录里
+        if (!it.value().tempPath.isEmpty())
+            QFile::remove(it.value().tempPath);
     }
     activeUploads_.clear();
 }
@@ -118,7 +175,6 @@ QString FileTransferService::defaultUploadDir()
     static bool computed = false;
     if (computed)
         return cached;
-    computed = true;
 
     QString homeDir;
 #ifdef Q_OS_LINUX
@@ -169,28 +225,47 @@ QString FileTransferService::defaultUploadDir()
             }
         }
     }
+    computed = true;   // Linux 推导一次即定版（loginctl 每次请求都要 spawn 成本高）
 #endif
 #ifdef Q_OS_WIN
     // Windows 服务模式跑在 SYSTEM（session 0），QDir::homePath() 指向
     // systemprofile——推导活动控制台会话用户（见 windowsDesktopUserHome）。
     homeDir = windowsDesktopUserHome();
+    if (!homeDir.isEmpty()) {
+        computed = true;   // 会话用户命中，结果可信
+    } else {
+        // 会话用户取不到（XP 欢迎屏预登录、服务先于登录启动）：按 NTUSER.DAT
+        // 最近使用猜测一个 profile。**结果不定版**——用户真正登录后，下一次
+        // 文件列表请求会重新推导并取到准确的桌面路径（每次重扫仅目录枚举，开销小）。
+        homeDir = windowsFallbackProfileHome();
+    }
 #endif
-    // 最终兜底：仅当 homePath 是真实用户家目录（非常量 "/" 或 "/root"）才用，
-    // 否则保持 homeDir 为空，让下面回退到 "/" 的虚拟根语义而不是写进系统目录。
+    // 最终兜底：仅当 homePath 是真实用户家目录（非常量 "/"、"/root"，也不是
+    // SYSTEM 账户的 systemprofile）才用。
     if (homeDir.isEmpty()) {
         const QString hp = QDir::homePath();
-        if (hp != "/" && hp != "/root")
+        if (hp != "/" && hp != "/root"
+            && !hp.contains(QStringLiteral("systemprofile"), Qt::CaseInsensitive)) {
             homeDir = hp;
+            computed = true;
+        }
     }
+    if (homeDir.isEmpty())
+        return QString();   // 仍推导不出：返回空让前端回落当前目录，下次请求再试
 
     QDir home(homeDir);
+    QString result;
     if (home.exists("Desktop"))
-        cached = homeDir + "/Desktop";
+        result = homeDir + "/Desktop";
     else if (home.exists("OneDrive/Desktop"))
-        cached = homeDir + "/OneDrive/Desktop";   // OneDrive 已知文件夹重定向的桌面
+        result = homeDir + "/OneDrive/Desktop";   // OneDrive 已知文件夹重定向的桌面
+    else if (home.exists(QString::fromUtf8("桌面")))
+        result = homeDir + "/" + QString::fromUtf8("桌面");   // 中文 XP 的桌面目录名
     else
-        cached = homeDir;
-    return cached;
+        result = homeDir;
+    if (computed)
+        cached = result;
+    return result;
 }
 
 void FileTransferService::setRootPath(const QString& root)
@@ -235,10 +310,12 @@ QString FileTransferService::rootDisplay()
 }
 
 #ifndef Q_OS_WIN
-// 拒绝 Windows 盘符风格的路径（"C:"、"C:/"、"C:\..."）。Linux/Unix 上 ':' 在文件名里
-// 合法，从 Windows 客户端误传的盘符路径会被当成相对路径，在服务进程 CWD 下建出名为
-// "C:" 的垃圾目录（90 上实测出现过 /home/neardi/C:）。这不是权限判断，而是这种输入
+// 拒绝 Windows 盘符风格的路径（"C:"、"C:/"、"C:\\..."、"C:foo"）。Linux/Unix 上 ':' 在
+// 文件名里合法，从 Windows 客户端误传的盘符路径会被当成相对路径，在服务进程 CWD 下建出
+// 名为 "C:" 的垃圾目录（90 上实测出现过 /home/neardi/C:）。这不是权限判断，而是这种输入
 // 在本平台没有可解释的含义。放开文件根之后仍必须保留：否则写盘目标会随 CWD 漂移。
+// 判据：出现在路径边界（开头或紧随分隔符）的「单个字母 + ':'」一律视为盘符形式，
+// 包含 "C:foo" 这种盘符相对写法（旧实现要求 ':' 后必须是分隔符，会漏掉它）。
 static bool looksLikeWindowsDrivePath(const QString& path)
 {
     for (int i = 0; i + 1 < path.size(); ++i) {
@@ -247,10 +324,7 @@ static bool looksLikeWindowsDrivePath(const QString& path)
         const bool atBoundary = (i == 0)
                                 || path.at(i - 1) == QLatin1Char('/')
                                 || path.at(i - 1) == QLatin1Char('\\');
-        const QChar after = (i + 2 < path.size()) ? path.at(i + 2) : QChar();
-        const bool driveForm = after.isNull() || after == QLatin1Char('/')
-                               || after == QLatin1Char('\\');
-        if (atBoundary && driveForm)
+        if (atBoundary)
             return true;
     }
     return false;
@@ -282,11 +356,25 @@ QString FileTransferService::sanitizeFilePath(const QString& path)
         if (path.isEmpty())
             return QDir::rootPath();
 #ifndef Q_OS_WIN
+        // 反斜杠是 Windows 分隔符：Linux 上会被当成文件名字符，于是 "\\server\share"
+        // 或 "foo\bar" 这种误传路径会在 CWD 下建出名为 "\server\share" 的垃圾目录
+        // （与 "C:" 垃圾目录同类）。本平台只认 '/'，一律拒绝。
+        if (path.contains(QLatin1Char('\\'))) {
+            qWarning() << "FileTransfer: backslash path rejected on this platform:" << path;
+            return QString();
+        }
         if (looksLikeWindowsDrivePath(path)) {
             qWarning() << "FileTransfer: windows drive-style path rejected:" << path;
             return QString();
         }
 #endif
+        // 相对路径必须在绝对化之前拦掉：QDir("foo").absolutePath() 以**进程 CWD** 为基准，
+        // 写盘/读盘目标会随 CWD 漂移（远端进程 CWD 可能是 / 或 system32）。前端一律发
+        // 绝对路径，收到相对路径只能是协议错乱或恶意输入，直接拒绝。
+        if (!QDir::isAbsolutePath(path)) {
+            qWarning() << "FileTransfer: relative path rejected (would resolve against CWD):" << path;
+            return QString();
+        }
         QDir dir(path);
         return dir.absolutePath();
     }
@@ -367,24 +455,63 @@ void FileTransferService::writeTarHeader(QByteArray& data, const QString& name, 
 {
     QByteArray header(512, '\0');
 
+    // ustar 名字字段只有 100 字节，长路径靠 prefix 字段（偏移 345，155 字节）承载：
+    // 完整名字 = prefix + "/" + name。旧实现一律截断到 100 字节——放开整机访问后
+    // 深层路径极常见，中文每字 3 字节、约 33 字即超限，截断会造成目录尾 '/' 丢失、
+    // 多字节字符被劈成非法 UTF-8、不同文件截断后同名互相覆盖。这里按标准算法拆分。
     QByteArray nameBytes = name.toUtf8();
-    int nameLen = qMin(nameBytes.size(), 100);
-    memcpy(header.data(), nameBytes.constData(), nameLen);
+    QByteArray prefixBytes;
+    if (nameBytes.size() > 100) {
+        int split = -1;
+        for (int i = nameBytes.size() - 1; i > 0; --i) {
+            if (nameBytes.at(i) != '/')
+                continue;
+            const int prefixLen = i;                                  // 前段长度（不含 '/'）
+            const int baseLen = nameBytes.size() - i - 1;             // 后段长度
+            if (baseLen > 0 && baseLen <= 100 && prefixLen <= 155) {
+                split = i;
+                break;
+            }
+        }
+        if (split > 0) {
+            prefixBytes = nameBytes.left(split);
+            nameBytes = nameBytes.mid(split + 1);
+        } else {
+            // 无法拆分（单段就超 100 字节）：只能截断，但必须告警，别静默损坏
+            qWarning() << "writeTarHeader: name too long and not splittable, truncating to 100:"
+                       << name << nameBytes.size();
+            nameBytes = nameBytes.left(100);
+        }
+    }
+    if (!nameBytes.isEmpty())
+        memcpy(header.data(), nameBytes.constData(), nameBytes.size());
+    if (!prefixBytes.isEmpty())
+        memcpy(header.data() + 345, prefixBytes.constData(), prefixBytes.size());
 
+    // 目录 0755 / 文件 0644：新建目录还需让桌面用户能进入(x)，见 processUploadStart
     const char* mode = (type == '5') ? "000755\0" : "000644\0";
     memcpy(header.data() + 100, mode, 7);
     memcpy(header.data() + 108, "000000\0", 7);
     memcpy(header.data() + 116, "000000\0", 7);
 
+    // size 字段 12 字节（11 位八进制 + 结尾空格/NUL）。八进制最多表示 8GiB-1；
+    // 超过时旧实现把字段填成 "77777777777" 却仍追加全部内容 → header 与实长矛盾、
+    // 整个 tar 错位。改用 GNU base-256（最高位 0x80），tar/GNU/bsdtar/7z 均支持。
     QByteArray sizeOct = QString::number(size, 8).toLatin1();
     if (sizeOct.size() > 11) {
-        qWarning() << "writeTarHeader: file size too large for tar format:" << size;
-        sizeOct = QByteArray(11, '7'); // 填满表示最大
+        unsigned char* p = reinterpret_cast<unsigned char*>(header.data() + 124);
+        memset(p, 0, 12);
+        quint64 v = static_cast<quint64>(size);
+        for (int i = 11; i >= 0; --i) {
+            p[i] = static_cast<unsigned char>(v & 0xFFu);
+            v >>= 8;
+        }
+        p[0] |= 0x80u;   // base-256 标记
     } else {
         sizeOct = QByteArray(11 - sizeOct.size(), '0') + sizeOct;
+        memcpy(header.data() + 124, sizeOct.constData(), 11);
+        header[135] = ' ';
     }
-    memcpy(header.data() + 124, sizeOct.constData(), 11);
-    header[135] = ' ';
 
     memcpy(header.data() + 136, "00000000000", 11);
     header[156] = type;
@@ -405,48 +532,6 @@ void FileTransferService::writeTarHeader(QByteArray& data, const QString& name, 
     header[155] = ' ';
 
     data.append(header);
-}
-
-void FileTransferService::addToTar(QByteArray& tarData, const QDir& dir, const QString& prefix)
-{
-    QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-
-    for (const QFileInfo& fi : entries) {
-        // 安全：跳过符号链接。QFileInfo::isDir()/size() 会跟随链接目标，
-        // 若不跳过，共享目录里一个指向 / 的软链会让 tar 以 root 权限读出
-        // 受限根之外的任意文件（越权读取），链接环还会导致无限递归。
-        if (fi.isSymLink())
-            continue;
-        QString entryName = prefix.isEmpty() ? fi.fileName() : prefix + "/" + fi.fileName();
-
-        if (fi.isDir()) {
-            writeTarHeader(tarData, entryName + "/", 0, '5');
-            addToTar(tarData, QDir(fi.absoluteFilePath()), entryName);
-        } else {
-            QFile file(fi.absoluteFilePath());
-            if (file.open(QIODevice::ReadOnly)) {
-                QByteArray content = file.readAll();
-                file.close();
-                writeTarHeader(tarData, entryName, content.size(), '0');
-                tarData.append(content);
-                if (tarData.size() % 512 != 0)
-                    tarData.append(QByteArray(512 - (tarData.size() % 512), '\0'));
-            }
-        }
-    }
-}
-
-QByteArray FileTransferService::createTarForDirectory(const QString& dirPath)
-{
-    QByteArray tarData;
-    QDir dir(dirPath);
-    QString dirName = dir.dirName();
-
-    writeTarHeader(tarData, dirName + "/", 0, '5');
-    addToTar(tarData, dir, dirName);
-    tarData.append(QByteArray(1024, '\0'));
-
-    return tarData;
 }
 
 QByteArray FileTransferService::tarHeaderFor(const QString& name, qint64 size, char type)
@@ -849,8 +934,32 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     emit transferProgress(clientId, path, totalSize, totalSize, 0);
 }
 
+// 未声明大小（size==0）上传的硬上限：防止"谎报 0 字节"绕过大小校验无限写入磁盘。
+// 局域网内正常上传都会带真实 File.size()，只有协议错乱/恶意输入才会是 0。
+static const qint64 kUnknownSizeUploadLimit = 64LL * 1024 * 1024 * 1024;   // 64 GiB
+
+QString FileTransferService::makePartPath(const QString& finalPath, const QString& clientId)
+{
+    // 与目标同目录 → rename 不会跨设备；带 clientId 摘要 → 两个客户端上传同名目标
+    // 各有各的临时文件，互不覆盖。
+    const QByteArray h = QCryptographicHash::hash(clientId.toUtf8(),
+                                                  QCryptographicHash::Sha1).toHex().left(8);
+    return finalPath + QStringLiteral(".qtrd-") + QString::fromLatin1(h) + QStringLiteral(".part");
+}
+
 void FileTransferService::processUploadStart(const QString& clientId, const QString& path, qint64 size)
 {
+    // 声明的 size 必须合法：负数只可能来自协议错乱/恶意输入。若不拦，下面基于
+    // "totalSize > 0" 的所有大小校验都会失效。
+    if (size < 0) {
+        qWarning() << "Upload rejected: negative declared size" << size << "path:" << path;
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_upload_done"},
+            {"error", "上传声明的大小非法"}
+        });
+        return;
+    }
+
     QString safePath = sanitizeFilePath(path);
     if (safePath.isEmpty()) {
         emit jsonResponse(clientId, QJsonObject{
@@ -861,11 +970,19 @@ void FileTransferService::processUploadStart(const QString& clientId, const QStr
     }
 
     QFileInfo fi(safePath);
+    // 目标是已存在的目录：写入必然失败，早期拒绝（否则 QFile 打开目录会失败但语义混乱）
+    if (fi.isDir()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_upload_done"},
+            {"error", "目标是目录，无法作为文件写入"}
+        });
+        return;
+    }
     QDir parentDir = fi.absoluteDir();
     if (!parentDir.exists()) {
         const QString parentAbs = parentDir.absolutePath();
         parentDir.mkpath(".");
-        // 新建的中间目录设为 0777：服务常以 root 写出，桌面用户需要执行(x)权限
+        // 新建的中间目录设为 0755：服务常以 root 写出，桌面用户需要执行(x)权限
         // 才能进入这些子目录查看刚拖入的文件（文件本身在 done 时再设 0666）。
         QFile::setPermissions(parentAbs,
             QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner
@@ -875,28 +992,38 @@ void FileTransferService::processUploadStart(const QString& clientId, const QStr
 
     auto existing = activeUploads_.find(uploadKey(clientId, safePath));
     if (existing != activeUploads_.end()) {
-        existing.value().file->close();
-        delete existing.value().file;
+        // 同名重传：收掉旧会话（连同其临时文件），避免句柄与 .part 残留
+        UploadState& old = existing.value();
+        if (old.file) { old.file->close(); delete old.file; old.file = nullptr; }
+        if (!old.tempPath.isEmpty())
+            QFile::remove(old.tempPath);
         activeUploads_.erase(existing);
     }
 
     UploadState us;
-    us.file = new QFile(safePath);
+    us.finalPath = safePath;
+    us.tempPath = makePartPath(safePath, clientId);
     us.totalSize = size;
     us.receivedSize = 0;
 
+    // 关键：先写同目录 .part 临时文件，done 校验通过后才原子改名覆盖目标。
+    // 旧实现直接 open(WriteOnly) 目标文件 → 一开就把原文件截断，后续失败/断线
+    // 也无法恢复，等于"选错文件传一次就毁掉原文件"。
+    us.file = new QFile(us.tempPath);
     if (!us.file->open(QIODevice::WriteOnly)) {
-        qWarning() << "Upload failed: cannot open file for writing:" << safePath;
+        qWarning() << "Upload failed: cannot open temp file for writing:"
+                   << us.tempPath << us.file->errorString();
         delete us.file;
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_upload_done"},
-            {"error", "Cannot open file for writing: " + safePath}
+            {"error", "无法创建上传临时文件（目录不可写？）"}
         });
         return;
     }
 
     activeUploads_[uploadKey(clientId, safePath)] = us;
-    qInfo() << "Upload started:" << safePath << "size:" << size << "client:" << clientId;
+    qInfo() << "Upload started:" << safePath << "(temp" << us.tempPath << ") size:" << size
+            << "client:" << clientId;
 }
 
 void FileTransferService::processUploadChunk(const QString& clientId, const QString& path, const QByteArray& data)
@@ -914,11 +1041,24 @@ void FileTransferService::processUploadChunk(const QString& clientId, const QStr
     if (us.failed)
         return; // 已判失败的会话：丢弃后续块，等 done 时统一回报
 
-    // 超出声明大小的数据直接拒绝：防止 totalsize 谎报/消息错乱导致静默损坏
-    if (us.totalSize > 0 && us.receivedSize + data.size() > us.totalSize) {
-        qWarning() << "Upload chunk exceeds declared size:" << safePath
-                   << "received" << us.receivedSize << "+" << data.size()
-                   << "> declared" << us.totalSize;
+    if (!us.file) {
+        us.failed = true;
+        return;
+    }
+
+    // 超出声明大小的数据直接拒绝：防止 totalsize 谎报/消息错乱导致静默损坏。
+    // 声明为 0（未知大小）时改用硬上限，避免"报 0 就无限写"绕过校验。
+    if (us.totalSize > 0) {
+        if (us.receivedSize + data.size() > us.totalSize) {
+            qWarning() << "Upload chunk exceeds declared size:" << safePath
+                       << "received" << us.receivedSize << "+" << data.size()
+                       << "> declared" << us.totalSize;
+            us.failed = true;
+            return;
+        }
+    } else if (us.receivedSize + data.size() > kUnknownSizeUploadLimit) {
+        qWarning() << "Upload exceeds unknown-size hard limit:" << safePath
+                   << "received" << us.receivedSize << "+" << data.size();
         us.failed = true;
         return;
     }
@@ -926,7 +1066,7 @@ void FileTransferService::processUploadChunk(const QString& clientId, const QStr
     // 写盘失败（磁盘满等）必须显式失败：静默丢字节 = 文件损坏
     const qint64 written = us.file->write(data);
     if (written != data.size()) {
-        qWarning() << "Upload write failed (" << us.file->errorString() << "):" << safePath
+        qWarning() << "Upload write failed (" << us.file->errorString() << "):" << us.tempPath
                    << "wrote" << written << "of" << data.size();
         us.failed = true;
         return;
@@ -948,36 +1088,99 @@ void FileTransferService::processUploadDone(const QString& clientId, const QStri
         return;
     }
 
-    it.value().file->close();
-    delete it.value().file;
-    qint64 received = it.value().receivedSize;
-    const qint64 declared = it.value().totalSize;
-    const bool failed = it.value().failed
-        || (declared > 0 && received != declared); // 字节数不符 = 损坏，不伪装成功
+    // 先把状态拷出来再 erase：QMap::erase 之后 it.value() 的引用即失效
+    UploadState& us = it.value();
+    const QString finalPath = us.finalPath;
+    const QString tempPath = us.tempPath;
+    const qint64 received = us.receivedSize;
+    const qint64 declared = us.totalSize;
+    bool failed = us.failed;
+
+    if (us.file) {
+        us.file->flush();
+        if (us.file->error() != QFileDevice::NoError)
+            failed = true;
+        us.file->close();
+        if (us.file->error() != QFileDevice::NoError)
+            failed = true;
+        delete us.file;
+        us.file = nullptr;
+    }
+    if (declared > 0 && received != declared)   // 字节数不符 = 损坏，不伪装成功
+        failed = true;
     activeUploads_.erase(it);
 
     if (failed) {
-        qWarning() << "Upload finished with size mismatch:" << safePath
+        QFile::remove(tempPath);   // 失败绝不留下半截垃圾，也绝不动原文件
+        qWarning() << "Upload finished with error:" << finalPath
                    << "received" << received << "declared" << declared;
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_upload_done"},
-            {"error", QString("上传数据不完整（收到 %1 / 声明 %2 字节）").arg(received).arg(declared)}
+            {"error", QString("上传失败或数据不完整（收到 %1 / 声明 %2 字节）")
+                          .arg(received).arg(declared)}
+        });
+        return;
+    }
+
+    // 原子落盘：数据已完整写在同目录 .part，改名到目标即可（同目录 rename 不跨设备）。
+    // Windows 下 QFile::rename 不覆盖已存在文件，必须先删旧目标——此时数据已在 .part，
+    // 即使删除后改名失败也只丢一次操作，不会出现"删了旧文件却没写新的"之外的窗口，
+    // 且下面会明确报错，用户可重试。
+    if (QFile::exists(finalPath) && !QFile::remove(finalPath)) {
+        QFile::remove(tempPath);
+        qWarning() << "Upload target exists and cannot be replaced:" << finalPath;
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_upload_done"},
+            {"error", "目标文件已存在且无法覆盖（可能被占用）"}
+        });
+        return;
+    }
+    if (!QFile::rename(tempPath, finalPath)) {
+        QFile::remove(tempPath);
+        qWarning() << "Upload rename failed:" << tempPath << "->" << finalPath;
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_upload_done"},
+            {"error", "落盘失败（重命名临时文件失败）"}
         });
         return;
     }
 
     // 落盘后改为所有用户可读写（0666）：服务常以 root 运行，写出的文件 owner 是 root，
     // 桌面用户默认只有只读/无权限，改 0666 后桌面用户也能正常读写拖入的文件。
-    QFile::setPermissions(safePath,
+    QFile::setPermissions(finalPath,
         QFile::ReadOwner | QFile::WriteOwner
         | QFile::ReadGroup | QFile::WriteGroup
         | QFile::ReadOther | QFile::WriteOther);
 
-    qInfo() << "Upload complete:" << safePath << received << "bytes";
+    qInfo() << "Upload complete:" << finalPath << received << "bytes";
 
     emit jsonResponse(clientId, QJsonObject{
         {"type", "file_upload_done"},
-        {"path", safePath},
+        {"path", finalPath},
         {"size", received}
     });
+}
+
+void FileTransferService::abortUploadsForClient(const QString& clientId)
+{
+    const QString prefix = clientId + QLatin1Char('\n');
+    int n = 0;
+    for (auto it = activeUploads_.begin(); it != activeUploads_.end(); ) {
+        if (!it.key().startsWith(prefix)) {
+            ++it;
+            continue;
+        }
+        UploadState& us = it.value();
+        if (us.file) {
+            us.file->close();
+            delete us.file;
+            us.file = nullptr;
+        }
+        if (!us.tempPath.isEmpty() && QFile::remove(us.tempPath))
+            qInfo() << "Upload aborted, temp removed:" << us.tempPath;
+        it = activeUploads_.erase(it);
+        ++n;
+    }
+    if (n > 0)
+        qInfo() << "Aborted" << n << "in-flight upload(s) for disconnected client" << clientId;
 }

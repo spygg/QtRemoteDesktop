@@ -47,14 +47,11 @@ public:
     // 拼进错误信息会显示成 "C:/" 而看不出"已放开全盘"。
     static QString rootDisplay();
 
-    // 目录 → tar 包（内存数据）。WS 下载与 HTTP 直链下载共用，保证两处产物一致。
-    static QByteArray createTarForDirectory(const QString& dirPath);
-
     // ---- 目录 tar 流式生成（[P1 perf]）----
     // GB 级目录的 HTTP 直链下载不再整包进内存：只收集条目清单，文件内容由
-    // HTTP 泵送阶段按需读盘。条目顺序与 createTarForDirectory 产物严格一致
-    //（深度优先、名称序，首元素为根目录自身）；totalSize 为精确 tar 长度
-    //（512B header/条 + 文件内容 + 512B 对齐填充 + 1024B 结束块）。
+    // HTTP 泵送阶段按需读盘（深度优先、名称序，首元素为根目录自身）；
+    // totalSize 为精确 tar 长度（512B header/条 + 文件内容 + 512B 对齐填充
+    // + 1024B 结束块）。
     struct TarEntry {
         QString absPath;  // 磁盘绝对路径（目录/文件）
         QString tarName;  // tar 内路径（根目录名起头，目录不带 '/' 后缀）
@@ -78,6 +75,12 @@ public slots:
     void processUploadChunk(const QString& clientId, const QString& path, const QByteArray& data);
     void processUploadDone(const QString& clientId, const QString& path);
 
+    // 客户端断线时清理其全部在途上传：关闭句柄并删除 .part 临时文件。
+    // 上传会话 key 含每连接唯一的 clientId，断线后该 key 永不再命中 →
+    // 不主动清理就会让裸 QFile 句柄和半个临时文件残留到进程退出。
+    // 由 RDPServer::onClientDisconnected 经队列连接调用（跨线程）。
+    void abortUploadsForClient(const QString& clientId);
+
 signals:
     void jsonResponse(const QString& clientId, const QJsonObject& obj);
     void binaryResponse(const QString& clientId, const QByteArray& data);
@@ -91,14 +94,18 @@ private:
     static bool s_enforceRoot;
     std::function<qint64()> backpressureQuery_; // [C5-①] 下游 WS 积压查询（可空）
     static void writeTarHeader(QByteArray& data, const QString& name, qint64 size, char type);
-    static void addToTar(QByteArray& tarData, const QDir& dir, const QString& prefix);
 
     struct UploadState {
-        QFile* file = nullptr;
-        qint64 totalSize = 0;
+        QFile* file = nullptr;     // 指向临时文件（.part），不是最终目标
+        QString finalPath;         // 最终目标路径（done 时原子改名到这里）
+        QString tempPath;          // 临时文件路径，失败/断线时删除
+        qint64 totalSize = 0;      // 客户端声明的总大小（0 表示未知）
         qint64 receivedSize = 0;
         bool failed = false; // 写盘失败/超出声明大小后置位，后续块丢弃，done 时回报错误
     };
+    // 上传临时文件路径：与目标同目录（保证 rename 不跨设备），用 clientId 摘要避免
+    // 两个客户端上传同名目标时互相覆盖临时文件。
+    static QString makePartPath(const QString& finalPath, const QString& clientId);
     // 上传会话 key = clientId + '\n' + 安全路径：两个客户端上传同一目标路径
     // 互不干扰（按 path 单 key 会互相顶掉、数据交错写坏文件）
     static QString uploadKey(const QString& clientId, const QString& safePath)

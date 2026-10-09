@@ -242,6 +242,12 @@ int VideoEncoder::estimateBitrate(CodecType codec, int encW, int encH, int fps, 
 bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int encH, int fps, int bitrate,
                               HwEncodeMode hwMode)
 {
+    // 契约安全：initialize() 允许被重复调用（上层 reinit 未必先 shutdown）。若编码
+    // 线程仍在运行，必须先把线程停下来再释放/覆盖上下文，否则线程会继续使用马上
+    // 被 releaseAv() 释放的 codecCtx_/frame_/swsCtx_（use-after-free）。
+    if (encoderThread_.isRunning())
+        shutdown();
+
     // 支持 shutdown() 后重新初始化（缩放/帧率/画质/编码协议/硬件开关改变时重建编码器）
     // 先释放旧 MPP 实例：hwMode=Off 回退软编时必须清掉残留的 MPP（否则 encodingLoop
     // 仍会走 isActive() 的 MPP 路径，软编永不生效）
@@ -258,7 +264,10 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     frameCount_ = 0;
     startTime_ = 0;
     pendingBitrate_.store(0);
-    appliedBitrate_.store(0);   // [H18] 新编码器按参数码率打开，旧 applied 值残留会让 encode() 误判已生效
+    // 初始化为**实际**打开的码率（而不是 0）：上层过载降码率时会读
+    // currentBitrate() 作为基准（reduced = max(150000, cur*0.6)）。置 0 会让首次
+    // 过载算出 max(150000, 0)=150000，画面瞬间掉到底码率。
+    appliedBitrate_.store(bitrate);
     forceKeyframe_.store(false);
     mppBroken_.store(false);
     mppFailCount_ = 0;          // [H18] 上一轮累计的失败计数不清零，新实例再失败 1 次即被永久禁用
@@ -647,9 +656,11 @@ void VideoEncoder::encodingLoop()
         int ret = avcodec_send_frame(codecCtx_, frame_);
         if (ret < 0) {
             // 失败路径也必须恢复 GOP：否则强制关键帧后 gop_size 一直为 1，
-            // 导致后续每一帧都被强制为 IDR（码率暴增、CPU 过载）
+            // 导致后续每一帧都被强制为 IDR（码率暴增、CPU 过载）。
+            // 恢复值必须与 initialize() 里的初值一致（fps/2，0.5s），
+            // 用 fps_（1s）会让强制关键帧后 IDR 间隔永久翻倍。
             if (codecCtx_->gop_size == 1)
-                codecCtx_->gop_size = fps_;
+                codecCtx_->gop_size = qMax(1, fps_ / 2);
             continue;
         }
 
@@ -678,14 +689,14 @@ void VideoEncoder::encodingLoop()
         // 冷启动前几帧含编码器预热（首帧必然慢），跳过过载判定避免启动时误降码率
         if (frameCount_ <= 5) {
             if (codecCtx_->gop_size == 1)
-                codecCtx_->gop_size = fps_;
+                codecCtx_->gop_size = qMax(1, fps_ / 2);
             continue;
         }
         updateOverloadState(encodeStart);
 
-        // 恢复正常 GOP 间隔
+        // 恢复正常 GOP 间隔（与 initialize() 初值一致：fps/2）
         if (codecCtx_->gop_size == 1)
-            codecCtx_->gop_size = fps_;
+            codecCtx_->gop_size = qMax(1, fps_ / 2);
     }
     av_packet_free(&packet); // [P2] 复用的 packet 在线程退出时统一释放
 }

@@ -5,6 +5,18 @@
 
 #include <CoreGraphics/CoreGraphics.h>
 
+// CGEventCreate* 系列在失败时返回 NULL，直接 CGEventPost/CFRelease 会崩溃
+// （CFRelease(NULL) 是未定义行为）。统一走这个包装：失败时告警并跳过。
+static void postEventAndRelease(CGEventRef event, const char* what)
+{
+    if (!event) {
+        qWarning() << "InputManager(mac): CGEventCreate returned NULL for" << what;
+        return;
+    }
+    CGEventPost(kCGHIDEventTap, event);
+    CFRelease(event);
+}
+
 // 返回 macOS CGKeyCode；未识别时返回 -1。
 // [P0 fix] 禁止用 0 作"未找到"哨兵：kVK_ANSI_A = 0x00 是合法键码，
 // 旧逻辑会把 A 键误判为未找到并回退到 JS 码点（'A'=65）→ 敲错物理键。
@@ -118,8 +130,7 @@ void InputManager::injectMouseMove(int x, int y)
     CGEventRef event = CGEventCreateMouseEvent(
         nullptr, kCGEventMouseMoved,
         CGPointMake(x, h - y), kCGMouseButtonLeft);
-    CGEventPost(kCGHIDEventTap, event);
-    CFRelease(event);
+    postEventAndRelease(event, "mouse");
 }
 
 void InputManager::injectMouseButton(int x, int y, int button, bool isDown)
@@ -135,20 +146,26 @@ void InputManager::injectMouseButton(int x, int y, int button, bool isDown)
     default: return;
     }
 
-    CGEventType type = isDown ? kCGEventLeftMouseDown + btn
-                              : kCGEventLeftMouseUp + btn;
+    // 不能用 kCGEventLeftMouseDown + btn：常量值并不连续
+    // （Left=1, Right=3, Other=25），btn=Center 时会算成 2=kCGEventRightMouseDown，
+    // 中键被注入成右键按下。必须显式映射。
+    CGEventType type;
+    if (btn == kCGMouseButtonCenter)
+        type = isDown ? kCGEventOtherMouseDown : kCGEventOtherMouseUp;
+    else if (btn == kCGMouseButtonRight)
+        type = isDown ? kCGEventRightMouseDown : kCGEventRightMouseUp;
+    else
+        type = isDown ? kCGEventLeftMouseDown : kCGEventLeftMouseUp;
     CGEventRef event = CGEventCreateMouseEvent(
         nullptr, type, CGPointMake(x, h - y), btn);
-    CGEventPost(kCGHIDEventTap, event);
-    CFRelease(event);
+    postEventAndRelease(event, "mouse");
 }
 
 void InputManager::injectWheel(int delta)
 {
     CGEventRef event = CGEventCreateScrollWheelEvent(
         nullptr, kCGScrollEventUnitLine, 1, delta);
-    CGEventPost(kCGHIDEventTap, event);
-    CFRelease(event);
+    postEventAndRelease(event, "mouse");
 }
 
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar, bool meta)
@@ -174,28 +191,24 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
     }
 
     CGEventRef event = CGEventCreateKeyboardEvent(nullptr, static_cast<CGKeyCode>(macKey), isDown);
-    CGEventPost(kCGHIDEventTap, event);
-    CFRelease(event);
+    postEventAndRelease(event, "mouse");
 }
 
 void InputManager::updateModifiers(bool ctrl, bool alt, bool shift)
 {
     if (ctrl != ctrlDown_) {
         CGEventRef e = CGEventCreateKeyboardEvent(nullptr, 0x3B, ctrl);
-        CGEventPost(kCGHIDEventTap, e);
-        CFRelease(e);
+        postEventAndRelease(e, "modifier");
         ctrlDown_ = ctrl;
     }
     if (alt != altDown_) {
         CGEventRef e = CGEventCreateKeyboardEvent(nullptr, 0x3A, alt);
-        CGEventPost(kCGHIDEventTap, e);
-        CFRelease(e);
+        postEventAndRelease(e, "modifier");
         altDown_ = alt;
     }
     if (shift != shiftDown_) {
         CGEventRef e = CGEventCreateKeyboardEvent(nullptr, 0x38, shift);
-        CGEventPost(kCGHIDEventTap, e);
-        CFRelease(e);
+        postEventAndRelease(e, "modifier");
         shiftDown_ = shift;
     }
 }

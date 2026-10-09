@@ -8,6 +8,13 @@
 InputManager::InputManager(QObject *parent) : QObject(parent)
 {
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+    // XInitThreads 必须"先于进程内一切 Xlib 调用"。原先只在 XdndMonitor::start
+    // 里调用，而该线程只在"非 Wayland"时才启动 —— Wayland 会话下永远不会调，
+    // 同时采集线程/本对象的 Xlib 调用仍可能发生（XWayland 回退）。这里在本对象
+    // 构造时（早于任何 XOpenDisplay：本类的 display 是惰性打开、采集在
+    // RDPServer::startCapture 之后）再调一次。XInitThreads 幂等，重复调用无害。
+    XInitThreads();
+
     // 不在构造时打开 X display：服务模式常在本对象构造后才由 detectUserX11Env 设置
     // DISPLAY/XAUTHORITY，过早 XOpenDisplay 会因鉴权文件未就绪而失败，导致 xDisplay_
     // 永久为空、所有输入注入过早 return 而失效。X display 改由 ensureXDisplay() 在

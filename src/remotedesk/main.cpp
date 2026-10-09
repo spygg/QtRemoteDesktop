@@ -61,6 +61,13 @@ void applyLogLevelFromArgs(int argc, char* argv[])
     }
 }
 
+// 日志文件名角色后缀。Windows 服务模式下 service / helper / secure-input 是
+// 三个独立进程，默认共用 logs/YYYYMMDD.txt，各进程的 QTextStream 交错写入会
+// 产生断行碎片，排障时极易误判为“日志丢失/被覆盖”。辅助进程显式设置后缀
+// （_helper / _secure-input）；主服务进程保持原名，沿用既有日志路径约定。
+static QString g_logRoleSuffix;
+void setLogRoleSuffix(const QString& suffix) { g_logRoleSuffix = suffix; }
+
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
 {
     // 日志分级过滤：低于级别的消息直接丢弃。默认级别随构建类型：
@@ -101,7 +108,7 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
     static QString s_logDate;
     QDateTime dt = QDateTime::currentDateTime();
     QString date = dt.toString("yyyyMMdd");
-    QString logFile = QString("%1/logs/%2.txt").arg(QCoreApplication::applicationDirPath() /*QDir::currentPath()*/).arg(date);
+    QString logFile = QString("%1/logs/%2%3.txt").arg(QCoreApplication::applicationDirPath() /*QDir::currentPath()*/).arg(date).arg(g_logRoleSuffix);
     if (!s_log.isOpen() || date != s_logDate) {
         if (s_log.isOpen())
             s_log.close();
@@ -190,8 +197,11 @@ int main(int argc, char* argv[])
     bool useSslOverride = !parser.isSet(noSslOption);
     QString path = QString("%1/%2").arg(a.applicationDirPath()).arg("logs");
     QDir dir(path);
-    if (!dir.exists()) {
-        dir.mkpath(path);
+    // mkpath 的返回值必须检查：安装目录只读/无权限时静默失败，随后
+    // logToFile 会一直 open 失败（只有 stderr 告警），排障时看不到任何落盘日志。
+    if (!dir.exists() && !dir.mkpath(path)) {
+        fprintf(stderr, "Failed to create log directory: %s\n", path.toUtf8().constData());
+        fflush(stderr);
     }
 
     qInstallMessageHandler(logToFile);

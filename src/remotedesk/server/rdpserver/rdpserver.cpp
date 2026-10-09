@@ -404,13 +404,36 @@ void RDPServer::saveServerConfig(const QString& configPath)
     root["hw_encode"] = (configHwEncodeMode_ == HwEncodeMode::On) ? "on"
                       : (configHwEncodeMode_ == HwEncodeMode::Off) ? "off" : "auto";
 
-    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    // 原子写：先写临时文件再改名。旧实现直接 WriteOnly|Truncate 覆盖原文件，
+    // 写一半断电/被杀会留下截断的 JSON，下次启动 loadServerConfig 解析失败，
+    // 端口/账号等配置全部回落默认值（users 字段丢失 = 登录账号全没了）。
+    // 同目录临时文件保证 rename 不跨设备；QSaveFile 在 Qt5.10+ 才有 commit 语义，
+    // 这里手写等价逻辑以兼容 Qt5.7/5.9。
+    const QString tmpPath = path + QStringLiteral(".tmp");
+    {
+        QFile tmpFile(tmpPath);
+        if (!tmpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            qWarning() << "Failed to save server config to" << path
+                       << "(cannot open temp file:" << tmpPath << ")";
+            return;
+        }
         QJsonDocument doc(root);
-        file.write(doc.toJson(QJsonDocument::Indented));
-        file.close();
+        tmpFile.write(doc.toJson(QJsonDocument::Indented));
+        tmpFile.flush();
+        if (tmpFile.error() != QFileDevice::NoError) {
+            qWarning() << "Failed to write server config temp file:" << tmpPath;
+            tmpFile.close();
+            QFile::remove(tmpPath);
+            return;
+        }
+        tmpFile.close();
+    }
+    QFile::remove(path); // Windows 的 rename 不覆盖已存在文件，先删旧文件
+    if (QFile::rename(tmpPath, path)) {
         qInfo() << "Server config saved to" << path;
     } else {
-        qWarning() << "Failed to save server config to" << path;
+        qWarning() << "Failed to replace server config:" << path
+                   << "(temp file kept at" << tmpPath << ")";
     }
 }
 
@@ -521,8 +544,9 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     // 初始化认证管理器
     authManager_ = new AuthManager(this);
 
-    // 设置 HTTP 服务器
-    setupHttpServer();
+    // 设置 HTTP 服务器（端口被占用等绑定失败 = 致命，中止启动）
+    if (!setupHttpServer())
+        return false;
 
     // 初始化 WebSocket 服务器
     // wsServer_ = std::make_unique<WebSocketServer>(this);
@@ -921,20 +945,25 @@ QStringList RDPServer::getLocalIpAddr()
     return ipList;
 }
 
-void RDPServer::setupHttpServer()
+bool RDPServer::setupHttpServer()
 {
     httpServer_ = std::unique_ptr<SslTcpServer>(new SslTcpServer(this));
 
     const quint16 httpPort = httpPort_;
 
+    // 端口绑定失败按致命处理：HTTP 承载登录页 / 文件下载直链 / shell API，
+    // 挂了整个服务等于不可用。旧实现只 qWarning 后继续跑，只剩 WS 半个通道，
+    // 用户看到的现象是“服务在跑但网页打不开”，排障时极易误判为前端问题。
     if (!httpServer_->listen(QHostAddress::Any, httpPort)) {
-        qWarning() << "HTTP server failed to listen on port" << httpPort;
-    } else {
-
-        foreach (const QString& ip, getLocalIpAddr()) {
-            qInfo() << QString("listen  http%1://%2:%3").arg(useSsl_ ? "s" : "").arg(ip).arg(httpPort);
-        }
+        qCritical() << "HTTP server failed to listen on port" << httpPort
+                    << "-" << httpServer_->errorString();
+        return false;
     }
+
+    foreach (const QString& ip, getLocalIpAddr()) {
+        qInfo() << QString("listen  http%1://%2:%3").arg(useSsl_ ? "s" : "").arg(ip).arg(httpPort);
+    }
+    return true;
 }
 
 void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
@@ -1249,7 +1278,11 @@ void RDPServer::handleApiFileDownload(QTcpSocket* socket, const QString& path, c
     head += partial ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n";
     head += "Content-Type: application/octet-stream\r\n";
     head += "Content-Length: " + QByteArray::number(end - start + 1) + "\r\n";
-    head += "Accept-Ranges: bytes\r\n";
+    // 分块可寻址的单文件才声明支持 Range；目录 tar 是流式生成、不可随机寻址，
+    // 声明 Accept-Ranges 会诱导浏览器/下载器发 Range 请求，随后被忽略（浪费一次往返，
+    // 断点续传工具还会因"服务端忽略 Range"反复重试）。
+    if (!st->tarStream)
+        head += "Accept-Ranges: bytes\r\n";
     if (partial)
         head += "Content-Range: bytes " + QByteArray::number(start) + "-"
             + QByteArray::number(end) + "/" + QByteArray::number(st->totalSize) + "\r\n";
@@ -3115,6 +3148,14 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 {
     qInfo() << "Client disconnected:" << clientId;
 
+    // 清理该客户端在途的文件上传：上传会话 key 含每连接唯一的 clientId，断线后
+    // 该 key 永不再命中 → 不主动清理就会残留裸 QFile 句柄与半个 .part 临时文件。
+    // FileTransferService 跑在 transferThread_，所以用队列连接投递过去执行。
+    if (fileTransferService_) {
+        QMetaObject::invokeMethod(fileTransferService_, "abortUploadsForClient",
+                                  Qt::QueuedConnection, Q_ARG(QString, clientId));
+    }
+
     // [B-1] 释放该客户端按下的所有键：断网/关标签页时前端 blur 兜底收不到，
     // 远端按键会永久卡死（无限自动重复 / 修饰键卡住）。回放 keyup 带全 false
     // 修饰键顺带复位修饰键状态；保留原 keycode 供 Windows VK 注入。
@@ -4118,10 +4159,33 @@ void RDPServer::startWebRtcSession(const QString& clientId)
     return;
 #endif
 
+    // WebRTC 的轨道与 NAL 解析在 WebRtcSession 内是**固定 H.264** 实现
+    //（addVideoTrack(Yang_VED_H264)、NAL type = byte & 0x1F）。若当前配置是
+    // HEVC/VP9 且编码器初始化成功（典型：开着硬件编码），编码器会产出非 H.264 帧，
+    // 而 sendFrame 永远匹配不到 H.264 的 NAL 类型 → 一帧都发不出去（黑屏）。
+    // 因此进入 WebRTC 前强制 H.264（只改本进程内存值，不写回配置文件，
+    // 用户下次切回 WS 视频模式时仍可用原选择）。
+    const bool codecForcedToH264 = (configCodec_ != CodecType::H264);
+    if (codecForcedToH264) {
+        qWarning() << "WebRTC requires H.264; overriding configured codec"
+                   << codecToString(configCodec_) << "-> h264";
+        configCodec_ = CodecType::H264;
+    }
+
     // WebRTC 依赖 H.264 编码器，先确保处于视频模式
     if (!switchToVideoMode()) {
         failNoEncoder("no_encoder");
         return;
+    }
+
+    // 已经在视频模式时 switchToVideoMode() 会直接返回 true，不会按新 codec 重建，
+    // 这里补一次重建：本地编码器直接重建；服务模式（编码在 helper）重新下发
+    // config+video_on，让 helper 按 H.264 重建编码器。
+    if (codecForcedToH264) {
+        if (videoEncoder_ && screenCapturer_)
+            reinitVideoEncoderForScale();
+        else if (serviceMode_)
+            sendVideoParamsToCaptureSource(QStringLiteral("video_on"));
     }
 
     WebRtcSession* session = new WebRtcSession(this);

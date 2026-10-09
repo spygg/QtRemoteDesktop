@@ -83,7 +83,10 @@ namespace {
                     XA_ATOM, &actualType, &actualFormat,
                     &nitems, &bytesAfter, &data) == Success && data) {
                 Atom* atoms = reinterpret_cast<Atom*>(data);
-                bool skip = (atoms[0] == wmTypeDesktop || atoms[0] == wmTypeDock);
+                // nitems 可能为 0：XGetWindowProperty 成功但属性为空时不校验就访问
+                // atoms[0] 属越界读（下方 wmState 分支已有 j<nitems 判界，这里漏了）
+                bool skip = nitems > 0
+                            && (atoms[0] == wmTypeDesktop || atoms[0] == wmTypeDock);
                 XFree(data);
                 if (skip) return None;
             }
@@ -289,7 +292,7 @@ void InputManager::injectMouseMove(int x, int y) {
     // 成功会把 waylandMode_ 改回 false，避免下面误走 uinput。
     ensureXDisplay();
     // Wayland 下无 X：走 uinput 绝对定位
-    if (uinputMouseFd_ < 0 && waylandMode_)
+    if (uinputMouseFd_ < 0 && waylandMode_ && shouldRetryUinputInit())
         initUinputMouse();
     if (uinputMouseFd_ >= 0) {
         sendUinputMouseMove(x, y);
@@ -369,7 +372,7 @@ void InputManager::injectWheel(int delta) {
     }
     // 首次注入时惰性打开 X display（env 已就绪）
     ensureXDisplay();
-    if (uinputWheelFd_ < 0 && waylandMode_)
+    if (uinputWheelFd_ < 0 && waylandMode_ && shouldRetryUinputInit())
         initUinputMouse();
     if (uinputWheelFd_ >= 0) {
         sendUinputWheel(delta);
@@ -549,6 +552,18 @@ bool InputManager::initUinput()
 
     // 键盘设备就绪后，一并创建鼠标（绝对定位）与滚轮设备（Wayland 需要）
     initUinputMouse();
+    return true;
+}
+
+bool InputManager::shouldRetryUinputInit()
+{
+    // 节流：uinput 不可用（无 /dev/uinput 权限）时，指针/滚轮事件每次都调
+    // initUinputMouse() 会 open() 两次 + 打警告（60Hz ≈ 120 次/秒的 open 风暴
+    // 与日志淹没）。这里限制为最多每 5s 尝试一次。
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (lastUinputInitMs_ != 0 && (now - lastUinputInitMs_) < 5000)
+        return false;
+    lastUinputInitMs_ = now;
     return true;
 }
 

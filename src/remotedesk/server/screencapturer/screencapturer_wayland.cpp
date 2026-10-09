@@ -31,7 +31,9 @@
 #include <spa/utils/result.h>
 
 #include <unistd.h>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 // ---------------------------------------------------------------------------
@@ -150,6 +152,19 @@ void WaylandCapturer::onStreamStateChanged(int oldState, int newState, const cha
         int res = pw_stream_set_active(stream_, true);
         qInfo() << "WaylandCapturer: pw_stream_set_active returned" << res;
     }
+
+    if (newState == -2 /*ERROR*/) {
+        // ERROR 是终态：compositor 撤销共享 / 会话失效 / 设备错误。置标志让
+        // captureFrame 如实报失败，上层才会走采集失败处理（计数、重建），
+        // 而不是继续返回 true 让画面永久冻结。
+        if (!streamError_) {
+            streamError_ = true;
+            hasFrame_ = false;
+            qWarning() << "WaylandCapturer: PipeWire stream ERROR ("
+                       << (error ? error : "no detail")
+                       << ") - reporting capture failure to upper layer";
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +202,12 @@ bool WaylandCapturer::initialize()
     }
 
     // 2) 回退：标准 xdg-desktop-portal ScreenCast（可能需要用户确认）
+    //    必须先拆掉 mutter 路径可能已建好的 PipeWire loop/线程与会话，否则回退后
+    //    会残留一个常驻线程 + 录屏会话（mutter 失败分支已 abort，但 setupMutterScreenCast
+    //    内部在 createStream 之前失败也可能留下 session）。
     qWarning() << "WaylandCapturer: Mutter ScreenCast unavailable, falling back to portal...";
+    teardownPipewire();
+    closeSession();
     if (setupPortalScreenCast()) {
         initialized_ = true;
         qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
@@ -319,25 +339,34 @@ bool WaylandCapturer::setupPipewireMutter()
     loop_ = pw_thread_loop_new("wayland-capture", nullptr);
     if (!loop_) { qWarning() << "WaylandCapturer: pw_thread_loop_new failed"; return false; }
     context_ = pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0);
-    if (!context_) { qWarning() << "WaylandCapturer: pw_context_new failed"; return false; }
+    if (!context_) {
+        qWarning() << "WaylandCapturer: pw_context_new failed";
+        abortPipewireSetup();
+        return false;
+    }
 
     // 先启动 loop 线程，确保事件能被处理（和 portal 路径一致）
     if (pw_thread_loop_start(loop_) < 0) {
         qWarning() << "WaylandCapturer: pw_thread_loop_start failed";
+        abortPipewireSetup();
         return false;
     }
+    loopStarted_ = true;
 
     pw_thread_loop_lock(loop_);
     core_ = pw_context_connect(context_, nullptr, 0);
     if (!core_) {
         pw_thread_loop_unlock(loop_);
         qWarning() << "WaylandCapturer: pw_context_connect failed";
+        abortPipewireSetup();
         return false;
     }
     bool ok = createStream(nodeId_);
     pw_thread_loop_unlock(loop_);
-    if (!ok)
+    if (!ok) {
+        abortPipewireSetup();
         return false;
+    }
 
     qInfo() << "WaylandCapturer: PipeWire capture started (mutter), node" << nodeId_
             << "size" << width_ << "x" << height_;
@@ -462,7 +491,15 @@ bool WaylandCapturer::setupPortalScreenCast()
         return false;
     }
 
-    return setupPipewire(pfd.fileDescriptor(), nodeId);
+    // 复制一份 fd 交给 PipeWire：QDBusUnixFileDescriptor 析构时会关闭它持有的 fd，
+    // 而 pw_context_connect_fd 会接管并最终关闭传入的 fd —— 直接用同一个 fd 会造成
+    // 双重关闭，可能误关其它线程刚分配到同号 fd（极难排查的间歇性故障）。
+    const int rawFd = ::dup(pfd.fileDescriptor());
+    if (rawFd < 0) {
+        qWarning() << "WaylandCapturer: dup(PipeWire fd) failed:" << strerror(errno);
+        return false;
+    }
+    return setupPipewire(rawFd, nodeId);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,24 +513,33 @@ bool WaylandCapturer::setupPipewire(int fd, uint32_t nodeId)
     if (!loop_) { qWarning() << "WaylandCapturer: pw_thread_loop_new failed"; return false; }
 
     context_ = pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0);
-    if (!context_) { qWarning() << "WaylandCapturer: pw_context_new failed"; return false; }
+    if (!context_) {
+        qWarning() << "WaylandCapturer: pw_context_new failed";
+        abortPipewireSetup();
+        return false;
+    }
 
     if (pw_thread_loop_start(loop_) < 0) {
         qWarning() << "WaylandCapturer: pw_thread_loop_start failed";
+        abortPipewireSetup();
         return false;
     }
+    loopStarted_ = true;
 
     pw_thread_loop_lock(loop_);
     core_ = pw_context_connect_fd(context_, fd, nullptr, 0);
     if (!core_) {
         pw_thread_loop_unlock(loop_);
         qWarning() << "WaylandCapturer: pw_context_connect_fd failed";
+        abortPipewireSetup();
         return false;
     }
     bool ok = createStream(nodeId);
     pw_thread_loop_unlock(loop_);
-    if (!ok)
+    if (!ok) {
+        abortPipewireSetup();
         return false;
+    }
 
     qInfo() << "WaylandCapturer: PipeWire capture started, node" << nodeId_
             << "size" << width_ << "x" << height_;
@@ -631,6 +677,8 @@ void WaylandCapturer::teardownPipewire()
         pw_thread_loop_destroy(loop_);
         loop_ = nullptr;
     }
+    loopStarted_ = false;
+    streamError_ = false;
     streamReady_ = false;
 }
 
@@ -723,14 +771,23 @@ void WaylandCapturer::streamProcess()
 
 void WaylandCapturer::parseFormatParam(const struct spa_pod* param)
 {
-    struct spa_video_info info;
-    if (spa_format_parse(param, &info.media_type, &info.media_subtype) < 0)
+    // 必须解析到 spa_video_info_raw：旧代码声明 struct spa_video_info info; 后
+    // 只填 media_type/media_subtype，就直接读 info.info.raw.size.*（联合体成员从未
+    // 初始化）→ 未定义行为，得到随机宽高并写进 QTRD_WAYLAND_WIDTH/HEIGHT，
+    // 污染 InputManager 的坐标映射。
+    struct spa_video_info_raw raw;
+    memset(&raw, 0, sizeof(raw));
+    uint32_t mediaType = 0;
+    uint32_t mediaSubtype = 0;
+    if (spa_format_parse(param, &mediaType, &mediaSubtype) < 0)
         return;
-    if (info.media_type == SPA_MEDIA_TYPE_video &&
-        info.media_subtype == SPA_MEDIA_SUBTYPE_raw &&
-        info.info.raw.size.width > 0 && info.info.raw.size.height > 0) {
-        width_ = info.info.raw.size.width;
-        height_ = info.info.raw.size.height;
+    if (mediaType != SPA_MEDIA_TYPE_video || mediaSubtype != SPA_MEDIA_SUBTYPE_raw)
+        return;
+    if (spa_format_video_raw_parse(param, &raw) < 0)
+        return;
+    if (raw.size.width > 0 && raw.size.height > 0) {
+        width_ = static_cast<int>(raw.size.width);
+        height_ = static_cast<int>(raw.size.height);
         qInfo() << "WaylandCapturer: negotiated format" << width_ << "x" << height_;
         // 协商后的实际尺寸同步给 InputManager 做坐标映射（offscreen 平台无 QScreen）
         qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
@@ -738,8 +795,30 @@ void WaylandCapturer::parseFormatParam(const struct spa_pod* param)
     }
 }
 
+void WaylandCapturer::abortPipewireSetup()
+{
+    // 只在 loop 已启动时走常规 teardown（pw_thread_loop_stop 对未启动的 loop
+    // 行为不保证）；否则手工销毁已创建的对象。
+    if (loopStarted_) {
+        teardownPipewire();
+        return;
+    }
+    if (stream_) { pw_stream_destroy(stream_); stream_ = nullptr; }
+    if (core_) { pw_core_disconnect(core_); core_ = nullptr; }
+    if (context_) { pw_context_destroy(context_); context_ = nullptr; }
+    if (loop_) { pw_thread_loop_destroy(loop_); loop_ = nullptr; }
+}
+
 bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
 {
+    // PipeWire 流已进入 ERROR（compositor 撤销共享 / 会话失效 / 设备错误）：
+    // 如实报失败，让上层走"采集失败"路径（计数、必要时重建），而不是继续
+    // 返回 true，让画面永久冻结在最后一帧而看不出任何异常。
+    if (streamError_) {
+        if (updated) *updated = false;
+        return false;
+    }
+
     QMutexLocker lk(&frameMutex_);
     // 空帧 / 0 尺寸帧保护：流初始化或格式重协商中可能提交 0 宽高缓冲，
     // 此时不视为有效帧（避免上层 quickFrameChecksum 除零崩溃）

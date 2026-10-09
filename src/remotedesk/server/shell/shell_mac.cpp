@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <string>
+#include <vector>
 
 class MacInteractiveShell : public InteractiveShell {
 public:
@@ -43,22 +45,43 @@ void MacInteractiveShell::start()
         return;
     }
 
+    // ── fork 之前完成终端属性与环境表准备（子进程只用 AS-safe 调用） ──
+    struct termios tios;
+    if (tcgetattr(slaveFd, &tios) == 0) {
+        tios.c_cc[VERASE] = '\x7f';
+        tcsetattr(slaveFd, TCSANOW, &tios);
+    }
+    std::vector<std::string> envStrings;
+    for (char** e = environ; e && *e; ++e) {
+        const std::string s(*e);
+        if (s.compare(0, 5, "TERM=") == 0 || s.compare(0, 5, "LANG=") == 0
+            || s.compare(0, 7, "LC_ALL=") == 0)
+            continue;
+        envStrings.push_back(s);
+    }
+    envStrings.push_back("TERM=xterm-256color");
+    // 强制 UTF-8，保证 PTY 输出字节与前端 xterm 的 UTF-8 解码一致，避免中文乱码
+    envStrings.push_back("LANG=C.UTF-8");
+    envStrings.push_back("LC_ALL=C.UTF-8");
+    std::vector<char*> envp;
+    envp.reserve(envStrings.size() + 1);
+    for (std::string& s : envStrings)
+        envp.push_back(const_cast<char*>(s.c_str()));
+    envp.push_back(nullptr);
+    char* const argv[] = { const_cast<char*>("/bin/bash"),
+                           const_cast<char*>("--login"), nullptr };
+
     childPid_ = fork();
     if (childPid_ == 0) {
+        // 子进程内只用 async-signal-safe 调用（见 shell_linux.cpp 的详细说明：
+        // 多线程进程 fork 后调用 setenv/tcgetattr 可能因 libc 锁而死锁）。
+        // 终端属性与环境表已在 fork 前于父进程准备好。
         setsid();
         ioctl(slaveFd, TIOCSCTTY, 0);
         dup2(slaveFd, 0); dup2(slaveFd, 1); dup2(slaveFd, 2);
-        struct termios tios;
-        tcgetattr(slaveFd, &tios);
-        tios.c_cc[VERASE] = '\x7f';
-        tcsetattr(slaveFd, TCSANOW, &tios);
         if (slaveFd > 2) close(slaveFd);
         close(masterFd_);
-        setenv("TERM", "xterm-256color", 1);
-        // 强制 UTF-8，保证 PTY 输出字节与前端 xterm 的 UTF-8 解码一致，避免中文乱码
-        setenv("LANG", "C.UTF-8", 1);
-        setenv("LC_ALL", "C.UTF-8", 1);
-        execl("/bin/bash", "/bin/bash", "--login", nullptr);
+        execve("/bin/bash", argv, envp.data());
         _exit(1);
     }
     close(slaveFd);
@@ -92,7 +115,7 @@ void MacInteractiveShell::write(const QByteArray& data)
 void MacInteractiveShell::resize(int cols, int rows)
 {
     if (masterFd_ >= 0) {
-        struct winsize ws;
+        struct winsize ws = {};
         ws.ws_col = static_cast<unsigned short>(cols);
         ws.ws_row = static_cast<unsigned short>(rows);
         ioctl(masterFd_, TIOCSWINSZ, &ws);

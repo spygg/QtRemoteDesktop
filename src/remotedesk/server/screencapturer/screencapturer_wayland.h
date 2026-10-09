@@ -84,6 +84,13 @@ private:
     bool activated_ = false;
     bool streamReady_ = false;
     bool mutterMode_ = false;
+    bool loopStarted_ = false;   // pw_thread_loop_start 是否成功（失败路径不能 stop 未启动的 loop）
+    // PipeWire 流进入 ERROR 状态：captureFrame 必须如实报失败，否则上层永远
+    // 以为采集正常（画面冻结却无任何重连），表现为"永久卡住最后一帧"。
+    bool streamError_ = false;
+    // 部分初始化资源的清理：只销毁已创建的对象（区别于 teardownPipewire 的
+    // 无条件 stop loop），用于 setup 各失败分支，避免泄漏常驻线程/会话。
+    void abortPipewireSetup();
 };
 
 #endif // SCREENCAPTURER_WAYLAND_H

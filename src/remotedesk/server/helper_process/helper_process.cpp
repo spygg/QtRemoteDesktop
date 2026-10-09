@@ -32,6 +32,8 @@
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
 void applyLogLevelFromArgs(int argc, char* argv[]);
+// 日志角色后缀：helper 与 service 是两个进程，共用同一日志文件会互相交错
+void setLogRoleSuffix(const QString& suffix);
 
 #ifdef USE_FFMPEG
 // 编码协议字符串 ↔ CodecType（helper 侧本地映射，与服务端 codecFromString/ToString 语义一致）
@@ -77,6 +79,7 @@ int HelperProcess::run(int argc, char* argv[])
     QString logDir = QString("%1/logs").arg(QGuiApplication::applicationDirPath());
     QDir().mkpath(logDir);
     applyLogLevelFromArgs(argc, argv);
+    setLogRoleSuffix(QStringLiteral("_helper"));
     qInstallMessageHandler(logToFile);
 
     int wsPort = 8081;
@@ -268,6 +271,13 @@ int HelperProcess::run(int argc, char* argv[])
 
     // 编码帧 → 服务端：[1字节类型(0x01=IDR/0x02=P)][u32 长度][i64 时间戳][数据]
     // （与服务端→浏览器 13 字节头一致，服务端可直接复用 onEncodedFrame 分发）
+    // 背压计数：Qt 5.7/5.9 的 QWebSocket 未公开 bytesToWrite()（5.12 才有），
+    // 用「sendBinaryMessage 返回值累加 − bytesWritten 扣减」估算写缓冲积压，
+    // 与服务端 pendingBytes_ 同一套路。断线后缓冲被丢弃，重连时清零。
+    qint64 wsBacklogBytes = 0;
+    QObject::connect(&ws, &QWebSocket::bytesWritten, &app,
+        [&](qint64 n) { wsBacklogBytes = qMax<qint64>(0, wsBacklogBytes - n); });
+    qint64 droppedVideoFrames = 0;
     QObject::connect(encoder.get(), &VideoEncoder::encodedFrame, &app,
         [&](const QByteArray& data, bool keyframe, qint64 ts) {
             if (keyframe) {
@@ -280,6 +290,16 @@ int HelperProcess::run(int argc, char* argv[])
                 return;
             if (ws.state() != QAbstractSocket::ConnectedState)
                 return;
+            // 背压：服务端消费不过来时丢弃**非关键帧**。QWebSocket 写缓冲无上限，
+            // 一直塞会让内存暴涨、延迟线性增长（画面越看越滞后）。丢帧是可接受的：
+            // 关键帧仍然送，浏览器随时能重新同步。
+            static const qint64 kMediaBacklogLimit = 4 * 1024 * 1024;
+            if (!keyframe && wsBacklogBytes > kMediaBacklogLimit) {
+                if ((++droppedVideoFrames % 60) == 1)
+                    qWarning() << "Helper: WS backlog" << wsBacklogBytes
+                               << "bytes - dropping video frames (total" << droppedVideoFrames << ")";
+                return;
+            }
             QByteArray packet;
             QDataStream stream(&packet, QIODevice::WriteOnly);
             stream.setByteOrder(QDataStream::BigEndian);
@@ -287,7 +307,7 @@ int HelperProcess::run(int argc, char* argv[])
             stream << quint32(data.size());
             stream << qint64(ts);
             packet.append(data);
-            ws.sendBinaryMessage(packet);
+            wsBacklogBytes += qMax<qint64>(0, ws.sendBinaryMessage(packet));
         });
     // SPS/PPS：编码器 init 产出 extradata 时上报，服务端缓存并转发给浏览器
     QObject::connect(encoder.get(), &VideoEncoder::codecConfigChanged, &app,
@@ -319,6 +339,7 @@ int HelperProcess::run(int argc, char* argv[])
 
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
+        wsBacklogBytes = 0; // 断线期间写缓冲被丢弃，重连后从零开始记账
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
         // [P2] 每次连接都上报：服务端内存态在 helper 重连期间可能已变（或服务重启），
         // 只发一次会让重连后的会话拿不到尺寸 → 鼠标坐标映射错位。
@@ -374,18 +395,28 @@ int HelperProcess::run(int argc, char* argv[])
 #endif
             compressor->enqueue(frame);
         });
+    qint64 droppedJpegFrames = 0;
     QObject::connect(compressor.get(), &JpegCompressor::jpegCompressed,
         &ws, [&](const QByteArray& jpegData) {
             if (quitting) return;
             if (ws.state() != QAbstractSocket::ConnectedState)
                 return;
+            // 背压：图片模式下同样丢弃积压帧（下一帧很快会到，丢帧只损失一帧画面，
+            // 不丢帧则内存与延迟双爆）。
+            static const qint64 kMediaBacklogLimit = 4 * 1024 * 1024;
+            if (wsBacklogBytes > kMediaBacklogLimit) {
+                if ((++droppedJpegFrames % 60) == 1)
+                    qWarning() << "Helper: WS backlog" << wsBacklogBytes
+                               << "bytes - dropping JPEG frames (total" << droppedJpegFrames << ")";
+                return;
+            }
             QByteArray packet;
             QDataStream stream(&packet, QIODevice::WriteOnly);
             stream.setByteOrder(QDataStream::BigEndian);
             stream << quint8(0x03);
             stream << quint32(jpegData.size());
             packet.append(jpegData);
-            ws.sendBinaryMessage(packet);
+            wsBacklogBytes += qMax<qint64>(0, ws.sendBinaryMessage(packet));
         }, Qt::QueuedConnection);
 
     bool locked = false;
@@ -775,6 +806,10 @@ int HelperProcess::run(int argc, char* argv[])
                 }
                 int fps = obj["fps"].toInt();
                 if (fps >= 1) {
+                    // 与 ScreenCapturer::setFps 的上界保持一致：captureFps 还要参与
+                    // 编码器帧率/码率估算与切分辨率后的 capturer.start()，
+                    // 原样保存 5000 会让定时器间隔算成 0ms（忙转）+ 编码器重建风暴。
+                    if (fps > 60) fps = 60;
                     capturer.setFps(fps);
                     captureFps = fps; // [B-6] 记住配置帧率，供切分辨率后重启使用
                 }
@@ -802,7 +837,17 @@ int HelperProcess::run(int argc, char* argv[])
                 return;
             }
 
-            if (locked) return;
+            // [XP] 锁屏状态在 XP 上高频抖动（实锤日志：locked true→false 仅隔 2 秒），
+            // 且 XP 的登录/解锁 UI 运行在 winsta0\default 桌面（即 helper 所在桌面，
+            // 锁屏期间实测 input desktop 名字就是 "default"）。XP 下不丢输入：
+            // helper 直注覆盖 default 桌面激活的场景（欢迎屏点用户名块、输解锁密码），
+            // secure-input 进程覆盖 winlogon 桌面激活的场景；非激活桌面上的
+            // SendInput 是无害 no-op，两条通道总有一条命中。丢输入会让抖动窗口期
+            // 内的密码输入全部蒸发送失（XP 首次登录输密码失败的根因）。
+            // Win7+ 登录 UI 在 winlogon 安全桌面，helper 注入无效但同样无害，
+            // 仍保留丢弃以省去无效 SendInput。
+            if (locked && !isWinXP)
+                return;
 
             if (type == "mousemove") {
                 inputMgr.injectMouseMove(obj["x"].toInt(), obj["y"].toInt());

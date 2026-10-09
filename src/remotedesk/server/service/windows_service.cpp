@@ -3,6 +3,7 @@
 #include "crashhandler.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QMessageLogContext>
 #include <QTimer>
@@ -17,9 +18,14 @@ void applyLogLevelFromArgs(int argc, char* argv[]);
 
 #define SERVICE_NAME L"QtRemoteDesktop"
 
+// helper 启动后必须在此时限内连上 /capture，否则视为"活着但没用"并杀掉重建。
+// 卡死/连错端口/WS 断开都会表现为"服务端永远等不到画面"，只判进程存活会永久黑屏。
+static const qint64 kHelperConnectTimeoutMs = 20000;
+
 SERVICE_STATUS_HANDLE WindowsService::s_statusHandle = NULL;
 SERVICE_STATUS WindowsService::s_status = {};
 HANDLE WindowsService::s_stopEvent = NULL;
+HANDLE WindowsService::s_sessionChangeEvent = NULL;
 
 void WINAPI WindowsService::serviceCtrlHandler(DWORD ctrlCode)
 {
@@ -34,6 +40,13 @@ void WINAPI WindowsService::serviceCtrlHandler(DWORD ctrlCode)
         s_status.dwWaitHint = 15000;
         SetServiceStatus(s_statusHandle, &s_status);
         SetEvent(s_stopEvent);
+        break;
+    case SERVICE_CONTROL_SESSIONCHANGE:
+        // 用户切换/注销/新登录：当前 helper 属于旧会话，必须重建（否则新会话
+        // 一直是黑屏，而旧 helper 还"已连接"）。这里只置事件，实际重建交给
+        // helper 定时器（服务控制线程里不能做重活）。
+        if (s_sessionChangeEvent)
+            SetEvent(s_sessionChangeEvent);
         break;
     default:
         break;
@@ -106,20 +119,45 @@ DWORD WindowsService::launchHelperProcess()
 
     STARTUPINFOW si = { sizeof(si) };
     si.lpDesktop = const_cast<wchar_t*>(L"winsta0\\default");
-    PROCESS_INFORMATION pi;
+    PROCESS_INFORMATION pi = {};
     typedef BOOL (WINAPI *CPAUserW_t)(HANDLE, LPCWSTR, LPWSTR,
         LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
         LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
     CPAUserW_t pCreateProcessAsUserW = (CPAUserW_t)GetProcAddress(
         GetModuleHandleA("advapi32"), "CreateProcessAsUserW");
 
-    bool ok = pCreateProcessAsUserW && pCreateProcessAsUserW(hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    // 为桌面用户构造环境块：lpEnvironment=NULL 会让 helper 继承**服务进程(SYSTEM)**
+    // 的 environ，其 TEMP/APPDATA/USERPROFILE 全部指向 systemprofile，helper 写临时
+    // 文件/读用户配置都会跑到系统账户目录下。userenv.dll 动态加载，避免新增链接依赖。
+    typedef BOOL (WINAPI *CreateEnvironmentBlock_t)(LPVOID*, HANDLE, BOOL);
+    typedef BOOL (WINAPI *DestroyEnvironmentBlock_t)(LPVOID);
+    LPVOID envBlock = NULL;
+    HMODULE hUserEnv = LoadLibraryA("userenv.dll");
+    CreateEnvironmentBlock_t pCreateEnv = NULL;
+    DestroyEnvironmentBlock_t pDestroyEnv = NULL;
+    if (hUserEnv) {
+        pCreateEnv = (CreateEnvironmentBlock_t)GetProcAddress(hUserEnv, "CreateEnvironmentBlock");
+        pDestroyEnv = (DestroyEnvironmentBlock_t)GetProcAddress(hUserEnv, "DestroyEnvironmentBlock");
+        if (pCreateEnv && !pCreateEnv(&envBlock, hDupToken, FALSE))
+            envBlock = NULL;   // 失败就退回继承环境，不阻断启动
+    }
+
+    bool ok = pCreateProcessAsUserW && pCreateProcessAsUserW(
+        hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE,
+        envBlock ? CREATE_UNICODE_ENVIRONMENT : 0,
+        envBlock, NULL, &si, &pi);
+
+    if (envBlock && pDestroyEnv)
+        pDestroyEnv(envBlock);
+    if (hUserEnv)
+        FreeLibrary(hUserEnv);
 
     CloseHandle(hDupToken);
 
     if (ok) {
         qInfo() << "LaunchHelper: helper process started, PID:" << pi.dwProcessId
-                << "token: user (explorer.exe in session" << sessionId << ")";
+                << "token: user (explorer.exe in session" << sessionId << ")"
+                << "env:" << (envBlock ? "user" : "inherited(SYSTEM)");
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         return pi.dwProcessId;
@@ -136,10 +174,12 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
 
     s_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     s_status.dwCurrentState = SERVICE_START_PENDING;
-    s_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
+    s_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN
+                                  | SERVICE_ACCEPT_SESSIONCHANGE;
     SetServiceStatus(s_statusHandle, &s_status);
 
     s_stopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    s_sessionChangeEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!s_stopEvent) {
         s_status.dwCurrentState = SERVICE_STOPPED;
         SetServiceStatus(s_statusHandle, &s_status);
@@ -183,28 +223,60 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
 
             QTimer helperTimer;
             DWORD helperPid = 0;
+            qint64 helperSpawnMs = 0;     // helper 最近一次启动时刻
+            qint64 lastCaptureMs = 0;     // 最近一次观察到 /capture 已连接的时刻
             QObject::connect(&helperTimer, &QTimer::timeout, [&]() {
-                if (server.isCaptureSourceConnected()) {
-                    // 不 stop()：helper 崩溃/断开后需要继续监视并自动重启。
-                    // 原实现在此 stop()，导致 helper 崩溃后 timer 永久停止、
-                    // 远程桌面无法恢复（服务只挂着不重建 helper）。
+                const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+                // 会话切换/注销：旧 helper 属于旧会话，先收掉，让下面立刻为新会话重建
+                if (s_sessionChangeEvent
+                    && WaitForSingleObject(s_sessionChangeEvent, 0) == WAIT_OBJECT_0) {
+                    ResetEvent(s_sessionChangeEvent);
+                    if (helperPid != 0) {
+                        qInfo() << "Session change detected, terminating helper PID" << helperPid;
+                        HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
+                        if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+                        helperPid = 0;
+                    }
+                    helperTimer.setInterval(1000);
                     return;
                 }
+
+                if (server.isCaptureSourceConnected()) {
+                    // 不 stop()：helper 崩溃/断开后需要继续监视并自动重启。
+                    lastCaptureMs = now;
+                    return;
+                }
+
                 if (helperPid != 0) {
-                    HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, helperPid);
+                    // 用 WaitForSingleObject 判活，比 GetExitCodeProcess==STILL_ACTIVE
+                    // 可靠（PID 复用/句柄失效都不会误判为"还在跑"）。
+                    bool alive = false;
+                    HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION,
+                                               FALSE, helperPid);
                     if (hProc) {
-                        DWORD exitCode;
-                        if (GetExitCodeProcess(hProc, &exitCode) && exitCode == STILL_ACTIVE) {
-                            CloseHandle(hProc);
-                            return;
-                        }
+                        alive = (WaitForSingleObject(hProc, 0) == WAIT_TIMEOUT);
                         CloseHandle(hProc);
                     }
+                    if (alive) {
+                        // 关键：进程活着 != 健康。helper 卡死 / WS 断开 / 连错端口时
+                        // 服务端永远等不到 /capture，只判"进程存活"会永久黑屏。
+                        // 以"最近一次成功连接 /capture 的时刻"为健康判据，超时就杀掉重建。
+                        const qint64 lastOk = (lastCaptureMs > 0) ? lastCaptureMs : helperSpawnMs;
+                        if (now - lastOk < kHelperConnectTimeoutMs)
+                            return;   // 宽限期内，等它连上
+                        qWarning() << "Helper PID" << helperPid << "alive but /capture not"
+                                   << "connected for" << (now - lastOk) << "ms - terminating";
+                        HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
+                        if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+                    }
                     helperPid = 0;
+                    lastCaptureMs = 0;
                 }
                 DWORD pid = launchHelperProcess();
                 if (pid != 0) {
                     helperPid = pid;
+                    helperSpawnMs = now;
                     helperTimer.setInterval(5000);
                 } else {
                     // 无用户会话时慢速轮询，有会话但启动失败时快速重试
@@ -214,14 +286,27 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
             });
             helperTimer.start(5000);
             helperPid = launchHelperProcess();
+            helperSpawnMs = QDateTime::currentMSecsSinceEpoch();
 
             app.exec();
             tickTimer.stop();
+
+            // 服务停止：必须回收 helper，否则它在用户会话里成为孤儿进程，
+            // 继续抓屏/占端口，下次启动还会与新 helper 抢 /capture。
+            if (helperPid != 0) {
+                qInfo() << "Service stopping, terminating helper PID" << helperPid;
+                HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
+                if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+            }
         }
     }
 
     CloseHandle(s_stopEvent);
     s_stopEvent = NULL;
+    if (s_sessionChangeEvent) {
+        CloseHandle(s_sessionChangeEvent);
+        s_sessionChangeEvent = NULL;
+    }
 
     // [P2] serviceMain 返回前必须显式报 SERVICE_STOPPED，否则 SCM 等到超时
     // 才认为服务已停（事件查看器记 7031/1053）。
@@ -301,7 +386,9 @@ bool WindowsService::uninstall()
 
     CloseServiceHandle(svc);
     CloseServiceHandle(scm);
-    wprintf(L"Service '%S' removed.\n", SERVICE_NAME);
+    // [B8] 宽字符 printf 格式必须用 %ls：%S 在 MSVC 宽格式里表示窄字符串，
+    // 传入 wchar_t* 是 UB（MinGW 下依赖实现）。
+    wprintf(L"Service '%ls' removed.\n", SERVICE_NAME);
     return TRUE;
 }
 

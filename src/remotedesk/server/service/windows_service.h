@@ -19,4 +19,5 @@ private:
     static SERVICE_STATUS_HANDLE s_statusHandle;
     static SERVICE_STATUS s_status;
     static HANDLE s_stopEvent;
+    static HANDLE s_sessionChangeEvent;   // SERVICE_CONTROL_SESSIONCHANGE → helper 重建
 };

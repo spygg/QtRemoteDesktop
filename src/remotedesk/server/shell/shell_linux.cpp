@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <string>
+#include <vector>
 
 class LinuxInteractiveShell : public InteractiveShell {
 public:
@@ -48,27 +50,68 @@ void LinuxInteractiveShell::start()
     grantpt(masterFd_);
     unlockpt(masterFd_);
 
-    childPid_ = fork();
-    if (childPid_ == 0) {
-        setsid();
-        const char* slaveName = ptsname(masterFd_);
-        int slaveFd = open(slaveName, O_RDWR);
-        ioctl(slaveFd, TIOCSCTTY, 0);
-        dup2(slaveFd, 0); dup2(slaveFd, 1); dup2(slaveFd, 2);
-        // 配置终端：Backspace 发送 DEL (0x7f)，匹配浏览器按键
-        struct termios tios;
-        tcgetattr(slaveFd, &tios);
+    // ── fork 之前完成所有"非 async-signal-safe"的准备 ──
+    // 本进程是多线程的（Qt 事件循环 + 采集/编码线程）。fork 出来的子进程只能安全
+    // 调用 async-signal-safe 函数：若 fork 瞬间恰好有其它线程持有 malloc / stdio 锁，
+    // 子进程里再调 setenv / tcgetattr（都会碰 libc 锁）就可能永久死锁，表现为"点开
+    // 终端后卡住不输出"。因此这里把从端打开、终端属性、环境表全部前置到父进程，
+    // 子进程只做 setsid/dup2/execve（均为 AS-safe）。
+    const char* slaveName = ptsname(masterFd_);
+    if (!slaveName) {
+        qWarning() << "InteractiveShell: ptsname failed";
+        close(masterFd_); masterFd_ = -1;
+        ws_->close();
+        return;
+    }
+    const int slaveFd = ::open(slaveName, O_RDWR);
+    if (slaveFd < 0) {
+        qWarning() << "InteractiveShell: open slave pty failed";
+        close(masterFd_); masterFd_ = -1;
+        ws_->close();
+        return;
+    }
+    // 配置终端：Backspace 发送 DEL (0x7f)，匹配浏览器按键
+    struct termios tios;
+    if (tcgetattr(slaveFd, &tios) == 0) {
         tios.c_cc[VERASE] = '\x7f';
         tcsetattr(slaveFd, TCSANOW, &tios);
-        if (slaveFd > 2) close(slaveFd);
-        close(masterFd_);
-        setenv("TERM", "xterm-256color", 1);
-        // 强制 UTF-8，保证 PTY 输出字节与前端 xterm 的 UTF-8 解码一致，避免中文乱码
-        setenv("LANG", "C.UTF-8", 1);
-        setenv("LC_ALL", "C.UTF-8", 1);
-        execl("/bin/bash", "/bin/bash", "--login", nullptr);
+    }
+
+    // 环境表：继承父进程 environ 并覆盖 TERM/LANG/LC_ALL（execve 需要连续存储，
+    // 由下面的 vector 持有，其内存在 fork 后被子进程继承，保持有效）
+    std::vector<std::string> envStrings;
+    for (char** e = environ; e && *e; ++e) {
+        const std::string s(*e);
+        if (s.compare(0, 5, "TERM=") == 0 || s.compare(0, 5, "LANG=") == 0
+            || s.compare(0, 7, "LC_ALL=") == 0)
+            continue;
+        envStrings.push_back(s);
+    }
+    envStrings.push_back("TERM=xterm-256color");
+    // 强制 UTF-8，保证 PTY 输出字节与前端 xterm 的 UTF-8 解码一致，避免中文乱码
+    envStrings.push_back("LANG=C.UTF-8");
+    envStrings.push_back("LC_ALL=C.UTF-8");
+    std::vector<char*> envp;
+    envp.reserve(envStrings.size() + 1);
+    for (std::string& s : envStrings)
+        envp.push_back(const_cast<char*>(s.c_str()));
+    envp.push_back(nullptr);
+    char* const argv[] = { const_cast<char*>("/bin/bash"),
+                           const_cast<char*>("--login"), nullptr };
+
+    childPid_ = fork();
+    if (childPid_ == 0) {
+        // 子进程：仅使用 async-signal-safe 调用
+        setsid();
+        ioctl(slaveFd, TIOCSCTTY, 0);
+        dup2(slaveFd, 0); dup2(slaveFd, 1); dup2(slaveFd, 2);
+        if (slaveFd > 2) ::close(slaveFd);
+        ::close(masterFd_);
+        execve("/bin/bash", argv, envp.data());
         _exit(1);
     }
+    // 父进程不再需要从端：不关会导致子进程退出后 PTY 不产生 EOF（会话泄漏）
+    ::close(slaveFd);
     if (childPid_ < 0) {
         close(masterFd_); masterFd_ = -1;
         qWarning() << "InteractiveShell: fork failed";
@@ -103,7 +146,8 @@ void LinuxInteractiveShell::write(const QByteArray& data)
 void LinuxInteractiveShell::resize(int cols, int rows)
 {
     if (masterFd_ >= 0) {
-        struct winsize ws;
+        // 必须整体零初始化：ws_xpixel/ws_ypixel 未初始化即传给内核，属未定义数据
+        struct winsize ws = {};
         ws.ws_col = static_cast<unsigned short>(cols);
         ws.ws_row = static_cast<unsigned short>(rows);
         ioctl(masterFd_, TIOCSWINSZ, &ws);

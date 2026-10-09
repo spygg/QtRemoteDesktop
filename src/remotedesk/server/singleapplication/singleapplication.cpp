@@ -203,13 +203,27 @@ SingleApplication::SingleApplication(int& argc, char** argv)
             m_pServer = new QLocalServer(this);
             connect(m_pServer, SIGNAL(newConnection()), this, SLOT(newLocalConnection()));
 
-            if (!m_pServer->listen(strServerName)
-                && m_pServer->serverError() == QAbstractSocket::AddressInUseError) {
-                QLocalServer::removeServer(strServerName);
-                m_pServer->listen(strServerName);
+            bool listening = m_pServer->listen(strServerName);
+            if (!listening && m_pServer->serverError() == QAbstractSocket::AddressInUseError) {
+                // 清残留前再探测一次：另一实例可能刚好在 listen 窗口内抢到锁，
+                // 此刻直接 removeServer 会把它的服务器名删掉 → 双实例同时监听
+                // HTTP/WS 端口，会话与配置互相覆盖。
+                QLocalSocket probe;
+                probe.connectToServer(strServerName);
+                if (probe.waitForConnected(300)) {
+                    m_bRunning = true;
+                    listening = true;
+                } else {
+                    QLocalServer::removeServer(strServerName);
+                    listening = m_pServer->listen(strServerName);
+                }
             }
-            if (!m_pServer->isListening()) {
-                qDebug() << m_pServer->errorString() << m_pServer->serverName();
+            if (!listening) {
+                // 仍然拿不到单实例锁：保守按“已在运行”处理。旧实现只打一条
+                // qDebug 就继续执行 → 双实例竞态（端口冲突、状态互相覆盖）。
+                qWarning() << "Single-instance lock unavailable, assume another instance is running:"
+                           << m_pServer->errorString();
+                m_bRunning = true;
             }
         } else {
             m_bRunning = true;

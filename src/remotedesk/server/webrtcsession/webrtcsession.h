@@ -70,6 +70,10 @@ private:
     // 会话失败/关闭时由 stopWebRtcSession 将本会话从 webrtcSessions_ 移除，
     // 推流随之自然停止。
     bool remoteSet_ = false;
+    // close() 重入保护：pc_->close() 可能**同步**回调 onConnectionStateChange →
+    // 上层 stopWebRtcSession → session->close()，形成重入。重入时若 pc_ 已被
+    // reset 而外层栈帧仍在使用，就是 use-after-free。
+    bool closing_ = false;
     // answer 未生效前到达的远端 ICE 候选先排队，answer 生效后补发，
     // 否则 metaRTC addIceCandidate 在 remoteDescription 未设置时失败、候选被丢弃。
     QVector<QPair<QString, QString>> pendingIce_;

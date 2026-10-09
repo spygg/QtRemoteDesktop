@@ -78,6 +78,10 @@ private:
     bool sendUinputWheel(int delta);
     bool initUinputMouse();
     bool initUinputWheelDevice(); // [B-3] 独立创建滚轮设备，补建时不再重开指针设备
+    // uinput 初始化节流：无 /dev/uinput 权限时不能每次输入事件都重试 open()
+    // （60Hz 指针事件 = open() 风暴 + 日志淹没）。失败后 5s 内不再重试。
+    bool shouldRetryUinputInit();
+    qint64 lastUinputInitMs_ = 0;
     unsigned short keysymToLinuxKeycode(unsigned long ks);
     unsigned long lockScreenWindow_ = 0;
     qint64 focusCheckedMs_ = 0;

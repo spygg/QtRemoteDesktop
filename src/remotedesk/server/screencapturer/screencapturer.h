@@ -77,6 +77,11 @@ public:
     // 漏报子窗口重绘（任务栏/顶部面板）导致的局部黑块。默认 false=尽量增量。
     bool fullCaptureOnly_ = false;
     virtual void setFullCaptureOnly(bool v) { fullCaptureOnly_ = v; }
+    // 请求下一次 captureFrame 强制全量抓取。外部"强制帧"（新客户端接入、
+    // 关键帧泵）必须用它：有增量检测的平台（X11 Damage）在桌面无变化时会
+    // 回 updated=false，强制帧被吃掉，静止桌面下最长要等 ~2s 才有画面。
+    // 无增量检测的平台天然每帧全量，默认 no-op。
+    virtual void requestFullCapture() {}
 };
 
 class ScreenCapturer : public QObject {
@@ -110,6 +115,14 @@ public:
         if (useWayland_ && waylandCapturer_)
             return waylandCapturer_->width();
 #endif
+#ifdef Q_OS_WIN
+        // 多屏：必须返回**当前选中输出**的尺寸，而不是 screen_（主屏 QScreen）。
+        // 选了非主输出（如副显示器）时二者不同，返回主屏尺寸会让编码器按错误尺寸
+        // 初始化、每帧尺寸校验失败 → 周期性重建编码器、坐标映射错位。
+        if (winCurrentIndex_ >= 0 && winCurrentIndex_ < winOutputs_.size()
+            && winOutputs_[winCurrentIndex_].w > 0)
+            return winOutputs_[winCurrentIndex_].w;
+#endif
         return screen_ ? screen_->size().width() : 0;
     }
     int height() const {
@@ -118,6 +131,11 @@ public:
             return x11Capturer_->height();
         if (useWayland_ && waylandCapturer_)
             return waylandCapturer_->height();
+#endif
+#ifdef Q_OS_WIN
+        if (winCurrentIndex_ >= 0 && winCurrentIndex_ < winOutputs_.size()
+            && winOutputs_[winCurrentIndex_].h > 0)
+            return winOutputs_[winCurrentIndex_].h;
 #endif
         return screen_ ? screen_->size().height() : 0;
     }
@@ -176,8 +194,6 @@ private:
 #if defined(Q_OS_WIN)
     PlatformCapturer* dxgiCapturer_ = nullptr;
     bool useDXGI_ = false;
-    bool initDXGI();
-    void captureDXGI();
 #endif
 
     int idleCount_ = 0;

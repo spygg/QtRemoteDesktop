@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QSet>
+#include <QTimer>
 #include <QUuid>
 #include <QWebSocket>
 #include <QWebSocketServer>
@@ -46,7 +47,7 @@ public:
     // [C5-①] 下载分块背压：sendBinaryToClient 排入下载字节时累加，
     // socket 实际写出时扣减。文件传输工作线程在产出下一块前轮询该值，
     // 低于阈值才继续——否则 GB 级目录会把信号队列 + 套接字写队列撑爆（OOM）。
-    void addDownloadBacklog(qint64 delta) { downloadBacklog_.fetch_add(delta, std::memory_order_relaxed); }
+    void addDownloadBacklog(const QString& clientId, qint64 delta);
     qint64 downloadBacklog() const { return downloadBacklog_.load(std::memory_order_relaxed); }
 
     void broadcastCodecConfig(const QByteArray& extra);
@@ -98,6 +99,12 @@ private slots:
 private:
     // 单个已完成握手的 socket 的路由与挂接（onNewConnection 逐个 pending 调用）
     void handleNewSocket(QWebSocket* socket);
+    // 释放某客户端的下载积压份额（断线/被踢时调用）。只扣该客户端自己的份额，
+    // 不再像旧实现那样把全局计数清零——否则其它客户端正在受控的下载节流会被
+    // 一并解除，GB 级目录传输重新撑爆信号队列与套接字写队列。
+    void releaseDownloadBacklog(const QString& clientId);
+    // 记录客户端最近一次活动时间，配合 idleTimer_ 清理半开连接
+    void touchClient(const QString& clientId);
     QWebSocketServer* server_;
     QMap<QString, QWebSocket*> clients_;
     QSet<QString> mediaExcludedClients_;
@@ -108,6 +115,13 @@ private:
     QMap<QString, qint64> pendingBytes_;
     // [C5-①] 下载分块未写出字节数（跨线程原子量：工作线程读，主线程增减）
     std::atomic<qint64> downloadBacklog_{0};
+    // 分客户端下载未写出份额（仅主线程读写）：断线时只扣当事人，见 releaseDownloadBacklog
+    QMap<QString, qint64> downloadBacklogByClient_;
+    // 每客户端最近一次上行消息时间（毫秒时钟）：半开连接（对端掉电/断网无 FIN）
+    // 永远不会触发 disconnected，会一直占着 clients_ 且让 hasVideoClients() 恒真
+    // → 服务端为不存在的观众持续编码推流。idleTimer_ 定期清理。
+    QMap<QString, qint64> lastActivityMs_;
+    QTimer idleTimer_;
     QMap<QWebSocket*, QString> socketToId_;
     QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;

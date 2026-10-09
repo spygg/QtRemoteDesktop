@@ -325,11 +325,21 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
 
 void WebRtcSession::close()
 {
+    // 防重入：pc_->close() 可能同步回调 failed()/closed() → 上层
+    // stopWebRtcSession → 再次 close()。若不设标志，内层会把 pc_ reset 掉，
+    // 外层栈帧继续使用已释放对象（UAF）。
+    if (closing_)
+        return;
+    closing_ = true;
+
     connected_ = false;
-    if (pc_) {
-        pc_->close();
-        pc_.reset();
-    }
+    remoteSet_ = false;
+    // 先把 unique_ptr move 到局部变量再 close：这样 close() 期间发生的重入
+    // 看到的是 pc_ == nullptr（走上面的重入分支或空指针保护），不会碰到正被销毁的对象；
+    // 真正的析构推迟到本函数返回时，仍在外层栈帧之外完成。
+    std::unique_ptr<YangPeerConnection8> pc = std::move(pc_);
+    if (pc)
+        pc->close();
     pacer_.reset();
 }
 

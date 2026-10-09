@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
 #include <dirent.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -17,6 +18,12 @@
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
 void applyLogLevelFromArgs(int argc, char* argv[]);
+
+// systemd stop/restart 会发 SIGTERM；Qt 默认不接管 → 进程被直接硬杀，既不跑
+// aboutToQuit、也不回收采集/编码线程与子进程。信号处理器只能触碰 async-signal-safe
+// 的东西，所以这里仅置位标志，由主线程定时器轮询后走正常退出流程。
+static volatile sig_atomic_t g_quitRequested = 0;
+static void onTerminationSignal(int) { g_quitRequested = 1; }
 
 // Check if a dirent is likely a numeric PID directory (handle DT_UNKNOWN)
 static bool isPidDir(struct dirent* entry)
@@ -309,7 +316,9 @@ static bool detectUserX11Env()
     }
 
     if (bestIdx >= 0) {
-        // 记录调用前的值，仅在实际发生变化时输出日志，避免每 3 秒刷屏
+        // 记录调用前的值，仅在实际发生变化时才 setenv，避免每 3 秒改写一次全局
+        // environ —— setenv/unsetenv 会 realloc 整个 environ 数组，而采集/输入
+        // 线程可能正在 getenv，属真实数据竞争。只在确实变化时写，把窗口压到最小。
         char prevDpy[64] = {};
         char prevXauth[1024] = {};
         const char* oldD = getenv("DISPLAY");
@@ -317,9 +326,11 @@ static bool detectUserX11Env()
         if (oldD) { strncpy(prevDpy, oldD, sizeof(prevDpy) - 1); prevDpy[sizeof(prevDpy) - 1] = '\0'; }
         if (oldA) { strncpy(prevXauth, oldA, sizeof(prevXauth) - 1); prevXauth[sizeof(prevXauth) - 1] = '\0'; }
 
-        setenv("DISPLAY", entries[bestIdx].display, 1);
+        // 为选中的 display 推导 XAUTHORITY：会话自带 → 该 uid 的 $HOME/.Xauthority。
+        // 推不出来就**清空**，绝不沿用上一个 display 的 auth 文件。
+        char desiredAuth[1024] = {};
         if (xauthHasContent(entries[bestIdx].xauth)) {
-            setenv("XAUTHORITY", entries[bestIdx].xauth, 1);
+            snprintf(desiredAuth, sizeof(desiredAuth), "%s", entries[bestIdx].xauth);
         } else if (entries[bestIdx].uid >= 1000) {
             // No XAUTHORITY env var on any process for this display. The
             // session almost certainly relies on the default $HOME/.Xauthority
@@ -330,9 +341,25 @@ static bool detectUserX11Env()
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/.Xauthority", pw->pw_dir);
                 if (xauthHasContent(path))
-                    setenv("XAUTHORITY", path, 1);
+                    snprintf(desiredAuth, sizeof(desiredAuth), "%s", path);
             }
         }
+
+        if (strcmp(prevDpy, entries[bestIdx].display) != 0)
+            setenv("DISPLAY", entries[bestIdx].display, 1);
+
+        // 切换 display 时必须先清掉旧 XAUTHORITY：新 display 的 auth 常常是另一个
+        // 文件（甚至不存在），留着旧值会拼出 "DISPLAY=新 + XAUTHORITY=旧(有效但
+        // 属于旧 display)"，XOpenDisplay 必然失败 —— 与"选到 0 字节 auth"是同一类
+        // 整机失效。清空后下面的 Fallback 段（触发条件是"XAUTHORITY 无内容"）还会
+        // 继续按新 display 重新探测。
+        if (desiredAuth[0]) {
+            if (strcmp(prevXauth, desiredAuth) != 0)
+                setenv("XAUTHORITY", desiredAuth, 1);
+        } else if (prevXauth[0]) {
+            unsetenv("XAUTHORITY");
+        }
+
         const char* newD = getenv("DISPLAY");
         const char* newA = getenv("XAUTHORITY");
         if (strcmp(prevDpy, newD) != 0 ||
@@ -512,6 +539,16 @@ int LinuxService::run(int argc, char* argv[])
 
     qInfo() << "Linux service mode: starting RDP server";
 
+    // 安装 SIGTERM/SIGINT 处理器：systemd 停机走正常退出（app.exec() 返回后
+    // RDPServer 析构会停采集/编码线程、关 WS/HTTP 监听），而不是被强杀。
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = onTerminationSignal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT, &sa, nullptr);
+
     RDPServer server;
     if (!server.initialize(QString(), true, true)) {
         return 1;
@@ -557,6 +594,15 @@ int LinuxService::run(int argc, char* argv[])
         // display 未变且 capture 已连接（健康或锁屏）：保持现状，等待更优 display 出现
     });
     checkTimer->start(3000);
+
+    // 退出信号轮询：收到 SIGTERM/SIGINT 后请求正常退出，让 RDPServer 析构收尾
+    // （停采集/编码线程、关监听、断开客户端），而不是被 systemd 直接 SIGKILL 掉。
+    QTimer* quitTimer = new QTimer(&app);
+    QObject::connect(quitTimer, &QTimer::timeout, []() {
+        if (g_quitRequested)
+            QCoreApplication::quit();
+    });
+    quitTimer->start(200);
 
     return app.exec();
 }

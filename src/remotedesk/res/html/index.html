@@ -955,7 +955,9 @@
             return div.innerHTML;
         }
         const CONFIG = {
-            wsUrl: `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.hostname}:websocketPort${sessionToken ? '?token=' + sessionToken : ''}`,
+            // token 来自 cookie，必须转义：含 '+'/'='/'/' 等字符时若直接拼进 URL 会被
+            // 解析成空格或路径分隔（服务端校验必然失败），encodeURIComponent 保证原样送达。
+            wsUrl: `${location.protocol === 'https:' ? 'wss://' : 'ws://'}${location.hostname}:websocketPort${sessionToken ? '?token=' + encodeURIComponent(sessionToken) : ''}`,
             targetFps: 30,
             keyframeInterval: 1000, // 请求关键帧间隔
         };
@@ -1853,6 +1855,15 @@
                 }
             }
 
+            // 显式释放：切换编码协议时旧的 VideoDecoder 不再使用，必须 close 掉，
+            // 否则底层硬件解码器/内存会一直挂到 GC，多次切换后可能耗尽解码器资源。
+            close() {
+                this.supported = false;
+                this.configured = false;
+                try { if (this.decoder) this.decoder.close(); } catch (e) {}
+                this.decoder = null;
+            }
+
             handleFrame(frame) {
                 // canvas 固定为物理分辨率（scale 只影响编码分辨率），
                 // 帧统一拉伸绘制，保证各缩放档位下画面铺满且与图片模式行为一致。
@@ -1873,6 +1884,16 @@
 
                 updateFps();
             }
+        }
+
+        // 统一替换解码器：先释放旧的（close 掉底层 VideoDecoder），再建新的。
+        // 直接 `state.decoder = new H264Decoder(...)` 会泄漏旧解码器实例。
+        function replaceDecoder(codec) {
+            if (state.decoder && typeof state.decoder.close === 'function') {
+                try { state.decoder.close(); } catch (e) {}
+            }
+            state.decoder = new H264Decoder(codec);
+            return state.decoder;
         }
 
         // ==================== WebSocket 连接 ====================
@@ -1920,7 +1941,7 @@
                 overlay.classList.remove('active');
 
                 // 初始化解码器（按持久化的编码协议）
-                state.decoder = new H264Decoder(state.currentConfig.codec || 'h264');
+                replaceDecoder(state.currentConfig.codec || 'h264');
                 buildCodecOptions();
 
                 // 发送认证
@@ -2010,6 +2031,9 @@
                 // 图片模式：JPEG 帧
                 if (data.length < 5) return; // [H24] 4 字节长度字段必须存在
                 const dataLength = view.getUint32(1, false);
+                // [H24] dataLength 不可信：声明长度须能真正装下，否则 subarray 会静默截断
+                // 出一张残缺 JPEG（画面上出现半张图/拖影），直接丢弃本帧。
+                if (5 + dataLength > data.length) return;
                 // [P2] subarray 零拷贝视图（每条 WS 消息独占 ArrayBuffer，无跨帧钉住）；
                 // slice 每帧深拷贝一整幅 JPEG 纯浪费
                 const jpegData = data.subarray(5, 5 + dataLength);
@@ -2024,10 +2048,12 @@
                 const pathStr = new TextDecoder().decode(data.subarray(pos, pos + pathLen)); pos += pathLen;
                 const offset = Number(view.getBigUint64(pos, false)); pos += 8;
                 const chunkLen = view.getUint32(pos, false); pos += 4;
+                // [H24] 块体也须落在帧内，否则 subarray 截断后 set() 写入残缺数据
+                if (pos + chunkLen > data.length) return;
                 const chunkData = data.subarray(pos, pos + chunkLen); // [P2] 零拷贝视图，set() 时才真正拷贝
 
                 const entry = downloadBuffers[pathStr];
-                if (entry && offset + chunkLen <= entry.data.length) {
+                if (entry && offset >= 0 && offset + chunkLen <= entry.data.length) {
                     entry.data.set(chunkData, offset);
                     entry.received += chunkLen;
                 }
@@ -2050,6 +2076,9 @@
                 }
                 if (data.length < 13) return;
                 const dataLength = view.getUint32(1, false);
+                // [H24] 声明长度必须落在帧内：截断的 H.264 NAL 会让解码器报错→自愈重建
+                // →频繁重建甚至降级图片模式（明明只是丢了一帧）。
+                if (13 + dataLength > data.length) return;
                 const timestamp = view.getBigInt64(5, false);
                 const h264Data = data.subarray(13, 13 + dataLength); // [P2] 零拷贝视图（解码器/MSE 内部会拷贝）
                 const isKeyframe = frameType === 0x01;
@@ -2063,7 +2092,12 @@
                 // 文件下载包: [0x11][4-byte path length][path UTF8][4-byte data length][data]
                 if (data.length < 9) return;
                 const pathLen = view.getUint32(1, false);
+                // [H24] pathLen 不可信：旧代码直接 getUint32(5 + pathLen)，伪造/损坏的
+                // 帧会让 DataView 越界抛 RangeError，把整条 onmessage 打断（后续帧全丢）。
+                if (5 + pathLen + 4 > data.length) return;
                 const dataLen = view.getUint32(5 + pathLen, false);
+                // [H24] dataLen 同样不可信：截断会下载到一个损坏的半截文件
+                if (9 + pathLen + dataLen > data.length) return;
                 const pathStr = new TextDecoder().decode(data.subarray(5, 5 + pathLen));
                 const fileData = data.subarray(9 + pathLen, 9 + pathLen + dataLen); // [P2] 零拷贝视图，Blob 构造时才拷贝
                 // Trigger browser download
@@ -2098,17 +2132,25 @@
             const url = URL.createObjectURL(blob);
             const img = new Image();
             // 解码完成后的统一绘制：drawImage 直接用位图对象（Image 或 ImageBitmap）
+            // try/finally 保证 jpegDecoding 一定复位：若 drawImage 抛异常（位图为空/
+            // 画布尺寸被外部改成 0 等），旧代码会把单飞标志永久卡在 true，
+            // 之后所有 JPEG 帧只进 jpegPending 不再绘制 —— 图片模式彻底黑屏。
             const finish = (d, revoke) => {
-                if (state.screenWidth === 0) {
-                    // 未收到 screen_info 前用 JPEG 实际尺寸兜底，避免拉伸变形
-                    state.canvas.width = d.width || 1920;
-                    state.canvas.height = d.height || 1080;
-                    updateScale();
+                try {
+                    if (state.screenWidth === 0) {
+                        // 未收到 screen_info 前用 JPEG 实际尺寸兜底，避免拉伸变形
+                        state.canvas.width = d.width || 1920;
+                        state.canvas.height = d.height || 1080;
+                        updateScale();
+                    }
+                    state.ctx.drawImage(d.bmp, 0, 0, state.canvas.width, state.canvas.height);
+                    updateFps();
+                } catch (e) {
+                    console.error('draw jpeg frame failed:', e);
+                } finally {
+                    if (revoke) { try { URL.revokeObjectURL(url); } catch (e) {} }
+                    jpegDecoding = false;
                 }
-                state.ctx.drawImage(d.bmp, 0, 0, state.canvas.width, state.canvas.height);
-                if (revoke) URL.revokeObjectURL(url);
-                updateFps();
-                jpegDecoding = false;
                 if (jpegPending) {
                     const next = jpegPending;
                     jpegPending = null;
@@ -2116,7 +2158,7 @@
                 }
             };
             img.onerror = () => {
-                URL.revokeObjectURL(url);
+                try { URL.revokeObjectURL(url); } catch (e) {}
                 jpegDecoding = false;
                 if (jpegPending) {
                     const p = jpegPending;
@@ -2320,7 +2362,7 @@
                         document.getElementById('lock-password').focus();
                         const hintEl = document.getElementById('lock-hint');
                         const isXP = msg.isXP;
-                        hintEl.innerHTML = isXP ? 'XP 锁屏：请点击上图锁中 <svg viewBox="0 0 16 16" width="14" height="14" style="vertical-align:middle;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><circle cx="7" cy="7" r="3"/><path d="M9.5 9.5l5 5"/><line x1="12" y1="12" x2="13" y2="13"/></svg> 部分然后多试几次' : (msg.hint || '');
+                        hintEl.innerHTML = isXP ? 'XP 锁屏：请点击上图锁中 <svg viewBox="0 0 16 16" width="14" height="14" style="vertical-align:middle;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><circle cx="7" cy="7" r="3"/><path d="M9.5 9.5l5 5"/><line x1="12" y1="12" x2="13" y2="13"/></svg> 部分或者本行的"锁定"然后多试几次' : (msg.hint || '');
                     } else {
                         document.getElementById('lock-password').value = '';
                         document.getElementById('lock-hint').textContent = '';
@@ -2967,7 +3009,7 @@
                 if (hwOff && cfg.codec !== 'h264') {
                     cfg.codec = 'h264';
                     try { localStorage.setItem('rd_codec', 'h264'); } catch (e) {}
-                    state.decoder = new H264Decoder('h264');
+                    replaceDecoder('h264');
                     send({ type: 'config', codec: 'h264' });
                 }
             }
@@ -3062,7 +3104,7 @@
                 state.currentConfig.codec = val;
                 try { localStorage.setItem('rd_codec', val); } catch (e) {}
                 // 重建解码器等待新协议的关键帧/codec_config；服务端 reinit 后发新流
-                state.decoder = new H264Decoder(val);
+                replaceDecoder(val);
                 send({ type: 'config', codec: val });
             } else if (key === 'hw_encode') {
                 if (val !== 'auto' && val !== 'on' && val !== 'off') return;

@@ -152,7 +152,8 @@ signals:
     void imeResultReady(const QString& clientId, const QJsonObject& state);
 
 private:
-    void setupHttpServer();
+    // 返回 false = HTTP 端口绑定失败（致命，initialize 应中止启动）
+    bool setupHttpServer();
     QByteArray loadHtmlResource();
     QByteArray loadLoginHtml();
     void serveLoginPage(QTcpSocket* socket);

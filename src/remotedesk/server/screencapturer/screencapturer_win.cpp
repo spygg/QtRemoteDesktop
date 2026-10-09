@@ -143,9 +143,15 @@ class DXGICapturer : public PlatformCapturer {
     UINT64 lastFrameNumber_ = 0; // 添加帧序号追踪
     LARGE_INTEGER lastTimestamp_ = { 0, 0 };
     ID3D11Texture2D* stagingTexture_ = nullptr;
+    QImage lastFrame_;        // 最近一次成功捕获的帧，供强制帧复用
+    bool forceNext_ = false;  // 下次 captureFrame 直接返回 lastFrame_
 
 public:
     explicit DXGICapturer(int outputIndex = 0) : outputIndex_(outputIndex) {}
+
+    // 请求下一帧强制产出：静止桌面下 AcquireNextFrame 只会超时，上层（新客户端
+    // 接入 / 关键帧喂帧泵）要求"立刻给一帧"时用它复用上一帧缓存。
+    void requestForceFrame() { forceNext_ = true; }
     bool initialize() override
     {
 
@@ -217,6 +223,19 @@ public:
 
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
+        // 强制帧请求：DXGI 在静止桌面下 AcquireNextFrame 只会超时（无新帧），
+        // 而强制帧（新客户端接入 / request_keyframe 的喂帧泵）必须产出内容，
+        // 否则新客户端一直黑屏。直接复用上一帧缓存（内容相同，但下游能拿到
+        // 一帧真实的 IDR）。
+        if (forceNext_) {
+            forceNext_ = false;
+            if (!lastFrame_.isNull()) {
+                outImage = lastFrame_;
+                if (updated) *updated = true;
+                return true;
+            }
+        }
+
         bool frameUpdated = false;
 
         IDXGIResource* desktopResource = nullptr;
@@ -430,6 +449,11 @@ void ScreenCapturer::captureFrame()
 #if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
     if (useDXGI_ && dxgiCapturer_) {
         bool updated = false;
+        // 强制帧（resume 预热 / 新客户端接入 / request_keyframe 喂帧泵）：DXGI 在
+        // 静止桌面下只会返回超时（无新帧），必须让它复用上一帧缓存，否则
+        // forceFrameCount_ 在 DXGI 路径上完全失效（新客户端一直黑屏）。
+        if (forceFrameCount_ > 0)
+            dxgiCapturer_->requestForceFrame();
         if (dxgiCapturer_->captureFrame(frame, &updated)) {
             dxgiRetryCount_ = 0;
             if (screenLocked_) {

@@ -8,7 +8,23 @@
 
 void RDPServer::startSecureInputProcess()
 {
-    if (secureInputRunning_) return;
+    if (secureInputRunning_) {
+        // 标志位一旦置 true 就永久阻止重启，而进程可能已崩溃或从未连上（下面
+        // 5s 超时会终止它）。所以这里先做一次健康判定：进程活着**且**已连上
+        // /secure-input 才算健康；否则复位标志走重新启动流程。不修的话，锁屏
+        // 输入（登录密码）会一直失效到服务重启为止。
+        bool alive = false;
+        HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, secureInputPid_);
+        if (hProc) {
+            alive = (WaitForSingleObject(hProc, 0) == WAIT_TIMEOUT);
+            CloseHandle(hProc);
+        }
+        if (alive && wsServer_ && wsServer_->isSecureInputConnected())
+            return;
+        qWarning() << "Secure input process unhealthy (alive =" << alive
+                   << ") - restarting";
+        stopSecureInputProcess();
+    }
 
     DWORD sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF) return;
@@ -61,6 +77,11 @@ void RDPServer::startSecureInputProcess()
                 qWarning() << "Secure input process didn't connect in time, terminating";
                 HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
                 if (hProc) { TerminateProcess(hProc, 1); CloseHandle(hProc); }
+                // 复位标志，允许下一次锁屏事件重新拉起（否则永久失效）
+                if (secureInputPid_ == pid) {
+                    secureInputPid_ = 0;
+                    secureInputRunning_ = false;
+                }
             }
         });
     } else {
