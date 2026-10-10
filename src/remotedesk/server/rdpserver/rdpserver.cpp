@@ -80,6 +80,13 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #include <fcntl.h>
 #include <unistd.h>
 #include <pwd.h>
+// X11 EWMH 直发（显示桌面等）：工程已通过 XdndMonitor PUBLIC 链接 X11
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+// X11 头会把 None 定义成 0L，与工程枚举（InhibitBackend::None 等）冲突
+#ifdef None
+#undef None
+#endif
 #endif
 
 #ifdef Q_OS_MACOS
@@ -2774,6 +2781,36 @@ void RDPServer::onImeResultReady(const QString& clientId, const QJsonObject& sta
     wsServer_->sendJson(clientId, state);
 }
 
+#ifdef Q_OS_LINUX
+// X11 EWMH：向 root 窗口发送 _NET_SHOWING_DESKTOP client message（wmctrl -k on
+// 同款协议），不依赖 wmctrl/xdotool 是否安装；GNOME/XFCE/KDE/openbox/LXDE 等支持
+// EWMH 的 WM 都会响应。注意：GNOME(mutter) 不响应 XTEST 合成的 Super+D 快捷键
+// （实测 xdotool key super+d 无效），因此该协议是 Linux 显示桌面最可靠的方式。
+static void x11ShowDesktopOnce(bool show)
+{
+    static bool threadsInit = false;
+    if (!threadsInit) { XInitThreads(); threadsInit = true; }
+    Display* dpy = XOpenDisplay(nullptr);
+    if (!dpy) return;
+    Atom a = XInternAtom(dpy, "_NET_SHOWING_DESKTOP", False);
+    XEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.xclient.type = ClientMessage;
+    ev.xclient.window = DefaultRootWindow(dpy);
+    ev.xclient.message_type = a;
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = show ? 1 : 0;
+    ev.xclient.data.l[1] = 0;
+    ev.xclient.data.l[2] = 0;
+    ev.xclient.data.l[3] = 0;
+    ev.xclient.data.l[4] = 0;
+    XSendEvent(dpy, DefaultRootWindow(dpy), False,
+               SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+    XSync(dpy, False);
+    XCloseDisplay(dpy);
+}
+#endif
+
 void RDPServer::handleSystemAction(const QString& action, const QString& clientId)
 {
     qInfo() << "System action requested:" << action << "from" << clientId.left(8);
@@ -2889,9 +2926,12 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         proc->start(sh, { QStringLiteral("-c"), lines.join(QLatin1Char('\n')) });
     } else if (action == "show_desktop") {
         // 显示桌面链：
+        //  0) X11 EWMH 直发 _NET_SHOWING_DESKTOP —— 最可靠，不依赖外部工具；
+        //     GNOME(mutter) 实测不响应 XTEST 合成的 Super+D，必须走此协议。
         //  1) wmctrl -k on —— EWMH 标准，openbox/LXDE、GNOME、XFCE、KDE 的 X11 会话均支持；
         //  2) xdotool 模拟 Super+D（GNOME/XFCE/KDE 快捷键；openbox 若未绑定可改 Ctrl+Alt+D）；
         //  3) GNOME Wayland（无 EWMH）→ Shell D-Bus 显示桌面。
+        x11ShowDesktopOnce(true);
         QString sh = findBin("wmctrl");
         if (!sh.isEmpty()) {
             launch(sh, { "-k", "on" });
