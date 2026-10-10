@@ -213,6 +213,24 @@ private:
             captureTimer_->setInterval(target);
     }
 
+public:
+    // [FLUSH-PUMP] 视频模式下启用：孤立的单次画面变化（弹窗关闭、单击、caret 闪烁）
+    // 只产生 1 帧输入，而 openh264 等 1 帧流水线延迟的编码器需要 N+1 帧输入才输出
+    // 第 N 帧 —— 该变化帧会被吞在编码器里，直到下次画面变化或 PLI 泵（可达数秒）
+    // 才被顶出来，表现为"静止片刻后第一次交互延迟 2~3 秒"。启用后每次发射变化帧
+    // 都安排一次 80ms 后的强制补帧，把流水线里的帧顶出来。图片模式无此问题（帧内
+    // 编码），不必启用。
+    void setFrameFlushPump(bool on) { pumpFlushEnabled_ = on; }
+
+private:
+    void schedulePumpFlush();
+    void pumpFlushTick();
+
+    QTimer* flushPumpTimer_ = nullptr;
+    bool pumpFlushEnabled_ = false;
+    bool pumpInProgress_ = false;
+    static constexpr int kFlushPumpDelayMs = 80;
+
 #ifdef Q_OS_LINUX
     PlatformCapturer* x11Capturer_ = nullptr;
     bool useX11_ = false;

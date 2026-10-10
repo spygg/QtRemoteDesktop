@@ -293,7 +293,9 @@ int HelperProcess::run(int argc, char* argv[])
             // 背压：服务端消费不过来时丢弃**非关键帧**。QWebSocket 写缓冲无上限，
             // 一直塞会让内存暴涨、延迟线性增长（画面越看越滞后）。丢帧是可接受的：
             // 关键帧仍然送，浏览器随时能重新同步。
-            static const qint64 kMediaBacklogLimit = 4 * 1024 * 1024;
+            // 阈值=延迟上限：积压阈值 ÷ 链路吞吐 = 常驻延迟。4MB 在 2~4MB/s
+            // 链路上是 1~2 秒；512KB 亚秒级（与服务端 kMaxSocketBacklogBytes 一致）。
+            static const qint64 kMediaBacklogLimit = 512 * 1024;
             if (!keyframe && wsBacklogBytes > kMediaBacklogLimit) {
                 if ((++droppedVideoFrames % 60) == 1)
                     qWarning() << "Helper: WS backlog" << wsBacklogBytes
@@ -402,8 +404,8 @@ int HelperProcess::run(int argc, char* argv[])
             if (ws.state() != QAbstractSocket::ConnectedState)
                 return;
             // 背压：图片模式下同样丢弃积压帧（下一帧很快会到，丢帧只损失一帧画面，
-            // 不丢帧则内存与延迟双爆）。
-            static const qint64 kMediaBacklogLimit = 4 * 1024 * 1024;
+            // 不丢帧则内存与延迟双爆）。512KB=亚秒级延迟上限，与视频路径一致。
+            static const qint64 kMediaBacklogLimit = 512 * 1024;
             if (wsBacklogBytes > kMediaBacklogLimit) {
                 if ((++droppedJpegFrames % 60) == 1)
                     qWarning() << "Helper: WS backlog" << wsBacklogBytes

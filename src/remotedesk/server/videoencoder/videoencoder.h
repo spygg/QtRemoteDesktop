@@ -97,6 +97,8 @@ private:
     QMutex mutex_;
     QWaitCondition condition_;
     QQueue<QImage> frameQueue_;
+    // [DIAG] 最近一次入队时刻（mutex_ 保护）：用于 ENC-LAT 延迟分解日志
+    qint64 lastEnqueueMs_ = 0;
     static constexpr int kMaxFrameQueueSize = 10; // 队列上限，防止 OOM
     std::atomic<bool> abort_{false};
 

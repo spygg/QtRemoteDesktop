@@ -1127,6 +1127,15 @@
             pc.ontrack = (e) => {
                 const stream = e.streams.length > 0 ? e.streams[0] : new MediaStream([e.track]);
                 webrtcState.videoEl.srcObject = stream;
+                // [LAT] 远程桌面是局域网实时流：把接收端抖动缓冲压到最小。
+                // Chrome 默认按测量抖动自适应（LAN 上纯属白加延迟，且抖动后不回缩）。
+                // jitterBufferTarget 是标准属性（m117+），playoutDelayHint 为旧属性，都设以兼容。
+                try {
+                    if (e.receiver) {
+                        e.receiver.jitterBufferTarget = 0;
+                        e.receiver.playoutDelayHint = 0;
+                    }
+                } catch (err) {}
                 if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
             };
 
@@ -1366,10 +1375,14 @@
             return mp4Concat(ftyp, moov);
         }
         // 单样本 media fragment：moof(mfhd/traf(tfhd/tfdt/trun)) + mdat(avcc 样本)
-        // timescale=1000，每样本 33ms(30fps)，DTS 用单调帧计数避免时间戳回退
-        function buildFmp4Fragment(avccData, isKey, dtsMs, seq) {
+        // timescale=1000；样本时长必须等于「本帧到下一帧的真实间隔」，否则会在时间轴上
+        // 留空洞：旧实现固定 33ms，而实际帧间隔约 95ms（~10fps），每帧留 62ms 空洞，
+        // MSE 在空洞处反复进 waiting，播放速率只有真实时间的 ~1/3 → 画面恒定滞后且
+        // 越用越大（buffered.end 长期落后最新 dts ≈ 1s）。改用真实间隔后区间首尾相接。
+        function buildFmp4Fragment(avccData, isKey, dtsMs, seq, durMs) {
+            const sampleDur = (typeof durMs === 'number' && durMs >= 1) ? Math.round(durMs) : 33;
             const trun = mp4Box('trun', mp4U32(0x000701), mp4U32(1), mp4U32(0),
-                mp4U32(33), mp4U32(avccData.length), mp4U32(isKey ? 0x00000000 : 0x01010000));
+                mp4U32(sampleDur), mp4U32(avccData.length), mp4U32(isKey ? 0x00000000 : 0x01010000));
             const traf = mp4Box('traf',
                 mp4Box('tfhd', mp4U32(0x020000), mp4U32(1)),
                 mp4Box('tfdt', mp4U32(0), mp4U32(dtsMs >>> 0)),
@@ -1378,6 +1391,34 @@
             const frag = mp4Concat(moof, mp4U32(8 + avccData.length), mp4Str('mdat'), avccData);
             // trun data_offset = moof 大小 + 8 字节 mdat 头；trun 内偏移 = 8+4+4=16，
             // trun 在 frag 中的绝对偏移 = 8(moof)+16(mfhd)+8(traf)+16(tfhd)+16(tfdt) = 64
+            new DataView(frag.buffer).setUint32(64 + 16, moof.length + 8);
+            return frag;
+        }
+        // 多样本 media fragment：单个 traf/trun 内塞入 N 个样本（samples=[{data,dur,isKey}]）。
+        // 动机：每帧一个单样本分片时，Chrome 每次 appendBuffer 都要走一遍 moof 解析 + 样本
+        // 表重建，实测吞吐只有 ~6.7fps，追不上 ~10.6fps 的到达率 → SourceBuffer 内容持续
+        // 落后最新 dts 约 2s（fmp4Dts 领先 bufEnd 1.96s、呈现帧年龄 P50≈1.8s/P90≈2.7s）。
+        // 把 N 帧合并进一个分片可把 append 次数降 N 倍，摊薄解析开销。
+        function buildFmp4Multi(samples, baseDtsMs, seq) {
+            let total = 0;
+            const parts = [];
+            for (const s of samples) { parts.push(s.data); total += s.data.length; }
+            // trun: 0x000701 = data-offset + sample-duration + sample-size + sample-flags
+            const trunParts = [mp4U32(samples.length), mp4U32(0)];
+            for (const s of samples) {
+                trunParts.push(mp4U32(Math.max(1, Math.round(s.dur || 33)) | 0),
+                               mp4U32(s.data.length),
+                               mp4U32(s.isKey ? 0x00000000 : 0x01010000));
+            }
+            const trun = mp4Box('trun', mp4U32(0x000701), ...trunParts);
+            const traf = mp4Box('traf',
+                mp4Box('tfhd', mp4U32(0x020000), mp4U32(1)),
+                mp4Box('tfdt', mp4U32(0), mp4U32(baseDtsMs >>> 0)),
+                trun);
+            const moof = mp4Box('moof', mp4Box('mfhd', mp4U32(0), mp4U32(seq >>> 0)), traf);
+            const frag = mp4Concat(moof, mp4U32(8 + total), mp4Str('mdat'), ...parts);
+            // trun 位置与单样本版一致（moof 头 + mfhd + traf 头 + tfhd + tfdt = 64），
+            // trun 内 data_offset 字段偏移 16
             new DataView(frag.buffer).setUint32(64 + 16, moof.length + 8);
             return frag;
         }
@@ -1397,7 +1438,13 @@
 
         const msePlayer = {
             using: false, started: false, ms: null, sb: null, ready: false, pending: [], _gen: 0, _lastRestart: 0, _needKf: false,
-            fmp4Seq: 0, fmp4Dts: 0, lastTs: null,
+            fmp4Seq: 0, fmp4Dts: 0, lastTs: null, _durMs: 33,
+            // 分包合批：_batch 累积待打包样本，攒够 batchSize 帧、超过 maxBatchMs、
+            // 或遇到关键帧边界时合成一个多样本分片一次性 append（见 buildFmp4Multi 注释）。
+            // [LAT-TUNE 2026-10-10] 原 4/200ms：15.8fps 下攒满 4 帧要 253ms，等于给端到端
+            // 延迟白加约 250ms（实测 MSE 390ms vs WebRTC 147ms）。降到 2/100ms 后 append
+            // 频率仅 8 次/秒（SourceBuffer 完全无压力），延迟随合批窗口同步下降。
+            _batch: [], batchSize: 2, maxBatchMs: 100, _batchWall: 0,
             // 复用 webrtc-video 元素渲染 MSE 流；codec 影响 MIME（hevc 浏览器兼容性差，尽力而为）
             start(codec) {
                 if (this.using) return true;
@@ -1534,7 +1581,7 @@
                     console.log('MSE first avcc head:', Array.from(av.slice(0, 20)).map(b => b.toString(16).padStart(2, '0')).join(' '));
                     // video/mp4 SourceBuffer 必须先收 fMP4 init segment（含 avcC），
                     // 之后每帧封装为 moof+mdat fragment，否则 MP4 demuxer 解析失败黑屏。
-                    this.fmp4Seq = 0; this.fmp4Dts = 0;
+                    this.fmp4Seq = 0; this.fmp4Dts = 0; this._durMs = 33;
                     const spsPps = extractSpsPps(data);
                     if (spsPps) {
                         console.log('MSE building fMP4 init segment, sps=' + spsPps.sps.length + ' pps=' + spsPps.pps.length + ' screen=' + state.screenWidth + 'x' + state.screenHeight);
@@ -1542,10 +1589,13 @@
                     } else {
                         console.warn('MSE first keyframe has no SPS/PPS, cannot build init segment');
                     }
-                    this._queue(buildFmp4Fragment(av, true, this.fmp4Dts, ++this.fmp4Seq));
+                    // 首帧（关键帧）作为合批起点；不再每帧单独封装分片
+                    this.fmp4Dts = 0;
+                    this._batch = [];
+                    this._pushSample(av, true, null);
                     // 记录首帧服务端时间戳（编码器启动后毫秒数），后续帧按真实间隔推进
                     this.lastTs = (typeof tsMs === 'number' && isFinite(tsMs)) ? tsMs : null;
-                    this.fmp4Dts += 33;
+                    this._durMs = 33;
                     // 1.5s 后验证解码状态：videoWidth>0 说明解码器已解析出画面尺寸
                     setTimeout(() => {
                         const el = msePlayer.videoEl;
@@ -1556,26 +1606,46 @@
                     return;
                 }
                 if (++this.frameCount % 60 === 0) {
-                    console.log('MSE frames=' + this.frameCount + ' pending=' + this.pending.length);
+                    console.log('MSE frames=' + this.frameCount + ' pending=' + this.pending.length + ' batch=' + this._batch.length);
                 }
-                this._queue(buildFmp4Fragment(annexbToAvcc(data), false, this.fmp4Dts, ++this.fmp4Seq));
-                // fMP4 时间戳按服务端真实帧间隔推进（静态桌面帧稀疏、动态时密集）。
-                // 旧实现固定 +33ms（假定 30fps），而实际到达率远低于此（去重后 ~3fps），
-                // 流时间增长速度只有真实时间的 1/10，播放位置永远顶死在缓冲前沿，
-                // 视频元素反复“饿死→新数据→恢复”，表现为黑屏与桌面交替闪烁/画面冻结。
-                // delta 夹在 [1,200]ms：单调递增，且长时间静止后恢复时延迟有界。
+                // 真实帧间隔（与上一帧服务端 ts 之差）：用于定稿上一帧的样本时长，使相邻
+                // 样本/分片首尾相接、不留空洞。上限放宽到 1000ms —— 静止桌面帧稀疏时大间隔
+                // 若被截断，时间轴会系统性慢于真实时间而持续累积滞后。
+                let d = 33;
                 if (typeof tsMs === 'number' && isFinite(tsMs) && this.lastTs !== null) {
-                    this.fmp4Dts += Math.min(Math.max(tsMs - this.lastTs, 1), 200);
+                    d = Math.min(Math.max(tsMs - this.lastTs, 1), 1000);
                     this.lastTs = tsMs;
-                } else {
-                    this.fmp4Dts += 33;
                 }
+                this._durMs = d;
+                this._pushSample(annexbToAvcc(data), isKeyframe, d);
+            },
+            // 压入一个样本（AVCC）：先用本次观测间隔 d 定稿上一帧时长，再按需封包上一批。
+            // 封包前末帧时长已定稿（= 到本帧的真实间隔），所以批次与下一批首帧首尾相接、无空洞。
+            _pushSample(avcc, isKey, d) {
+                if (this._batch.length) {
+                    const last = this._batch[this._batch.length - 1];
+                    if (typeof d === 'number' && d >= 1) last.dur = d;
+                    this.fmp4Dts = last.dts + (last.dur || 33);
+                }
+                if (this._batch.length && (isKey || this._batch.length >= this.batchSize ||
+                    (this._batch.length >= 2 && Date.now() - this._batchWall >= this.maxBatchMs))) {
+                    this._flushBatch();
+                }
+                if (!this._batch.length) this._batchWall = Date.now();
+                this._batch.push({ data: avcc, isKey: !!isKey, dts: this.fmp4Dts, dur: 33 });
+            },
+            _flushBatch() {
+                if (!this._batch.length) return;
+                const base = this._batch[0].dts;
+                this._queue(buildFmp4Multi(this._batch, base, ++this.fmp4Seq));
+                this._batch = [];
             },
             frameCount: 0,
             stop(tag) {
                 if (tag) console.log('MSE stop() called by: ' + tag + '; using=' + this.using + ' gen=' + this._gen);
                 this._gen++; // 使旧 MediaSource 的 sourceopen/updateend 回调全部失效
                 this.using = false; this.started = false; this.ready = false; this.pending = []; this._needKf = false;
+                this._batch = [];
                 try { if (this.ms && this.ms.readyState === 'open') this.ms.endOfStream(); } catch (e) {}
                 disposeVideoEl(this.videoEl);
                 this.videoEl = null;

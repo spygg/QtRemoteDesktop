@@ -2,6 +2,7 @@
 #define WEBRTCSESSION_H
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 #include <QVector>
@@ -60,8 +61,14 @@ private:
     YangPeerInfo peerInfo_;
     std::unique_ptr<YangPeerConnection8> pc_;
     std::unique_ptr<YangRtcPacer> pacer_;
-    uint64_t rtpTimestamp_ = 0;
-    uint64_t rtpTicksPerFrame_ = 3000;  // 90000 / fps，由 create(fps) 计算
+    // RTP 时间戳源：单调微秒时钟（create() 时 start()）。metaRTC 的 YangTimestamp
+    // 期望 frame->pts 是**微秒**：getVideoTimestamp = (pts-base)*9/100 = 90kHz ticks。
+    // 此前每帧传 90kHz 步进计数器（+90000/fps），被按 µs 解释后 RTP 时钟只走真实
+    // 速度的 9%（15fps 下每帧仅 +540 ticks 而非 +6000），Chrome 的到达/时间戳
+    // 偏差随帧数线性发散 → 延迟估计持续上调渲染延迟（实测"连上流畅、几分钟
+    // 后延迟 2 秒以上"）。改为每帧取一次单调微秒，帧内所有 NALU 共享同一 pts；
+    // 静止期无帧自然不推进，恢复后 delta 与真实时间一致。
+    QElapsedTimer rtpClock_;
     bool connected_ = false;
     // answer 已设置（DTLS/SRTP 握手可以开始）：sendFrame 的推流门禁用它而非
     // connected_——metaRTC 在纯媒体推流（无 DataChannel）场景下不回调

@@ -1,6 +1,7 @@
 // server/screen_capturer.cpp
 #include "screencapturer.h"
 #include <QColor>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QJsonArray>
@@ -886,6 +887,7 @@ void ScreenCapturer::captureFrame()
             idleCount_ = 0;
             leaveIdleThrottle();
             emit frameCaptured(frame);
+            schedulePumpFlush();
             return;
         }
 
@@ -904,7 +906,18 @@ void ScreenCapturer::captureFrame()
         leaveIdleThrottle();
         lastFrameChecksum_ = checksum;
 
+        {
+            static int s_emitCnt = 0;
+            static qint64 s_lastEmitMs = 0;
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            if (forceFrameCount_ > 0)
+                qInfo() << "CAP-EMIT force frame sz=" << frame.width() << "x" << frame.height();
+            else if (++s_emitCnt % 20 == 1 || nowMs - s_lastEmitMs > 1000)
+                qInfo() << "CAP-EMIT seq=" << s_emitCnt << " sz=" << frame.width() << "x" << frame.height();
+            s_lastEmitMs = nowMs;
+        }
         emit frameCaptured(frame);
+        schedulePumpFlush();
         return;
     }
 
@@ -970,6 +983,7 @@ void ScreenCapturer::captureFrame()
         lastFrameChecksum_ = checksum;
 
         emit frameCaptured(frame);
+        schedulePumpFlush();
         return;
     }
 #endif
@@ -1003,6 +1017,7 @@ void ScreenCapturer::captureFrame()
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);
+    schedulePumpFlush();
 }
 
 bool ScreenCapturer::changeDisplayResolution(int w, int h)

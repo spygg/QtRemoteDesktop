@@ -528,6 +528,8 @@ void VideoEncoder::encode(const QImage& frame)
     // kMaxQueueSize=1。积压意味着编码跟不上，丢弃过期帧换来低延迟。
     while (frameQueue_.size() >= 2)
         frameQueue_.dequeue();
+    // [DIAG] 记录入队时刻，供编码线程分解 排队等待 / 编码耗时
+    lastEnqueueMs_ = QDateTime::currentMSecsSinceEpoch();
     // 必须深拷贝再入队：X11 全量抓取路径把持久缓冲 fullFrame_ 浅共享给上层，
     // 而 Damage 区域抓取路径会在同一缓冲上 memcpy 原地改写。若这里只存 QImage 引用，
     // 编码线程出队时可能读到被捕获线程并发改写的半新半旧帧 → 画面撕裂/花屏。
@@ -542,6 +544,7 @@ void VideoEncoder::encodingLoop()
     AVPacket* packet = av_packet_alloc();
     while (!abort_) {
     QImage image;
+    qint64 enqueueMs = 0;
     {
         QMutexLocker locker(&mutex_);
         while (frameQueue_.isEmpty() && !abort_)
@@ -549,7 +552,11 @@ void VideoEncoder::encodingLoop()
         if (abort_)
             break;
         image = frameQueue_.dequeue();
+        enqueueMs = lastEnqueueMs_; // [DIAG] 入队时刻（近似=采集发射时刻）
     }
+    // [DIAG] ENC-LAT：排队等待（入队→出队）+ 本帧编码完成总延迟，每 60 帧打一条
+    const qint64 dequeueMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 queueWaitMs = dequeueMs - enqueueMs;
 
     // 统一输入到 sws：X11 捕获直接给 RGB32（小端=BGRA），其他平台给 RGB888。
     // 转换放到编码线程（原本空闲），把主线程从全帧 convertToFormat 中解放。
@@ -598,6 +605,16 @@ void VideoEncoder::encodingLoop()
                 if (key)
                     hasIdr_.store(true);
                 qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
+                {
+                    // [DIAG] 每输出帧计时（静止期稀疏，开销可忽略）
+                    static int s_encSeq = 0;
+                    static qint64 s_lastEncLog = 0;
+                    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                    if (++s_encSeq % 15 == 0 || nowMs - s_lastEncLog > 300)
+                        qInfo() << "ENC-OUT seq=" << s_encSeq << "key=" << key
+                                << "sz=" << out.size() << "ts=" << timestamp;
+                    s_lastEncLog = nowMs;
+                }
                 emit encodedFrame(out, key, timestamp);
                 updateOverloadState(encodeStart);
                 continue;
@@ -693,6 +710,9 @@ void VideoEncoder::encodingLoop()
             continue;
         }
         updateOverloadState(encodeStart);
+        // [DIAG] ENC-LAT：总延迟 = 排队等待 + sws + avcodec_send/receive（近似，不含 emit 后）
+        if (frameCount_ % 60 == 0)
+            qInfo() << "ENC-LAT queueWait=" << queueWaitMs << "ms total=" << (QDateTime::currentMSecsSinceEpoch() - enqueueMs) << "ms";
 
         // 恢复正常 GOP 间隔（与 initialize() 初值一致：fps/2）
         if (codecCtx_->gop_size == 1)

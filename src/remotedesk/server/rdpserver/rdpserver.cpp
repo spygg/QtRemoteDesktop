@@ -2256,6 +2256,9 @@ void RDPServer::start()
                 configFps_, videoBitrateFor(ew, eh, configFps_, configCodec_), configHwEncodeMode_)) {
             currentMode_ = ServerMode::Video;
             videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_, configCodec_);
+            // [FLUSH-PUMP] 视频模式启用编码器 flush 泵：孤立变化帧不被 1 帧流水线延迟吞住
+            if (screenCapturer_)
+                screenCapturer_->setFrameFlushPump(true);
 
             qInfo() << "Video encoder initialized, using video mode.";
         } else
@@ -3864,6 +3867,8 @@ void RDPServer::switchToImageMode()
     // 重绘导致的局部黑块，且图片模式多为低动态，全量抓取的 CPU 成本可接受。
     if (screenCapturer_) {
         screenCapturer_->setFullCaptureOnly(true);
+        // 图片模式无编码器流水线延迟，关闭 flush 泵（JPEG 帧内编码不受影响）
+        screenCapturer_->setFrameFlushPump(false);
         // 立即强制抓一帧：视频模式期间桌面可能静止，checksum 去重会让客户端
         // 切回图片后迟迟等不到第一张 JPEG（画面停留在旧帧/黑屏）。
         screenCapturer_->forceNextFrame();
@@ -3957,8 +3962,11 @@ bool RDPServer::switchToVideoMode()
 
     currentMode_ = ServerMode::Video;
     // 视频模式恢复增量抓取（低延迟、省 CPU）；图片模式关闭此开关时已恒全量。
-    if (screenCapturer_)
+    if (screenCapturer_) {
         screenCapturer_->setFullCaptureOnly(false);
+        // [FLUSH-PUMP] 视频模式启用编码器 flush 泵
+        screenCapturer_->setFrameFlushPump(true);
+    }
 
     // 通知所有客户端
     QJsonObject notification;

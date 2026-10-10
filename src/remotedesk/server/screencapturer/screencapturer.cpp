@@ -10,6 +10,37 @@ ScreenCapturer::ScreenCapturer(QObject* parent)
     , screen_(QGuiApplication::primaryScreen())
 {
     connect(captureTimer_, &QTimer::timeout, this, &ScreenCapturer::captureFrame);
+    flushPumpTimer_ = new QTimer(this);
+    flushPumpTimer_->setSingleShot(true);
+    connect(flushPumpTimer_, &QTimer::timeout, this, &ScreenCapturer::pumpFlushTick);
+}
+
+void ScreenCapturer::schedulePumpFlush()
+{
+    // [PUMP-DISABLED 2026-10-09] 243 实测：补帧泵在桌面有持续微变化（光标闪烁/
+    // GNOME 面板刷新等）时形成自持循环——journal 显示 5 分钟自激发 1441 次
+    // (~4.8/s)，采集被迫以 ~9.5fps 空转发射 1920x1200 帧，打字 g2g 延迟中位
+    // 1.73s、最差 4.47s。泵原本只为解决"孤立变化帧被编码器 1 帧流水线吞掉"，
+    // 代价远大于收益，先整体禁用（代码保留，pumpFlushEnabled_ 由模式切换控制）。
+    return;
+    if (!pumpFlushEnabled_ || pumpInProgress_)
+        return;
+    if (flushPumpTimer_ && !flushPumpTimer_->isActive())
+        flushPumpTimer_->start(kFlushPumpDelayMs);
+}
+
+void ScreenCapturer::pumpFlushTick()
+{
+    if (!captureTimer_->isActive())
+        return;
+    pumpInProgress_ = true;
+    // 强制推一帧（允许与上一帧内容相同），把编码器流水线里被 1 帧延迟吞住的
+    // 真实变化帧顶出来。pumpInProgress_ 防止补帧再次调度泵（否则静止时无限
+    // 80ms 空转）。
+    forceFrameCount_ = qMax(forceFrameCount_, 1);
+    qInfo() << "FLUSH-PUMP fire (forceFrameCount->1)";
+    captureFrame();
+    pumpInProgress_ = false;
 }
 
 ScreenCapturer::~ScreenCapturer()

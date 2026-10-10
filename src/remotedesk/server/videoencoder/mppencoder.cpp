@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QFile>
+#include <QThread>
 
 extern "C" {
 #include <rockchip/rk_mpi.h>
@@ -13,7 +14,6 @@ extern "C" {
 #include <rockchip/rk_type.h>
 #include <rockchip/rk_venc_cfg.h>
 #include <rockchip/rk_venc_rc.h>
-#include <rockchip/rk_venc_kcfg.h>
 #include <rockchip/mpp_task.h>
 #include <rockchip/mpp_frame.h>
 #include <rockchip/mpp_packet.h>
@@ -27,6 +27,11 @@ extern "C" {
 #ifndef MPP_PACKET_FLAG_INTRA
 #define MPP_PACKET_FLAG_INTRA 0x00000010
 #endif
+
+// [DIAG] 最近一次 encode 的返回码 / kcfg 初始化结果：仅用于 qInfo 诊断输出
+// （release 下 qWarning 被日志级别过滤，见 main.cpp severityRank）。
+static int  g_lastMppRet   = -999;
+static bool g_kcfgInitOk   = false;
 
 static inline int mppAlign16(int v) { return (v + 15) & ~15; }
 
@@ -98,9 +103,25 @@ bool MppEncoder::initialize(int codec, int srcW, int srcH, int encW, int encH,
     }
 
     // NV12 帧缓冲：Y + UV 两平面，大小按 16 对齐 stride 计算
-    mpp_buffer_get(NULL, &buffer_, (size_t)horStride_ * verStride_ * 3 / 2);
+    // [MPP-BUFFIX 2026-10-09 — 第二个真根因]
+    // 旧实现用 `mpp_buffer_get(NULL, ...)`：MPP 源码里 NULL group 会落到 **deprecated 的
+    // MPP_BUFFER_TYPE_ION** misc group（mpp_buffer.c:61-64），而本机内核 6.1.118 已无
+    // /dev/ion（只有 /dev/dma_heap/* 与 /dev/dri/renderD*）→ 分配到的内存硬件编码器
+    // 读不到 → encode 恒返回 MPP_OK 却永不出包（被探测判为不可用 → 回退软编 ~10fps）。
+    // 官方 mpi_enc_test 用 MPP_BUFFER_TYPE_DRM 内部缓冲组，这里对齐。
+    {
+        MppBufferGroup grp = nullptr;
+        MPP_RET gr = mpp_buffer_group_get_internal(&grp, MPP_BUFFER_TYPE_DRM | MPP_BUFFER_FLAGS_CACHABLE);
+        if (gr == MPP_OK && grp) {
+            bufGrp_ = grp;
+        } else {
+            qInfo() << "[MPP-DIAG] DRM buffer group failed ret=" << gr << "-> fallback to default/ION group";
+            bufGrp_ = nullptr;
+        }
+    }
+    mpp_buffer_get(static_cast<MppBufferGroup>(bufGrp_), &buffer_, (size_t)horStride_ * verStride_ * 3 / 2);
     if (!buffer_) {
-        qCritical() << "MppEncoder: mpp_buffer_get failed";
+        qInfo() << "[MPP-DIAG] mpp_buffer_get failed";
         teardown();
         return false;
     }
@@ -119,15 +140,34 @@ bool MppEncoder::initialize(int codec, int srcW, int srcH, int encW, int encH,
     {
         QImage probe(srcW, srcH, QImage::Format_RGB32);
         probe.fill(Qt::black);
-        QByteArray dummy;
-        bool dummyKey = false;
-        if (!encode(probe, dummy, dummyKey) || dummy.isEmpty()) {
-            qWarning() << "MppEncoder probe encode produced no output, treating as unavailable";
+        // [MPP-PROBE-FIX 2026-10-09] 连续喂多帧（pts 递增）后再判定可用性。
+        // RK3588 vepu541 在**固定帧率 RC 节流边界**会返回 ret=MPP_OK 但无包；
+        // 旧实现只喂 1 帧、且重试用同一个 pts，于是必然判定"不可用"，把完全正常的
+        // 硬编永久禁用（g_mppDisabled）→ 1080p 纯软编 ~10fps（用户体感"卡"）。
+        // 节流只能由**后续帧输入**（pts 前进）解除，见本文件 encode() 的注释。
+        bool probed = false;
+        for (int i = 0; i < 8; ++i) {
+            QByteArray dummy;
+            bool dummyKey = false;
+            if (encode(probe, dummy, dummyKey) && !dummy.isEmpty()) {
+                probed = true;
+                break;
+            }
+            QThread::msleep(25);   // 让 RC 时间轴前进
+        }
+        if (!probed) {
+            // [DIAG] 用 qInfo 而非 qWarning：release 构建默认日志级别是 QtInfoMsg，
+            // 而 QtMsgType 枚举非按严重度单调（Warning=1 < Info=4），main.cpp 的
+            // 过滤会把 qWarning/qCritical 全部丢弃 → 现场看不到失败原因。
+            qInfo() << "[MPP-DIAG] probe: 8 advancing frames produced no output, MPP unavailable"
+                    << "lastRet=" << g_lastMppRet << "kcfgInitOk=" << g_kcfgInitOk;
+            qWarning() << "MppEncoder probe: 8 advancing frames produced no output, treating as unavailable";
             teardown();
             return false;
         }
         // 探测帧（IDR）被丢弃未发送，强制下一帧重新出关键帧，避免前端等 keyframe 超时
         keyframeReq_.store(true);
+        // 探测已推进 frameCount_：保持递增即可（pts 回退会被 RC 判为非法）
     }
 
     qInfo() << "MppEncoder initialized" << (static_cast<CodecType>(codec_) == CodecType::HEVC ? "hevc" : "h264")
@@ -153,48 +193,54 @@ bool MppEncoder::setupEncoder()
     MPP_RET ret = mpp_create(&ctx_, &mpiTmp);
     mpi_ = mpiTmp;
     if (ret != MPP_OK || !ctx_ || !mpi_) {
-        qCritical() << "MppEncoder: mpp_create failed" << ret;
+        qInfo() << "[MPP-DIAG] mpp_create failed" << ret;
         return false;
+    }
+
+    // [MPP-LEGACY 2026-10-09] 对齐官方 mpi_enc_test：mpp_init **之前**先设输出超时。
+    {
+        RK_S32 timeout = MPP_POLL_BLOCK;
+        MPP_RET tr = static_cast<MppApi*>(mpi_)->control(static_cast<MppCtx>(ctx_),
+                                                         MPP_SET_OUTPUT_TIMEOUT, &timeout);
+        if (tr != MPP_OK)
+            qInfo() << "[MPP-DIAG] set output timeout ret=" << tr;
     }
 
     MppCodingType coding = (static_cast<CodecType>(codec_) == CodecType::HEVC) ? MPP_VIDEO_CodingHEVC : MPP_VIDEO_CodingAVC;
     ret = mpp_init(ctx_, MPP_CTX_ENC, coding);
     if (ret != MPP_OK) {
-        qCritical() << "MppEncoder: mpp_init failed" << ret;
+        qInfo() << "[MPP-DIAG] mpp_init failed" << ret;
         return false;
     }
 
-    // kmpp 路径 init 配置（官方 mpi_enc_test 同款）：RK3588 的 HEVC 编码器（vepu541）
-    // 依赖 MPP_SET_VENC_INIT_KCFG 才能正常输出码流；仅旧流程时 H.264 可绕开此配置
-    MppVencKcfg initCfg = nullptr;
-    ret = mpp_venc_kcfg_init(&initCfg, MPP_VENC_KCFG_TYPE_INIT);
-    if (ret == MPP_OK && initCfg) {
-        mpp_venc_kcfg_set_u32(initCfg, "type", (RK_U32)MPP_CTX_ENC);
-        mpp_venc_kcfg_set_u32(initCfg, "coding", (RK_U32)coding);
-        mpp_venc_kcfg_set_s32(initCfg, "chan_id", 0);
-        mpp_venc_kcfg_set_s32(initCfg, "online", 0);
-        mpp_venc_kcfg_set_u32(initCfg, "max_width", (RK_U32)width_);
-        mpp_venc_kcfg_set_u32(initCfg, "max_height", (RK_U32)height_);
-        mpp_venc_kcfg_set_u32(initCfg, "max_lt_cnt", 0);
-        mpp_venc_kcfg_set_s32(initCfg, "input_timeout", MPP_POLL_BLOCK);
-        ret = static_cast<MppApi*>(mpi_)->control(static_cast<MppCtx>(ctx_), MPP_SET_VENC_INIT_KCFG, initCfg);
-        if (ret != MPP_OK)
-            qWarning() << "MppEncoder: MPP_SET_VENC_INIT_KCFG failed" << ret;
-        mpp_venc_kcfg_deinit(initCfg);
-    } else {
-        qWarning() << "MppEncoder: mpp_venc_kcfg_init failed" << ret;
-    }
+    // [MPP-KCFG-OFF 2026-10-09 — 真根因修复]
+    // 这台 RK3588 的内核不向用户态暴露 kmpp ctrl_cfg，mpp_get_api() 会自动走
+    // legacy(/dev/vcodec) 路径，`mpp_venc_kcfg_init` 恒返回 MPP_NOK(-1)。官方
+    // mpi_enc_test 在默认 kmpp_mode=0 时根本不调用 MPP_SET_VENC_INIT_KCFG。
+    // 原实现**无条件**调用 kcfg，且把调用放在 mpp_init 之后（顺序也与官方相反），
+    // 失败后给编码会话留下半初始化状态 → 后续 legacy 流程 encode 恒返回 MPP_OK
+    // 却永不出包 → 探测判为"不可用" → 整机回退 1080p 软编 ~10fps（用户体感卡的真根因）。
+    // 现场实证：`mpi_enc_test -w 1280 -h 720 -t 7 -n 20`（legacy 路径）编出 127KB 正常码流。
+    g_kcfgInitOk = false;
 
     ret = mpp_enc_cfg_init(&cfg_);
     if (ret != MPP_OK || !cfg_) {
-        qCritical() << "MppEncoder: mpp_enc_cfg_init failed" << ret;
+        qInfo() << "[MPP-DIAG] mpp_enc_cfg_init failed" << ret;
         return false;
+    }
+
+    // [对齐官方 mpi_enc_test] 先取编码器内建默认配置，再覆盖需要的键；缺这一步时
+    // prep:format / codec:type 等键可能保持未初始化，编码器恒不出包。
+    {
+        MPP_RET gr = static_cast<MppApi*>(mpi_)->control(static_cast<MppCtx>(ctx_), MPP_ENC_GET_CFG, cfg_);
+        if (gr != MPP_OK)
+            qInfo() << "[MPP-DIAG] MPP_ENC_GET_CFG ret=" << gr;
     }
 
     auto set32 = [&](const char* key, RK_S32 v) {
         MPP_RET r = mpp_enc_cfg_set_s32(cfg_, key, v);
         if (r != MPP_OK)
-            qWarning() << "MppEncoder: cfg set" << key << "failed" << r;
+            qInfo() << "[MPP-DIAG] cfg set" << key << "failed" << r;   // qInfo：release 下 qWarning 被日志级别吞掉
         return r == MPP_OK;
     };
     set32("prep:width", width_);
@@ -220,7 +266,7 @@ bool MppEncoder::setupEncoder()
 
     ret = static_cast<MppApi*>(mpi_)->control(static_cast<MppCtx>(ctx_), MPP_ENC_SET_CFG, cfg_);
     if (ret != MPP_OK) {
-        qCritical() << "MppEncoder: MPP_ENC_SET_CFG failed" << ret;
+        qInfo() << "[MPP-DIAG] MPP_ENC_SET_CFG failed" << ret;
         return false;
     }
 
@@ -228,7 +274,7 @@ bool MppEncoder::setupEncoder()
     RK_S32 headerMode = MPP_ENC_HEADER_MODE_EACH_IDR;
     ret = static_cast<MppApi*>(mpi_)->control(static_cast<MppCtx>(ctx_), MPP_ENC_SET_HEADER_MODE, &headerMode);
     if (ret != MPP_OK)
-        qWarning() << "MppEncoder: set header mode failed" << ret;
+        qInfo() << "[MPP-DIAG] set header mode failed" << ret;
 
     name_ = (static_cast<CodecType>(codec_) == CodecType::HEVC) ? QStringLiteral("H.265 (hevc_rkmpp)")
                                                                 : QStringLiteral("H.264 (h264_rkmpp)");
@@ -263,23 +309,20 @@ bool MppEncoder::encode(const QImage& img, QByteArray& out, bool& keyframe)
         return false;
     }
 
-    // 帧按 pts 递增（单位 us）；同步 encode 偶尔返回 null/空包（固定帧率节流边界）。
-    // 对同一帧重试一次即可，过多重试无意义（节流由后续帧输入解除）。
-    int64_t pts = frameCount_ * (1000000LL / qMax(1, fps_));
-    frameCount_++;
-
+    // [MPP-API-FIX 2026-10-09 — 第三个真根因]
+    // 本 MPP 版本（系统 1.3.9 / 自编 1.3.10）里 `mpi->encode()` 是**未实现的空函数**
+    // （mpp/mpi.c:162-184，函数体只有 "// TODO: do encode here"）：恒返回 MPP_OK
+    // 且从不填充 packet —— 这正是"encode ret=0 却永不出包"的真身。
+    // 官方 mpi_enc_test 走 split API：encode_put_frame() + encode_get_packet()，
+    // 初始化时设的 MPP_SET_OUTPUT_TIMEOUT=MPP_POLL_BLOCK 让 get_packet 阻塞到有包。
     MppPacket packet = nullptr;
-    MPP_RET ret = MPP_ERR_UNKNOW;
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        // 用局部 p 接收本次尝试的结果：旧实现在循环开头 `packet = nullptr`，
-        // 会把上一次拿到的（非空但 size==0 的）packet 指针直接丢弃 → MppPacket 泄漏，
-        // 长时间运行会耗尽 MPP 内存。这里只把"有效包"交给 packet，无效包立即释放。
-        MppPacket p = nullptr;
+    for (int attempt = 0; attempt < 3 && !packet; ++attempt) {
+        const int64_t pts = frameCount_ * (1000000LL / qMax(1, fps_));
+        frameCount_++;
         MppFrame f = nullptr;
         mpp_frame_init(&f);
         if (!f) {
-            qWarning() << "MppEncoder: mpp_frame_init failed";
-            if (packet) mpp_packet_deinit(&packet);
+            qInfo() << "[MPP-DIAG] mpp_frame_init failed";
             return false;
         }
         mpp_frame_set_width(f, width_);
@@ -289,33 +332,38 @@ bool MppEncoder::encode(const QImage& img, QByteArray& out, bool& keyframe)
         mpp_frame_set_fmt(f, MPP_FMT_YUV420SP);
         mpp_frame_set_pts(f, pts);
         mpp_frame_set_buffer(f, buffer_);
-        ret = static_cast<MppApi*>(mpi_)->encode(static_cast<MppCtx>(ctx_), f, &p);
+        MPP_RET ret = static_cast<MppApi*>(mpi_)->encode_put_frame(static_cast<MppCtx>(ctx_), f);
+        g_lastMppRet = ret;   // [DIAG]
         mpp_frame_deinit(&f);
-        if (ret == MPP_OK && p && mpp_packet_get_size(p) > 0) {
+        if (ret != MPP_OK) {
+            qInfo() << "[MPP-DIAG] encode_put_frame failed ret =" << ret;
+            continue;
+        }
+        MppPacket p = nullptr;
+        ret = static_cast<MppApi*>(mpi_)->encode_get_packet(static_cast<MppCtx>(ctx_), &p);
+        g_lastMppRet = ret;   // [DIAG]
+        if (ret == MPP_OK && p && mpp_packet_get_length(p) > 0) {
             packet = p;
             break;
         }
         if (p) mpp_packet_deinit(&p);
         if (attempt == 0)
-            qWarning() << "MppEncoder: encode retry 1 null/empty, ret =" << ret;
-    }
-    if (ret != MPP_OK) {
-        qWarning() << "MppEncoder: mpi encode failed, ret =" << ret << "frameCount =" << (frameCount_ - 1);
-        return false;
+            qInfo() << "[MPP-DIAG] encode_get_packet empty ret =" << ret;
     }
     if (!packet) {
-        qWarning() << "MppEncoder: encode returned null packet, frameCount =" << (frameCount_ - 1);
+        qInfo() << "[MPP-DIAG] encode produced no packet, frameCount =" << (frameCount_ - 1);
         return false;
     }
 
-    void* data = mpp_packet_get_data(packet);
-    size_t size = mpp_packet_get_size(packet);
+    // 官方取流方式：get_pos()（含 SPS/PPS 预处理后的当前读位置）+ get_length()（真实码流长度）
+    void* data = mpp_packet_get_pos(packet);
+    size_t size = mpp_packet_get_length(packet);
     if (size > 0 && data) {
         out = QByteArray(reinterpret_cast<char*>(data), static_cast<int>(size));
         bool isHevc = (static_cast<CodecType>(codec_) == CodecType::HEVC);
         keyframe = isKeyframeNal(out, isHevc);
     } else {
-        qWarning() << "MppEncoder: empty packet size =" << size << "frameCount =" << (frameCount_ - 1);
+        qInfo() << "[MPP-DIAG] empty packet size =" << size << "frameCount =" << (frameCount_ - 1);
         mpp_packet_deinit(&packet);
         return false;
     }
@@ -354,6 +402,11 @@ void MppEncoder::teardown()
     if (buffer_) {
         mpp_buffer_put(buffer_);
         buffer_ = nullptr;
+    }
+    // 缓冲组必须在所有 buffer 归还后再释放
+    if (bufGrp_) {
+        mpp_buffer_group_put(static_cast<MppBufferGroup>(bufGrp_));
+        bufGrp_ = nullptr;
     }
     if (sws_) {
         sws_freeContext(static_cast<SwsContext*>(sws_));

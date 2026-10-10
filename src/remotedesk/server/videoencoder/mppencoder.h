@@ -46,6 +46,7 @@ private:
     void* cfg_ = nullptr;    // MppEncCfg
     void* sws_ = nullptr;    // SwsContext*（RGB32 -> NV12）
     void* buffer_ = nullptr; // MppBuffer（NV12 帧缓冲，循环使用）
+    void* bufGrp_ = nullptr; // MppBufferGroup（DRM 内部缓冲组；NULL=回退默认 ION 组）
     int codec_ = 0;          // 0=H264 1=HEVC
     int width_ = 0, height_ = 0;   // 编码输出尺寸
     int srcW_ = 0, srcH_ = 0;      // 输入源尺寸（sws 源端）

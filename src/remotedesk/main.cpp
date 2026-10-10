@@ -29,6 +29,24 @@ int g_logLevel = QtDebugMsg;
 int g_logLevel = QtInfoMsg;
 #endif
 
+// [LOG-FIX 2026-10-09] QtMsgType 的枚举值**不是按严重度单调**的：
+//   QtDebugMsg=0 < QtWarningMsg=1 < QtCriticalMsg=2 < QtFatalMsg=3 < QtInfoMsg=4
+// 旧过滤条件 `type < g_logLevel` 在 release（默认 QtInfoMsg=4）下会把
+// Warning(1)/Critical(2)/Fatal(3) 全部判为"低于级别"而丢弃 —— 现场告警
+// （如 MPP 硬编探测失败、编码器回退）在部署包里完全静默，排障等于闭眼。
+// 改为按真实严重度排序后比较。
+static int severityRank(QtMsgType t)
+{
+    switch (t) {
+    case QtDebugMsg:    return 0;
+    case QtInfoMsg:     return 1;
+    case QtWarningMsg:  return 2;
+    case QtCriticalMsg: return 3;
+    case QtFatalMsg:    return 4;
+    }
+    return 1;
+}
+
 // 设置日志级别；无法识别的级别返回 false
 bool setLogLevel(const QString& lvRaw)
 {
@@ -72,7 +90,7 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
 {
     // 日志分级过滤：低于级别的消息直接丢弃。默认级别随构建类型：
     // debug 构建 QtDebugMsg 全量记录；release 构建 QtInfoMsg 及以上。
-    if (type < g_logLevel)
+    if (severityRank(type) < severityRank(static_cast<QtMsgType>(g_logLevel)))
         return;
 
     static QMutex mutex;

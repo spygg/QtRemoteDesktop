@@ -4,18 +4,9 @@
 
 #include <yangrtc/YangPushData.h>
 
-#include <QDateTime>
 #include <QDebug>
-#if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
-#include <QRandomGenerator>
-#else
-#include <QUuid>
-#endif
 #include <cstring>
 #include <mutex>
-
-// 90000Hz / 30fps ≈ 3000 ticks/frame
-static const uint64_t kRtpTicksPerFrame = 3000;
 
 WebRtcSession::WebRtcSession(QObject* parent)
     : QObject(parent)
@@ -30,9 +21,12 @@ WebRtcSession::~WebRtcSession()
 bool WebRtcSession::create(const QVector<QString>& iceServers, int fps)
 {
     Q_UNUSED(iceServers)
+    Q_UNUSED(fps)  // 时间戳改为单调微秒时钟后不再依赖标称帧率
 
-    // RTP 时钟 90kHz：每帧推进 90000/fps 个 tick（旧值固定 3000 = 30fps）
-    rtpTicksPerFrame_ = 90000ULL / static_cast<uint64_t>(qMax(1, fps));
+    // RTP 时间戳基准：单调微秒时钟（见 webrtcsession.h 成员注释）。
+    // 只用 delta，起点无意义；90kHz/fps 的帧步进计数器已废弃（单位错误，
+    // 会被 metaRTC 按 µs 解释导致 RTP 时钟失真）。
+    rtpClock_.start();
 
     yang_init_peerInfo(&peerInfo_);
     peerInfo_.uid = 0;
@@ -98,20 +92,9 @@ bool WebRtcSession::create(const QVector<QString>& iceServers, int fps)
     emit localOffer(QString::fromUtf8(offer));
     delete[] offer;
 
-    // RFC 3550: RTP 时间戳初始值应随机，而非从 0 开始。
-    // 固定 0 起点会让多会话/重连后的时间戳序列高度可预测，且个别实现
-    // 对启动时即出现的小时间戳（含回绕判定边界）处理不佳。
-#if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
-    rtpTimestamp_ = QRandomGenerator::global()->bounded(1u, 0x7FFFFFFFu);
-#else
-    // Qt < 5.10 回退：QUuid v4（Unix 下取自 /dev/urandom），映射到 [1, 0x7FFFFFFE]
-    {
-        const QUuid u = QUuid::createUuid();
-        quint32 v = 0;
-        std::memcpy(&v, &u.data4[0], sizeof(v));
-        rtpTimestamp_ = (v % 0x7FFFFFFEu) + 1u;
-    }
-#endif
+    // RFC 3550 的"时间戳随机起点"由 metaRTC 侧保证：YangTimestamp 以首帧 pts
+    // 为基准做差（base），线上 RTP ts = delta*9/100，与本地时钟绝对值无关。
+    // （旧的 rtpTimestamp_ 随机计数器已废弃，单位错误见 webrtcsession.h 注释。）
     return true;
 }
 
@@ -176,13 +159,10 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
     if (!remoteSet_ || !pc_ || !pacer_ || data.isEmpty())
         return;
 
-    // [DIAG] 确认服务端是否真的把帧推给 metaRTC on_video（WebRTC RTP 黑屏排查）
-    {
-        static int64_t s_cnt = 0;
-        if (++s_cnt % 30 == 1)
-            qInfo() << "WebRtcSession sendFrame #" << s_cnt << " key=" << keyframe << " sz=" << data.size();
-    }
-
+    // [PERF] 逐帧诊断日志已移除：旧实现每 30 帧打一条 sendFrame、每个关键帧打一条
+    // KEYFRAME（实测一天 5.8 万条 KEYFRAME + 3.2 万条 sendFrame，占日志 85%），
+    // 在 sendFrame 热路径上做字符串拼接+落盘，属自伤。
+    Q_UNUSED(keyframe);
     // metaRTC 的 H.264 发送器(yang_push_h264_video)接收“单个 NALU”(无起始码)：
     // 小 NALU 直接 memcpy 进 RTP Raw 载荷；大 NALU(>kRtpMaxPayloadSize)走 FU-A。
     // 但 pushVideo 的上层（yang_pushVideo_getData）对 I 帧要求完整 Annex-B 帧，
@@ -241,6 +221,22 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
     uint8_t* wbase = reinterpret_cast<uint8_t*>(buf.data());
     int sent = 0;
 
+    // 帧内所有 NALU（SPS/PPS/IDR slices）共享同一 RTP 时间戳，由 metaRTC 的
+    // YangTimestamp 以 (pts-base)*9/100 换算成 90kHz ticks——pts 单位必须是微秒。
+    //
+    // [ROOT-CAUSE 2026-10-10] 这里**必须用 elapsed()**，绝不能用 msecsSinceReference()。
+    // QElapsedTimer 只在 start()/restart() 时把"当前绝对时刻"快照进 t1：
+    //   - msecsSinceReference() 返回那个**快照**，start() 后永不变化 → ptsUs 恒定 →
+    //     metaRTC 的 yang_setVideoData() 因 `ts <= preTimestamp` 提前 return，
+    //     curVideotimestamp 永远停在 0 → **每帧 RTP 时间戳都是 0**；
+    //   - Chrome 的 VideoFrameCompositor 视"与当前帧时间戳相同"的帧为重复帧直接丢弃
+    //     → 远端画面冻住，只在时间戳偶发被改写时才"补"一批（表现为每 6~10s 跳一次，
+    //     端到端延迟在 0.1s~5.9s 之间锯齿；MSE 路径不受影响，因为其时间戳是前端自建的）。
+    //   - elapsed() 返回"自 start() 以来流逝的毫秒数"，才是这里想要的单调递增时钟。
+    // 1ms 量化对本场景（帧距 55~66ms）足够。加 1 防止首帧恰为 0
+    //（YangTimestamp 以 preTimestamp==0 判基准帧）。
+    const qint64 ptsUs = qMax<qint64>(1, rtpClock_.elapsed() * 1000);
+
     // 单 NALU 发送 helper（frametype 显式指定；marker=1 表示帧内最后一个 NALU）
     auto sendNalu = [&](const Nalu& nu, int frametype, int marker) -> bool {
         YangFrame frame;
@@ -248,8 +244,8 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
         frame.mediaType = YangFrameTypeVideo;
         frame.frametype = frametype;
         frame.nb = nu.len;
-        frame.pts = static_cast<int64_t>(rtpTimestamp_);
-        frame.dts = static_cast<int64_t>(rtpTimestamp_);
+        frame.pts = ptsUs;
+        frame.dts = ptsUs;
         frame.payload = wbase + nu.off;
         frame.marker = marker;
         YangPushData* pushData = pacer_->getVideoData(&frame);
@@ -301,26 +297,9 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
             if (sendNalu(nalus[sliceIdx[k]], YANG_Frametype_P, (k == sliceIdx.size() - 1) ? 1 : 0)) ++sent;
         }
     }
-    // 每帧推进一次时间戳（按实际帧率），并保持 32 位回绕：
-    // RTP 时间戳只有 32 位，若用 64 位累加不截断，交给 metaRTC 时高位被丢弃，
-    // 跨回绕点会出现时间戳突变（播放端可能误判为乱序/丢帧）。
-    rtpTimestamp_ = (rtpTimestamp_ + rtpTicksPerFrame_) & 0xFFFFFFFFULL;
-
-    // [DIAG] WebRTC RTP 黑屏排查：确认关键帧已拆成 SPS/PPS/IDR 多 NALU 正确发出
-    {
-        static int64_t s_cnt = 0;
-        if (++s_cnt % 30 == 1)
-            qInfo() << "WebRtcSession sendFrame #" << s_cnt << " key=" << keyframe
-                    << " sz=" << n << " nalus=" << nalus.size() << " sent=" << sent;
-        // 关键帧必打详细日志：列出每个 NALU 类型，确认含 SPS(7)/PPS(8)/IDR(5)
-        if (keyframe) {
-            QString types;
-            for (const Nalu& nu : nalus)
-                types += QString::number(nu.type) + " ";
-            qInfo() << "WebRtcSession KEYFRAME nalus=" << nalus.size()
-                    << " types=[" << types.trimmed() << "] sent=" << sent;
-        }
-    }
+    // 时间戳不再按帧步进：pts 取自单调微秒时钟（本函数开头），RTP 时钟与
+    // 真实时间一致；32 位回绕由 metaRTC 的 (pts-base)*9/100 换算自然处理。
+    Q_UNUSED(sent);
 }
 
 void WebRtcSession::close()

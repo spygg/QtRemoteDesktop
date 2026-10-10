@@ -14,6 +14,186 @@
 
 #include <VersionHelpers.h>
 
+// ======================= [WIN-DIAG] 采集循环诊断 =======================
+// 背景（2026-10-10 218 Win7 实测）：视频模式长期只有 ~2.7fps，且**与画面变化
+// 快慢完全无关**——用滚轮连续滚动页面 119 次/4s（客户端哈希证实远端画面确实在
+// 变）仍只收到 10 帧（2.49fps）；纯静止时 2.5fps。即瓶颈在采集循环的**迭代次数**
+// 本身，而不是变化检测/编码/WS/传输（客户端 framesDropped=0）。
+//
+// 需要区分的两种成因：
+//   A) 定时器间隔被拉长 / 主线程事件循环被别的活拖慢 ⇒ gap 很大、cap 很小
+//   B) 单帧采集调用本身极慢                       ⇒ gap ≈ cap，且 cap 很大
+// 因此这里同时记账「相邻两次进入 captureFrame 的间隔(gap)」和「本次采集调用耗时
+// (cap)」以及校验和耗时(chk)，每秒打一条 CAP-WIN 汇总。
+//
+// 用 QueryPerformanceCounter 而不是 QElapsedTimer：Qt 在 Windows 上退化为
+// GetTickCount64，Win7 粒度 15.6ms，无法分辨 ms 级阶段耗时。
+static inline double qpcMs()
+{
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart);
+}
+
+namespace {
+struct GdiDiag {
+    double winStart = 0.0;   // 统计窗口起点（qpcMs，0=未启动）
+    double lastEntry = 0.0;  // 上一次进入 captureFrame 的时刻
+    qint64 iters = 0;
+    qint64 emits = 0;
+    qint64 windows = 0;      // 已完成的统计窗口数（用于降噪）
+    double gapSum = 0.0;
+    double capSum = 0.0;
+    double capMax = 0.0;
+    double chkSum = 0.0;
+};
+GdiDiag g_gdiDiag;
+
+// ================= [WIN-DWM] DWM 合成导致的读屏 stall 规避 =================
+// 实测（218 = VM: VMware SVGA 3D, Win7 x64, 1920x1080）：
+//   DWM 合成开启：从屏幕 DC BitBlt 一帧 570 ms（刚重新开启时甚至 1800 ms）
+//   DWM 合成关闭：同一调用 0.48 ms
+// 且与 blit 尺寸（全屏/半屏/1/4）、目标位图（DDB / DIBSection）、CAPTUREBLT、
+// 源 DC（GetDC(NULL) / CreateDC("DISPLAY") / GetWindowDC(桌面窗口)）全部无关 ——
+// 是 VMware SVGA 驱动在「DWM 合成 → GDI 读屏」路径上的固定 stall，不是带宽问题
+// （同尺寸 memcpy 仅 1 ms）。GetDIBits 也不是瓶颈（1.95 ms）。
+//
+// 后果：GDI 采集循环被硬顶在 ~1.8 次/秒（CAP-WIN 日志 capAvg≈550ms、gapAvg≈capAvg、
+// interval 恒 33ms、idle=0），与画面变化快慢完全无关，表现为「视频不流畅」。
+// 这与画面内容无关，因此在 VM 上表现为稳定卡顿。
+//
+// 处理：自适应 —— 只在实测到读屏异常慢时才关闭 DWM 合成（等价于 RDP 强制 Basic
+// 主题的效果；Windows 自身在检测到性能不足时也会这么做），并把结果打到日志；
+// 进程正常退出时恢复。读屏本来就快的机器完全不碰用户桌面。
+//
+// 用动态加载而不是链接 dwmapi：老系统可能没有该 DLL，且不改动构建脚本。
+typedef HRESULT (WINAPI *PfnDwmIsCompositionEnabled)(BOOL*);
+typedef HRESULT (WINAPI *PfnDwmEnableComposition)(UINT);
+
+const UINT kDwmEcDisable = 0; // DWM_EC_DISABLE
+const UINT kDwmEcEnable = 1;  // DWM_EC_ENABLE
+
+struct WinDwmState {
+    HMODULE mod = nullptr;
+    PfnDwmIsCompositionEnabled isEnabled = nullptr;
+    PfnDwmEnableComposition enable = nullptr;
+    bool loaded = false;
+    bool disabledByUs = false;
+    bool warnedStillSlow = false;
+    int graceWindows = 0; // 关闭后的过渡窗口数（Aero 收尾会有零星慢帧，其间不判定/不告警）
+};
+WinDwmState g_dwm;
+
+void winDwmLoad()
+{
+    if (g_dwm.loaded)
+        return;
+    g_dwm.loaded = true;
+    g_dwm.mod = LoadLibraryW(L"dwmapi.dll");
+    if (!g_dwm.mod)
+        return;
+    g_dwm.isEnabled = reinterpret_cast<PfnDwmIsCompositionEnabled>(
+        reinterpret_cast<void*>(GetProcAddress(g_dwm.mod, "DwmIsCompositionEnabled")));
+    g_dwm.enable = reinterpret_cast<PfnDwmEnableComposition>(
+        reinterpret_cast<void*>(GetProcAddress(g_dwm.mod, "DwmEnableComposition")));
+}
+
+void winDwmRestore()
+{
+    if (g_dwm.disabledByUs && g_dwm.enable) {
+        g_dwm.enable(kDwmEcEnable);
+        g_dwm.disabledByUs = false;
+        qInfo() << "ScreenCapturer[WIN]: DWM composition re-enabled on exit";
+    }
+}
+
+// 进程正常退出时恢复 DWM 合成（helper 被强杀时无法恢复，属可接受，
+// 用户亦可从 Windows「个性化」重新启用 Aero）。
+struct WinDwmGuard {
+    ~WinDwmGuard() { winDwmRestore(); }
+};
+WinDwmGuard g_dwmGuard;
+
+// 单帧采集均值超过该阈值即判定读屏异常（30fps 预算 33ms；60ms 意味着上限 <17fps）
+const double kSlowReadbackMs = 60.0;
+// 关闭 DWM 后的过渡窗口数：Aero 收尾/窗口重绘会带来零星慢帧，跳过再判定，避免误告警
+const int kPostDisableGraceWindows = 6;
+
+// 决策前的累计探测：要求跨 ≥2 个统计窗口、≥4 帧样本，避免把启动抖动误判为「读屏慢」
+struct DwmProbe {
+    qint64 iters = 0;
+    double capSum = 0.0;
+    int windows = 0;
+    bool done = false;
+};
+DwmProbe g_dwmProbe;
+
+void winDwmConsider(double avgCapMs, qint64 itersInWindow)
+{
+    // 情况一：已由我们关闭 DWM 合成。只负责两件事 ——
+    //   (1) 系统又把它打开了（Aero 自恢复 / 用户手动开启 / 会话解锁）→ 再关回去，
+    //       否则画面会悄悄退回 ~2fps；
+    //   (2) 关掉之后读屏仍然慢 ⇒ 说明不是 DWM 的锅，告警提示排查显卡/VM 驱动。
+    if (g_dwm.disabledByUs) {
+        if (g_dwm.graceWindows > 0) {
+            g_dwm.graceWindows--;
+            return;
+        }
+        if (avgCapMs <= kSlowReadbackMs)
+            return;
+        BOOL on = FALSE;
+        if (g_dwm.isEnabled && g_dwm.enable
+            && SUCCEEDED(g_dwm.isEnabled(&on)) && on) {
+            if (SUCCEEDED(g_dwm.enable(kDwmEcDisable))) {
+                g_dwm.graceWindows = kPostDisableGraceWindows;
+                g_dwm.warnedStillSlow = false;
+                qWarning() << "ScreenCapturer[WIN]: DWM composition was re-enabled by the system,"
+                           << "disabling it again for smooth capture";
+                return;
+            }
+        }
+        if (!g_dwm.warnedStillSlow) {
+            g_dwm.warnedStillSlow = true;
+            qWarning() << "ScreenCapturer[WIN]: screen readback still slow" << avgCapMs
+                       << "ms/frame - check the display/VM graphics driver";
+        }
+        return;
+    }
+
+    // 情况二：尚未判定。累计足够样本后做一次判定，读屏正常就完全不碰用户桌面。
+    if (g_dwmProbe.done || itersInWindow <= 0)
+        return;
+    g_dwmProbe.iters += itersInWindow;
+    g_dwmProbe.capSum += avgCapMs * static_cast<double>(itersInWindow);
+    g_dwmProbe.windows++;
+    if (g_dwmProbe.windows < 2 || g_dwmProbe.iters < 4)
+        return;
+    g_dwmProbe.done = true;
+    const double avg = g_dwmProbe.capSum / static_cast<double>(g_dwmProbe.iters);
+    if (avg < kSlowReadbackMs)
+        return;
+    winDwmLoad();
+    if (!g_dwm.isEnabled || !g_dwm.enable)
+        return;
+    BOOL on = FALSE;
+    if (FAILED(g_dwm.isEnabled(&on)) || !on)
+        return;
+    const HRESULT hr = g_dwm.enable(kDwmEcDisable);
+    if (SUCCEEDED(hr)) {
+        g_dwm.disabledByUs = true;
+        g_dwm.graceWindows = kPostDisableGraceWindows;
+        qWarning() << "ScreenCapturer[WIN]: screen readback" << avg
+                   << "ms/frame with DWM composition on - disabling DWM composition"
+                   << "for smooth capture (restored on exit)";
+    } else {
+        g_dwm.warnedStillSlow = true;
+        qWarning() << "ScreenCapturer[WIN]: screen readback" << avg
+                   << "ms/frame and DwmEnableComposition(DISABLE) failed, hr =" << static_cast<quint32>(hr);
+    }
+}
+} // namespace
+
 // 在 Windows 平台下添加 GDI 截屏类
 class GdiCapturer : public PlatformCapturer {
 public:
@@ -55,29 +235,46 @@ public:
         hdcMem_ = CreateCompatibleDC(hdcScreen_);
         if (!hdcMem_) {
             ReleaseDC(nullptr, hdcScreen_);
+            hdcScreen_ = nullptr;
             return false;
         }
 
-        // 创建兼容位图
-        hBitmap_ = CreateCompatibleBitmap(hdcScreen_, width_, height_);
-        if (!hBitmap_) {
+        // [WIN-GDI-FAST] 捕获目标直接用 DIBSection，而不是 CreateCompatibleBitmap(DDB)。
+        //
+        // 旧实现：CreateCompatibleBitmap 得到 DDB → 每帧 BitBlt + GetDIBits() 把 DDB
+        // 转成 DIB。GetDIBits 会走显示驱动做 DDB→DIB（含可能的驱动私有格式解交织）
+        // 转换，在部分驱动上单帧可达数百毫秒，且是**每帧固定开销**——桌面是否变化
+        // 都要付。这与 218 实测「采集循环只有 ~2.7 次/秒、且与画面变化快慢无关」
+        // 的现象完全吻合。
+        //
+        // DIBSection 的像素缓冲是**我们自己持有的线性内存**（32bpp BGRA，顶朝下），
+        // BitBlt 直接把屏幕内容写进去，全程没有任何 DDB→DIB 转换，也不需要中间
+        // buffer_ + 额外 8MB 拷贝。
+        BITMAPINFO bi;
+        ZeroMemory(&bi, sizeof(bi));
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = width_;
+        bi.bmiHeader.biHeight = -height_; // 负值表示从上到下存储（QImage 行序一致）
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        hBitmap_ = CreateDIBSection(hdcScreen_, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!hBitmap_ || !bits) {
+            if (hBitmap_) {
+                DeleteObject(hBitmap_);
+                hBitmap_ = nullptr;
+            }
             DeleteDC(hdcMem_);
+            hdcMem_ = nullptr;
             ReleaseDC(nullptr, hdcScreen_);
+            hdcScreen_ = nullptr;
             return false;
         }
+        dibBits_ = static_cast<uchar*>(bits);
 
         // 选入位图到内存 DC（保存旧对象，析构时先还原再删除位图）
         hBitmapOld_ = static_cast<HBITMAP>(SelectObject(hdcMem_, hBitmap_));
-
-        // 获取位图信息，用于后续转换
-        bitmapInfo_.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bitmapInfo_.bmiHeader.biWidth = width_;
-        bitmapInfo_.bmiHeader.biHeight = -height_; // 负值表示从上到下存储（避免翻转）
-        bitmapInfo_.bmiHeader.biPlanes = 1;
-        bitmapInfo_.bmiHeader.biBitCount = 32; // 32-bit BGRA
-        bitmapInfo_.bmiHeader.biCompression = BI_RGB;
-        bitmapInfo_.bmiHeader.biSizeImage = 0;
-        buffer_.resize(width_ * height_ * 4);
 
         return true;
     }
@@ -90,16 +287,12 @@ public:
             return false;
         }
 
-        // 获取位图数据（复用预分配缓冲区）
-        buffer_.resize(width_ * height_ * 4);
-        bitmapInfo_.bmiHeader.biSizeImage = static_cast<DWORD>(buffer_.size());
-        if (!GetDIBits(hdcScreen_, hBitmap_, 0, height_, buffer_.data(), &bitmapInfo_, DIB_RGB_COLORS)) {
+        // DIBSection 的缓冲由本对象持有、下一帧会被 BitBlt 覆盖 → 必须深拷贝一份
+        // 交给上层（QImage::copy 是唯一一次 8MB 级拷贝，等价于旧实现的 rawImg.copy()，
+        // 但省掉了 GetDIBits 那次转换）。
+        if (!dibBits_)
             return false;
-        }
-
-        // BGRA 直通输出 RGB32（小端=BGRA），与 X11 捕获一致。
-        // 全帧 RGB888 转换已移到编码线程，避免主线程每帧全帧转换。
-        QImage rawImg(buffer_.data(), width_, height_, width_ * 4, QImage::Format_RGB32);
+        QImage rawImg(dibBits_, width_, height_, width_ * 4, QImage::Format_RGB32);
         outImage = rawImg.copy();
         return true;
     }
@@ -122,10 +315,9 @@ private:
     HDC hdcMem_ = nullptr;
     HBITMAP hBitmap_ = nullptr;
     HBITMAP hBitmapOld_ = nullptr;
+    uchar* dibBits_ = nullptr; // DIBSection 像素缓冲（仅 GetObject 之外的只读用途）
     int width_ = 0, height_ = 0;
     int capX_ = 0, capY_ = 0, capW_ = 0, capH_ = 0; // 捕获区域（虚拟屏坐标）
-    BITMAPINFO bitmapInfo_;
-    std::vector<uchar> buffer_; // 复用像素缓冲区
 };
 
 #if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
@@ -466,6 +658,7 @@ void ScreenCapturer::captureFrame()
                 idleCount_ = 0;
                 leaveIdleThrottle();
                 emit frameCaptured(frame);
+                schedulePumpFlush();
             }
             else {
                 // 无新帧（DXGI 无桌面更新）：同样递增 idle 计数并降频，
@@ -493,7 +686,51 @@ void ScreenCapturer::captureFrame()
 #endif
 
     // GDI / 回退路径: 捕获安全桌面时可能返回黑帧, 但仍发到前端保持 canvas 尺寸正确
-    if (useGDI_ && gdiCapturer_ && gdiCapturer_->captureFrame(frame)) {
+    bool gdiOk = false;
+    if (useGDI_ && gdiCapturer_) {
+        // [WIN-DIAG] 计时：gap=相邻两次进入本函数的间隔，cap=本次采集调用耗时
+        const double entryMs = qpcMs();
+        gdiOk = gdiCapturer_->captureFrame(frame);
+        const double afterMs = qpcMs();
+        if (g_gdiDiag.winStart == 0.0) {
+            g_gdiDiag.winStart = entryMs;
+            g_gdiDiag.lastEntry = entryMs;
+        }
+        g_gdiDiag.iters++;
+        g_gdiDiag.capSum += (afterMs - entryMs);
+        if (afterMs - entryMs > g_gdiDiag.capMax)
+            g_gdiDiag.capMax = afterMs - entryMs;
+        if (g_gdiDiag.lastEntry > 0.0)
+            g_gdiDiag.gapSum += (entryMs - g_gdiDiag.lastEntry);
+        g_gdiDiag.lastEntry = entryMs;
+        const double winElapsed = entryMs - g_gdiDiag.winStart;
+        if (winElapsed >= 1000.0 && g_gdiDiag.iters > 0) {
+            const double capAvg = g_gdiDiag.capSum / static_cast<double>(g_gdiDiag.iters);
+            g_gdiDiag.windows++;
+            // 前 12 个窗口每秒一条（便于定位），之后每 10 秒一条、或读屏异常时继续打，
+            // 避免长期运行把日志刷满。
+            if (g_gdiDiag.windows <= 12 || (g_gdiDiag.windows % 10) == 0
+                || capAvg > kSlowReadbackMs) {
+                qInfo() << "CAP-WIN iters=" << g_gdiDiag.iters
+                        << "emits=" << g_gdiDiag.emits
+                        << "fps=" << QString::number(g_gdiDiag.iters * 1000.0 / winElapsed, 'f', 1)
+                        << "interval=" << captureTimer_->interval()
+                        << "gapAvg=" << QString::number(g_gdiDiag.gapSum / qMax<qint64>(1, g_gdiDiag.iters - 1), 'f', 1)
+                        << "capAvg=" << QString::number(capAvg, 'f', 2)
+                        << "capMax=" << QString::number(g_gdiDiag.capMax, 'f', 2)
+                        << "chkAvg=" << QString::number(g_gdiDiag.chkSum / g_gdiDiag.iters, 'f', 2)
+                        << "idle=" << idleCount_;
+            }
+            // 自适应判定读屏是否异常慢（VMware SVGA + DWM 合成时单帧 550ms）
+            winDwmConsider(capAvg, g_gdiDiag.iters);
+            const qint64 doneWindows = g_gdiDiag.windows;
+            g_gdiDiag = GdiDiag();
+            g_gdiDiag.winStart = entryMs;
+            g_gdiDiag.lastEntry = entryMs;
+            g_gdiDiag.windows = doneWindows;
+        }
+    }
+    if (gdiOk) {
         if (isFrameBlack(frame)) {
             idleCount_ = 0;
             leaveIdleThrottle();
@@ -502,6 +739,7 @@ void ScreenCapturer::captureFrame()
                 emit screenLocked(true);
             }
             // 黑帧仍发给前端，确保 canvas 尺寸正确
+            g_gdiDiag.emits++;
             emit frameCaptured(frame);
             return;
         }
@@ -510,18 +748,30 @@ void ScreenCapturer::captureFrame()
             emit screenLocked(false);
         }
 
+        const double chkStartMs = qpcMs();
         quint16 checksum = quickFrameChecksum(frame);
-        if (checksum == lastFrameChecksum_) {
+        g_gdiDiag.chkSum += qpcMs() - chkStartMs;
+        // [H21-WIN] 与 Linux 路径对齐：forceFrameCount_ > 0 时必须**绕过**校验和去重。
+        // 旧 Windows GDI 分支无条件丢「校验和未变」的帧，而 forceNextFrame() 正是靠
+        // 这个计数表达「新客户端接入 / request_keyframe 喂帧泵 / 输入注入后强制出帧」。
+        // Linux 侧 screencapturer_linux.cpp 有此判断，Windows 侧缺失 ⇒ 强制帧语义
+        // 在 Windows 上退化（只剩 lastFrameChecksum_=0 的第一次生效，且计数永不回退）。
+        if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
             idleCount_++;
             if (idleCount_ > static_cast<int>(fps_ * 2))
                 enterIdleThrottle();
             return;
         }
+        forceSendNextFrame_ = false;
+        if (forceFrameCount_ > 0)
+            forceFrameCount_--;
         idleCount_ = 0;
         leaveIdleThrottle();
         lastFrameChecksum_ = checksum;
 
+        g_gdiDiag.emits++;
         emit frameCaptured(frame);
+        schedulePumpFlush();
         return;
     }
 
@@ -556,6 +806,7 @@ void ScreenCapturer::captureFrame()
     lastFrameChecksum_ = checksum;
 
     emit frameCaptured(frame);
+    schedulePumpFlush();
 }
 
 // Windows 多屏：文件级枚举函数前置声明（实现在文件末尾）

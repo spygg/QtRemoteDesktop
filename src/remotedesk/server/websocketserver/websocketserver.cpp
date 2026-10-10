@@ -11,7 +11,11 @@
 // sendBinaryMessage 的发送队列无限增长，最终吃光服务端内存。超过该阈值时主动
 // 丢弃该客户端的媒体帧（图像/视频），待其把积压发完再自然恢复。
 // 只作用于媒体广播，不碰控制类 JSON（体量小且不能丢）。
-static const qint64 kMaxSocketBacklogBytes = 8 * 1024 * 1024;
+// 阈值同时就是**延迟上限**：稳态积压 ≈ 阈值，延迟 = 阈值 ÷ 链路吞吐。
+// 8MB 在 2~4MB/s 的 WiFi/百兆链路上意味着 2~4 秒常驻延迟（用户实测"连上
+// 流畅、5 分钟后 2~3 秒"即此因）。512KB 对应亚秒级延迟；视频模式触顶丢
+// P 帧后最多等 0.5s（GOP=fps/2）即有新 IDR 重新同步。
+static const qint64 kMaxSocketBacklogBytes = 512 * 1024;
 
 // 普通远程客户端连接数上限。每条连接都会在 clients_ / socketToId_ / pendingBytes_
 // 里留一份状态，且会被纳入视频广播列表；无上限时局域网内一堆（或失控脚本反复）
