@@ -167,6 +167,48 @@ static int readProcUid(const char* pid)
     return uid;
 }
 
+// Read /proc/<pid>/comm (process name; kernel truncates to 15 chars).
+static bool readProcComm(const char* pid, char* out, size_t outSize)
+{
+    char commPath[64];
+    snprintf(commPath, sizeof(commPath), "/proc/%s/comm", pid);
+    FILE* f = fopen(commPath, "rb");
+    if (!f) return false;
+    if (!fgets(out, static_cast<int>(outSize), f)) { fclose(f); return false; }
+    fclose(f);
+    size_t len = strlen(out);
+    while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r')) out[--len] = '\0';
+    return out[0] != '\0';
+}
+
+// 桌面组件（窗口管理器/面板/文件管理器/会话管理器）进程名匹配。
+// 若某个 DISPLAY 上有这些进程，说明它是真实桌面会话；反之（例如 WSLg 的 :0
+// 只有 Weston 空壳、无 WM/桌面），就是空 X server，抓屏只会得到黑屏。
+static bool isDesktopComponent(const char* comm)
+{
+    static const char* kNames[] = {
+        // 窗口管理器
+        "xfwm4", "metacity", "mutter", "gnome-shell", "kwin_x11", "kwin_wayland",
+        "openbox", "fluxbox", "icewm", "jwm", "matchbox", "i3", "awesome",
+        "xmonad", "bspwm", "dwm", "marco", "wayfire", "labwc",
+        // 桌面/面板/文件管理器/会话管理器
+        "xfdesktop", "xfce4-panel", "lxpanel", "mate-panel", "caja",
+        "nautilus", "thunar", "pcmanfm", "plasmashell", "cinnamon",
+        "budgie-panel", "polybar", "xfce4-session", "lxsession",
+        "gnome-session", "mate-session", "plasma-desktop",
+        "xfce4-notifyd", "xfce4-power-manager", "lxqt-panel",
+    };
+    if (!comm || !comm[0]) return false;
+    for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i) {
+        if (strcmp(comm, kNames[i]) == 0) return true;
+        // comm 被内核截断到 15 字符：对长名单名允许按 comm 长度做前缀匹配
+        // （如 matchbox-window-manager 截断为 matchbox-window）
+        if (strlen(kNames[i]) > 8 && strlen(comm) >= 8 &&
+            strncmp(comm, kNames[i], strlen(comm)) == 0) return true;
+    }
+    return false;
+}
+
 // Score a (DISPLAY, XAUTHORITY, uid) candidate. Higher = more likely a real
 // user desktop session rather than a greeter / login screen.
 //   - uid >= 1000  → real user session (+100); gdm(42) → greeter (-100)
@@ -213,6 +255,7 @@ static bool detectUserX11Env()
         char xauth[1024];
         int uid;
         int score;
+        int desktopScore;   // 该 DISPLAY 上发现的桌面组件进程数（每发现一个 +40）
         bool confirmed; // 有活进程真正在使用该 display，而非基线占位
     };
     DisplayEntry entries[32];
@@ -223,6 +266,7 @@ static bool detectUserX11Env()
         entries[i].xauth[0] = '\0';
         entries[i].uid = -1;
         entries[i].score = -1000000;
+        entries[i].desktopScore = 0;
         entries[i].confirmed = false;
     }
 
@@ -285,6 +329,11 @@ static bool detectUserX11Env()
                         entries[idx].score = sc;
                         entries[idx].uid = uid;
                     }
+                    // 桌面组件加分：该 DISPLAY 上有 WM/面板/文件管理器等进程，
+                    // 说明是真实桌面会话（WSLg 空壳 :0 无任何桌面进程 → 不加分）
+                    char comm[32];
+                    if (readProcComm(pid, comm, sizeof(comm)) && isDesktopComponent(comm))
+                        entries[idx].desktopScore += 40;
                     // Prefer a non-empty XAUTHORITY（且确实含 cookie），尤其 /home/ 下的。
                     // 0 字节文件（LightDM 登录后清空留下的 lightdm/xauthority 残留）
                     // 必须排除，否则后面 XOpenDisplay 必失败。
@@ -304,10 +353,14 @@ static bool detectUserX11Env()
     // Pick the display with the highest score, preferring confirmed (live)
     // sessions over the unconfirmed current-display baseline. This way a
     // baseline whose display has died cannot win by its placeholder score 0.
+    // 总分 = 基础分 + 桌面组件分：分数相同的两个候选（如 WSLg :0 与 xrdp :10，
+    // 基础分都是 180），有真实桌面组件的那个胜出。
     int bestIdx = -1;
     for (int i = 0; i < entryCount; ++i) {
         if (!entries[i].confirmed) continue;
-        if (bestIdx < 0 || entries[i].score > entries[bestIdx].score)
+        if (bestIdx < 0 ||
+            entries[i].score + entries[i].desktopScore >
+                entries[bestIdx].score + entries[bestIdx].desktopScore)
             bestIdx = i;
     }
     // 没有任何活进程使用任何 display（例如纯无头），仍保留当前已选中的 display。
@@ -367,6 +420,7 @@ static bool detectUserX11Env()
             qInfo() << "detectUserX11Env: selected DISPLAY =" << entries[bestIdx].display
                     << "XAUTHORITY =" << (newA ? newA : "(none)")
                     << "uid =" << entries[bestIdx].uid << "score =" << entries[bestIdx].score
+                    << "desktop =" << entries[bestIdx].desktopScore
                     << "candidates =" << entryCount;
         }
         // Do NOT return yet: if XAUTHORITY is still empty, fall through to the

@@ -865,6 +865,17 @@
                 <button data-value="off">off</button>
             </div>
         </div>
+        <!-- 剪贴板同步：与 clip-sync-prompt 弹窗共用同一份 rd_clip_autosync 设置。
+             弹窗里「以后自动同步 / 仅手动」只能等远端内容到来时才出现，这里给一个常驻入口。 -->
+        <div class="dropdown-section">
+            <div class="dropdown-title">剪贴板同步</div>
+            <div class="dropdown-note">远端复制内容时：自动=直接写入本机；询问=弹提示由你决定（默认）；仅手动=只在你点「同步到本机」时写入</div>
+            <div class="dropdown-options" data-key="clip">
+                <button data-value="always">自动</button>
+                <button data-value="ask">询问</button>
+                <button data-value="never">仅手动</button>
+            </div>
+        </div>
     </div>
 
     <div id="container">
@@ -3048,6 +3059,9 @@
             const open = !dd.classList.contains('open');
             dd.classList.toggle('open', open);
             ov.classList.toggle('open', open);
+            // 打开时刷新一次高亮：剪贴板同步等纯前端设置在别处（弹窗）被改过、
+            // 或服务端 config 尚未回执时，按钮高亮可能过期。
+            if (open) updateDropdownActive();
         }
 
         function updateDropdownActive() {
@@ -3092,7 +3106,10 @@
                     ? (cfg.videomode === 'auto' ? 'auto' : state.displayStreamMode)
                     : (key === 'screen')
                         ? String(cfg.screen)
-                        : String(cfg[key]);
+                        // 剪贴板同步是纯前端设置（localStorage），不在服务端 config 里
+                        : (key === 'clip')
+                            ? getClipAutoSync()
+                            : String(cfg[key]);
                 group.querySelectorAll('button').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.value === val);
                 });
@@ -3181,6 +3198,24 @@
                 state.currentConfig.hw_encode = val;
                 try { localStorage.setItem('rd_hwencode', val); } catch (e) {}
                 send({ type: 'config', hw_encode: val });
+            } else if (key === 'clip') {
+                // 纯前端设置：与 clip-sync-prompt 共用同一份 rd_clip_autosync，
+                // 两个入口的状态始终一致（改完下次任一入口打开都能看到）。
+                if (val !== 'always' && val !== 'ask' && val !== 'never') return;
+                setClipAutoSync(val);
+                if (val === 'never') {
+                    state.clip.pendingLocalWrite = false;
+                    hideClipPrompt();
+                } else if (val === 'always') {
+                    // 已有远端内容时顺手补写一次；无手势/不安全上下文失败会保留
+                    // 待写标记，由 tryWriteRemoteClipToLocal 在下次手势重试。
+                    if (clipFingerprint()) {
+                        state.clip.pendingLocalWrite = true;
+                        tryWriteRemoteClipToLocal();
+                    } else {
+                        hideClipPrompt();
+                    }
+                }
             }
             updateDropdownActive();
             updateQualityLabel();
