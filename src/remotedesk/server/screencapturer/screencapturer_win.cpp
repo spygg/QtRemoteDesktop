@@ -657,7 +657,7 @@ void ScreenCapturer::captureFrame()
                 // 4fps 节流后，画面再变化仍恒为 4fps（GDI/X11 路径均正确复位）
                 idleCount_ = 0;
                 leaveIdleThrottle();
-                emit frameCaptured(frame);
+                emitCapturedFrame(frame);
                 schedulePumpFlush();
             }
             else {
@@ -740,7 +740,7 @@ void ScreenCapturer::captureFrame()
             }
             // 黑帧仍发给前端，确保 canvas 尺寸正确
             g_gdiDiag.emits++;
-            emit frameCaptured(frame);
+            emitCapturedFrame(frame);
             return;
         }
         if (screenLocked_) {
@@ -770,7 +770,7 @@ void ScreenCapturer::captureFrame()
         lastFrameChecksum_ = checksum;
 
         g_gdiDiag.emits++;
-        emit frameCaptured(frame);
+        emitCapturedFrame(frame);
         schedulePumpFlush();
         return;
     }
@@ -786,7 +786,7 @@ void ScreenCapturer::captureFrame()
             emit screenLocked(true);
         }
         // 黑帧仍发给前端
-        emit frameCaptured(frame);
+        emitCapturedFrame(frame);
         return;
     }
     if (screenLocked_) {
@@ -805,7 +805,7 @@ void ScreenCapturer::captureFrame()
     leaveIdleThrottle();
     lastFrameChecksum_ = checksum;
 
-    emit frameCaptured(frame);
+    emitCapturedFrame(frame);
     schedulePumpFlush();
 }
 

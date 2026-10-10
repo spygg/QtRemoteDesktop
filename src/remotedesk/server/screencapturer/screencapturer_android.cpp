@@ -51,7 +51,7 @@ void ScreenCapturer::captureFrame()
         return;
     lastFrameChecksum_ = checksum;
 
-    emit frameCaptured(frame);
+    emitCapturedFrame(frame);
 }
 
 void ScreenCapturer::cleanupPlatform()

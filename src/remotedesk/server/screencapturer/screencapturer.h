@@ -98,6 +98,16 @@ public:
     void forceNextFrame();   // 输入注入后强制下一帧通过校验（光标移动不产生 XDamage）
     void setFps(int fps);
 
+    // [KFR] 桌面内容真实变化计数：仅在两次**出帧**之间采样校验和不同时递增。
+    // 与去重用的 lastFrameChecksum_ 完全独立（后者会被 forceNextFrame()/resume()
+    // 重置为 0，不能用来判断"内容是否变过"）。强制抓帧（forceNextFrame，画面未变
+    // 但绕过去重）不会改变校验和，故不会误计数。
+    // RDPServer 用它判断"缓存的关键帧是否仍与当前桌面一致"——一致则浏览器 PLI
+    // 可直接重发缓存 IDR，省掉一次全屏抓屏 + H.264 IDR 编码（服务模式下还省掉
+    // 一次"服务端→helper→服务端"的关键帧请求往返）；不一致则必须重新出帧，
+    // 否则重发旧 IDR 会让客户端参考链错位（花屏）。
+    quint64 contentChangeCount() const { return contentChangeCount_; }
+
     // 切换恒全量抓取模式（图片模式 true；视频模式 false）。转发到平台捕获器。
     void setFullCaptureOnly(bool v) {
 #ifdef Q_OS_LINUX
@@ -167,10 +177,17 @@ private slots:
 
 private:
     void cleanupPlatform();
+    // 统一出帧入口：各平台分支一律经由它 emit，附带"画面是否真实变化"的累计。
+    void emitCapturedFrame(const QImage& frame);
 
     QTimer* captureTimer_ = nullptr;
     QScreen* screen_ = nullptr;
     int fps_ = 30;
+
+    // [KFR] 内容真实变化计数（见 contentChangeCount() 注释）。
+    quint64 contentChangeCount_ = 0;
+    quint16 lastEmittedChecksum_ = 0;
+    bool lastEmittedValid_ = false;
 
     quint16 lastFrameChecksum_ = 0;
     bool forceSendNextFrame_ = false; // 兼容保留（部分平台按 bool 判定）

@@ -214,6 +214,36 @@ private:
     qint64 lastKeyframeTs_ = 0;
     // 编码器尺寸不匹配触发的重建节流时间戳（避免每帧都尝试重建阻塞主线程）
     qint64 lastSizeReinitMs_ = 0;
+    // [PLI-REUSE] 静止桌面下的关键帧请求（PLI）优化状态。
+    // 背景：浏览器在"长时间收不到可解码帧"时会周期性发 PLI 索要一帧 IDR。旧实现用
+    // forceNextFrame() 响应，但非 requestNewIdr 分支产出的其实是 **P 帧**，浏览器
+    // 不满足 → 每 ~3s 再要一次 → 静止桌面下形成
+    //   「无帧 → PLI → 全屏抓屏 + 编码 → 仍非 IDR → 再 PLI」
+    // 的永久循环。这正是静止时视频模式 CPU 远高于图片模式（后者 0 帧 0 编码）的
+    // 唯一来源，也是本文件里 CAP-EMIT force frame 每 ~3.06s 刷一条的原因。
+    //
+    // 修复分两层：
+    //  ① 语义层：PLI 必须用 IDR 响应，否则循环不会停。
+    //  ② 成本层：静止画面下不重新抓屏/编码，直接重发缓存 IDR——sendFrame 内部按
+    //     rtpClock_.elapsed() 取当前时间戳（不会回退，Chrome 不会当重复帧丢弃），
+    //     而 IDR 自包含，解码不需要参考帧。
+    //
+    // 复用安全性判据 = 采集器的 contentChangeCount()（"桌面内容真实变化"计数）：
+    //   缓存 IDR 时记下其值 staticIdrEpoch_；PLI 到来时若仍相等 ⇒ 自该 IDR 起桌面
+    //   逐像素未变 ⇒ 重发缓存 IDR 与"重新抓屏编码出的 IDR"等价。
+    //   注意**不能**用"自缓存以来编码帧数 == 0"作判据：openh264 有 1 帧流水线延迟，
+    //   重建编码器逼 IDR 时必然多吐 1 个 P 帧（同画面），该判据永不成立（实测 =1）。
+    quint64 staticIdrEpoch_ = 0;
+    bool staticIdrEpochValid_ = false;
+    // 上次 PLI 复用的时刻（冷却，防止 PLI 风暴下重复重发）。
+    qint64 lastPliReuseMs_ = 0;
+    // IDR 请求待命时刻（0=无请求）。requestKeyframe() 只设标志，部分软编（openh264）
+    // 不认 flush + pict_type=I 仍输出 P 帧，需要超时兜底重建编码器才能真的产出 IDR。
+    qint64 idrRequestMs_ = 0;
+    QTimer* idrFallbackTimer_ = nullptr;
+    // PLI 处理计数（诊断：复用缓存 IDR vs 重新出帧）。
+    quint64 pliReuseCount_ = 0;
+    quint64 pliEncodeCount_ = 0;
 #endif
 
     std::unique_ptr<InputManager> inputManager_;
@@ -369,7 +399,9 @@ private:
     // 接入时需要一帧关键帧来引导出图，否则视频流永远起不来。
     // requestNewIdr=true 时（显式 request_keyframe）即使编码器已产过 IDR 也强制
     // 重新产一帧，用于客户端刚重置等帧门（WS videoStarted_）的场景。
-    void pumpKeyframe(bool requestNewIdr = false);
+    // allowStaticReuse=true 时（仅浏览器 PLI）允许在"桌面静止且编码器最后输出就是
+    // 关键帧"的情况下直接重发缓存 IDR，跳过全屏抓屏 + H.264 IDR 编码（[PLI-REUSE]）。
+    void pumpKeyframe(bool requestNewIdr = false, bool allowStaticReuse = false);
 
 public:
     static QStringList getLocalIpAddr();

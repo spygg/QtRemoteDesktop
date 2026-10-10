@@ -159,7 +159,7 @@ void ScreenCapturer::captureFrame()
     leaveIdleThrottle();
     lastFrameChecksum_ = checksum;
 
-    emit frameCaptured(frame);
+    emitCapturedFrame(frame);
 }
 
 void ScreenCapturer::cleanupPlatform()

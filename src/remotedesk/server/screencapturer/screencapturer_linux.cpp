@@ -886,7 +886,7 @@ void ScreenCapturer::captureFrame()
             // 区域抓取已知有变化（XDamage 非空），跳过全帧校验和以省 CPU
             idleCount_ = 0;
             leaveIdleThrottle();
-            emit frameCaptured(frame);
+            emitCapturedFrame(frame);
             schedulePumpFlush();
             return;
         }
@@ -916,7 +916,7 @@ void ScreenCapturer::captureFrame()
                 qInfo() << "CAP-EMIT seq=" << s_emitCnt << " sz=" << frame.width() << "x" << frame.height();
             s_lastEmitMs = nowMs;
         }
-        emit frameCaptured(frame);
+        emitCapturedFrame(frame);
         schedulePumpFlush();
         return;
     }
@@ -982,7 +982,7 @@ void ScreenCapturer::captureFrame()
         leaveIdleThrottle();
         lastFrameChecksum_ = checksum;
 
-        emit frameCaptured(frame);
+        emitCapturedFrame(frame);
         schedulePumpFlush();
         return;
     }
@@ -1016,7 +1016,7 @@ void ScreenCapturer::captureFrame()
     leaveIdleThrottle();
     lastFrameChecksum_ = checksum;
 
-    emit frameCaptured(frame);
+    emitCapturedFrame(frame);
     schedulePumpFlush();
 }
 

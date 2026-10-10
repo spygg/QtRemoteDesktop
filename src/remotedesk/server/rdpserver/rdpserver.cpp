@@ -228,6 +228,35 @@ RDPServer::RDPServer(QObject* parent)
             pumpKeyframe();
 #endif
     });
+#ifdef USE_FFMPEG
+    // [PLI-REUSE] IDR 请求兜底定时器：videoEncoder_->requestKeyframe() 只是置标志，
+    // 部分软编（openh264 实测）不认 avcodec_flush_buffers + frame->pict_type，flush
+    // 后仍输出 P 帧。900ms 内没等到关键帧就重建编码器（重建后首帧必为 IDR）。
+    // 单次触发，避免与 webrtcKfTimer_ 的周期逻辑互相干扰；重建另受 lastReinitMs_
+    // 冷却保护（MPP 库反复 init 有固件崩溃历史）。
+    idrFallbackTimer_ = new QTimer(this);
+    idrFallbackTimer_->setSingleShot(true);
+    // 间隔必须**大于**回调里的 1000ms 冷却判断，否则每次都在冷却窗口内被 return，
+    // 兜底永不生效（曾用 900ms：900 < 1000，重建从不发生，PLI 退化为每 3s 抓一帧
+    // P 帧的死循环）。requestNewIdr 分支会同步把 lastReinitMs_ 设为当前时刻，
+    // 故 1200ms 后触发时恰好满足 >1000ms。
+    idrFallbackTimer_->setInterval(1200);
+    connect(idrFallbackTimer_, &QTimer::timeout, this, [this]() {
+        if (idrRequestMs_ <= 0)
+            return;
+        idrRequestMs_ = 0;
+        if (currentMode_ != ServerMode::Video || !videoEncoder_ || remoteVideoSourceAvailable())
+            return;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - lastReinitMs_ < 1000)
+            return;
+        lastReinitMs_ = now;
+        qInfo() << "[PLI-REUSE] no IDR after requestKeyframe, rebuilding encoder to force IDR";
+        reinitVideoEncoderForScale();
+        if (screenCapturer_)
+            screenCapturer_->forceNextFrame();
+    });
+#endif
     webrtcKfTimer_->start();
 }
 
@@ -3170,7 +3199,11 @@ void RDPServer::onClientConnected(const QString& clientId)
         if (!lastKeyframeData_.isEmpty())
             wsServer_->sendFrameToClient(clientId, lastKeyframeData_, true, lastKeyframeTs_);
 #endif
-        pumpKeyframe();
+        // allowStaticReuse：这里的目标是"让新客户端拿到一帧可解码的 IDR"。桌面静止
+        // 且有缓存 IDR 时直接复用（零成本），否则产一帧真 IDR。**不能**走旧的
+        // forceNextFrame 路径——那产出的是 P 帧，既不能满足"从 IDR 起解"，还会白烧
+        // 一次全屏抓屏 + 编码。
+        pumpKeyframe(false, /*allowStaticReuse=*/true);
     }
 
     // 发送当前锁屏状态（客户端可能在屏幕已锁时连接/重连）
@@ -3784,6 +3817,21 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
     if (isKeyframe) {
         lastKeyframeData_ = data;
         lastKeyframeTs_ = timestamp;
+        // IDR 已产出：其对应的"待命请求"被满足，撤销兜底重建。
+        idrRequestMs_ = 0;
+        if (idrFallbackTimer_)
+            idrFallbackTimer_->stop();
+    }
+    // [PLI-REUSE] 记录缓存 IDR 对应的"桌面内容版本"。
+    // 采集器的 contentChangeCount() 只在画面**真实变化**时递增（forceNextFrame 的
+    // 强制抓帧画面未变、校验和相同，故不计数）。于是
+    //     contentChangeCount() == staticIdrEpoch_
+    // ⇔ 自该 IDR 起桌面逐像素未变 ⇔ 重发缓存 IDR 与"重新抓屏编码出的 IDR"等价。
+    // 判据比"自缓存以来编码帧数 == 0"稳健：openh264 有 1 帧流水线延迟，重建编码器
+    // 逼 IDR 时必然多吐 1 个 P 帧（同画面），旧判据因此永不成立（实测 framesSinceKf=1）。
+    if (isKeyframe) {
+        staticIdrEpoch_ = screenCapturer_ ? screenCapturer_->contentChangeCount() : 0;
+        staticIdrEpochValid_ = true;
     }
 #endif
 #ifdef USE_WEBRTC
@@ -3804,14 +3852,60 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
     wsServer_->broadcastFrame(data, isKeyframe, timestamp);
 }
 
-void RDPServer::pumpKeyframe(bool requestNewIdr)
+void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
 {
 #ifdef USE_FFMPEG
     if (currentMode_ != ServerMode::Video)
         return;
 
+    // [PLI-REUSE] 静止桌面下的 PLI 优化（判据说明见 rdpserver.h）。
+    // 复用前提：有缓存 IDR、缓存时的桌面内容版本 == 当前内容版本（桌面未变）、
+    // 距上次复用超过冷却。任一不满足都退到下方"产一帧真 IDR"。
+    if (allowStaticReuse && !requestNewIdr && !lastKeyframeData_.isEmpty()
+            && staticIdrEpochValid_ && screenCapturer_
+            && screenCapturer_->contentChangeCount() == staticIdrEpoch_) {
+        constexpr qint64 kPliReuseCooldownMs = 400; // PLI 风暴下的重发冷却
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - lastPliReuseMs_ < kPliReuseCooldownMs) {
+            // 冷却期内：刚刚才重发过同一份 IDR（浏览器尚未收到/尚未反应），
+            // 直接忽略这次重复请求。**绝不能退到下方的"抓屏 + 编码"**——这正是
+            // 要避免的开销（旧实现每 ~3s 抓一帧 + 编码 IDR 即由此而来）。
+            // 实测浏览器 PLI 会成对到达（同一毫秒两次），不拦就会漏抓一次。
+            return;
+        }
+        bool sent = false;
+#ifdef USE_WEBRTC
+        // 广播给所有 WebRTC 会话（与 onEncodedFrame 语义一致：一帧 IDR 对所有
+        // RTP 流都有效）。sendFrame 内部按 rtpClock_.elapsed() 取当前时间戳，
+        // 因此重发不会造成 RTP 时间戳回退（Chrome 不按重复帧丢弃）。
+        // QMap 节点式容器：erase 只失效被删元素的迭代器，故"先推进再发送"安全。
+        auto it = webrtcSessions_.begin();
+        while (it != webrtcSessions_.end()) {
+            WebRtcSession* s = it.value();
+            ++it;
+            if (s) {
+                s->sendFrame(lastKeyframeData_, true);
+                sent = true;
+            }
+        }
+#endif
+        if (sent) {
+            lastPliReuseMs_ = now;
+            if (pliReuseCount_++ % 10 == 0)
+                qInfo() << "[PLI-REUSE] replayed cached IDR (static desktop, no capture/encode)"
+                        << "reuse=" << pliReuseCount_;
+        }
+        // sent == false（当前无 WebRTC 会话要帧）时同样无需抓屏编码：没有人接。
+        return;
+    }
+    if (allowStaticReuse && pliEncodeCount_++ % 10 == 0)
+        qInfo() << "[PLI-REUSE] need fresh IDR (enc=" << pliEncodeCount_
+                << "epoch=" << staticIdrEpoch_ << "cur="
+                << (screenCapturer_ ? screenCapturer_->contentChangeCount() : 0) << ")";
+
     // 服务模式：编码在 helper 侧。请求 helper 产一帧新 IDR（它内部 requestKeyframe +
-    // forceNextFrame），服务端不做本地编码，也不应走下面的 videoEncoder_ 分支。
+    // forceNextFrame + 800ms 兜底重建），服务端不做本地编码，也不应走下面的
+    // videoEncoder_ 分支。
     if (remoteVideoSourceAvailable()) {
         QJsonObject rq;
         rq["type"] = "request_keyframe";
@@ -3823,19 +3917,26 @@ void RDPServer::pumpKeyframe(bool requestNewIdr)
     if (!videoEncoder_)
         return;
 
-    if (requestNewIdr) {
-        // 显式请求新 IDR（前端 request_keyframe）：必须产生**新的**关键帧，
-        // 因为请求方大概率已经丢弃了此前所有帧（WS 的 videoStarted_ 门在
-        // 客户端重连/切模式后会被清空，只有新 IDR 才能放行后续 P 帧）。
+    // allowStaticReuse（浏览器 PLI）在复用不成立时同样必须产**新 IDR**：PLI 的语义
+    // 就是"给我一帧能解码的 IDR"，继续回 P 帧会让浏览器每 ~3s 反复索要（旧行为的
+    // 根因，见 rdpserver.h）。requestNewIdr 是前端的显式 request_keyframe。
+    if (requestNewIdr || allowStaticReuse) {
+        // 显式请求新 IDR：必须产生**新的**关键帧，因为请求方大概率已经丢弃了此前
+        // 所有帧（WS 的 videoStarted_ 门在客户端重连/切模式后会被清空，只有新 IDR
+        // 才能放行后续 P 帧）。
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         if (now - lastReinitMs_ > 1000) {
             lastReinitMs_ = now;
-            // 先试编码器自身的强制关键帧（flush + pict_type=I）；libx264 等
-            // 软编可能不认，故 hasIdr 之后仍未见新 IDR 时由下方重建兜底。
+            // 先试编码器自身的强制关键帧（flush + pict_type=I）；libx264 等软编可能
+            // 不认（openh264 实测仍输出 P 帧），故启动单次兜底定时器，超时未见 IDR
+            // 就重建编码器（重建后首帧必为 IDR）。
             videoEncoder_->requestKeyframe();
             if (screenCapturer_)
                 screenCapturer_->forceNextFrame();
-            qInfo() << "pumpKeyframe: new IDR requested (encoder requestKeyframe)";
+            idrRequestMs_ = now;
+            if (idrFallbackTimer_)
+                idrFallbackTimer_->start();
+            qInfo() << "pumpKeyframe: new IDR requested";
         }
         return;
     }
@@ -4262,13 +4363,18 @@ void RDPServer::startWebRtcSession(const QString& clientId)
             { "type", "signal_state" },
             { "state", "connected" },
         });
-        // 连接建立后强制出一帧关键帧，引导客户端出图（静态桌面去重不会主动出帧）
-        pumpKeyframe();
+        // 连接建立后给客户端一帧可解码的 IDR 引导出图（静态桌面去重不会主动出帧）。
+        // allowStaticReuse：静止且有缓存 IDR 时复用，否则产真 IDR；不用旧的
+        // forceNextFrame 路径（它产 P 帧，不满足解码起点，还白烧一次抓屏+编码）。
+        pumpKeyframe(false, /*allowStaticReuse=*/true);
     });
 
     connect(session, &WebRtcSession::keyframeRequested, this, [this]() {
-        // 关键帧请求：同时强制抓取当前屏幕（绕过去重），否则静态桌面不会出新帧
-        pumpKeyframe();
+        // 浏览器 PLI（Yang_Req_Sendkeyframe）。静态桌面下浏览器会周期性地要关键帧，
+        // 若每次都强制抓屏 + 全屏 IDR 编码，就是静止时视频模式 CPU 高企的来源。
+        // allowStaticReuse=true 时优先重发缓存 IDR（桌面无变化则逐字节等价），
+        // 条件不满足会自动回退到原有的强制抓帧路径，行为不变。
+        pumpKeyframe(false, /*allowStaticReuse=*/true);
     });
 
     connect(session, &WebRtcSession::answerReceived, this, [this]() {
@@ -4333,7 +4439,7 @@ void RDPServer::onWebRtcMessage(const QString& clientId, const QJsonObject& msg)
             // answer 生效后立即强制一帧关键帧：此时 sendFrame 门禁(remoteSet_)已满足，
             // 关键帧可被服务端推给 metaRTC 加密成 RTP，浏览器才能从 IDR 起解。
             // 这比依赖 connected 信号的时机更稳（避免关键帧在门禁就绪前被丢弃）。
-            pumpKeyframe();
+            pumpKeyframe(false, /*allowStaticReuse=*/true);
         }
     } else if (type == "signal_ice") {
         if (WebRtcSession* s = webrtcSessions_.value(clientId))
