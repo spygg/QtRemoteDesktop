@@ -47,7 +47,18 @@ else()
         # 直接用 vendored 1.0.2u 的"库文件"与头，绕过 find_package 的 imported target 缓存。
         set(_OSSL102_LIB "${BUILD_OUTPUT_DIR}/openssl102_install/lib")
         set(_OSSL102_INC "${BUILD_OUTPUT_DIR}/openssl102_install/include")
-        if(NOT EXISTS "${_OSSL102_LIB}/libssl.so.1.0.0" OR NOT EXISTS "${_OSSL102_LIB}/libcrypto.so.1.0.0")
+        # 产物由 ExternalProject openssl102_ep 生成，而 openssl102_ep 只有在 configure
+        # 成功之后才能构建 —— 若在 configure 期校验"文件必须已存在"，会形成先有鸡还是
+        # 先有蛋的死锁：configure 通不过 → 永远构建不出 openssl102_ep → configure 仍通不过。
+        # 因此：目标存在（本次构建会产出产物）时只登记依赖，真实存在性交由构建期校验；
+        #       目标不存在（未启用 BUILD_THIRDPARTY）且产物确实缺失时才致命报错。
+        if(TARGET openssl102_ep)
+            add_dependencies(${WEBRTC_SESSION} openssl102_ep)
+            if(TARGET openssl102_verify)
+                add_dependencies(${WEBRTC_SESSION} openssl102_verify)
+            endif()
+            message(STATUS "WebRtcSession: 使用 vendored OpenSSL 1.0.2u (${_OSSL102_LIB})，由 openssl102_ep 构建")
+        elseif(NOT EXISTS "${_OSSL102_LIB}/libssl.so.1.0.0" OR NOT EXISTS "${_OSSL102_LIB}/libcrypto.so.1.0.0")
             message(FATAL_ERROR
                 "VENDOR_OPENSSL_102=ON 但 vendored OpenSSL 1.0.2u 未找到: "
                 "${_OSSL102_LIB}/libssl.so.1.0.0 / libcrypto.so.1.0.0\n"

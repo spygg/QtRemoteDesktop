@@ -346,6 +346,31 @@ check_deps() {
     echo "[deps] 必需依赖检查通过"
 }
 
+# ---------------- 0. vendored OpenSSL 1.0.2u（Qt<5.10 ABI 对齐）------------
+# 由 CMake ExternalProject openssl102_ep 构建，产物落在
+#   $OUT_DIR/openssl102_install
+# 注意：必须放在首次 cmake_configure 之后（configure 通过才能生成该目标），
+# 但要在编译业务代码之前完成 —— metaRTC / webrtcsession 都要用它的头与 .so。
+build_openssl102() {
+    if [ "$VENDOR_SSL102" != "ON" ]; then
+        return
+    fi
+    local libssl="$OUT_DIR/openssl102_install/lib/libssl.so.1.0.0"
+    local libcrypto="$OUT_DIR/openssl102_install/lib/libcrypto.so.1.0.0"
+    if [ -f "$libssl" ] && [ -f "$libcrypto" ]; then
+        echo ">>> vendored OpenSSL 1.0.2u 已存在 ($libssl)，跳过（增量构建）"
+        return
+    fi
+    step "0/5 编译 vendored OpenSSL 1.0.2u -> $OUT_DIR/openssl102_install"
+    OPENSSL102_JOBS="$JOBS" cmake --build "$BUILD_DIR" --target openssl102_ep -j"$JOBS"
+    if [ ! -f "$libssl" ] || [ ! -f "$libcrypto" ]; then
+        echo "错误: vendored OpenSSL 1.0.2u 构建失败" >&2
+        echo "  期望产物: $libssl" >&2
+        echo "  详细日志: $BUILD_DIR/openssl102_build/src/make.log" >&2
+        exit 1
+    fi
+}
+
 # ---------------- 1. openh264（由 CMake ExternalProject openh264_ep 构建）----
 build_openh264_cmake() {
     if [ -f "$OPENH264_INSTALL/lib/libopenh264.a" ]; then
@@ -550,6 +575,7 @@ if [ $CLEAN -eq 1 ]; then
 fi
 
 cmake_configure
+build_openssl102
 build_openh264_cmake
 build_mpp
 build_ffmpeg
