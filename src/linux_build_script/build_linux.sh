@@ -7,6 +7,8 @@
 #   <repo>/build_output  (第三方库产物: ffmpeg_install/openh264_install)
 # src/ 目录保持零编译产物。
 #
+# 编译成功后：自动把 onekeydeploy.sh 复制到可执行文件所在目录，并切换到该目录。
+#
 # 依赖：脚本会**自动检查**并打印适配当前发行版的安装命令（--check-deps 只检查不构建）。
 # 必选：gcc/g++ make cmake pkg-config sed tar
 #       Qt5 或 Qt6（必须带 WebSockets 组件）
@@ -523,6 +525,9 @@ cmake_build() {
 }
 
 # ---------------- 5. 验证 ----------------
+EXE_PATH=""
+EXE_DIR=""
+
 verify() {
     step "5/5 验证产物"
     local exe="$BIN_DIR/QtRemoteDesktop"
@@ -533,12 +538,29 @@ verify() {
         echo "错误: 未找到可执行文件" >&2
         exit 1
     fi
-    echo "可执行文件: $exe"
+    EXE_PATH="$(cd "$(dirname "$exe")" && pwd)/$(basename "$exe")"
+    EXE_DIR="$(cd "$(dirname "$exe")" && pwd)"
+    echo "可执行文件: $EXE_PATH"
     if strings "$exe" 2>/dev/null | grep -q "Video encoder initialized"; then
         echo "[OK] Video 编码模式已启用"
     else
         echo "[警告] 未检测到 Video 编码模式，可能回退到 JPEG"
     fi
+}
+
+# ---------------- 6. 复制 onekeydeploy.sh 到可执行目录 ----------------
+# 编译成功后，把一键打包脚本放到可执行文件旁边，方便直接执行：
+#   cd <可执行目录> && ./onekeydeploy.sh QtRemoteDesktop
+deploy_onekey() {
+    local src="$SCRIPT_DIR/onekeydeploy.sh"
+    if [ ! -f "$src" ]; then
+        echo "[警告] 未找到 $src，跳过复制" >&2
+        return 0
+    fi
+    mkdir -p "$EXE_DIR"
+    cp -f "$src" "$EXE_DIR/onekeydeploy.sh"
+    chmod +x "$EXE_DIR/onekeydeploy.sh"
+    echo "[deploy] onekeydeploy.sh 已复制到: $EXE_DIR/onekeydeploy.sh"
 }
 
 detect_qt
@@ -584,7 +606,12 @@ cmake_configure
 cmake_build
 verify
 
+# 编译成功（verify 通过）后：复制 onekeydeploy.sh 并切换到可执行目录
+deploy_onekey
+echo "可执行目录: $EXE_DIR"
+
 echo ""
 echo "=============================================="
-echo " 一键编译完成！可执行文件: $BIN_DIR/QtRemoteDesktop"
+echo " 一键编译完成！可执行文件: $EXE_PATH"
+echo " 打包脚本: $EXE_DIR/onekeydeploy.sh  (用法: ./onekeydeploy.sh $(basename "$EXE_PATH"))"
 echo "=============================================="
