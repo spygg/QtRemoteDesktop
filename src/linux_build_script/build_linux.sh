@@ -458,6 +458,17 @@ build_ffmpeg() {
         sed -i 's/: "ic" ((uint8_t)(-s))/: "c" ((uint8_t)(-s))/g' "$mops"
         echo "[patch] mathops.h: ic -> c (GCC 13 兼容)"
     fi
+    # GCC 14 兼容：把 implicit-function-declaration / int-conversion /
+    # incompatible-pointer-types 等老 C 代码告警从 error 降回 warning（FFmpeg 3.4.8 太老）。
+    # 各 flag 是否存在随 GCC 版本不同（如 return-mismatch 仅 GCC14+），逐个探测避免硬失败。
+    local gcc14_flags=""
+    for f in -Wno-error=implicit-function-declaration -Wno-error=implicit-int \
+             -Wno-error=int-conversion -Wno-error=incompatible-pointer-types \
+             -Wno-error=return-mismatch; do
+        if echo 'int main(void){return 0;}' | ${CC:-gcc} "$f" -x c - -c -o /dev/null >/dev/null 2>&1; then
+            gcc14_flags="$gcc14_flags $f"
+        fi
+    done
     ( cd "$ffbuild" && PKG_CONFIG_PATH="$OPENH264_INSTALL/lib/pkgconfig" \
         "$FFMPEG_SRC/configure" \
         --cc=gcc --ld=gcc --arch="$FFMPEG_ARCH" \
@@ -468,7 +479,7 @@ build_ffmpeg() {
         --enable-encoder=libopenh264 \
         --enable-decoder=h264 --enable-decoder=mjpeg --enable-decoder=mpeg4 \
         --disable-x86asm --disable-inline-asm --enable-static --disable-shared \
-        --extra-cflags="-I$OPENH264_INSTALL/include" \
+        --extra-cflags="-I$OPENH264_INSTALL/include $gcc14_flags" \
         --extra-ldflags="-L$OPENH264_INSTALL/lib" \
         --prefix="$FFMPEG_INSTALL" )
     ( cd "$ffbuild" && make -j"$JOBS" && make install )

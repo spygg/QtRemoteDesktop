@@ -1798,15 +1798,16 @@ void RDPServer::onHttpRequest()
         return;
     }
 
-    // 无屏幕捕获（无头模式）→ 静态页面免登录，但**任何 API 仍必须鉴权**。
-    // 历史实现把 /api/shell/exec 与 /api/shell/cwd 也放进 skipAuth，导致无 DISPLAY
-    // （无头/服务模式）时局域网任意主机可免登录执行任意命令 = 远程代码执行。
-    // 这里只放开页面本身，命令执行/目录查询与 shell WebSocket 一律要求有效会话。
-    bool skipAuth = !captureAvailable_ && (path == "/" || path == "/shell" || path.startsWith("/shell?"));
+    // 无屏幕捕获（无头模式）**同样要求登录**：页面、API、shell WebSocket 一律需要
+    // 有效会话。此前 headless 放开静态页面免登录，但 /api/shell/ws 始终校验 token，
+    // 导致无头模式下 shell 页能打开却永远连不上（前端“连接不上”）；统一走登录页
+    // 拿 HttpOnly session cookie 后，同源 WS 握手自动携带即可通过校验。
+    // （历史漏洞：/api/shell/exec、cwd 曾进过 skipAuth，无 DISPLAY 时免登录执行任意
+    // 命令 = RCE，已由 ws/exec 侧强制鉴权封死，这里不再放行任何路径。）
 
     // Protected routes — require valid session
     QString token = extractSessionToken(request);
-    if (!skipAuth && !authManager_->validateSession(token)) {
+    if (!authManager_->validateSession(token)) {
         if (path.startsWith("/api/")) {
             QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
                 QJsonDocument(QJsonObject { { "success", false }, { "error", "未登录" } }).toJson(QJsonDocument::Compact));
@@ -2440,12 +2441,18 @@ bool RDPServer::restartCapture()
     // then start fresh so the new ScreenCapturer picks up the current DISPLAY /
     // XAUTHORITY environment. Used when the active X session changes at runtime
     // (e.g. xrdp session appears after the service started on the GDM greeter).
+    const bool wasLocked = screenLocked_;
     if (screenCapturer_) {
         screenCapturer_->stop();
         screenCapturer_.reset();  // ~ScreenCapturer() -> cleanupPlatform()
     }
     captureAvailable_ = false;
     screenLocked_ = false;
+    // 重启采集会丢掉旧的锁屏状态，但已连接前端的遮罩不会自动收起（新捕获器
+    // 只在状态"变化"时才发 screen_locked）→ 必须主动广播一次解锁。
+    if (wasLocked && wsServer_)
+        wsServer_->broadcastJson(QJsonObject {
+            { "type", "screen_locked" }, { "locked", false } });
     return startCapture();
 }
 
@@ -3206,11 +3213,13 @@ void RDPServer::onClientConnected(const QString& clientId)
         pumpKeyframe(false, /*allowStaticReuse=*/true);
     }
 
-    // 发送当前锁屏状态（客户端可能在屏幕已锁时连接/重连）
-    if (screenLocked_) {
+    // 发送当前锁屏状态（客户端可能在屏幕已锁时连接/重连）。未锁时也必须
+    // 显式下发 locked=false：浏览器页面跨服务重启重连后，前端遮罩状态是
+    // 上一次会话残留的，若服务端不补发解锁消息，锁屏遮罩将永远无法收起。
+    {
         QJsonObject lock;
         lock["type"] = "screen_locked";
-        lock["locked"] = true;
+        lock["locked"] = screenLocked_;
         wsServer_->sendJson(clientId, lock);
     }
 

@@ -16,9 +16,7 @@
 #include <netinet/tcp.h>
 #endif
 
-#if Yang_OS_WIN
 #include <yangutil/sys/YangSocketCompat.h>
-#endif
 
 #include <fcntl.h>
 

@@ -21,9 +21,7 @@
 
 #endif
 
-#if Yang_OS_WIN
 #include <yangutil/sys/YangSocketCompat.h>
-#endif
 
 yangbool yang_socket_filterIp(char* ip){
     if(yang_memcmp(ip,"127.0.0",7)==0 || yang_memcmp(ip,"169.",4)==0 || yang_memcmp(ip,"192.168.56.",11)==0)
