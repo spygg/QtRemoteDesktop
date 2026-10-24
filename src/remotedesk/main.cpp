@@ -11,9 +11,13 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QImageWriter>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLibraryInfo>
 #include <QMutexLocker>
+#include <QStringList>
 #include <QTextStream>
 #include <QTimer>
 
@@ -152,8 +156,69 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
     logStream.flush();
 }
 
+// ==================== Qt 插件路径自适应 ====================
+// 图片模式依赖 QImage::save(..., "JPEG")，而 JPEG 编解码器是**插件**
+// （imageformats/libqjpeg.so），Qt 只从 QT_PLUGIN_PATH / 编译期插件目录里找。
+// Linux 部署的常见形态是「二进制旁边拷了 libQt5*.so，却没拷 imageformats」，
+// 此时 image.save() 恒返回 false，日志每帧刷一条
+// "JpegCompressor: failed to compress frame"，前端图片模式整片黑屏；
+// 而切到 ffmpeg/WebRTC（走 H.264，不经 Qt 编解码器）立刻恢复 ——
+// 极容易被误判成采集或渲染问题（本次 WSL 黑屏就是这个根因）。
+// 这里在 QApplication 构造之前把候选插件目录写进 QT_PLUGIN_PATH，覆盖：
+// ①部署目录 bin/plugins ②部署目录本身 ③Qt 编译期插件目录 ④发行版 Qt5 插件目录。
+static void ensureQtPluginPath(int argc, char* argv[])
+{
+    if (!qgetenv("QT_PLUGIN_PATH").isEmpty())
+        return;   // 部署方已显式指定，尊重其选择
+
+    QStringList dirs;
+    if (argc > 0 && argv[0] && *argv[0]) {
+        const QString appDir = QFileInfo(QString::fromLocal8Bit(argv[0])).absolutePath();
+        if (!appDir.isEmpty())
+            dirs << appDir + "/plugins" << appDir;
+    }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    dirs << QLibraryInfo::path(QLibraryInfo::PluginsPath);
+#else
+    dirs << QLibraryInfo::location(QLibraryInfo::PluginsPath);
+#endif
+    dirs << "/usr/lib/x86_64-linux-gnu/qt5/plugins"
+         << "/usr/lib/x86_64-linux-gnu/qt6/plugins"
+         << "/usr/lib64/qt5/plugins"
+         << "/usr/lib/qt5/plugins"
+         << "/usr/local/lib/qt5/plugins";
+
+    QStringList existing;
+    for (const QString& d : dirs) {
+        if (QDir(d).exists() && !existing.contains(d))
+            existing << d;
+    }
+    if (existing.isEmpty())
+        return;
+
+    qputenv("QT_PLUGIN_PATH", existing.join(QDir::listSeparator()).toLocal8Bit());
+}
+
+// 启动自检：JPEG 写入能力缺失时明确告警一次。否则每帧刷
+// "failed to compress frame"，根因被噪音埋掉，前端也只会看到黑屏。
+static void verifyJpegSupport()
+{
+    const QList<QByteArray> fmts = QImageWriter::supportedImageFormats();
+    for (const QByteArray& f : fmts) {
+        const QByteArray low = f.toLower();
+        if (low == "jpeg" || low == "jpg")
+            return;
+    }
+    qWarning() << "Qt has no JPEG image writer (imageformats/libqjpeg.so missing):"
+               << "image mode will render a BLACK SCREEN. Install the Qt imageformats"
+               << "plugin next to the binary (bin/imageformats/) or set QT_PLUGIN_PATH."
+               << "Available writers:" << fmts;
+}
+
 int main(int argc, char* argv[])
 {
+
+    ensureQtPluginPath(argc, argv);
 
     int ret = platformMain(argc, argv);
     if (ret >= 0)
@@ -211,6 +276,11 @@ int main(int argc, char* argv[])
     if (a.isRunning()) {
         return 0;
     }
+    // [B20] 单实例锁因真实错误创建失败：以非零码退出（systemd/启动脚本可见失败），
+    // 而不是静默 exit(0) 假装"另一实例在运行"。
+    if (a.lockFailed()) {
+        return 1;
+    }
 
     bool useSslOverride = !parser.isSet(noSslOption);
     QString path = QString("%1/%2").arg(a.applicationDirPath()).arg("logs");
@@ -223,6 +293,7 @@ int main(int argc, char* argv[])
     }
 
     qInstallMessageHandler(logToFile);
+    verifyJpegSupport();
     Breakpad::CrashHandler::instance()->Init(QCoreApplication::applicationDirPath());
 
     SystemSleepBlocker blocker;

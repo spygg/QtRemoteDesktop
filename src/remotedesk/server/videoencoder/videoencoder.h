@@ -44,6 +44,9 @@ public:
                     HwEncodeMode hwMode = HwEncodeMode::Auto);
     void encode(const QImage& frame);
     void shutdown();
+    // [N6] 重建路径专用：停线程并释放资源；线程卡死在驱动调用时返回 false
+    // （绝不 qFatal——调用方必须退役本对象、新建编码器继续服务）。
+    bool shutdownRetire();
 
     // 探测当前系统是否可对指定编码使用硬件编码（用于前端 auto 模式选路/模式通知）
     static bool isHwAcceleratedAvailable(CodecType type = CodecType::H264);
@@ -92,6 +95,8 @@ private slots:
 private:
     // 编码耗时 EMA 过载监控（MPP 与 FFmpeg 两条编码路径共用）
     void updateOverloadState(qint64 encodeStartMs);
+    // 线程确认停止后的资源释放（mpp 实例 + ffmpeg 上下文），shutdown/shutdownRetire 共用
+    void releaseStoppedResources();
 
     QThread encoderThread_;
     QMutex mutex_;
@@ -115,7 +120,12 @@ private:
     std::atomic<bool> sizeMismatch_{ false };
     QString hwName_;
     int64_t frameCount_ = 0;
+    // 编码时间戳基准：进程级单调起点（encoderEpochMs()），重建不得归零，
+    // 否则浏览器按 timestamp 排序会丢弃回退帧。
     qint64 startTime_ = 0;
+    // 连续 send_frame/receive_packet 失败计数（仅编码线程访问）：达到阈值后
+    // 请求上层重建，避免编码器进入错误态后长期静默失败。
+    int consecutiveEncFailures_ = 0;
     int fps_ = 30;
 
     CodecType currentCodec_ = CodecType::H264;

@@ -95,12 +95,16 @@ void ScreenCapturer::forceNextFrame()
 
 void ScreenCapturer::emitCapturedFrame(const QImage& frame)
 {
+    emitCapturedFrame(frame, quickFrameChecksum(frame));
+}
+
+void ScreenCapturer::emitCapturedFrame(const QImage& frame, quint16 cs)
+{
     // [KFR] 累计"画面真实变化"次数。这里用**独立**的 lastEmittedChecksum_，
     // 不复用去重用的 lastFrameChecksum_（后者会被 forceNextFrame()/resume()
     // 重置为 0，若拿来比较会把"强制抓帧"误判成"画面变了"）。
     // 只有出帧之间校验和真的不同才算一次内容变化；静止桌面下 PLI 反复强制抓帧
     // 得到的都是同一幅画面，校验和不变 → 计数不动 → 上层可放心复用缓存关键帧。
-    const quint16 cs = quickFrameChecksum(frame);
     if (lastEmittedValid_ && cs != lastEmittedChecksum_)
         contentChangeCount_++;
     lastEmittedChecksum_ = cs;

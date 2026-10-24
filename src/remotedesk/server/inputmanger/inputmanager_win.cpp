@@ -27,6 +27,18 @@ void InputManager::injectMouseMove(int x, int y)
     // 若未设置 screenW_/screenH_（与前端一致），回退物理尺寸。
     int sw = screenW_ > 0 ? screenW_ : GetSystemMetrics(SM_CXSCREEN);
     int sh = screenH_ > 0 ? screenH_ : GetSystemMetrics(SM_CYSCREEN);
+    // 无头/RDP 边缘会话下 SM_CXSCREEN 可能为 0，裸除会直接整除零崩溃进程；
+    // 分母兜底为 1（坐标会被系统钳到边界，但至少不崩）。
+    if (sw <= 0 || sh <= 0) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            qWarning() << "injectMouseMove: screen size unavailable ("
+                       << sw << sh << "), clamping denominator to 1";
+        }
+        sw = qMax(1, sw);
+        sh = qMax(1, sh);
+    }
     input.mi.dx = x * 65535 / sw;
     input.mi.dy = y * 65535 / sh;
     input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;

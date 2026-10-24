@@ -26,6 +26,10 @@ public:
     // 而 Windows SendInput 用物理像素归一化，两者不一致会错位。
     // 设置与前端一致的逻辑屏幕尺寸作为归一化基准（0 = 回退系统物理尺寸）。
     void setScreenSize(int w, int h);
+    // 多屏时捕获区（主输出）在 X 根窗口中的原点偏移：采集按主输出裁剪，
+    // 而 XTest/uinput 的绝对坐标是根窗口坐标系。不补这个偏移，主屏不在
+    // (0,0) 时所有鼠标位置/点击都会系统性偏移。
+    void setScreenOffset(int x, int y) { screenOffsetX_ = x; screenOffsetY_ = y; }
     void injectMouseButton(int x, int y, int button, bool isDown);
     void injectWheel(int delta);
     void injectKeyboard(int keycode, const QString &code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback = false, bool isChar = false, bool meta = false);
@@ -65,8 +69,13 @@ private:
     // 过早 XOpenDisplay 会因鉴权文件未就绪而失败，导致 xDisplay_ 永久为空、输入全死。
     // 改为 env 就绪后（首次注入时）再打开；成功即优先走 X11（XTest）输入。
     bool ensureXDisplay();
+    // XOpenDisplay 失败（无 X server / 鉴权未就绪）时限流重试，避免每个 mousemove
+    // 都做一次失败的 X 连接（60Hz 下等于每秒 60 次同步连接尝试，主线程持续卡顿）。
+    qint64 lastXOpenFailMs_ = 0;
     bool portalInitStarted_ = false;  // 防止纯 Wayland 下重复发起 portal CreateSession
-    void sendXModifier(X11KeySym ks, bool isDown);
+    // 返回是否真的注入了：调用方据此决定是否提交 ctrlDown_/altDown_ 记账。
+    // 旧实现失败（display 未开、uinput 不可用）仍写状态 → 组合键 Ctrl 前缀永久丢失。
+    bool sendXModifier(X11KeySym ks, bool isDown);
     int uinputFd_ = -1;         // 键盘 uinput 设备
     int uinputMouseFd_ = -1;    // 绝对定位鼠标 uinput 设备（Wayland）
     int uinputWheelFd_ = -1;    // 滚轮 uinput 设备（Wayland）
@@ -94,7 +103,11 @@ private:
     QString portalSessionPath_;  // 门户会话路径
     QString portalRequestPath_;  // 当前阶段 Request 对象路径
     int portalStage_ = -1;       // 0=等CreateSession 1=等SelectDevices 2=等Start
-    QString portalStreamNode_;   // PipeWire 流节点（用于绝对定位）
+    QString portalStreamNode_;   // PipeWire 流节点 id（NotifyPointerMotionAbsolute 必填）
+    // 流在桌面上的几何（来自 Start 应答的 streams a(ua{sv})）：
+    // portal 的绝对定位坐标是**流内 0..1 归一化值**，不是像素。
+    int portalStreamX_ = 0, portalStreamY_ = 0;
+    int portalStreamW_ = 0, portalStreamH_ = 0;
     bool portalReady_ = false;   // 门户会话已就绪
     void initWaylandPortal();
     QString portalConnectResponse(const QString &token);
@@ -113,6 +126,8 @@ private slots:
 private:
     int screenW_ = 0;   // 与前端一致的逻辑屏幕尺寸（归一化基准）
     int screenH_ = 0;
+    int screenOffsetX_ = 0;   // 捕获区在根窗口/虚拟桌面中的原点（多屏）
+    int screenOffsetY_ = 0;
     bool ctrlDown_  = false;
     bool altDown_   = false;
     bool shiftDown_ = false;

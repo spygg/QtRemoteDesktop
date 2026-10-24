@@ -39,7 +39,14 @@ void RDPServer::startSecureInputProcess()
         return;
     }
 
-    SetTokenInformation(hDupToken, TokenSessionId, &sessionId, sizeof(sessionId));
+    if (!SetTokenInformation(hDupToken, TokenSessionId, &sessionId, sizeof(sessionId))) {
+        // 不改会话 id 就会在 Session0 启动 helper：它永远连不上 winlogon 桌面，
+        // 只会被 5s 超时杀掉并反复重试。这里显式失败退出，日志能直接定位原因。
+        qWarning() << "SetTokenInformation(TokenSessionId) failed:" << GetLastError();
+        CloseHandle(hDupToken);
+        CloseHandle(hProcToken);
+        return;
+    }
 
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -68,20 +75,27 @@ void RDPServer::startSecureInputProcess()
     if (pCreateProcessAsUserW(hDupToken, NULL, &cmdLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         qInfo() << "Secure input process started, PID:" << pi.dwProcessId;
         CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+        secureInputProcHandle_ = pi.hProcess;   // 保留句柄，超时/停止时直接用它终止
         secureInputPid_ = pi.dwProcessId;
         secureInputRunning_ = true;
-        DWORD pid = pi.dwProcessId;
-        QTimer::singleShot(5000, this, [this, pid]() {
+        const quint64 gen = ++secureInputGen_;
+        QTimer::singleShot(5000, this, [this, gen]() {
+            // 代次已变 = 期间 stop 过（或又拉起了新进程）→ 本定时器作废，
+            // 否则会 TerminateProcess 掉新进程并把状态复位。
+            if (gen != secureInputGen_)
+                return;
             if (wsServer_ && !wsServer_->isSecureInputConnected()) {
                 qWarning() << "Secure input process didn't connect in time, terminating";
-                HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
-                if (hProc) { TerminateProcess(hProc, 1); CloseHandle(hProc); }
-                // 复位标志，允许下一次锁屏事件重新拉起（否则永久失效）
-                if (secureInputPid_ == pid) {
-                    secureInputPid_ = 0;
-                    secureInputRunning_ = false;
+                // 用保留的句柄终止：按 PID 重新 OpenProcess 在 PID 被回收时
+                // 可能误杀无关进程。
+                if (secureInputProcHandle_) {
+                    TerminateProcess((HANDLE)secureInputProcHandle_, 1);
+                    CloseHandle((HANDLE)secureInputProcHandle_);
+                    secureInputProcHandle_ = nullptr;
                 }
+                // 复位标志，允许下一次锁屏事件重新拉起（否则永久失效）
+                secureInputPid_ = 0;
+                secureInputRunning_ = false;
             }
         });
     } else {
@@ -95,17 +109,17 @@ void RDPServer::startSecureInputProcess()
 void RDPServer::stopSecureInputProcess()
 {
     if (!secureInputRunning_) return;
+    // 作废在途的 5s 超时定时器（它只持有 this 与代次，无法单独取消）
+    ++secureInputGen_;
     secureInputRunning_ = false;
 
     if (wsServer_)
         wsServer_->closeSecureInput();
 
-    if (secureInputPid_) {
-        HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, secureInputPid_);
-        if (hProc) {
-            TerminateProcess(hProc, 0);
-            CloseHandle(hProc);
-        }
-        secureInputPid_ = 0;
+    if (secureInputProcHandle_) {
+        TerminateProcess((HANDLE)secureInputProcHandle_, 0);
+        CloseHandle((HANDLE)secureInputProcHandle_);
+        secureInputProcHandle_ = nullptr;
     }
+    secureInputPid_ = 0;
 }

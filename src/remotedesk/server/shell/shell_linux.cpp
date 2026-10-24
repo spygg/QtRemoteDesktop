@@ -26,9 +26,13 @@ public:
     void stop() override;
 
 private:
+    void flushWrite();
+
     int masterFd_ = -1;
     pid_t childPid_ = 0;
     QSocketNotifier* notifier_ = nullptr;
+    QSocketNotifier* writeNotifier_ = nullptr;
+    QByteArray pendingWrite_;   // PTY 写满时的待发数据（主线程绝不阻塞在 write）
 };
 
 InteractiveShell* InteractiveShell::create(QWebSocket* socket, QObject* parent)
@@ -41,7 +45,9 @@ InteractiveShell* InteractiveShell::create(QWebSocket* socket, QObject* parent)
 
 void LinuxInteractiveShell::start()
 {
-    masterFd_ = posix_openpt(O_RDWR | O_NOCTTY);
+    // O_NONBLOCK：主线程 write 绝不能阻塞在 PTY 上（远端 shell 暂时不读 stdin
+    // 时，阻塞写会让采集/WebSocket 全部冻结）。读路径同样按 EAGAIN 处理。
+    masterFd_ = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (masterFd_ < 0) {
         qWarning() << "InteractiveShell: posix_openpt failed";
         ws_->close();
@@ -123,24 +129,64 @@ void LinuxInteractiveShell::start()
     connect(notifier_, &QSocketNotifier::activated, this, [this](int fd) {
         char buf[16384];
         int n;
-        // [P2] EINTR/EAGAIN 不是 EOF：信号中断或非阻塞暂无数据时重试/返回，
-        // 旧代码把 read()==-1 一律当 EOF 处理，信号一来自然断开用户 shell
+        // [P2] EINTR 重试；EAGAIN 是"暂时无数据"，直接返回等待下次可读通知。
+        // 旧代码把 EAGAIN 也放进重试循环，fd 改成非阻塞后会变成忙等。
         do {
             n = read(fd, buf, sizeof(buf));
-        } while (n < 0 && (errno == EINTR || errno == EAGAIN));
+        } while (n < 0 && errno == EINTR);
         if (n > 0) {
             // 用二进制帧发送原始终端字节，避免 UTF-8 多字节序列被拆成多帧导致乱码
             ws_->sendBinaryMessage(QByteArray(buf, n));
-        } else if (n == 0 || (n < 0 && errno != EINTR)) {
+        } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
             ws_->close();
         }
+    });
+
+    writeNotifier_ = new QSocketNotifier(masterFd_, QSocketNotifier::Write, this);
+    writeNotifier_->setEnabled(false);
+    connect(writeNotifier_, &QSocketNotifier::activated, this, [this](int) {
+        flushWrite();
     });
 }
 
 void LinuxInteractiveShell::write(const QByteArray& data)
 {
-    if (!data.isEmpty() && masterFd_ >= 0)
-        ::write(masterFd_, data.data(), data.size());
+    if (data.isEmpty() || masterFd_ < 0)
+        return;
+    // 上限保护：客户端持续灌输入而 shell 不读时，缓冲区不能无限增长
+    static const int kMaxPendingWrite = 8 * 1024 * 1024;
+    if (pendingWrite_.size() + data.size() > kMaxPendingWrite) {
+        qWarning() << "InteractiveShell: input backlog overflow, dropping"
+                   << data.size() << "bytes";
+        return;
+    }
+    pendingWrite_.append(data);
+    flushWrite();
+}
+
+void LinuxInteractiveShell::flushWrite()
+{
+    while (!pendingWrite_.isEmpty() && masterFd_ >= 0) {
+        const ssize_t n = ::write(masterFd_, pendingWrite_.constData(),
+                                  static_cast<size_t>(pendingWrite_.size()));
+        if (n > 0) {
+            pendingWrite_.remove(0, static_cast<int>(n));
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // PTY 缓冲已满：剩余数据等可写通知再发
+            if (writeNotifier_)
+                writeNotifier_->setEnabled(true);
+            return;
+        }
+        // 对端已关闭等硬错误：丢弃剩余数据，由读侧 EOF 关闭会话
+        pendingWrite_.clear();
+        break;
+    }
+    if (writeNotifier_)
+        writeNotifier_->setEnabled(!pendingWrite_.isEmpty());
 }
 
 void LinuxInteractiveShell::resize(int cols, int rows)
@@ -157,6 +203,8 @@ void LinuxInteractiveShell::resize(int cols, int rows)
 void LinuxInteractiveShell::stop()
 {
     if (notifier_) { notifier_->setEnabled(false); }
+    if (writeNotifier_) { writeNotifier_->setEnabled(false); }
+    pendingWrite_.clear();
     if (childPid_ > 0) {
         kill(childPid_, SIGTERM);
         // 有限等待子进程退出并回收。[P2] 旧实现最多在主线程阻塞 1s（20×50ms），

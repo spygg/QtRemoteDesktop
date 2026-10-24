@@ -13,7 +13,9 @@ public:
                                "org.freedesktop.login1.Manager",
                                QDBusConnection::systemBus());
         QDBusReply<QDBusUnixFileDescriptor> reply = manager.call(
-            "Inhibit", "idle", "MyApp", "Long-running operation");
+            "Inhibit", "idle", "MyApp", "Long-running operation", "block");
+        // [B19] 必须带第 4 个参数 mode="block"：logind 默认返回"延迟"句柄，
+        // 系统仍会休眠只是延后；只有 block 模式才真正阻止睡眠。
 
         if (reply.isValid()) {
             fd = reply.value();

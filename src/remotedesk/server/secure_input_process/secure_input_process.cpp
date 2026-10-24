@@ -120,8 +120,12 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
         } else if (type == "mousemove") {
             INPUT in = {};
             in.type = INPUT_MOUSE;
-            in.mi.dx = obj["x"].toInt() * 65535 / GetSystemMetrics(SM_CXSCREEN);
-            in.mi.dy = obj["y"].toInt() * 65535 / GetSystemMetrics(SM_CYSCREEN);
+            // 锁屏/Session0 等场景 GetSystemMetrics 可能返回 0，直接做除数会崩掉
+            // 安全输入 helper（锁屏输入就此永久失效）。
+            const int screenW = GetSystemMetrics(SM_CXSCREEN);
+            const int screenH = GetSystemMetrics(SM_CYSCREEN);
+            in.mi.dx = screenW > 0 ? obj["x"].toInt() * 65535 / screenW : 0;
+            in.mi.dy = screenH > 0 ? obj["y"].toInt() * 65535 / screenH : 0;
             in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
             SendInput(1, &in, sizeof(INPUT));
         } else if (type == "mousedown" || type == "mouseup") {
@@ -130,8 +134,10 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
             int btn = obj["button"].toInt();
             INPUT mv = {};
             mv.type = INPUT_MOUSE;
-            mv.mi.dx = x * 65535 / GetSystemMetrics(SM_CXSCREEN);
-            mv.mi.dy = y * 65535 / GetSystemMetrics(SM_CYSCREEN);
+            const int screenW = GetSystemMetrics(SM_CXSCREEN);
+            const int screenH = GetSystemMetrics(SM_CYSCREEN);
+            mv.mi.dx = screenW > 0 ? x * 65535 / screenW : 0;
+            mv.mi.dy = screenH > 0 ? y * 65535 / screenH : 0;
             mv.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
             SendInput(1, &mv, sizeof(INPUT));
             DWORD flags = 0;

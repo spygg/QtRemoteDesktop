@@ -10,6 +10,7 @@
 #include <QMap>
 #include <QObject>
 #include <QThread>
+#include <atomic>
 #include <functional>
 
 class FileTransferService : public QObject
@@ -22,6 +23,12 @@ public:
     // [C5-①] 注入下游背压查询（由 RDPServer 提供：WS 发送队列未写出字节数）。
     // 工作线程产出目录 tar/单文件分块前轮询，超过阈值就暂停，避免 OOM。
     void setBackpressureQuery(std::function<qint64()> q) { backpressureQuery_ = std::move(q); }
+
+    // 进程关闭时置位：下载线程在背压轮询/分块循环里立即返回。
+    // 否则主线程析构时 wait() 阻塞事件循环 → WS 未写出字节永不下降 →
+    // 工作线程永远停在 waitBackpressure 的 msleep 循环里，双方互等死锁。
+    // 可在任意线程调用（仅写一个 atomic 标志）。
+    void abortPendingTransfer() { backpressureAbort_.store(true, std::memory_order_relaxed); }
 
     // 文件传输根目录约束。**默认不限制**（局域网可信环境）：Windows 虚拟根是
     // 「此电脑」全部盘符，Linux 根就是真实的 "/"，登录用户可浏览/读写整机文件。
@@ -93,6 +100,7 @@ private:
     static QString s_rootPath;
     static bool s_enforceRoot;
     std::function<qint64()> backpressureQuery_; // [C5-①] 下游 WS 积压查询（可空）
+    std::atomic<bool> backpressureAbort_{false}; // 关闭时置位，解除背压等待
     static void writeTarHeader(QByteArray& data, const QString& name, qint64 size, char type);
 
     struct UploadState {

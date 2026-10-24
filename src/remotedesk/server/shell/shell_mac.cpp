@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <cerrno>
 #include <string>
 #include <vector>
 
@@ -97,6 +98,10 @@ void MacInteractiveShell::start()
     connect(notifier_, &QSocketNotifier::activated, this, [this](int fd) {
         char buf[16384];
         int n = read(fd, buf, sizeof(buf));
+        // 被信号打断（EINTR）不是 EOF：旧实现把 n<0 一律当断开，信号一来就
+        // 误关用户的交互式 shell。重试一次即可；EAGAIN 交给下一轮可读通知。
+        if (n < 0 && errno == EINTR)
+            n = read(fd, buf, sizeof(buf));
         if (n > 0) {
             // 用二进制帧发送原始终端字节，避免 UTF-8 多字节序列被拆成多帧导致乱码
             ws_->sendBinaryMessage(QByteArray(buf, n));

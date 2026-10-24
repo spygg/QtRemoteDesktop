@@ -42,10 +42,12 @@ private:
 #endif
     bool m_mousePressed; // 鼠标是否按下
     bool m_bRunning;
+    bool m_bLockFailed;  // [B20] 锁因真实错误创建失败（区别于"另一实例在运行"）
     QLocalServer* m_pServer;
 
 public:
     bool isRunning();
+    bool lockFailed();
 #ifdef GUIWIDGET
     void setSingleMainWindow(QWidget* w);
 #endif

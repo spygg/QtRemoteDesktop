@@ -168,6 +168,7 @@ SingleApplication::SingleApplication(int& argc, char** argv)
 #endif
     m_mousePressed(false)
     , m_bRunning(false)
+    , m_bLockFailed(false)
     , m_pServer(Q_NULLPTR)
 {
     // 先拷贝必要的资源到制定路径
@@ -219,11 +220,13 @@ SingleApplication::SingleApplication(int& argc, char** argv)
                 }
             }
             if (!listening) {
-                // 仍然拿不到单实例锁：保守按“已在运行”处理。旧实现只打一条
-                // qDebug 就继续执行 → 双实例竞态（端口冲突、状态互相覆盖）。
-                qWarning() << "Single-instance lock unavailable, assume another instance is running:"
-                           << m_pServer->errorString();
-                m_bRunning = true;
+                // [B20] 锁创建失败且不是"另一实例在运行"：QLocalServer 真错误
+                // （socket 目录不可写等）。旧实现按"已在运行"处理 → 调用方
+                // exit(0) 静默退出，systemd 下服务显示启动成功实则从未监听，
+                // 且日志级别被过滤后毫无痕迹。置锁失败标志，由调用方以非零码退出。
+                qCritical() << "Single-instance lock failed:" << m_pServer->errorString()
+                            << "(server name:" << strServerName << ")";
+                m_bLockFailed = true;
             }
         } else {
             m_bRunning = true;
@@ -244,6 +247,11 @@ SingleApplication::~SingleApplication()
 bool SingleApplication::isRunning()
 {
     return m_bRunning;
+}
+
+bool SingleApplication::lockFailed()
+{
+    return m_bLockFailed;
 }
 
 #ifdef GUIWIDGET

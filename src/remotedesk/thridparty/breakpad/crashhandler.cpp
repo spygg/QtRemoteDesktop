@@ -1,4 +1,5 @@
 #include "crashhandler.h"
+#include <cstdio>
 #include <QtCore/QDir>
 #include <QtCore/QProcess>
 #include <QtCore/QCoreApplication>
@@ -51,9 +52,13 @@ namespace Breakpad {
         Q_UNUSED(assertion);
         Q_UNUSED(exinfo);
 #endif
-        qInfo(
+        // [R2] 崩溃回调里禁用 Qt 日志：qInfo 会走 QMessageLogger → 已安装的
+        // logToFile 消息处理器（打开文件、QString 分配、加锁），在异常上下文
+        // 里可能重入/二次崩溃，且信息根本落不到日志。fprintf(stderr) 不分配、
+        // 不经过 Qt，即使 stderr 已被重定向到日志文件也能直写。
+        fprintf(stderr,
             "\n====================================\n"
-            "Breakpad catched program crashed!!!!\n"
+            "Breakpad caught program crash!\n"
             "====================================\n");
 
         /*

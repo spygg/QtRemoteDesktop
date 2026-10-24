@@ -344,6 +344,10 @@ public:
     // 请求下一帧强制产出：静止桌面下 AcquireNextFrame 只会超时，上层（新客户端
     // 接入 / 关键帧喂帧泵）要求"立刻给一帧"时用它复用上一帧缓存。
     void requestForceFrame() { forceNext_ = true; }
+    // 实时捕获尺寸（外部改分辨率后由 captureFrame 按帧纹理回写），
+    // 供 ScreenCapturer::width()/height() 与编码器保持一致
+    int width() const override { return width_; }
+    int height() const override { return height_; }
     bool initialize() override
     {
 
@@ -536,9 +540,14 @@ public:
                     << "->" << desc.Width << "x" << desc.Height;
             width_ = static_cast<int>(desc.Width);
             height_ = static_cast<int>(desc.Height);
+            // 分辨率变了，旧缓存尺寸不匹配，必须丢弃，否则强制帧会返回过期尺寸的图
+            lastFrame_ = QImage();
         }
         QImage rawImg(src, width_, height_, srcStep, QImage::Format_RGB32);
         outImage = rawImg.copy();
+        // [FIX-B1] 回填强制帧缓存：此前 lastFrame_ 只读不写，恒为 null，静止桌面
+        // 下 AcquireNextFrame 超时 + 强制帧走不到缓存 → 新客户端黑屏直到画面变化。
+        lastFrame_ = outImage;
 
         context_->Unmap(stagingTexture_, 0);
         // stagingTexture_ 复用，不释放
@@ -657,6 +666,12 @@ void ScreenCapturer::captureFrame()
                 // 4fps 节流后，画面再变化仍恒为 4fps（GDI/X11 路径均正确复位）
                 idleCount_ = 0;
                 leaveIdleThrottle();
+                // 强制帧计数必须在这里消费：否则 forceNextFrame() 置的 2 永远不归零，
+                // 之后每个 tick 都会 requestForceFrame()，静止桌面也满帧 emit（编码/带宽持续浪费）。
+                if (forceFrameCount_ > 0) {
+                    forceSendNextFrame_ = false;
+                    forceFrameCount_--;
+                }
                 emitCapturedFrame(frame);
                 schedulePumpFlush();
             }
@@ -675,6 +690,23 @@ void ScreenCapturer::captureFrame()
         if (dxgiRetryCount_ >= 15) {
             qWarning() << "DXGI persistently failing, falling back to GDI";
             useDXGI_ = false;
+            // start() 只在启动时创建 GDI 实例；运行期 DXGI 失效时若不在这里补建，
+            // 会落到 screen_->grabWindow(0)（整主屏抓取，区域/缩放与选中输出不一致）。
+            delete dxgiCapturer_;
+            dxgiCapturer_ = nullptr;
+            if (!useGDI_ && !gdiCapturer_
+                && winCurrentIndex_ >= 0 && winCurrentIndex_ < winOutputs_.size()) {
+                const WinOutput& o = winOutputs_[winCurrentIndex_];
+                gdiCapturer_ = new GdiCapturer(o.x, o.y, o.w, o.h);
+                if (gdiCapturer_->initialize()) {
+                    useGDI_ = true;
+                    qInfo() << "GDI capture created at runtime as DXGI fallback, region"
+                            << o.w << "x" << o.h << "@" << o.x << "," << o.y;
+                } else {
+                    delete gdiCapturer_;
+                    gdiCapturer_ = nullptr;
+                }
+            }
         }
 
         if (dxgiRetryCount_ >= 5 && !screenLocked_) {
@@ -795,12 +827,16 @@ void ScreenCapturer::captureFrame()
     }
 
     quint16 checksum = quickFrameChecksum(frame);
-    if (checksum == lastFrameChecksum_) {
+    // 兜底抓屏路径同样要尊重强制帧，否则新客户端在静止桌面下拿不到首帧
+    if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
         idleCount_++;
         if (idleCount_ > static_cast<int>(fps_ * 2))
             enterIdleThrottle();
         return;
     }
+    forceSendNextFrame_ = false;
+    if (forceFrameCount_ > 0)
+        forceFrameCount_--;
     idleCount_ = 0;
     leaveIdleThrottle();
     lastFrameChecksum_ = checksum;
@@ -820,9 +856,10 @@ bool ScreenCapturer::start(int fps)
     // 防止在 stop() 之外二次调用 start() 时泄漏旧实例。
     cleanupPlatform();
 
-    // 多屏：确保已枚举输出并选中有效目标（默认主输出）
-    if (winOutputs_.isEmpty())
-        winOutputs_ = winEnumMonitors();
+    // 多屏：每次启动都重新枚举输出。set_resolution 走 stop→start，
+    // 若沿用旧 winOutputs_，GDI 会按旧区域宽高抓取（画面裁切/拉伸），
+    // 而 screen_info 已按新分辨率广播 → 画面与坐标同时错位。
+    winOutputs_ = winEnumMonitors();
     if (winCurrentIndex_ < 0 || winCurrentIndex_ >= winOutputs_.size()) {
         winCurrentIndex_ = 0;
         for (int i = 0; i < winOutputs_.size(); ++i) {

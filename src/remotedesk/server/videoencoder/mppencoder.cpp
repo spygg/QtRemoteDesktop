@@ -198,8 +198,12 @@ bool MppEncoder::setupEncoder()
     }
 
     // [MPP-LEGACY 2026-10-09] 对齐官方 mpi_enc_test：mpp_init **之前**先设输出超时。
+    // [N5] 原为 MPP_POLL_BLOCK（-1）：会话半死时 encode_get_packet 永不返回，
+    // 而探测在 initialize() 调用方线程（主线程）执行 → 服务整体冻结。
+    // 改为有限超时（毫秒）：正常出包时 poll 立即返回，仅病态路径付出 150ms/次
+    // 的有界等待，探测最坏 ~4s 后回退软编，不再无限挂死。
     {
-        RK_S32 timeout = MPP_POLL_BLOCK;
+        RK_S32 timeout = 150;
         MPP_RET tr = static_cast<MppApi*>(mpi_)->control(static_cast<MppCtx>(ctx_),
                                                          MPP_SET_OUTPUT_TIMEOUT, &timeout);
         if (tr != MPP_OK)
@@ -288,10 +292,18 @@ bool MppEncoder::encode(const QImage& img, QByteArray& out, bool& keyframe)
     if (!active_ || !ctx_ || !mpi_ || !sws_ || !buffer_)
         return false;
 
-    // 强制关键帧：重建会话（MPP 无 force-IDR 命令）
+    // 强制关键帧：优先用 MPP 的 control 命令，避免重建整个 VPU 会话。
+    // 旧实现每收到一次 PLI 就 mpp_destroy + mpp_create（注释自己也记录过
+    // 连续重建曾 Segfault）；弱网/多客户端轮询 PLI 时就是持续的会话 churn，
+    // 每帧黑屏抖动 + CPU 尖峰。
     if (keyframeReq_.exchange(false)) {
-        if (!setupEncoder())
-            return false;
+        MPP_RET idrRet = static_cast<MppApi*>(mpi_)->control(
+            static_cast<MppCtx>(ctx_), MPP_ENC_SET_IDR_FRAME, nullptr);
+        if (idrRet != MPP_OK) {
+            qInfo() << "[MPP-DIAG] control IDR failed ret =" << idrRet << ", rebuild session";
+            if (!setupEncoder())
+                return false;
+        }
     }
 
     uint8_t* ptr = static_cast<uint8_t*>(mpp_buffer_get_ptr(buffer_));
@@ -299,11 +311,16 @@ bool MppEncoder::encode(const QImage& img, QByteArray& out, bool& keyframe)
         qWarning() << "MppEncoder: mpp_buffer_get_ptr failed";
         return false;
     }
+    // [B16] CACHABLE buffer 的 CPU 写必须包在 sync_begin/end 里：sws_scale 通过
+    // 用户态指针写 NV12，不刷 cache 的话 VPU 读到的可能是陈旧 cache 行 →
+    // 画面上出现横纹/花屏伪影（uncached buffer 时这两个调用是廉价 no-op）。
+    mpp_buffer_sync_begin(buffer_);
     uint8_t* dstData[2] = { ptr, ptr + horStride_ * verStride_ };
     int dstLinesize[2] = { horStride_, horStride_ };
     const uint8_t* srcData[1] = { img.bits() };
     int srcLinesize[1] = { static_cast<int>(img.bytesPerLine()) };
     int swsRet = sws_scale(static_cast<SwsContext*>(sws_), srcData, srcLinesize, 0, img.height(), dstData, dstLinesize);
+    mpp_buffer_sync_end(buffer_);
     if (swsRet != height_) {
         qWarning() << "MppEncoder: sws_scale returned" << swsRet << "expected" << height_;
         return false;

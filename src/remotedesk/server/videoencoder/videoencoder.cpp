@@ -4,9 +4,23 @@
 #include <cstring>
 #include <QDebug>
 #include <QFile>
+extern "C" {
+#include <libavutil/error.h>
+}
 #ifdef Q_OS_LINUX
 #include <QDir>
 #endif
+
+// [FIX-B2] 编码时间戳基准必须是进程级单调值。
+// 浏览器（WebCodecs / MSE）按 timestamp 排序，任何一次编码器重建（切分辨率/
+// 画质/帧率/缩放/编码协议、MPP 回退、PLI 兜底）若把基准归零，时间戳就会回退，
+// 新帧被判为"过期"直接丢弃 —— 表现为重建后画面冻结直到下一个自然 IDR。
+// 用函数内 static 保证整个进程只取一次，所有实例/所有重建共享同一基准。
+static qint64 encoderEpochMs()
+{
+    static const qint64 epoch = QDateTime::currentMSecsSinceEpoch();
+    return epoch;
+}
 
 VideoEncoder::VideoEncoder(QObject*)
     : QObject(nullptr)
@@ -262,7 +276,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     abort_ = false;
     hasIdr_.store(false);
     frameCount_ = 0;
-    startTime_ = 0;
+    startTime_ = encoderEpochMs();
     pendingBitrate_.store(0);
     // 初始化为**实际**打开的码率（而不是 0）：上层过载降码率时会读
     // currentBitrate() 作为基准（reduced = max(150000, cur*0.6)）。置 0 会让首次
@@ -303,8 +317,12 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
             codecName_ = mpp_->name();
             hwName_ = mpp_->hwName();
             qInfo() << "Using MPP encoder:" << hwName_ << encW << "x" << encH << "@" << fps << "fps";
-            startTime_ = QDateTime::currentMSecsSinceEpoch();
+            startTime_ = encoderEpochMs();
             encoderThread_.start(QThread::HighPriority);
+            // MPP 不带外带参数集：显式发一次空 extradata 让上层清掉上一轮编码器
+            // （FFmpeg 软/硬编）缓存的 SPS/PPS。否则重建后新客户端仍会收到旧
+            // avcC，分辨率/协议一变就花屏。
+            emit codecConfigChanged(QByteArray());
             emit encoderReady();
             return true;
         }
@@ -481,9 +499,18 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     if (codecCtx_->extradata && codecCtx_->extradata_size > 0) {
         QByteArray extra(reinterpret_cast<char*>(codecCtx_->extradata), codecCtx_->extradata_size);
         emit codecConfigChanged(extra);
+    } else {
+        // 硬编（nvenc/amf/videotoolbox）或带内参数集路径 open 后 extradata 常为空：
+        // 必须显式清空上层缓存，否则上一轮编码器的旧 SPS/PPS 会被继续回放。
+        emit codecConfigChanged(QByteArray());
     }
 
     frame_ = av_frame_alloc();
+    // 分配失败（极端 OOM）必须返回：下面直接解引用 frame_ 会确定性空指针崩溃。
+    if (!frame_) {
+        qCritical() << "Failed to allocate AVFrame";
+        return false;
+    }
     frame_->format = codecCtx_->pix_fmt;
     frame_->width = codecCtx_->width;
     frame_->height = codecCtx_->height;
@@ -508,7 +535,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         return false;
     }
 
-    startTime_ = QDateTime::currentMSecsSinceEpoch();
+    startTime_ = encoderEpochMs();
     encoderThread_.start(QThread::HighPriority);
     qInfo() << codecName_ << "encoder initialized" << encW << "x" << encH
             << "@" << fps << "fps (sws " << srcW << "x" << srcH << " -> " << encW << "x" << encH << ")";
@@ -642,10 +669,28 @@ void VideoEncoder::encodingLoop()
     if (!codecCtx_ || !frame_ || !swsCtx_)
         continue;
 
+    // [FIX-B4] avcodec_send_frame 不拷贝输入像素（内部只 av_frame_ref），带流水线
+    // 延迟的编码器（openh264 / VP9 等）在下一帧入队时仍引用本帧缓冲。复用同一个
+    // frame_ 前必须 make_writable，否则下面的 sws_scale 会覆写"编码器还在读"的
+    // 像素，编出半新半旧的撕裂帧。libx264 ultrafast+zerolatency 无延迟，暂时掩盖
+    // 了该问题，换编码器/开 B 帧即会暴露。
+    int mwRet = av_frame_make_writable(frame_);
+    if (mwRet < 0) {
+        qWarning() << "VideoEncoder: av_frame_make_writable failed:" << mwRet;
+        continue;
+    }
+
     const uint8_t* srcData[1] = { image.bits() };
     int srcLinesize[1] = { static_cast<int>(image.bytesPerLine()) };
-    sws_scale(swsCtx_, srcData, srcLinesize, 0, image.height(),
+    const int swsRows = sws_scale(swsCtx_, srcData, srcLinesize, 0, image.height(),
         frame_->data, frame_->linesize);
+    if (swsRows != frame_->height) {
+        // sws 失败时 frame_ 保留上一帧像素，照常送编会产出"画面停了但时间戳在走"
+        // 的假活帧，且无任何线索可查 —— 直接丢帧并告警。
+        qWarning() << "VideoEncoder: sws_scale returned" << swsRows
+                   << "rows, expected" << frame_->height << "- frame dropped";
+        continue;
+    }
 
         // 应用 WebRTC 反馈：REMB 码率调整 / PLI 强制关键帧
         int br = pendingBitrate_.exchange(0);
@@ -678,16 +723,46 @@ void VideoEncoder::encodingLoop()
             // 用 fps_（1s）会让强制关键帧后 IDR 间隔永久翻倍。
             if (codecCtx_->gop_size == 1)
                 codecCtx_->gop_size = qMax(1, fps_ / 2);
-            continue;
+            // [FIX-B3] 编码错误不再静默：此前 ret<0 直接 continue，既不打日志
+            // 也不上报，编码器进入错误态后会长期每帧失败，上层只能靠 hasIdr()
+            // 每 4s 盲目重建，形成"重建-失败"死循环且日志无痕。
+            if (ret == AVERROR(EAGAIN)) {
+                // EAGAIN 是正常背压：编码器输出缓冲未排空、不接受新帧。
+                // 必须走下方 receive 循环把已编码数据取走，否则输入永远不被
+                // 消费、之后每帧都 EAGAIN → 画面冻结直到 4s 周期重建才恢复
+                // （FFmpeg 模式周期性卡顿的来源之一）。本帧未被消费，排空后
+                // 下一轮循环会以新 pts 重发，内容无损。
+                consecutiveEncFailures_ = 0;
+                ret = 0; // 使下方的 while (ret >= 0) 排空循环执行
+            } else {
+                char errBuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+                av_strerror(ret, errBuf, sizeof(errBuf));
+                if (++consecutiveEncFailures_ == 1 || consecutiveEncFailures_ % 30 == 0) {
+                    qWarning() << "VideoEncoder: send_frame failed:" << errBuf
+                               << "consecutive=" << consecutiveEncFailures_;
+                }
+                if (consecutiveEncFailures_ >= 30) {
+                    consecutiveEncFailures_ = 0;
+                    qWarning() << "VideoEncoder: too many send failures, requesting reinit";
+                    emit reinitRequired();
+                }
+                continue;
+            }
         }
+        consecutiveEncFailures_ = 0;
 
         AVPacket* pkt = packet; // [P2] 复用循环外分配的 packet
         while (ret >= 0) {
             ret = avcodec_receive_packet(codecCtx_, pkt);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
                 break;
-            if (ret < 0)
+            if (ret < 0) {
+                // [FIX-B3] 真错误（非 EAGAIN/EOF）此前与 EAGAIN 同等对待静默 break
+                char errBuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+                av_strerror(ret, errBuf, sizeof(errBuf));
+                qWarning() << "VideoEncoder: receive_packet failed:" << errBuf;
                 break;
+            }
 
             bool isKeyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
             if (isKeyframe)
@@ -769,6 +844,22 @@ int VideoEncoder::currentBitrate() const
 
 void VideoEncoder::shutdown()
 {
+    if (shutdownRetire())
+        return;
+
+    // [N6] 析构/退出路径无法"退役换新"，保留原兜底：再给 25s 宽限
+    // （覆盖慢盘/驱动瞬时恢复）；仍不停说明卡死在驱动层编码调用里。
+    // 服务由 systemd 托管（Restart=on-failure），主动 abort 换来自动重启恢复，
+    // 优于静默永久卡死。
+    qCritical() << "Encoder thread did not stop within 8s; granting 25s grace...";
+    if (!encoderThread_.wait(25000))
+        qFatal("VideoEncoder: encoding thread wedged in a driver-level call; "
+               "aborting so systemd can restart the service");
+    releaseStoppedResources();
+}
+
+bool VideoEncoder::shutdownRetire()
+{
     {
         QMutexLocker locker(&mutex_);
         abort_ = true;
@@ -781,34 +872,29 @@ void VideoEncoder::shutdown()
     // 2) 线程可能正处在 emit encodedFrame() 的半发射状态（QMetaObject::activate 中途），
     //    强杀会让接收方访问已析构对象。
     // 正确做法：只置 abort_ + 唤醒条件变量，让线程自己从循环退出；超时只告警不硬杀。
-    bool stopped = true;
     if (encoderThread_.isRunning()) {
         encoderThread_.requestInterruption();
         encoderThread_.quit();          // 线程无事件循环时无效，仅作兜底
-        stopped = encoderThread_.wait(8000);
-        if (!stopped) {
-            // [H14] 不能无限 wait（调用方全在主线程，冻结 = 整个服务失联），
-            // 也不能超时后继续销毁（QThread 析构 abort / 编码循环 UAF 成员）。
-            // 折中：再给 25s 宽限（覆盖慢盘/驱动瞬时恢复）；仍不停说明卡死在
-            // 驱动层编码调用里。服务由 systemd 托管（Restart=on-failure），
-            // 主动 abort 换来自动重启恢复，优于静默永久卡死。
-            qCritical() << "Encoder thread did not stop within 8s; granting 25s grace...";
-            stopped = encoderThread_.wait(25000);
-            if (!stopped)
-                qFatal("VideoEncoder: encoding thread wedged in a driver-level call; "
-                       "aborting so systemd can restart the service");
+        if (!encoderThread_.wait(8000)) {
+            // 线程仍卡在驱动调用里：不释放任何资源（codecCtx_/mpp_ 还在被它触碰），
+            // 返回 false 由上层把本对象断开信号后故意泄漏退役，新建编码器继续服务。
+            qCritical() << "VideoEncoder: encode thread wedged in driver call; caller must retire this encoder";
+            return false;
         }
     }
 
-    // 只有线程确实停了才释放资源，避免与仍在运行的编码线程竞争（UAF）
-    if (stopped) {
-        if (mpp_) {
-            mpp_->shutdown();
-            delete mpp_;
-            mpp_ = nullptr;
-        }
+    releaseStoppedResources();
+    return true;
+}
 
-        // 与 initialize() 开头的清理保持一致，保证 shutdown 后可安全重建
-        releaseAv(&codecCtx_, &frame_, &swsCtx_);
+void VideoEncoder::releaseStoppedResources()
+{
+    if (mpp_) {
+        mpp_->shutdown();
+        delete mpp_;
+        mpp_ = nullptr;
     }
+
+    // 与 initialize() 开头的清理保持一致，保证 shutdown 后可安全重建
+    releaseAv(&codecCtx_, &frame_, &swsCtx_);
 }

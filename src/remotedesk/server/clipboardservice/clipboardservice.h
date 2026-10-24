@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QString>
 #include <QByteArray>
+#include <atomic>
 
 class QTimer;
 
@@ -25,6 +26,10 @@ public:
     ClipboardCliWorker(const QString& bin, bool imageCapable);
     ~ClipboardCliWorker();
 
+    // 进程关闭时置位：让 write() 里 30s 的管道冲刷循环尽快返回，避免
+    // 析构 wait(5s) 超时后销毁仍在运行的 QThread（Qt 会直接 abort）。
+    void abort() { abort_.store(true, std::memory_order_relaxed); }
+
 public slots:
     void read();                                            // 阻塞读取，结果经 contentRead 返回
     void write(const QString& mime, const QByteArray& data); // 阻塞写入，结果经 contentWritten 返回
@@ -42,6 +47,7 @@ private:
     // 常驻的 selection owner：必须存活才能向其他 X 客户端提供数据
     // （局部 QProcess 析构会 kill 子进程 → owner 消失 → 远端粘贴为空）
     QProcess* owner_ = nullptr;
+    std::atomic<bool> abort_{false};
 };
 #endif
 

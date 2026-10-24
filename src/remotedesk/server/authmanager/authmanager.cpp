@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QUuid>
 
@@ -102,7 +103,7 @@ void AuthManager::loadConfig()
     }
 }
 
-void AuthManager::saveConfig()
+bool AuthManager::saveConfig()
 {
     QJsonObject root;
     // 保留已有配置字段
@@ -120,13 +121,21 @@ void AuthManager::saveConfig()
     }
     root["users"] = users;
 
-    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-        file.close();
-        qInfo() << "Auth config saved to:" << configPath_;
+    // 原子写：先写同目录临时文件再 rename。旧实现 Truncate 直写目标文件，
+    // 进程被杀/断电/磁盘满时会留下空文件，下次启动 users_ 为空 →
+    // 静默重建 admin/admin，用户账号与已改密码全部丢失。
+    QSaveFile save(configPath_);
+    if (save.open(QIODevice::WriteOnly)) {
+        save.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+        if (save.commit()) {
+            qInfo() << "Auth config saved to:" << configPath_;
+            return true;
+        }
+        qWarning() << "Failed to commit auth config:" << configPath_ << save.errorString();
     } else {
-        qWarning() << "Failed to save auth config:" << configPath_;
+        qWarning() << "Failed to save auth config:" << configPath_ << save.errorString();
     }
+    return false;
 }
 
 bool AuthManager::validateUser(const QString& username, const QString& password)
@@ -211,7 +220,12 @@ bool AuthManager::addUser(const QString& username, const QString& password)
     QString salt = generateSalt();
     entry.passwordHash = salt + ":" + hashPassword(password, salt);
     users_[username] = entry;
-    saveConfig();
+    // [B18] 保存失败必须如实返回：旧实现无论写盘成败都 return true，
+    // 前端显示"已添加"，重启后用户消失且毫无提示。
+    if (!saveConfig()) {
+        users_.remove(username);   // 回滚内存态，与磁盘保持一致
+        return false;
+    }
     return true;
 }
 
@@ -222,8 +236,11 @@ bool AuthManager::removeUser(const QString& username)
         return false;
     if (!users_.contains(username))
         return false;
-    users_.remove(username);
-    saveConfig();
+    const UserEntry removed = users_.take(username);
+    if (!saveConfig()) {
+        users_[username] = removed;   // 回滚内存态，与磁盘保持一致
+        return false;
+    }
     return true;
 }
 

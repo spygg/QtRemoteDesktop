@@ -142,7 +142,8 @@ void ClipboardCliWorker::write(const QString& mime, const QByteArray& data)
     // 字节被截断 → 远端粘贴内容缺斤短两，却恒报成功。
     const int kFlushTimeoutMs = 30000;
     int waited = 0;
-    while (owner->bytesToWrite() > 0 && waited < kFlushTimeoutMs) {
+    while (owner->bytesToWrite() > 0 && waited < kFlushTimeoutMs
+           && !abort_.load(std::memory_order_relaxed)) {
         const bool progressed = owner->waitForBytesWritten(500);
         waited += 500;
         if (!progressed && owner->error() == QProcess::WriteError)
@@ -175,12 +176,17 @@ ClipboardService::ClipboardService(QObject* parent)
 ClipboardService::~ClipboardService()
 {
 #ifdef Q_OS_LINUX
-    // 工作线程内的阻塞调用最长 2.5s，先停线程再让 QObject 析构，
-    // 避免析构 QProcess/QTimer 时它们仍属于一个运行中的线程。
+    // 工作线程内的阻塞调用最长 30s（大数据量管道冲刷），先让 worker 的
+    // 冲刷循环看到 abort 标志并在 500ms 内返回，再停线程；wait 超时后必须
+    // 继续等——销毁仍在运行的 QThread 会直接 abort 整个进程。
     if (cliThread_) {
+        if (cliWorker_ && cliThread_->isRunning())
+            cliWorker_->abort();
         cliThread_->quit();
-        if (!cliThread_->wait(5000))
-            qWarning("ClipboardService: clipboard worker thread did not stop in time");
+        if (!cliThread_->wait(5000)) {
+            qWarning("ClipboardService: clipboard worker thread did not stop in 5s, waiting...");
+            cliThread_->wait();
+        }
         cliThread_ = nullptr;   // QThread 是 this 的子对象，随 this 析构
         cliWorker_ = nullptr;   // 已由 finished → deleteLater 在工作线程内回收
     }

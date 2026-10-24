@@ -109,7 +109,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 
 # Release 构建后拆分调试符号：生成 QtRemoteDesktop.debug 并 strip 主程序。
 # Debug 构建跳过（保留内嵌符号）。
-if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+# [R1] 仅工具链提供 objcopy（GNU/MinGW）时执行：MSVC 下 CMAKE_OBJCOPY 为空，
+# 旧实现无条件展开 → 构建失败。MSVC 的符号拆分由 /DEBUG+PDB 原生处理，无需此步。
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_OBJCOPY)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} --only-keep-debug
                 $<TARGET_FILE:${PROJECT_NAME}>
@@ -144,6 +146,11 @@ if(WIN32)
     target_link_libraries(InputManager PUBLIC user32)
     target_link_libraries(ScreenCapturer PUBLIC d3d11 dxgi gdi32)
     if(MSVC)
+        # DXGI 桌面复制（screencapturer_win.cpp 的 DXGICapturer 整段）依赖 MSVC 专有
+        # 的 __uuidof(IDXGIOutput1)，且 requestForceFrame 只在具体类上声明——MinGW
+        # 下编译不过（已实测）。故 _WIN32_WINNT=0x0A00 只对 MSVC 提版；MinGW 构建
+        # 走 Q_OS_WIN 分支但保持 GDI 软捕获（DXGI 被 _WIN32_WINNT>=WIN8 门控编译掉）。
+        # 类布局由 screencapturer.h 的 Q_OS_WIN 守卫决定（见 [ODR] 注释），不随本宏变。
         target_compile_definitions(ScreenCapturer PRIVATE _WIN32_WINNT=0x0A00)
         set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "/DELAYLOAD:d3d11.dll /DELAYLOAD:dxgi.dll")
         target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)

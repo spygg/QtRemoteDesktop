@@ -33,7 +33,7 @@ private:
     static QString hashPassword(const QString& password, const QString& salt);
     static QString generateSalt();
     void loadConfig();
-    void saveConfig();
+    bool saveConfig();
     QString generateToken();
 };
 

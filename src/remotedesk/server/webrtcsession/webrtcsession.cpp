@@ -5,6 +5,7 @@
 #include <yangrtc/YangPushData.h>
 
 #include <QDebug>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -65,6 +66,10 @@ bool WebRtcSession::create(const QVector<QString>& iceServers, int fps)
     char* offer = nullptr;
     if (pc_->createOffer(&offer) != 0 || !offer) {
         qWarning() << "WebRtcSession: createOffer failed";
+        // metaRTC 用 yang_calloc(calloc) 分配 SDP，失败路径同样要释放，
+        // 否则每次连接尝试都泄漏 12KB（长时间重连会累积）。
+        if (offer)
+            free(offer);
         close();
         return false;
     }
@@ -90,7 +95,9 @@ bool WebRtcSession::create(const QVector<QString>& iceServers, int fps)
         qInfo() << "WebRtcSession offer keylines:" << key.join(" | ");
     }
     emit localOffer(QString::fromUtf8(offer));
-    delete[] offer;
+    // 与 createOffer 的分配器配对：metaRTC 内部是 yang_calloc(=calloc)，
+    // 用 free() 释放。delete[] 对 calloc 内存是未定义行为（堆破坏/崩溃）。
+    free(offer);
 
     // RFC 3550 的"时间戳随机起点"由 metaRTC 侧保证：YangTimestamp 以首帧 pts
     // 为基准做差（base），线上 RTP ts = delta*9/100，与本地时钟绝对值无关。
@@ -218,7 +225,11 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
     // 正确做法：合成 [SC][SPS][SC][PPS][SC][IDR1] 作为 I 帧喂入，
     // 同帧其余 IDR slice 按 P 帧（frametype=P 绕过 keyframe 分支）逐 NALU 发出，
     // 与首 IDR 共享同一 RTP 时间戳，浏览器按时间戳拼帧解码。
-    uint8_t* wbase = reinterpret_cast<uint8_t*>(buf.data());
+    // [FIX-P5] 发送路径只读 NALU 字节：frame.payload 由 metaRTC 只读引用，
+    // 不需要可写指针。原写法 buf.data()（非 const 重载）必然触发 COW detach，
+    // → 每帧、每客户端一次全帧深拷贝（关键帧可达 1MB）。用 constData 的
+    // const_cast 让纯读路径真正零拷贝（"去掉每帧深拷贝"这条注释此前名不副实）。
+    uint8_t* wbase = const_cast<uint8_t*>(base);
     int sent = 0;
 
     // 帧内所有 NALU（SPS/PPS/IDR slices）共享同一 RTP 时间戳，由 metaRTC 的
@@ -317,8 +328,15 @@ void WebRtcSession::close()
     // 看到的是 pc_ == nullptr（走上面的重入分支或空指针保护），不会碰到正被销毁的对象；
     // 真正的析构推迟到本函数返回时，仍在外层栈帧之外完成。
     std::unique_ptr<YangPeerConnection8> pc = std::move(pc_);
-    if (pc)
+    if (pc) {
         pc->close();
+        // [FIX-B5] 必须先销毁 pc 再释放 pacer_：metaRTC 的 YangPushStream
+        // 把 pub->video_queue 直接指向 pacer 的 pushDataBuffer，pc 内部的
+        // UDP/RTCP 线程在关闭瞬间处理 NACK 重传时仍会访问该队列。原先 pc 是
+        // 局部 unique_ptr，要等 close() 返回后才析构，而 pacer_ 已经先被 reset
+        // → 弱网重传窗口内的 UAF（偶发崩溃）。
+        pc.reset();
+    }
     pacer_.reset();
 }
 

@@ -3,6 +3,7 @@
 #include "screencapturer_wayland.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDebug>
 #include <QDBusConnection>
@@ -510,17 +511,23 @@ bool WaylandCapturer::setupPipewire(int fd, uint32_t nodeId)
     nodeId_ = nodeId;
 
     loop_ = pw_thread_loop_new("wayland-capture", nullptr);
-    if (!loop_) { qWarning() << "WaylandCapturer: pw_thread_loop_new failed"; return false; }
+    if (!loop_) {
+        qWarning() << "WaylandCapturer: pw_thread_loop_new failed";
+        ::close(fd);   // 连接失败时 fd 仍归本函数所有，必须关闭（旧实现每次重建漏一个 fd）
+        return false;
+    }
 
     context_ = pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0);
     if (!context_) {
         qWarning() << "WaylandCapturer: pw_context_new failed";
+        ::close(fd);
         abortPipewireSetup();
         return false;
     }
 
     if (pw_thread_loop_start(loop_) < 0) {
         qWarning() << "WaylandCapturer: pw_thread_loop_start failed";
+        ::close(fd);
         abortPipewireSetup();
         return false;
     }
@@ -531,6 +538,7 @@ bool WaylandCapturer::setupPipewire(int fd, uint32_t nodeId)
     if (!core_) {
         pw_thread_loop_unlock(loop_);
         qWarning() << "WaylandCapturer: pw_context_connect_fd failed";
+        ::close(fd);
         abortPipewireSetup();
         return false;
     }
@@ -815,6 +823,21 @@ bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
     // 如实报失败，让上层走"采集失败"路径（计数、必要时重建），而不是继续
     // 返回 true，让画面永久冻结在最后一帧而看不出任何异常。
     if (streamError_) {
+        // ERROR 是终态，PipeWire 不会自己恢复：按 5s 节流重建一次流（teardown
+        // 会清 streamError_），否则 compositor 撤销共享后画面永久冻结。
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (streamErrorRetryMs_ == 0 || nowMs - streamErrorRetryMs_ >= 5000) {
+            streamErrorRetryMs_ = nowMs;
+            qInfo() << "WaylandCapturer: stream ERROR, rebuilding PipeWire stream (attempt)";
+            teardownPipewire();
+            closeSession();
+            initialized_ = false;
+            hasFrame_ = false;
+            if (initialize()) {
+                streamErrorRetryMs_ = 0;
+                qInfo() << "WaylandCapturer: PipeWire stream rebuilt";
+            }
+        }
         if (updated) *updated = false;
         return false;
     }

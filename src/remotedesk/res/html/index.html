@@ -5,7 +5,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Qt5 远程桌面</title>
+    <title>__REMOTE_HOSTNAME__</title>
     <style>
         * {
             margin: 0;
@@ -907,9 +907,6 @@
         </div>
         <div id="file-list"></div>
         <div id="file-panel-footer" style="flex-direction:column;gap:4px">
-            <div style="color:#888;font-size:11px;line-height:1.4">
-                拖文件到画面即上传到当前目录；拖动下面列表项到画面即下载
-            </div>
             <button class="file-action-btn" onclick="document.getElementById('file-upload-input').click()">⬆
                 上传文件</button>
             <button class="file-action-btn" onclick="document.getElementById('folder-upload-input').click()">⬆
@@ -1007,7 +1004,10 @@
             showFps: false,
             mouseX: 0,
             mouseY: 0,
-            keysPressed: new Set(),
+            // [B13] code → keycode：blur 补发 keyup 时必须带原始 keycode。
+            // 旧实现用 Set<code> 只能发 keycode=0，Windows SendInput 对 wVk=0
+            // 的 keyup 直接无效 → 失焦后按键在远端永久卡住。
+            keysPressed: new Map(),
             // 共享剪贴板状态。核心难点：**本机剪贴板往往非空但内容陈旧**（上一次 Ctrl+C
             // 的残留），远端刚复制的内容又常常因为非安全上下文而写不进本机剪贴板。
             // 因此除内容本身外还要记录“谁更新得晚”，粘贴时据此仲裁优先级。
@@ -1105,6 +1105,8 @@
                     webrtcState.active = true;
                     // 连接已建立，立即撤销 12s 超时定时器
                     if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
+                    // 从 disconnected 自行恢复：撤销降级宽限定时器
+                    if (webrtcState._discTo) { clearTimeout(webrtcState._discTo); webrtcState._discTo = null; }
                     webrtcState.videoEl.style.display = 'block';
                     webrtcState.videoEl.play?.().catch(() => {});
                     // [DIAG] WebRTC 黑屏排查：连接后连续 dump video 元素状态，定位 RTP 是否可解码
@@ -1124,7 +1126,7 @@
                         updateDropdownActive();
                     }
                     showTransferStatus('WebRTC 已连接', 2000);
-                } else if (st === 'failed' || st === 'closed' || st === 'disconnected') {
+                } else if (st === 'failed' || st === 'closed') {
                     if (webrtcState.pc !== pc) return; // 旧 pc 回调不影响当前模式
                     // 显式选择 WebRTC 且连接失败时降级回图片模式并持久化，画面持续刷新
                     if (state.currentConfig.videomode === 'webrtc') {
@@ -1132,6 +1134,22 @@
                     } else {
                         webrtcClose();
                     }
+                } else if (st === 'disconnected') {
+                    if (webrtcState.pc !== pc) return;
+                    // 'disconnected' 是暂时性状态（网络抖动 / ICE 重连中），浏览器通常能自行
+                    // 恢复。旧逻辑把它与 failed 同等处理并**持久化**图片模式，一次抖动就永久
+                    // 切走 WebRTC。这里给 8s 宽限，期间恢复则撤销；到期仍断才降级。
+                    if (webrtcState._discTo) clearTimeout(webrtcState._discTo);
+                    webrtcState._discTo = setTimeout(() => {
+                        webrtcState._discTo = null;
+                        if (webrtcState.pc !== pc || pc.connectionState !== 'disconnected')
+                            return;
+                        if (state.currentConfig.videomode === 'webrtc') {
+                            fallbackToImage('WebRTC 连接中断，已切换图片模式');
+                        } else {
+                            webrtcClose();
+                        }
+                    }, 8000);
                 }
             };
 
@@ -1151,13 +1169,30 @@
             };
 
             // 视频帧到达时统计 FPS
-            const rvfc = webrtcState.videoEl.requestVideoFrameCallback ||
-                (cb => { setTimeout(() => cb(0), 1000); return 0; });
-            const countFrames = (now, meta) => {
-                updateFps();
-                rvfc.call(webrtcState.videoEl, countFrames);
+            // 先停掉上一轮的回调链：videoEl 是常驻元素，每次 initWebRTC（onopen/
+            // auto 重试/mode_changed 补发）都新挂一条永不终止的链，会导致 FPS
+            // 成倍虚高、无 rVFC 的浏览器还会堆积 N 条 1s 定时器。
+            if (webrtcState._fpsStop) { webrtcState._fpsStop(); webrtcState._fpsStop = null; }
+            let fpsAlive = true;
+            let fpsTimer = null;
+            let fpsHandle = null;
+            const hasRvfc = typeof webrtcState.videoEl.requestVideoFrameCallback === 'function';
+            const stopFps = () => {
+                fpsAlive = false;
+                if (fpsTimer) { clearTimeout(fpsTimer); fpsTimer = null; }
+                if (hasRvfc && fpsHandle != null) {
+                    try { webrtcState.videoEl.cancelVideoFrameCallback(fpsHandle); } catch (e) {}
+                    fpsHandle = null;
+                }
             };
-            rvfc.call(webrtcState.videoEl, countFrames);
+            webrtcState._fpsStop = stopFps;
+            const countFrames = () => {
+                if (!fpsAlive) return;
+                updateFps();
+                if (hasRvfc) fpsHandle = webrtcState.videoEl.requestVideoFrameCallback(countFrames);
+                else fpsTimer = setTimeout(countFrames, 1000);
+            };
+            countFrames();
 
             // 通知服务端发起 WebRTC（服务端生成 offer 后经 WS 回传）
             send({ type: 'signal_start' });
@@ -1220,6 +1255,9 @@
             webrtcState.intending = false;
             webrtcState.pendingIce = [];
             if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
+            if (webrtcState._discTo) { clearTimeout(webrtcState._discTo); webrtcState._discTo = null; }
+            // 停掉 FPS 回调链：videoEl 常驻，不断连会跨会话继续统计（虚高并泄漏定时器）
+            if (webrtcState._fpsStop) { webrtcState._fpsStop(); webrtcState._fpsStop = null; }
             if (webrtcState.pc) {
                 webrtcState.pc.close();
                 webrtcState.pc = null;
@@ -1450,12 +1488,19 @@
         const msePlayer = {
             using: false, started: false, ms: null, sb: null, ready: false, pending: [], _gen: 0, _lastRestart: 0, _needKf: false,
             fmp4Seq: 0, fmp4Dts: 0, lastTs: null, _durMs: 33,
-            // 分包合批：_batch 累积待打包样本，攒够 batchSize 帧、超过 maxBatchMs、
-            // 或遇到关键帧边界时合成一个多样本分片一次性 append（见 buildFmp4Multi 注释）。
+            // 分包合批：_batch 累积待打包样本，攒够 batchSize 帧、或空闲超过 maxBatchMs
+            // 时封一个分片 append（见 buildFmp4Multi 注释）。
             // [LAT-TUNE 2026-10-10] 原 4/200ms：15.8fps 下攒满 4 帧要 253ms，等于给端到端
-            // 延迟白加约 250ms（实测 MSE 390ms vs WebRTC 147ms）。降到 2/100ms 后 append
-            // 频率仅 8 次/秒（SourceBuffer 完全无压力），延迟随合批窗口同步下降。
-            _batch: [], batchSize: 2, maxBatchMs: 100, _batchWall: 0,
+            // 延迟白加约 250ms（实测 MSE 390ms vs WebRTC 147ms）。降到 2/100ms 后合批窗口
+            // 缩小，延迟随之下降。
+            // [LAT-TUNE 2026-10-23] 实测（Chrome 156 headless，640x360，真实 H.264 流经本
+            // msePlayer 全链路，requestVideoFrameCallback 计"产出→上屏"）逐帧 append 最快且
+            // 无丢帧：30fps p50≈48ms/107帧全上屏，15fps≈102ms/54全上屏，10fps≈110ms/34。
+            // 旧实现 15fps 下 p50≈1.3s、10fps≈1.6s 且只上屏一半——根因是空闲定时器提前
+            // 封包时末样本时长未定稿、fmp4Dts 未推进 → PTS 重叠 → 播放头卡死。修好后单帧
+            // 分片并无吞吐问题，故 batchSize=1。
+            _batch: [], batchSize: 1, maxBatchMs: 100, _batchWall: 0, _flushTimer: null,
+            _lastPushWall: 0,
             // 复用 webrtc-video 元素渲染 MSE 流；codec 影响 MIME（hevc 浏览器兼容性差，尽力而为）
             start(codec) {
                 if (this.using) return true;
@@ -1471,7 +1516,10 @@
                 document.body.appendChild(v);
                 this.videoEl = v;
                 this.ms = new MediaSource();
-                v.src = URL.createObjectURL(this.ms);
+                // 记录 blob URL：stop() 时必须 revoke。旧实现每次 stop/start 都新建
+                // 一个 MediaSource blob URL 却从不释放，长时间反复切模式会堆积内存。
+                this._url = URL.createObjectURL(this.ms);
+                v.src = this._url;
                 v.play().catch(() => {});
                 // 低延迟追边：播放位置因网络抖动/静态桌面后恢复而落后于缓冲前沿时，
                 // 跳到最新帧。远程桌面要求“永远看最新画面”，与图片模式行为一致。
@@ -1535,8 +1583,12 @@
                             } catch (e) {}
                         });
                     } catch (e) {
-                        console.error('MSE addSourceBuffer failed:', e);
-                        this.using = false;
+                        // addSourceBuffer 失败（codec 不支持/MediaSource 竞态）：必须完整
+                        // 拆除本实例——残留的黑底 z-index:1 <video> 会永久盖住 canvas，
+                        // 图片模式帧画在底下不可见（比不建更糟）。
+                        console.error('MSE addSourceBuffer failed, tearing down:', e);
+                        this.stop('addSourceBuffer failed');
+                        fallbackToImage('当前浏览器无法解码 H.264（MSE），已切换图片模式');
                     }
                 });
                 return true;
@@ -1640,15 +1692,47 @@
                 }
                 if (this._batch.length && (isKey || this._batch.length >= this.batchSize ||
                     (this._batch.length >= 2 && Date.now() - this._batchWall >= this.maxBatchMs))) {
-                    this._flushBatch();
+                    this._flushBatch(false);
                 }
                 if (!this._batch.length) this._batchWall = Date.now();
                 this._batch.push({ data: avcc, isKey: !!isKey, dts: this.fmp4Dts, dur: 33 });
+                this._lastPushWall = Date.now();
+                // [N-FLUSH] 桌面转静止时批量里可能滞留最后 1 帧：挂一个到时的兜底定时器，
+                // 把残余帧按默认时长封包播出，消除"最后一帧永远不上屏"的一帧滞后。
+                this._scheduleFlush();
             },
-            _flushBatch() {
+            _scheduleFlush() {
+                if (!this._batch.length) return;
+                // 去抖：每来一帧都把兜底定时器推后。旧实现从"批首"起算，帧间隔略小于
+                // maxBatchMs 时（如 15fps 下 66ms<100ms）定时器会在第二帧已入批、但末帧
+                // 时长尚未定稿时提前封包：末帧被按 33ms 截断 → 时间轴累计偏慢 → 播放头
+                // 越落越远。去抖后仅"真正静止 maxBatchMs"才兜底冲尾帧。
+                if (this._flushTimer) {
+                    clearTimeout(this._flushTimer);
+                    this._flushTimer = null;
+                }
+                this._flushTimer = setTimeout(() => {
+                    this._flushTimer = null;
+                    if (!this.using || !this.started) return;
+                    this._flushBatch(true);
+                }, Math.max(1, this.maxBatchMs));
+            },
+            _flushBatch(fromTimer) {
+                if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = null; }
                 if (!this._batch.length) return;
                 const base = this._batch[0].dts;
+                const last = this._batch[this._batch.length - 1];
+                if (fromTimer) {
+                    // 空闲兜底：末样本的真实时长不会再有下一帧来定稿，用滞留时长估计，
+                    // 避免长间隔被钉死成 33ms 造成时间轴与真实时间脱节。
+                    const idle = Date.now() - (this._lastPushWall || Date.now());
+                    if (idle >= 1) last.dur = Math.min(idle, 1000);
+                }
                 this._queue(buildFmp4Multi(this._batch, base, ++this.fmp4Seq));
+                // 关键：推进下一帧的起始 dts。旧实现只在 _pushSample 的"下一帧到达"分支
+                // 推进；定时器路径没有下一帧，fmp4Dts 停在原地 → 下一帧复用同一 PTS →
+                // 样本重叠 → SourceBuffer 播放头卡死（实测 10fps 下 p50 1.6s、只上屏一半）。
+                this.fmp4Dts = last.dts + (last.dur || 33);
                 this._batch = [];
             },
             frameCount: 0,
@@ -1656,11 +1740,16 @@
                 if (tag) console.log('MSE stop() called by: ' + tag + '; using=' + this.using + ' gen=' + this._gen);
                 this._gen++; // 使旧 MediaSource 的 sourceopen/updateend 回调全部失效
                 this.using = false; this.started = false; this.ready = false; this.pending = []; this._needKf = false;
+                if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = null; }
                 this._batch = [];
                 try { if (this.ms && this.ms.readyState === 'open') this.ms.endOfStream(); } catch (e) {}
                 disposeVideoEl(this.videoEl);
                 this.videoEl = null;
                 this.ms = null; this.sb = null;
+                if (this._url) {
+                    try { URL.revokeObjectURL(this._url); } catch (e) {}
+                    this._url = null;
+                }
             }
         };
 
@@ -1879,6 +1968,14 @@
             }
 
             configure(extraData) {
+                // 已 configured 的解码器再次 configure 在部分浏览器会抛
+                // InvalidStateError（旧实现被 onmessage 的 catch 静默吞掉，
+                // 新 SPS/PPS 从未生效 → 花屏/黑屏）。先重建干净解码器再 configure。
+                if (this.configured && this.decoder) {
+                    try { this.decoder.close(); } catch (e) {}
+                    this.decoder = this.createDecoder();
+                    this.configured = false;
+                }
                 // 按当前协议声明 codec（H.264 baseline L5.2 / HEVC main L5.0），实际级别由流内参数决定
                 this.decoder.configure({
                     codec: this.codecString(),
@@ -1991,7 +2088,9 @@
             wsLastAliveMs = Date.now();
             wsHeartbeatTimer = setInterval(() => {
                 if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-                if (Date.now() - wsLastAliveMs > 45000) {
+                // 后台标签页的定时器会被浏览器节流（可达 1 次/分钟），此时"45s 没消息"
+                // 不代表连接已死。隐藏期间只发 ping、不判超时，避免切回来时被误重连。
+                if (!document.hidden && Date.now() - wsLastAliveMs > 45000) {
                     console.warn('WS heartbeat timeout (no server message in 45s), closing stale connection');
                     try { state.ws.close(); } catch (e) {}
                     return;
@@ -2041,10 +2140,22 @@
                 } catch (e) {}
             };
 
-            state.ws.onclose = () => {
+            state.ws.onclose = (ev) => {
+                // 非正常关闭（code!=1000）在控制台留一份：UI 只显示"重连中"，
+                // 掉线真因（鉴权失效/服务端踢/网络断/协议错）靠这里的 code+reason 定位。
+                if (!ev || ev.code !== 1000)
+                    reportError('WebSocket 断开', 'code=' + (ev && ev.code) +
+                        ' reason=' + ((ev && ev.reason) || '(空)') +
+                        ' 存活=' + (Date.now() - wsOpenedAtMs) + 'ms' +
+                        ' 重连计数=' + wsReconnectCount);
                 stopWsHeartbeat();
                 state.connected = false;
                 webrtcClose();
+                // 断开后停止 MSE：必须按 using 判定——started=false 的实例（已建
+                // MediaSource/video 元素但还没等到关键帧）若不清理，重连后
+                // start() 会被 `if (this.using) return true` 短路，复用已死的
+                // MediaSource → 永久黑屏。
+                try { if (msePlayer.using) msePlayer.stop('ws close'); } catch (e) {}
                 // [B-2] 清空本地按下键集合：残留键会让重连后首次按键被 keydown
                 // 去重分支静默吞掉。远端侧由服务端 onClientDisconnected 统一补发
                 // keyup 释放，两侧职责分离。
@@ -2053,6 +2164,10 @@
                 // 服务端在 auth 失败时先推一条消息再踢人，计数被清零 → session
                 // 过期时无限重连、永远回不到登录页。存活 >30s 才算稳定连接。
                 const aliveMs = Date.now() - wsOpenedAtMs;
+                // 断线时丢弃所有未完成的分块下载缓冲并 reject 等待中的 fetch：
+                // 旧实现只在 file_download_end 清理，断线后这几块（按 totalSize
+                // 预分配，最大 2GB）会永久占住内存，且拖出预取的 Promise 永不落地。
+                abortPendingDownloads('连接已断开');
                 if (aliveMs > 30000) {
                     wsReconnectCount = 0;
                 } else {
@@ -2063,8 +2178,9 @@
                     window.location.href = '/login';
                     return;
                 }
-                updateStatus('🔴 连接断开，5秒后重连...');
-                setTimeout(connect, 5000);
+                updateStatus('🔴 连接断开，重连中...');
+                // 指数退避：服务端重启/网络抖动时避免每秒级重连风暴；封顶 30s。
+                setTimeout(connect, Math.min(5000 * Math.max(1, wsReconnectCount), 30000));
             };
 
             state.ws.onerror = (e) => {
@@ -2074,7 +2190,9 @@
 
             state.ws.onmessage = (event) => {
                 wsLastAliveMs = Date.now(); // [B12] 心跳判活依据
-                wsReconnectCount = 0;
+                // 不能在这里清零重连计数：会话失效时服务端会先发一条提示消息再关连接，
+                // 清零后 onclose 的"重连 >5 次跳登录"永远不触发，变成无限重连。
+                // 计数改由 onclose 在"连接存活过 30s"时才归零。
                 wsStable = true;
                 if (event.data instanceof ArrayBuffer) {
                     handleBinary(new Uint8Array(event.data));
@@ -2134,9 +2252,20 @@
                 const chunkData = data.subarray(pos, pos + chunkLen); // [P2] 零拷贝视图，set() 时才真正拷贝
 
                 const entry = downloadBuffers[pathStr];
-                if (entry && offset >= 0 && offset + chunkLen <= entry.data.length) {
+                // [P4] 缓冲按需增长：旧实现开局就按 totalSize 一次性预分配（上限 2GB），
+                // 慢网/中断的大文件会长时间钉住巨量内存。初始 8MB，不足时倍增。
+                if (entry && offset >= 0 && offset + chunkLen <= entry.totalSize) {
+                    if (offset + chunkLen > entry.data.length) {
+                        let cap = entry.data.length;
+                        const need = offset + chunkLen;
+                        while (cap < need) cap *= 2;
+                        const grown = new Uint8Array(Math.min(cap, entry.totalSize));
+                        grown.set(entry.data.subarray(0, entry.received));
+                        entry.data = grown;
+                    }
                     entry.data.set(chunkData, offset);
                     entry.received += chunkLen;
+                    entry.lastRx = Date.now(); // [P5] 静默超时判据：有数据即刷新
                 }
             } else if (frameType === 0x01 || frameType === 0x02) {
                 // WebRTC 会话存在期间（或意图中：intending）丢弃 WS 视频帧：
@@ -2208,9 +2337,13 @@
                 return;
             }
             jpegDecoding = true;
+            if (captureWarnVisible) hideCaptureWarning();   // 真实帧到达即撤掉提示
             const data = jpegData;
             const blob = new Blob([data], { type: 'image/jpeg' });
-            const url = URL.createObjectURL(blob);
+            // [P11] blob URL 惰性创建：现代浏览器走 createImageBitmap 路径根本不
+            // 需要 URL，每帧 createObjectURL/revoke 纯属分配抖动（60fps 下每秒 60 个）。
+            let url = '';
+            const ensureUrl = () => (url || (url = URL.createObjectURL(blob)));
             const img = new Image();
             // 解码完成后的统一绘制：drawImage 直接用位图对象（Image 或 ImageBitmap）
             // try/finally 保证 jpegDecoding 一定复位：若 drawImage 抛异常（位图为空/
@@ -2229,7 +2362,7 @@
                 } catch (e) {
                     console.error('draw jpeg frame failed:', e);
                 } finally {
-                    if (revoke) { try { URL.revokeObjectURL(url); } catch (e) {} }
+                    if (revoke && url) { try { URL.revokeObjectURL(url); } catch (e) {} }
                     jpegDecoding = false;
                 }
                 if (jpegPending) {
@@ -2266,7 +2399,7 @@
                         bmp.close();
                     }).catch(() => {
                         img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
-                        img.src = url;
+                        img.src = ensureUrl();
                     });
                 } else if (dispW > 0 && dispH > 0 && window.createImageBitmap) {
                     createImageBitmap(blob).then(bmp => {
@@ -2274,38 +2407,54 @@
                         bmp.close();
                     }).catch(() => {
                         img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
-                        img.src = url;
+                        img.src = ensureUrl();
                     });
                 } else {
                     img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
-                    img.src = url;
+                    img.src = ensureUrl();
                 }
             } else {
+                // [B23] 必须 ensureUrl()：无 createImageBitmap 的浏览器里 url 从未
+                // 创建（空串），img.src='' 不触发加载 → 图片模式每帧黑屏。
                 img.onload = () => finish({ bmp: img, width: img.naturalWidth, height: img.naturalHeight }, true);
-                img.src = url;
+                img.src = ensureUrl();
             }
         }
 
         function handleJson(msg) {
             switch (msg.type) {
-                case 'screen_info':
-                    state.screenWidth = msg.width;
-                    state.screenHeight = msg.height;
-                    state.canvas.width = msg.width;
-                    state.canvas.height = msg.height;
-                    state.currentConfig.resolution = msg.width + 'x' + msg.height;
+                case 'screen_info': {
+                    // 尺寸须为有限正数且在合理范围：0/负数会让 canvas 变 0，
+                    // 后续 drawImage/坐标归一化全部失效（表现为永久黑屏且无报错）。
+                    const sw = Number(msg.width), sh = Number(msg.height);
+                    if (!isFinite(sw) || !isFinite(sh) || sw < 1 || sh < 1 || sw > 8192 || sh > 8192) {
+                        console.warn('ignore invalid screen_info', msg.width, msg.height);
+                        break;
+                    }
+                    state.screenWidth = sw;
+                    state.screenHeight = sh;
+                    state.canvas.width = sw;
+                    state.canvas.height = sh;
+                    state.currentConfig.resolution = sw + 'x' + sh;
                     updateScale();
                     buildResolutionOptions();
                     updateDropdownActive();
                     break;
+                }
                 case 'cursor_pos':
                     updateRemoteCursor(msg.x, msg.y);
                     break;
                 case 'codec_config':
                     if (msg.extradata && state.decoder) {
-                        const extra = Uint8Array.from(atob(msg.extradata), c => c.charCodeAt(0));
-                        if (extra.byteLength > 0)
-                            state.decoder.configure(extra);
+                        try {
+                            const extra = Uint8Array.from(atob(msg.extradata), c => c.charCodeAt(0));
+                            if (extra.byteLength > 0)
+                                state.decoder.configure(extra);
+                        } catch (e) {
+                            // 非 base64 / 非法 avcC：configure 会抛异常打断整个
+                            // onmessage，后续消息（含 screen_info）全部丢失。
+                            console.warn('invalid codec_config, ignored:', e);
+                        }
                     }
                     break;
                 case 'ime_state':
@@ -2362,6 +2511,7 @@
                 case 'file_download_start':
                     // 初始化分块下载缓冲区（限 2GB，防止异常/恶意 totalSize 一次性分配超大数组导致浏览器 OOM）
                     if (!(msg.totalSize > 0 && msg.totalSize <= 2 * 1024 * 1024 * 1024)) {
+                        reportError('下载失败：文件大小异常', 'path=' + msg.path + ' totalSize=' + (msg.totalSize || '未知'));
                         showTransferStatus('下载失败：文件大小异常(' + (msg.totalSize || '未知') + '字节)', 4000);
                         const badWaiter = fetchWaiters[msg.path];
                         if (badWaiter) {
@@ -2371,10 +2521,14 @@
                         break;
                     }
                     downloadBuffers[msg.path] = {
-                        data: new Uint8Array(msg.totalSize),
+                        // [P4] 初始只分配 8MB，后续随块到达倍增增长（见 0x12 分支）。
+                        // 旧实现按 totalSize 一次预分配（上限 2GB），慢网大文件
+                        // 长时间钉住巨量内存；中断/取消时还要等超时才释放。
+                        data: new Uint8Array(Math.min(msg.totalSize, 8 * 1024 * 1024)),
                         received: 0,
                         totalSize: msg.totalSize,
-                        name: msg.name
+                        name: msg.name,
+                        lastRx: Date.now()
                     };
                     // 拖出预取（silent）：不占用进度条，也不触发浏览器自动下载
                     if (!fetchWaiters[msg.path]) {
@@ -2386,6 +2540,19 @@
                 case 'file_download_end': {
                     const dlEntry = downloadBuffers[msg.path];
                     const waiter = fetchWaiters[msg.path];
+                    // 长度校验：服务端读中断/短读时收到的字节少于声明值，
+                    // 预分配缓冲尾部还是零填充，直接保存 = 静默损坏文件。
+                    if (dlEntry && dlEntry.received !== dlEntry.totalSize) {
+                        reportError('下载不完整', `path=${msg.path} received=${dlEntry.received}/${dlEntry.totalSize}`);
+                        showTransferStatus(`下载不完整，请重试: ${dlEntry.name}`, 4000);
+                        delete downloadBuffers[msg.path];
+                        if (waiter) {
+                            delete fetchWaiters[msg.path];
+                            if (waiter.reject) waiter.reject(new Error('download incomplete'));
+                        }
+                        if (currentTransferPath === msg.path) hideTransferMonitor();
+                        break;
+                    }
                     if (dlEntry) {
                         if (waiter) {
                             // 预取完成：生成 blob URL 供拖出（DownloadURL）或点击下载复用
@@ -2428,7 +2595,20 @@
                         // 预取失败：清理等待中的 fetcher，避免 Promise 悬挂
                         const w = fetchWaiters[msg.path];
                         if (w) { delete fetchWaiters[msg.path]; if (w.reject) w.reject(new Error(msg.error)); }
+                        // 未完成的下载缓冲（可能已按 totalSize 预分配数十~数百 MB）必须立即释放
+                        if (downloadBuffers[msg.path]) delete downloadBuffers[msg.path];
+                        if (currentTransferPath === msg.path) hideTransferMonitor();
+                        reportError('下载失败', 'path=' + msg.path + ' error=' + msg.error);
                         alert('下载失败: ' + msg.error);
+                    }
+                    break;
+                case 'capture_status':
+                    // 采集不可用必须给出可见反馈：此前服务端 start 失败只是
+                    // captureAvailable_=false，前端看到的就是"连上了但一直黑"。
+                    if (msg.available) {
+                        hideCaptureWarning();
+                    } else {
+                        showCaptureWarning(msg.hint || '屏幕采集当前不可用，正在自动重试…');
                     }
                     break;
                 case 'remote_drag':
@@ -2443,21 +2623,36 @@
                         document.getElementById('lock-password').focus();
                         const hintEl = document.getElementById('lock-hint');
                         const isXP = msg.isXP;
-                        hintEl.innerHTML = isXP ? 'XP 锁屏：请点击上图锁中 <svg viewBox="0 0 16 16" width="14" height="14" style="vertical-align:middle;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><circle cx="7" cy="7" r="3"/><path d="M9.5 9.5l5 5"/><line x1="12" y1="12" x2="13" y2="13"/></svg> 部分或者本行的"锁定"然后多试几次' : (msg.hint || '');
+                        // XP 分支是本页自带的固定文案（含内联 SVG 图标），用 innerHTML
+                        // 渲染图标；msg.hint 来自服务端，必须走 textContent，
+                        // 避免远端内容被当作标记注入。
+                        if (isXP) {
+                            hintEl.innerHTML = 'XP 锁屏：请点击上图锁中 <svg viewBox="0 0 16 16" width="14" height="14" style="vertical-align:middle;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><circle cx="7" cy="7" r="3"/><path d="M9.5 9.5l5 5"/><line x1="12" y1="12" x2="13" y2="13"/></svg> 部分或者本行的"锁定"然后多试几次';
+                        } else {
+                            hintEl.textContent = msg.hint || '';
+                        }
                     } else {
                         document.getElementById('lock-password').value = '';
                         document.getElementById('lock-hint').textContent = '';
                     }
                     break;
                 case 'unlock_result':
-                    if (msg.ok) {
+                    if (msg.ok && !msg.pending) {
                         // 已切回桌面 VT：手动收起锁屏遮罩（Linux 端锁屏检测目前关闭，
                         // 不会自动再广播 screen_locked=false）
                         document.getElementById('lock-overlay').classList.remove('active');
                         document.getElementById('lock-password').value = '';
-                    } else {
+                    } else if (!msg.ok) {
                         alert('解锁失败：' + (msg.message || '未知原因'));
+                    } else {
+                        // pending：密码正在注入（Windows secure-input），遮罩保持，
+                        // 真正解锁后 helper 的 screen_locked=false 会自动收起
+                        showTransferStatus(msg.message || '正在解锁…', 3000);
                     }
+                    break;
+                case 'lock_result':
+                    // 服务端已逐步验证（LockedHint / dm-tool），ok 才代表真的锁上了
+                    showTransferStatus(msg.ok ? (msg.message || '已锁屏') : ('锁屏失败：' + (msg.message || '未知原因')), 4000);
                     break;
                 case 'clipboard':
                     // 远端剪贴板变化（文本/图片）→ 存入缓冲，下一次用户手势时写入本地系统剪贴板
@@ -2465,7 +2660,24 @@
                     break;
                 case 'file_upload_done':
                     refreshFileList();
-                    if (currentTransferPath === msg.path) {
+                    // [N-UPLOAD] 服务端失败路径带 error：必须消费它，
+                    // 旧实现无论成败都只显示客户端乐观发出的“上传完成”，失败被掩盖。
+                    if (msg.error) {
+                        reportError('服务端拒绝上传', msg.error);
+                        // [B15] 错误按 path 归属：批量队列上传时，上一个文件的服务端
+                        // 拒绝必须不能误杀正在传输的当前文件。只有 error.path 与
+                        // 当前文件一致才停止投喂剩余分块。
+                        if (msg.path && msg.path === currentTransferPath) {
+                            uploadServerError = msg.error;
+                            uploadCancelRequested = true;
+                            showTransferStatus(`上传失败: ${msg.error}`, 4000);
+                            hideTransferMonitor();
+                        } else {
+                            const name = String(msg.path || '').split('/').pop();
+                            showTransferStatus(`上传失败${name ? '(' + name + ')' : ''}: ${msg.error}`, 4000);
+                        }
+                    } else if (currentTransferPath === msg.path) {
+                        showTransferStatus(`上传完成: ${String(msg.path || '').split('/').pop()}`, 2000);
                         setTimeout(hideTransferMonitor, 500);
                     }
                     break;
@@ -2501,8 +2713,16 @@
                     if (msg.videoSupported === true && state.pendingVideoRetry &&
                         state.currentConfig.videomode === 'image') {
                         const want = state.pendingVideoRetry;
-                        state.pendingVideoRetry = null;
-                        setTimeout(() => { if (state.videoSupported === true) applyStreamMode(want); }, 50);
+                        // 保留 pendingVideoRetry 作"待恢复意图"凭证：50ms 窗口内
+                        // 若被清空（用户显式选了别的模式）或被改写（新的降级意图），
+                        // 定时器即放弃回切；执行前才清除。
+                        setTimeout(() => {
+                            if (state.pendingVideoRetry !== want) return;
+                            state.pendingVideoRetry = null;
+                            if (state.videoSupported === true &&
+                                state.currentConfig.videomode === 'image')
+                                applyStreamMode(want);
+                        }, 50);
                         return;
                     }
                     // 服务端明确回"无法提供视频流"（如请求 set_mode:video 被拒，helper 未连/
@@ -2588,7 +2808,10 @@
                         webrtcClose();
                     break;
                 case 'error':
-                    alert('错误: ' + (msg.message || '未知错误'));
+                    // 非阻塞提示：alert 会卡住整个页面事件循环（连续错误时更糟）。
+                    // 类似"消息过大"这种可恢复错误只需要一条可见提示。
+                    showTransferStatus('错误: ' + (msg.message || '未知错误'), 8000);
+                    console.error('[server error]', msg);
                     break;
             }
         }
@@ -2653,7 +2876,9 @@
 
         // 锁定密码输入
         function sendChar(char, isDown) {
-            send({ type: isDown ? 'keydown' : 'keyup', keycode: char.charCodeAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
+            // codePointAt 而非 charCodeAt：emoji 等 astral 字符在 JS 里是代理对，
+            // charCodeAt 只取到高代理码点（0xD800 段），远端收到错误按键。
+            send({ type: isDown ? 'keydown' : 'keyup', keycode: char.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
         }
         function unlockScreen() {
             const input = document.getElementById('lock-password');
@@ -2662,12 +2887,14 @@
             if (!pwd) return;
             btn.disabled = true;
             btn.textContent = '发送中…';
+            // Array.from 按码点拆分：pwd.length 会把代理对计成 2，按索引切会拆坏 emoji。
+            const chars = Array.from(pwd);
             let i = 0;
             function sendNext() {
-                if (i < pwd.length) {
-                    sendChar(pwd[i], true);
+                if (i < chars.length) {
+                    sendChar(chars[i], true);
                     setTimeout(() => {
-                        sendChar(pwd[i], false);
+                        sendChar(chars[i], false);
                         i++;
                         setTimeout(sendNext, 20);
                     }, 10);
@@ -2728,12 +2955,17 @@
             });
 
             // 鼠标按钮
+            // [B14] pressedButtons 追踪画布上按下的键：拖出画布再松开时 canvas
+            // 收不到 mouseup，远端按钮永久卡住。窗口级监听只对画布上按下的键
+            // 补发 mouseup，避免把工具栏等本地点击误转发给远端。
+            const pressedButtons = new Set();
             canvas.addEventListener('mousedown', (e) => {
                 // 点击画面时让画布获得焦点，作为远程键盘输入的焦点载体，
                 // 避免与本地输入框（文件路径框等）混淆
                 try { state.canvas.focus({ preventScroll: true }); } catch (err) {}
                 e.preventDefault();
                 const pos = getCanvasPos(e);
+                pressedButtons.add(e.button);
                 send({
                     type: 'mousedown',
                     x: Math.round(pos.x),
@@ -2743,6 +2975,7 @@
             });
 
             canvas.addEventListener('mouseup', (e) => {
+                pressedButtons.delete(e.button);
                 const pos = getCanvasPos(e);
                 send({
                     type: 'mouseup',
@@ -2752,14 +2985,35 @@
                 });
             });
 
+            // [B14] 画布外松键补发：canvas mouseup 只在自己的命中区域触发，
+            // 拖拽出画布（或落在叠加元素上）后松开，远端按钮会一直保持按下。
+            window.addEventListener('mouseup', (e) => {
+                if (e.target === state.canvas) return; // canvas 监听器已处理
+                if (!pressedButtons.has(e.button)) return; // 画布上没按下的键不转发
+                pressedButtons.delete(e.button);
+                const pos = getCanvasPos(e);
+                // 坐标钳到画布范围：远处松键时换算坐标可能远超屏幕，
+                // 直接下发会在 Windows 绝对坐标注入时映射到屏幕外。
+                send({
+                    type: 'mouseup',
+                    x: Math.round(Math.max(0, Math.min(state.canvas.width, pos.x))),
+                    y: Math.round(Math.max(0, Math.min(state.canvas.height, pos.y))),
+                    button: e.button
+                });
+            });
+
             // 滚轮
             let wheelAccum = 0; // [I-2] 累积 deltaY，保留滚动幅度（100px≈1 格）
             canvas.addEventListener('wheel', (e) => {
                 e.preventDefault();
+                // deltaMode 感知：0=像素（Chrome 类，一格≈100px），1=行（Firefox
+                // 默认，一格=1 行），2=页。旧实现恒按 /100 折算，行模式下 deltaY=1
+                // 永远凑不满一格 → 滚轮完全无效。
+                const per = e.deltaMode === 0 ? 100 : 1;
                 wheelAccum += e.deltaY;
-                const steps = Math.trunc(wheelAccum / 100);
+                const steps = Math.trunc(wheelAccum / per);
                 if (steps !== 0) {
-                    wheelAccum -= steps * 100;
+                    wheelAccum -= steps * per;
                     send({
                         type: 'wheel',
                         delta: -steps // 正=上滚格数，负=下滚格数
@@ -2771,8 +3025,8 @@
             window.addEventListener('compositionend', (e) => {
                 if (e.data) {
                     for (const ch of e.data) {
-                        send({ type: 'keydown', keycode: ch.charCodeAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
-                        send({ type: 'keyup', keycode: ch.charCodeAt(0), code: '' });
+                        send({ type: 'keydown', keycode: ch.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
+                        send({ type: 'keyup', keycode: ch.codePointAt(0), code: '' });
                     }
                 }
             });
@@ -2824,7 +3078,7 @@
                 // keysPressed 去重只拦截非 repeat 的重复事件。
                 if (state.keysPressed.has(e.code) && !e.repeat) return;
 
-                state.keysPressed.add(e.code);
+                state.keysPressed.set(e.code, e.keyCode);
                 send({
                     type: 'keydown',
                     keycode: e.keyCode,
@@ -2848,17 +3102,27 @@
                 send({
                     type: 'keyup',
                     keycode: e.keyCode,
-                    code: e.code
+                    code: e.code,
+                    // [B12] keyup 必须携带当前修饰键状态：服务端（尤其 Windows
+                    // SendInput 路径）每次 keyup 都会用消息里的 ctrl/alt/shift
+                    // 重建修饰键，旧实现缺省 false → 按住 Ctrl 松开普通键的瞬间
+                    // Ctrl 在远端被"松开"，后续组合键全部错乱。
+                    ctrl: e.ctrlKey,
+                    alt: e.altKey,
+                    shift: e.shiftKey,
+                    meta: e.metaKey
                 });
             });
 
             // 窗口失焦时释放所有按下的键，避免按键卡死
             window.addEventListener('blur', () => {
-                state.keysPressed.forEach(code => {
-                    // 发送 keyup 释放所有卡住的按键
+                state.keysPressed.forEach((keycode, code) => {
+                    // [B13] 发送 keyup 释放所有卡住的按键：必须用按下时记录的
+                    // 原始 keycode（keycode=0 在 Windows 注入路径是无效事件，
+                    // 键位会在远端永久卡住）。
                     send({
                         type: 'keyup',
-                        keycode: 0,
+                        keycode: keycode,
                         code: code
                     });
                 });
@@ -3176,6 +3440,9 @@
                 }
                 buildResolutionOptions();
             } else if (key === 'videomode') {
+                // 用户显式选择模式：作废"服务端恢复视频能力后自动回切"的待重试意图，
+                // 否则 mode_changed 到达时会把用户刚选的"图片"又抢回视频模式。
+                state.pendingVideoRetry = null;
                 applyStreamMode(val);
             } else if (key === 'screen') {
                 const idx = parseInt(val);
@@ -3332,6 +3599,8 @@
         const CHUNK_SIZE = 64 * 1024; // 64KB chunks
         let uploadQueue = [];
         let isUploading = false;
+        let uploadCancelRequested = false;   // 用户点“取消”后置位，上传循环据此提前退出
+        let uploadServerError = null;        // 服务端 file_upload_done 带回的失败原因（供上传循环如实提示）
 
         // 下载缓冲区（分块下载）
         let downloadBuffers = {};
@@ -3357,6 +3626,21 @@
         const fileFetchInflight = {};
         // 下载等待回调：remote path -> {resolve,reject,name}
         const fetchWaiters = {};
+        // 连接断开/认证失效时统一回收未完成的分块下载：
+        // 释放已按 totalSize 预分配的缓冲，并 settle 等待中的 fetch，
+        // 避免内存长期占用与 Promise 永久悬挂。
+        function abortPendingDownloads(reason) {
+            for (const p of Object.keys(downloadBuffers)) delete downloadBuffers[p];
+            for (const p of Object.keys(fetchWaiters)) {
+                const w = fetchWaiters[p];
+                delete fetchWaiters[p];
+                if (w && w.reject) {
+                    try { w.reject(new Error(reason || '下载已中断')); } catch (e) {}
+                }
+            }
+            for (const p of Object.keys(fileFetchInflight)) delete fileFetchInflight[p];
+            if (currentTransferPath && currentTransferType === 'download') hideTransferMonitor();
+        }
         // 内部拖拽标识（区分“远端文件拖出”和“本地文件拖入”）
         const REMOTE_DRAG_MIME = 'application/x-remote-file';
         // DownloadURL 只有 Chromium 系（Chrome/Edge/Opera）实现：拖出到桌面/资源管理器
@@ -3427,9 +3711,11 @@
         }
 
         function clipFingerprint() {
-            return state.clip.remoteMime === 'image/png'
-                ? imgFp(state.clip.remoteData)
-                : state.clip.remoteText;
+            // remoteData 为空（图片消息被清/尚未填充）时返回空串：旧实现返回
+            // imgFp(undefined) 仍是非空字符串，调用方误判"有远端图片可粘贴"。
+            if (state.clip.remoteMime === 'image/png')
+                return state.clip.remoteData ? imgFp(state.clip.remoteData) : '';
+            return state.clip.remoteText;
         }
 
         function markOsWritten(fp) {
@@ -3898,23 +4184,39 @@
         }
 
         // 经 WebSocket 分块下载（直链不可用时的兜底：例如页面不是 http(s) 打开）。
-        // Promise 带 60s 超时：服务端异常（如 start/end 事件丢失）时不至于永久悬挂，
-        // 调用方（downloadFile）能走到"下载失败"提示而不是无声无息。
+        // [P5] 静默超时：30s 内没收到任何数据块才判定死亡（每 10s 检查一次）。
+        // 旧实现固定 60s 总超时——大文件慢速传输（背压限流）合法地超过 60s
+        // 也会被误杀，进度条走到一半报"超时"。
         function fetchRemoteFileViaWs(path) {
             if (fileFetchCache[path]) return Promise.resolve(fileFetchCache[path]);
             if (fileFetchInflight[path]) return fileFetchInflight[path];
             const p = new Promise((resolve, reject) => {
-                fetchWaiters[path] = { resolve: resolve, reject: reject, name: path.split('/').pop() };
+                const w = { resolve: resolve, reject: reject, name: path.split('/').pop(),
+                            lastRx: Date.now(), timer: 0 };
+                fetchWaiters[path] = w;
                 send({ type: 'file_download', path: path, name: path.split('/').pop() });
-                fetchWaiters[path].timer = setTimeout(() => {
-                    const w = fetchWaiters[path];
-                    if (w) { delete fetchWaiters[path]; w.reject(new Error('WS download timeout')); }
-                }, 60000);
+                w.timer = setInterval(() => {
+                    const cur = fetchWaiters[path];
+                    if (!cur) return;
+                    const dl = downloadBuffers[path];
+                    // start 未到（服务端没响应）时以请求发出时刻为基准，同样 30s 判死
+                    const lastRx = dl ? dl.lastRx : cur.lastRx;
+                    if (Date.now() - lastRx <= 30000) return;
+                    clearInterval(cur.timer);
+                    delete fetchWaiters[path];
+                    // 超时后半截缓冲区必须清理：否则下次对同一 path 重下会
+                    // 从残留的旧 chunk 起拼接，得到损坏文件（永不归零的泄漏）。
+                    delete downloadBuffers[path];
+                    if (currentTransferPath === path && currentTransferType === 'download')
+                        hideTransferMonitor();
+                    reportError('WS 下载超时: ' + path, '30s 未收到任何数据块');
+                    cur.reject(new Error('WS download timeout'));
+                }, 10000);
             });
             fileFetchInflight[path] = p;
             p.catch(() => { }).then(() => {
                 const w = fetchWaiters[path];
-                if (w && w.timer) clearTimeout(w.timer);
+                if (w && w.timer) clearInterval(w.timer);
                 delete fetchWaiters[path];
                 delete fileFetchInflight[path];
             });
@@ -3948,6 +4250,7 @@
                             const r = await fetchRemoteFileViaWs(filePath);
                             saveBlobUrl(r.url, saveName);
                         } catch (err) {
+                            reportError('直连下载失败(WS兜底后): ' + fileName, err);
                             showTransferStatus('下载失败: ' + fileName, 3000);
                         }
                         return;
@@ -3960,6 +4263,7 @@
                 const r = await fetchRemoteFileViaWs(filePath);
                 saveBlobUrl(r.url, saveName);
             } catch (err) {
+                reportError('直连下载失败: ' + fileName, err);
                 showTransferStatus('下载失败: ' + fileName, 3000);
             }
         }
@@ -4235,6 +4539,10 @@
         }
 
         async function uploadFileChunked(file, targetDir) {
+            // 入口清零残留标志：上一轮"取消/服务端拒绝"若在循环之外置位（队首即被取消），
+            // 陈旧标志会立刻误杀本次全新上传。
+            uploadCancelRequested = false;
+            uploadServerError = null;
             const baseDir = targetDir || lastListRealPath || currentRemotePath;
             // 拖拽上传目录时 _relPath 携带相对路径（含子目录），远端据此建同名结构
             const relativePath = file._relPath || file.webkitRelativePath || file.name;
@@ -4248,8 +4556,16 @@
                 // Send start message
                 send({ type: 'file_upload_start', path: remotePath, name: file.name, size: file.size });
 
+                // [N-PERF] remotePath 整轮不变：UTF-8 编码提到循环外做一次
+                //（旧实现每 64KB 块 new TextEncoder + encode 一次）。
+                const pathBytes = new TextEncoder().encode(remotePath);
+
                 let offset = 0;
                 while (offset < file.size) {
+                    if (uploadCancelRequested) {
+                        uploadCancelRequested = false;
+                        throw new Error(uploadServerError || 'cancelled by user');
+                    }
                     if (!state.ws || state.ws.readyState !== WebSocket.OPEN)
                         throw new Error('WebSocket closed during upload');
 
@@ -4257,6 +4573,12 @@
                     // 发送队列全堆在标签页内存里 → OOM。超过 4MB 暂停投喂。
                     while (state.ws.bufferedAmount > 4 * 1024 * 1024) {
                         await new Promise(r => setTimeout(r, 50));
+                        // 取消/服务端拒绝也要在背压等待中即时生效：否则 4MB×N 的
+                        // 积压期间大文件继续无效投喂，取消要等排空才响应。
+                        if (uploadCancelRequested) {
+                            uploadCancelRequested = false;
+                            throw new Error(uploadServerError || 'cancelled by user');
+                        }
                         if (!state.ws || state.ws.readyState !== WebSocket.OPEN)
                             throw new Error('WebSocket closed during upload');
                     }
@@ -4268,7 +4590,6 @@
                     // Build binary packet: [0x10][4-byte path length][4-byte data length][path UTF8][data]
                     // 注意：pathLen 在前、dataLen 在其次（服务端 QDataStream 连续读两个 quint32，
                     // path 起始于偏移 9），不是「path 之后跟 dataLen」。
-                    const pathBytes = new TextEncoder().encode(remotePath);
                     const header = new ArrayBuffer(9);
                     const view = new DataView(header);
                     view.setUint8(0, 0x10); // file chunk type
@@ -4293,11 +4614,26 @@
                 }
 
                 send({ type: 'file_upload_done', path: remotePath, name: file.name });
-                showTransferStatus(`上传完成: ${file.name} → ${baseDir}`, 2000);
-                setTimeout(hideTransferMonitor, 500);
+                // 不再乐观提示"上传完成"：服务端可能因磁盘满/数据不完整/覆盖失败
+                // 回 error 的 file_upload_done（成功提示由该消息处理）。这里只把
+                // 进度条定稿在 100%，等待服务端确认。
+                showTransferMonitor('⬆', file.name, file.size, file.size, 0);
+                showTransferStatus(`等待服务端确认: ${file.name}`, 3500);
+                // 服务端确认消息按 path 全等匹配；若因路径规范化差异或消息丢失
+                // 未匹配上，进度条最迟 3.5s 自动收起，不会卡在 100%。
+                setTimeout(() => {
+                    if (currentTransferPath === remotePath && currentTransferType === 'upload')
+                        hideTransferMonitor();
+                }, 3500);
             } catch (err) {
-                console.error('Upload failed:', err);
-                showTransferStatus(`上传失败: ${file.name}`, 3000);
+                // 用户主动取消（'cancelled by user'）不算异常，不打错误日志；
+                // 服务端拒绝已在 file_upload_done 分支打过，这里避免重复。
+                const cancelled = (err && err.message === 'cancelled by user');
+                if (!cancelled)
+                    reportError('上传异常: ' + file.name, err);
+                const why = (err && err.message && !cancelled)
+                    ? err.message : '已取消';
+                showTransferStatus(`上传失败: ${file.name} — ${why}`, 4000);
             } finally {
                 isUploading = false;
                 processUploadQueue();
@@ -4323,20 +4659,77 @@
         }
 
         function cancelCurrentTransfer() {
+            // 上传无法中断服务端已写入的分块，但可让前端停止继续投喂并清空队列：
+            // 旧实现只清下载缓冲，点“取消”后大文件仍会整份上传完。
+            if (currentTransferType === 'upload') {
+                uploadCancelRequested = true;
+                uploadQueue.length = 0;
+                showTransferStatus('正在取消上传…', 2000);
+            }
             // Clear download buffer if exists
             if (currentTransferPath && downloadBuffers[currentTransferPath]) {
                 delete downloadBuffers[currentTransferPath];
+                abortPendingDownloads('传输已取消');
             }
             hideTransferMonitor();
             showTransferStatus('传输已取消', 2000);
         }
 
+        // 重要错误同时往浏览器控制台打印一份：UI 的 toast/进度条几秒就消失，
+        // 复现完就没了、无法排查。统一前缀 [RD-ERROR] 便于在 devtools 过滤。
+        // error 可为字符串（服务端回的错误）或 Error 对象（抛出的异常）。
+        function reportError(context, error) {
+            try {
+                const detail = (error instanceof Error)
+                    ? (error.name + ': ' + error.message + (error.stack ? '\n' + error.stack : ''))
+                    : String(error);
+                console.error('[RD-ERROR] ' + context + ' — ' + detail);
+            } catch (e) { /* 控制台被禁用等极端情况：忽略，不能因记录错误而中断主流程 */ }
+        }
+
+        // [B24] 自动隐藏定时器只保留最新一个：上传进度每块都会刷新提示条，
+        // 旧实现的陈旧定时器会把刚刷新的提示提前藏掉（大文件传输中提示条闪断）。
+        let transferStatusTimer = 0;
+        // 采集不可用提示条（WSL 启动早期 / 无 X 环境 / X server 崩溃）。
+        // 服务端会周期重试，恢复后广播 available=true，这里随之撤掉。
+        let captureWarnEl = null;
+        let captureWarnVisible = false;
+        function showCaptureWarning(text) {
+            if (!captureWarnEl) {
+                captureWarnEl = document.createElement('div');
+                captureWarnEl.id = 'capture-warning';
+                captureWarnEl.style.cssText =
+                    'position:fixed;left:50%;top:16px;transform:translateX(-50%);' +
+                    'z-index:9999;max-width:min(680px,90vw);padding:10px 14px;' +
+                    'border-radius:8px;background:rgba(180,60,40,.92);color:#fff;' +
+                    'font-size:13px;line-height:1.5;box-shadow:0 4px 16px rgba(0,0,0,.35);' +
+                    'pointer-events:none;white-space:pre-line;';
+                document.body.appendChild(captureWarnEl);
+            }
+            // 服务端文案：一律 textContent（与 lock-hint 的处理保持一致）
+            captureWarnEl.textContent = text;
+            if (!captureWarnVisible) {
+                captureWarnEl.style.display = 'block';
+                captureWarnVisible = true;
+            }
+        }
+        function hideCaptureWarning() {
+            if (captureWarnVisible && captureWarnEl) {
+                captureWarnEl.style.display = 'none';
+                captureWarnVisible = false;
+            }
+        }
+
         function showTransferStatus(text, autoHideMs = 0) {
             const el = document.getElementById('transfer-status');
+            if (transferStatusTimer) {
+                clearTimeout(transferStatusTimer);
+                transferStatusTimer = 0;
+            }
             el.textContent = text;
             el.style.display = 'block';
             if (autoHideMs > 0) {
-                setTimeout(() => { el.style.display = 'none'; }, autoHideMs);
+                transferStatusTimer = setTimeout(() => { el.style.display = 'none'; }, autoHideMs);
             }
         }
 
@@ -4351,6 +4744,18 @@
 
             // 窗口大小改变时更新缩放
             window.addEventListener('resize', updateScale);
+
+            // 兜底：未捕获的脚本异常与 Promise 拒绝也打印一份到控制台。
+            // 主流程各站点已就地 reportError；这里捕获的是漏网之鱼，
+            // 否则它们只会在 devtools 里以默认形式一闪而过、无法归因。
+            window.addEventListener('error', (ev) => {
+                const why = (ev && (ev.message || ev.error)) || 'unknown';
+                const where = (ev && ev.filename) ? ` (${ev.filename}:${ev.lineno})` : '';
+                reportError('未捕获脚本错误', String(why) + where);
+            });
+            window.addEventListener('unhandledrejection', (ev) => {
+                reportError('未处理的 Promise 拒绝', (ev && ev.reason) || 'unknown');
+            });
 
             // ---- 工具栏固定/自动隐藏（类似 mstsc） ----
             const toolbar = document.getElementById('toolbar');

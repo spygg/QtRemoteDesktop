@@ -227,6 +227,10 @@ class X11Capturer : public PlatformCapturer {
     // 的损伤不会上报到根窗口，导致全屏缓冲该区域停留在初始全黑→顽固黑块。
     // 定期强制一次全量抓取可自愈这类区域（≤ ~0.8s 的短暂黑块可接受）。
     std::chrono::steady_clock::time_point lastFullRefresh_ = std::chrono::steady_clock::now();
+    // 抓取连续失败（X server 无响应/锁屏切换/驱动重置）后的限流截止时刻：
+    // 上层仍会按 fps 调 captureFrame()，每次失败都要等 X 往返，主线程会持续卡顿。
+    std::chrono::steady_clock::time_point grabFailUntil_ { };
+    int grabFailCount_ = 0;   // 连续抓取失败次数（≥3 触发输出重新枚举，应对热插拔/改分辨率）
 #ifdef HAVE_XSHM
     // MIT-SHM 全区抓取（[P1 perf]）：XGetImage 走 X socket 逐像素回传
     //（1080p@30fps ≈ 500MB/s 的往返），XShmGetImage 由 X server 直写共享内存，
@@ -259,6 +263,27 @@ public:
         Screen* screen = DefaultScreenOfDisplay(display_);
         width_ = WidthOfScreen(screen);
         height_ = HeightOfScreen(screen);
+
+        // ── root 可读性验证 ──
+        // WSLg 的 XWayland 是 **rootless** 模式：root window 只是逻辑尺寸，
+        // 没有真实 framebuffer，XGetImage(root) 恒返回 BadMatch（error 8）。
+        // 拿它当桌面采集源的结果是"初始化成功、每帧抓取失败" → 前端永久黑屏，
+        // 而且 DISPLAY 值没变时服务不会重试（WSL 启动黑屏的根因）。
+        // 这里先抓 1x1 探测：失败就判定该 display 不可用于桌面采集，交由上层
+        // 探测链换下一个（WSL 下最终会落到 Xvfb 虚拟桌面）。
+        {
+            XImage* probe = XGetImage(display_, rootWindow_, 0, 0, 1, 1, AllPlanes, ZPixmap);
+            XSync(display_, False);
+            if (!probe) {
+                qWarning() << "X11Capturer: root window is NOT readable on"
+                           << DisplayString(display_)
+                           << "- rootless X server (WSLg XWayland?) cannot be used as a desktop";
+                XCloseDisplay(display_);
+                display_ = nullptr;
+                return false;
+            }
+            XDestroyImage(probe);
+        }
 
         // 默认捕获整个虚拟屏；若存在 primary 输出（多屏拼接），只捕获主输出
         offsetX_ = 0; offsetY_ = 0;
@@ -309,6 +334,13 @@ public:
 
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
+        // 失败限流：上一次抓取失败后 1s 内不再触碰 X（只回报"未更新"）。
+        // 上层见到 updated=false 会把采样降到 1fps，配合这里避免失败期空转。
+        if (grabFailUntil_ != std::chrono::steady_clock::time_point()
+            && std::chrono::steady_clock::now() < grabFailUntil_) {
+            if (updated) *updated = false;
+            return true;
+        }
         if (damageSupported_ && !forceFull_ && !fullCaptureOnly_) {
             // 周期性自愈：即使本次有 damage 矩形，若距上次全量抓取已超 ~0.8s，
             // 也强制走一次全量抓取。这是为了修复 XComposite/面板类常变区域
@@ -481,8 +513,22 @@ public:
         bool fromShm = false;
         XImage* ximage = grabPrimary(&fromShm);
         if (!ximage) {
-            return false;
+            // 记录失败并限流 1s，避免锁屏/X 无响应期间每个采样周期都做一次
+            // 注定失败的抓取（阻塞主线程）。
+            grabFailUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            // 热插拔/主机改分辨率：XShmGetImage 会对旧尺寸持续返回 BadMatch，
+            // 只限流不重枚举会永久黑屏（report P1）。连续 3 次失败后重新枚举
+            // 输出并重建缓冲/shm（applyOutput 会重置尺寸并强制下帧全量）。
+            if (++grabFailCount_ >= 3) {
+                grabFailCount_ = 0;
+                qWarning() << "X11Capturer: 3 consecutive grab failures, refreshing outputs";
+                refreshOutputs();
+            }
+            if (updated) *updated = false;
+            return true;
         }
+        grabFailCount_ = 0;
+        grabFailUntil_ = std::chrono::steady_clock::time_point(); // 成功，解除限流
         forceFull_ = false; // 全量抓取成功，清除强制标志
         lastFullRefresh_ = std::chrono::steady_clock::now(); // 记录全量刷新时刻，供下方周期性自愈计时
 
@@ -527,6 +573,8 @@ public:
 
     int width() const { return primaryW_ > 0 ? primaryW_ : width_; }
     int height() const { return primaryH_ > 0 ? primaryH_ : height_; }
+    int originX() const override { return offsetX_; }
+    int originY() const override { return offsetY_; }
 
     // 用 XRandR X 扩展在进程内枚举输出，避免依赖 xrandr 子进程。
     // 旧实现 spawn `xrandr --query` 子进程，在服务运行环境下 QProcess 偶发
@@ -787,8 +835,14 @@ bool ScreenCapturer::start(int fps)
     // WAYLAND_DISPLAY，但桌面会话（Wayland）的合成器 socket 仍在——补设后
     // Wayland 客户端即可连上真实桌面；纯 X11 桌面无此 socket，行为不变。
     const QString wlSock = detectWaylandSocketName();
+    // [WSL] WSLg（WSL2 自带 GUI）不能走 Wayland：它的 Weston 不提供 ScreenCast
+    // ——既没有 org.gnome.Mutter.ScreenCast，也没有可用的 xdg-desktop-portal
+    // ScreenCast 后端。走这条路只有两种结局：立刻失败再回退（白等一轮），或
+    // 卡在永不出现的授权对话框上（主线程阻塞）。外部表现就是"WSL 里启动后
+    // 一直黑屏"。WSLg 的 X server (:0) 完整可用，直接走 X11。
+    const bool wslgEnvironment = QFile::exists(QStringLiteral("/mnt/wslg"));
     // [compat] qEnvironmentVariableIsEmpty 是 Qt 5.10 API（243 用 Qt 5.9.7），用 qgetenv 等价替代
-    if (!qgetenv("WAYLAND_DISPLAY").isEmpty() || !wlSock.isEmpty()) {
+    if (!wslgEnvironment && (!qgetenv("WAYLAND_DISPLAY").isEmpty() || !wlSock.isEmpty())) {
         if (qgetenv("WAYLAND_DISPLAY").isEmpty() && !wlSock.isEmpty()) {
             qputenv("WAYLAND_DISPLAY", wlSock.toUtf8());
             qInfo() << "ScreenCapturer: detected Wayland socket, set WAYLAND_DISPLAY =" << wlSock;
@@ -815,13 +869,25 @@ bool ScreenCapturer::start(int fps)
     if (useX11_) {
         qInfo() << "Using X11 optimized capture";
     } else {
-        // 两者都不可用且无显示环境 → 无头模式
-        if (qgetenv("DISPLAY").isEmpty() && qgetenv("WAYLAND_DISPLAY").isEmpty()) {
-            qWarning() << "No X11/Wayland display, screen capture disabled (headless mode)";
-            delete x11Capturer_;
-            x11Capturer_ = nullptr;
-            return false;
+        const QByteArray dpy = qgetenv("DISPLAY");
+        const QByteArray xa = qgetenv("XAUTHORITY");
+        delete x11Capturer_;
+        x11Capturer_ = nullptr;
+        if (dpy.isEmpty() && qgetenv("WAYLAND_DISPLAY").isEmpty()) {
+            qWarning() << "No X11/Wayland display, screen capture unavailable (headless mode)";
+        } else {
+            qWarning() << "ScreenCapturer: X11 init FAILED (DISPLAY=" << dpy
+                       << "XAUTHORITY=" << (xa.isEmpty() ? "(none)" : xa) << ")";
+            qWarning() << "  capture unavailable; upper layer will retry periodically."
+                       << "WSL: check WSLg / host X server; remote X: check TCP 6000+N;"
+                       << "headless: install Xvfb.";
         }
+        // 不再"假装启动成功"：旧代码在这里 return true，上层据此把 captureAvailable_
+        // 置真，前端认为采集正常却永远收不到画面（黑屏），而且 DISPLAY 未变化时
+        // 服务不会重试 —— 这是 WSL / 无 X 环境黑屏且无法自愈的直接原因。
+        // 原 Qt grabWindow 兜底路径在 QCoreApplication（服务模式）下 screen_ 恒为
+        // null，实际不可达，没有保留价值。
+        return false;
     }
 
     captureTimer_->start(1000 / fps);
@@ -886,6 +952,10 @@ void ScreenCapturer::captureFrame()
             // 区域抓取已知有变化（XDamage 非空），跳过全帧校验和以省 CPU
             idleCount_ = 0;
             leaveIdleThrottle();
+            // 强制帧同样在这里消费，否则连续有变化的场景下计数永不清零
+            forceSendNextFrame_ = false;
+            if (forceFrameCount_ > 0)
+                forceFrameCount_--;
             emitCapturedFrame(frame);
             schedulePumpFlush();
             return;
@@ -972,12 +1042,17 @@ void ScreenCapturer::captureFrame()
         }
 
         quint16 checksum = quickFrameChecksum(frame);
-        if (checksum == lastFrameChecksum_) {
+        // 与 X11 分支对齐：强制帧（新客户端接入 / request_keyframe）必须绕过
+        // 校验和去重，否则静止桌面下 Wayland 客户端永远等不到首帧（黑屏）。
+        if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
             idleCount_++;
             if (idleCount_ > static_cast<int>(fps_ * 2))
                 enterIdleThrottle();
             return;
         }
+        forceSendNextFrame_ = false;
+        if (forceFrameCount_ > 0)
+            forceFrameCount_--;
         idleCount_ = 0;
         leaveIdleThrottle();
         lastFrameChecksum_ = checksum;
@@ -1006,12 +1081,15 @@ void ScreenCapturer::captureFrame()
     }
 
     quint16 checksum = quickFrameChecksum(frame);
-    if (checksum == lastFrameChecksum_) {
+    if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
         idleCount_++;
         if (idleCount_ > static_cast<int>(fps_ * 2))
             enterIdleThrottle();
         return;
     }
+    forceSendNextFrame_ = false;
+    if (forceFrameCount_ > 0)
+        forceFrameCount_--;
     idleCount_ = 0;
     leaveIdleThrottle();
     lastFrameChecksum_ = checksum;

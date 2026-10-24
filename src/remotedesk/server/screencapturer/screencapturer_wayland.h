@@ -88,6 +88,9 @@ private:
     // PipeWire 流进入 ERROR 状态：captureFrame 必须如实报失败，否则上层永远
     // 以为采集正常（画面冻结却无任何重连），表现为"永久卡住最后一帧"。
     bool streamError_ = false;
+    // 上次尝试重建 PipeWire 流的时刻（ms）：ERROR 是终态，若不重建，共享被
+    // compositor 撤销后画面会永久停在最后一帧；重建按 5s 节流，避免失败时忙转。
+    qint64 streamErrorRetryMs_ = 0;
     // 部分初始化资源的清理：只销毁已创建的对象（区别于 teardownPipewire 的
     // 无条件 stop loop），用于 setup 各失败分支，避免泄漏常驻线程/会话。
     void abortPipewireSetup();

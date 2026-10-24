@@ -21,6 +21,8 @@
 #include <QWaitCondition>
 #include <atomic>
 #include <memory>
+#include <thread>
+#include <vector>
 #include "videoencoder.h"
 
 #include "shell.h"
@@ -208,6 +210,10 @@ private:
     std::unique_ptr<ScreenCapturer> screenCapturer_;
 #ifdef USE_FFMPEG
     std::unique_ptr<VideoEncoder> videoEncoder_;
+    // [N6] 退役编码器墓地：编码线程卡死在驱动调用（shutdownRetire 失败）时，
+    // 对象断开全部信号后**故意泄漏**于此，绝不析构（析构路径 qFatal 会连坐服务）。
+    // 只在驱动真卡死时发生，实践中 0~2 个；每个约一份编码上下文 + 一个线程栈。
+    std::vector<std::unique_ptr<VideoEncoder>> retiredEncoders_;
     // 缓存最近一帧关键帧，用于新客户端接入时立即回放以引导出图
     // （静态桌面抓取去重不会主动出帧，否则新客户端永远等不到关键帧而黑屏）。
     QByteArray lastKeyframeData_;
@@ -263,6 +269,10 @@ private:
     FileTransferService* fileTransferService_ = nullptr;
     QThread* transferThread_ = nullptr;
 
+    // [B8] IME 切换工作线程（原先 detach 后无法回收）：由成员持有生命周期，
+    // 析构时 join。同一时刻只允许一个在飞（切换请求极低频）。
+    std::unique_ptr<std::thread> imeWorker_;
+
     bool isRunning_ = false;
     quint16 httpPort_;
     quint16 wsPort_;
@@ -288,6 +298,12 @@ private:
     HwEncodeMode configHwEncodeMode_ = HwEncodeMode::Auto; // 硬件编码开关（auto/on/off）
     int userScale_ = 75;
     bool screenLocked_ = false;
+    // [Win-解锁] 一键免密解锁用的明文密码（server_config.json 的 unlockPassword，
+    // 局域网自用场景）。锁屏 UI 在 winlogon 安全桌面，只能经 secure-input 注入。
+    QString unlockPassword_;
+    // 前端页面标题的自定义系统名称（server_config.json 的 systemName，如
+    // "办公室-242"）。空则回退主机名。多台被控机靠它区分标签页。
+    QString systemName_;
     bool secureInputRunning_ = false;
     bool captureAvailable_ = true;
     QString shellCurrentDir_;
@@ -304,6 +320,12 @@ private:
     QHash<QTcpSocket*, HttpDownloadState*> httpDownloadStates_;
 #ifdef _WIN32
     int secureInputPid_ = 0;
+    // 保留进程句柄（而非仅 PID）用于超时终止：PID 在进程退出后可被系统回收，
+    // 5s 超时后按 PID 重新 OpenProcess 有极小概率杀掉一个无关的新进程。
+    void* secureInputProcHandle_ = nullptr;
+    // 启动代次：5s 超时定时器只在代次未变时生效。否则旧进程的定时器会
+    // 误杀 stop 之后新拉起的进程（旧实现没有可取消的定时器句柄）。
+    quint64 secureInputGen_ = 0;
 #endif
     QSslConfiguration* sslConfiguration_;
     QByteArray lastCodecExtra_;

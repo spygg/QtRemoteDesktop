@@ -27,8 +27,11 @@ SERVICE_STATUS WindowsService::s_status = {};
 HANDLE WindowsService::s_stopEvent = NULL;
 HANDLE WindowsService::s_sessionChangeEvent = NULL;
 
-void WINAPI WindowsService::serviceCtrlHandler(DWORD ctrlCode)
+DWORD WINAPI WindowsService::serviceCtrlHandler(DWORD ctrlCode, DWORD eventType,
+                                               LPVOID eventData, LPVOID context)
 {
+    Q_UNUSED(eventData);
+    Q_UNUSED(context);
     switch (ctrlCode) {
     case SERVICE_CONTROL_STOP:
     case SERVICE_CONTROL_SHUTDOWN:
@@ -45,12 +48,28 @@ void WINAPI WindowsService::serviceCtrlHandler(DWORD ctrlCode)
         // 用户切换/注销/新登录：当前 helper 属于旧会话，必须重建（否则新会话
         // 一直是黑屏，而旧 helper 还"已连接"）。这里只置事件，实际重建交给
         // helper 定时器（服务控制线程里不能做重活）。
-        if (s_sessionChangeEvent)
-            SetEvent(s_sessionChangeEvent);
+        //
+        // [FIX-B9] 只对"会话归属可能变化"的事件重建。锁屏/解锁同样会发
+        // SESSIONCHANGE（WTS_SESSION_LOCK/UNLOCK），若不过滤会在每次锁屏时
+        // 白白杀掉重建 helper（黑屏 churn），而锁屏本身不需要换会话。
+        switch (eventType) {
+        case WTS_CONSOLE_CONNECT:
+        case WTS_CONSOLE_DISCONNECT:
+        case WTS_REMOTE_CONNECT:
+        case WTS_REMOTE_DISCONNECT:
+        case WTS_SESSION_LOGON:
+        case WTS_SESSION_LOGOFF:
+            if (s_sessionChangeEvent)
+                SetEvent(s_sessionChangeEvent);
+            break;
+        default:
+            break;
+        }
         break;
     default:
         break;
     }
+    return NO_ERROR;
 }
 
 DWORD WindowsService::launchHelperProcess()
@@ -168,7 +187,7 @@ DWORD WindowsService::launchHelperProcess()
 
 void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
 {
-    s_statusHandle = RegisterServiceCtrlHandlerW(SERVICE_NAME, serviceCtrlHandler);
+    s_statusHandle = RegisterServiceCtrlHandlerExW(SERVICE_NAME, serviceCtrlHandler, nullptr);
     if (!s_statusHandle)
         return;
 

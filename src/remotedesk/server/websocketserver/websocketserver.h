@@ -31,6 +31,9 @@ public:
     // 发送 JSON 给指定客户端
     void sendJson(const QString& clientId, const QJsonObject& data);
     QStringList clients() const { return clients_.keys(); }
+    // 仅判空/计数的调用点（每帧出帧、光标广播）用这个：clients() 会每次
+    // 构造一份含所有 clientId 的 QStringList，每帧堆分配纯属浪费。
+    int clientCount() const { return clients_.size(); }
     // 是否存在需要视频帧的 WS 客户端（排除仅走 RTP 的 WebRTC 客户端）。
     // 供服务端判断是否需要周期补关键帧——纯 ffmpeg/MSE 模式下没有
     // WebRTC 会话，若只检查 webrtcSessions_ 就永远不补帧，静态画面冻结。
@@ -126,6 +129,10 @@ private:
     QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;
     QWebSocket* captureSource_ = nullptr;
+    // /capture 上最近一次收到帧/消息的时间：捕获 helper 正常时每帧都有上行数据，
+    // 长时间静默说明连接已半开（对端掉电/断网无 FIN），需主动清理，
+    // 否则 captureSource_ 句柄与 helper 进程常驻，且 isCaptureSourceConnected() 恒真。
+    qint64 captureLastDataMs_ = 0;
     QWebSocket* secureInputSource_ = nullptr;
 };
 

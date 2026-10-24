@@ -52,9 +52,29 @@ bool XdndMonitor::ensurePlatform()
     st->comOk = true;
     hr = CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER,
         IID_IShellWindows, (void**)&st->shellWindows);
-    if (SUCCEEDED(hr) && st->shellWindows) {
-        hr = CoCreateInstance(kCLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-            kIID_IUIAutomation, (void**)&st->uia);
+    // 任一 COM 对象拿不到就整体回滚并返回 false：helper 常早于 Explorer 就绪，
+    // 若把半初始化的 state 固化到 platform_，ensurePlatform() 之后永远直接返回
+    // true，拖拽侦测整场会话失效且没有任何重试机会。
+    if (FAILED(hr) || !st->shellWindows) {
+        if (st->shellWindows) {
+            st->shellWindows->Release();
+            st->shellWindows = nullptr;
+        }
+        delete st;
+        CoUninitialize();
+        return false;
+    }
+    hr = CoCreateInstance(kCLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+        kIID_IUIAutomation, (void**)&st->uia);
+    if (FAILED(hr) || !st->uia) {
+        if (st->uia) {
+            st->uia->Release();
+            st->uia = nullptr;
+        }
+        st->shellWindows->Release();
+        delete st;
+        CoUninitialize();
+        return false;
     }
     platform_ = st;
     return true;

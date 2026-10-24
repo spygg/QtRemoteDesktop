@@ -70,17 +70,19 @@ int32_t yang_hmac_encode(const char *algo, const char *key,
 		return yang_error_wrap(ERROR_TLS, "hmac init faied");
 	}
 
-	if (HMAC_Init_ex(ctx, key, key_length, engine, NULL) < 0) {
+	// [FIX] HMAC_Init_ex/Update/Final 返回 1=成功、0=失败（非负错误码），原 `< 0`
+	// 判断永远漏掉失败 → 半成品 MAC 被当作有效发往 STUN。与 1.0.x 分支同一修正。
+	if (HMAC_Init_ex(ctx, key, key_length, engine, NULL) <= 0) {
 		HMAC_CTX_free(ctx);
 		return yang_error_wrap(ERROR_TLS, "hmac init faied");
 	}
 
-	if (HMAC_Update(ctx, (const uint8_t*) input, input_length) < 0) {
+	if (HMAC_Update(ctx, (const uint8_t*) input, input_length) <= 0) {
 		HMAC_CTX_free(ctx);
 		return yang_error_wrap(ERROR_TLS, "hmac update faied");
 	}
 
-	if (HMAC_Final(ctx, (uint8_t*) output, output_length) < 0) {
+	if (HMAC_Final(ctx, (uint8_t*) output, output_length) <= 0) {
 		HMAC_CTX_free(ctx);
 		return yang_error_wrap(ERROR_TLS, "hmac final faied");
 	}

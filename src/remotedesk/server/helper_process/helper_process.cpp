@@ -19,6 +19,7 @@
 #include <QJsonObject>
 #include <QMimeData>
 #include <QProcess>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QThread>
 #include <QTimer>
@@ -101,6 +102,25 @@ static QString helperCodecToString(CodecType c)
     }
 }
 #endif
+
+// [B7] helper 侧配置更新统一走 QSaveFile 原子写：server_config.json 由主服务进程
+// 与 helper 两个进程共同读写，ReadWrite+resize(0)+write 的非原子序列在并发窗口
+// 内会把对方刚写好的配置截断成半截 JSON（服务端下次启动读配置失败 → 全部回落默认）。
+static void helperSaveConfigField(const QString& key, const QJsonValue& value)
+{
+    const QString cfgPath = QGuiApplication::applicationDirPath() + "/server_config.json";
+    QSaveFile save(cfgPath);
+    if (!save.open(QIODevice::ReadWrite)) {
+        qWarning() << "Helper: cannot open config for update:" << cfgPath << save.errorString();
+        return;
+    }
+    QJsonObject root = QJsonDocument::fromJson(save.readAll()).object();
+    root[key] = value;
+    save.resize(0);
+    save.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    if (!save.commit())
+        qWarning() << "Helper: failed to commit config:" << cfgPath << save.errorString();
+}
 
 int HelperProcess::run(int argc, char* argv[])
 {
@@ -377,6 +397,16 @@ int HelperProcess::run(int argc, char* argv[])
                 qInfo() << "Helper: video encoder recovered, restoring bitrate to" << videoBaseBitrate;
             }
         });
+    // [N7] MPP 硬编运行中被证明不可用（编码线程经队列信号通知）：主线程重建为软编。
+    // 缺这条接线时 helper 会一直停在"编码器损坏但无人重建"→ 视频模式永久无帧，
+    // 只能等 request_keyframe 的兜底重建（静止桌面上可能永远等不到）。
+    QObject::connect(encoder.get(), &VideoEncoder::reinitRequired, &app, [&]() {
+        if (quitting || !videoActive || !encoder)
+            return;
+        qWarning() << "Helper: encoder reported reinitRequired (MPP unavailable), rebuilding as software encoder";
+        reinitVideoEncoder();
+        pumpCaptureFrames(4);
+    });
 #endif // USE_FFMPEG
 
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
@@ -402,6 +432,20 @@ int HelperProcess::run(int argc, char* argv[])
     QObject::connect(&ws, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
         &app, [&](QAbstractSocket::SocketError err) {
             qWarning() << "Helper: WS error" << err << ws.errorString();
+            if (quitting)
+                return;
+            // 连接失败（服务尚未开始监听/端口切换）时某些平台只发 error、不发
+            // disconnected → 旧实现没有重连，helper 永久停在"采集了但没人收"的状态。
+            if (err == QAbstractSocket::ConnectionRefusedError
+                || err == QAbstractSocket::HostNotFoundError
+                || err == QAbstractSocket::SocketTimeoutError
+                || err == QAbstractSocket::RemoteHostClosedError) {
+                QTimer::singleShot(3000, &app, [&]() {
+                    if (quitting || ws.state() != QAbstractSocket::UnconnectedState)
+                        return;
+                    ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
+                });
+            }
         });
     QObject::connect(&ws, &QWebSocket::disconnected, &app, [&]() {
         if (quitting) return;
@@ -411,7 +455,11 @@ int HelperProcess::run(int argc, char* argv[])
         // helper 在 3s 内退出时，lambda 会解引用已销毁的 ws/quitting（use-after-scope），
         // 而 `if (quitting) return` 里的 quitting 本身也是悬垂引用，保护形同虚设。
         QTimer::singleShot(3000, &app, [&]() {
-            if (quitting) return;
+            // 与 error 路径同构的守卫：若 3s 内已有其它路径发起重连（或 ws 尚未
+            // 回到 Unconnected），对非空闲状态的 socket 再 open() 会被 Qt 断言/忽略，
+            // 且两条重连线会互相竞争。
+            if (quitting || ws.state() != QAbstractSocket::UnconnectedState)
+                return;
             ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
         });
     });
@@ -420,6 +468,20 @@ int HelperProcess::run(int argc, char* argv[])
             qWarning() << "Helper: SSL error" << err.errorString();
         ws.ignoreSslErrors();
     });
+    // [N2] 30s 保活：服务端 180s 静默清扫无法区分"合法静默"（pause/静止桌面无帧）
+    // 与真正半开的挂死连接，会把健康的采集源误杀 → 每次误杀都是断连重连周期，
+    // 观看端表现为无画面数秒。事件循环存活即心跳照常；进程挂死则心跳停止，
+    // 清扫的半开检测语义仍然成立。
+    QTimer* captureHbTimer = new QTimer(&app);
+    captureHbTimer->setInterval(30000);
+    QObject::connect(captureHbTimer, &QTimer::timeout, &app, [&]() {
+        if (quitting || ws.state() != QAbstractSocket::ConnectedState)
+            return;
+        QJsonObject hb;
+        hb["type"] = "capture_hb";
+        ws.sendTextMessage(QString::fromUtf8(QJsonDocument(hb).toJson(QJsonDocument::Compact)));
+    });
+    captureHbTimer->start();
     ws.open(QUrl(QString("%1://127.0.0.1:%2/capture").arg(wsScheme).arg(wsPort)));
 
     QObject::connect(&capturer, &ScreenCapturer::frameCaptured,
@@ -617,20 +679,8 @@ int HelperProcess::run(int argc, char* argv[])
                     // [H9] 输入归一化基准必须同步更新：仅在启动时 setScreenSize 一次，
                     // 切分辨率后仍是旧尺寸 → 服务模式鼠标系统性偏移
                     inputMgr.setScreenSize(w, h);
-                    // 更新配置文件中的当前分辨率
-                    {
-                        QFile cfgFile(QGuiApplication::applicationDirPath() + "/server_config.json");
-                        if (cfgFile.open(QIODevice::ReadWrite)) {
-                            QJsonDocument doc = QJsonDocument::fromJson(cfgFile.readAll());
-                            if (doc.isObject()) {
-                                QJsonObject root = doc.object();
-                                root["currentResolution"] = QString("%1x%2").arg(w).arg(h);
-                                cfgFile.resize(0);
-                                cfgFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-                            }
-                            cfgFile.close();
-                        }
-                    }
+                    // 更新配置文件中的当前分辨率（QSaveFile 原子写，见 helperSaveConfigField）
+                    helperSaveConfigField("currentResolution", QString("%1x%2").arg(w).arg(h));
                     QJsonObject info;
                     info["type"] = "screen_info";
                     info["width"] = w;
@@ -966,8 +1016,12 @@ int HelperProcess::run(int argc, char* argv[])
                     POINT pt; GetCursorPos(&pt);
                     INPUT mi = {};
                     mi.type = INPUT_MOUSE;
-                    mi.mi.dx = (pt.x * 65535) / GetSystemMetrics(SM_CXSCREEN);
-                    mi.mi.dy = (pt.y * 65535) / GetSystemMetrics(SM_CYSCREEN);
+                    // GetSystemMetrics 在无头/RDP 边缘会话下可能返回 0，裸除会直接
+                    // 触发整数除零崩溃（helper 被看门狗反复拉起）。
+                    const int w = GetSystemMetrics(SM_CXSCREEN);
+                    const int h = GetSystemMetrics(SM_CYSCREEN);
+                    mi.mi.dx = w > 0 ? (pt.x * 65535) / w : 0;
+                    mi.mi.dy = h > 0 ? (pt.y * 65535) / h : 0;
                     mi.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
                     SendInput(1, &mi, sizeof(INPUT));
                     INPUT esc[2] = {};
@@ -1024,21 +1078,14 @@ int HelperProcess::run(int argc, char* argv[])
         return 1;
     }
 
-    // 枚举支持的分辨率并写入配置文件
+    // 枚举支持的分辨率并写入配置文件（QSaveFile 原子写，见 helperSaveConfigField）
     {
         QJsonArray resolutions = ScreenCapturer::enumerateSupportedResolutions();
-        QFile cfgFile(QGuiApplication::applicationDirPath() + "/server_config.json");
-        if (cfgFile.open(QIODevice::ReadWrite)) {
-            QJsonDocument doc = QJsonDocument::fromJson(cfgFile.readAll());
-            QJsonObject root = doc.isObject() ? doc.object() : QJsonObject();
-            root["resolutions"] = resolutions;
-            root["currentResolution"] = QString("%1x%2").arg(capturer.width()).arg(capturer.height());
-            cfgFile.resize(0);
-            cfgFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-            cfgFile.close();
-            qInfo() << "Helper: wrote" << resolutions.size() << "supported resolutions to config, current ="
-                    << root["currentResolution"].toString();
-        }
+        helperSaveConfigField("resolutions", resolutions);
+        helperSaveConfigField("currentResolution",
+            QString("%1x%2").arg(capturer.width()).arg(capturer.height()));
+        qInfo() << "Helper: wrote" << resolutions.size() << "supported resolutions to config, current ="
+                << capturer.width() << "x" << capturer.height();
     }
 
     QObject::connect(&app, &QGuiApplication::aboutToQuit, [&]() {

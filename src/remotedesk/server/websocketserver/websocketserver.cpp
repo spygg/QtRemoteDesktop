@@ -22,11 +22,12 @@ static const qint64 kMaxSocketBacklogBytes = 512 * 1024;
 // 连接会线性抬高每帧广播开销并吃掉内存。超出直接拒绝，不排队。
 static const int kMaxClients = 32;
 
-// 单条入站消息大小上限。上传/输入都是小块，采集帧也只有数 MB；超过此值基本可判为
-// 异常或恶意构造，丢弃而不是让它进入后续解析（大块解析本身就是内存放大点）。
-// Qt 5.15+ 另有 setMaxAllowedIncomingMessageSize 可在协议层直接掐断（见 handleNewSocket）。
-static const qint64 kMaxInboundMessageBytes = 16 * 1024 * 1024;
-static const int kMaxInboundTextBytes = 1024 * 1024;
+// 单条入站消息大小上限。上传/输入都是小块；文本通道除普通键鼠事件外还承载
+// 剪贴板（截图 PNG → base64 常见 1.5~4MB），因此文本上限必须显著高于 1MB，
+// 否则"复制截图 → 远端粘贴"会被静默丢弃。协议层上限按文本上限的 2 倍留出
+// JSON 包装余量。
+static const qint64 kMaxInboundTextBytes = 32 * 1024 * 1024;
+static const qint64 kMaxInboundMessageBytes = 64 * 1024 * 1024;
 
 // 半开连接清理阈值：前端每 15s 发一次 ping，正常连接不可能 180s 无任何上行消息。
 static const qint64 kClientIdleTimeoutMs = 180000;
@@ -56,6 +57,18 @@ WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent
                 dropClient(id);
             }
         }
+        // /capture 半开清理：helper 正常时每帧都有上行数据，180s 静默 = 连接已死。
+        // 不清理的话 captureSource_ 一直指向僵尸 socket，服务端误以为有采集源在线。
+        if (captureSource_ && captureLastDataMs_ > 0 && now - captureLastDataMs_ > kClientIdleTimeoutMs) {
+            qWarning() << "Capture source idle timeout, dropping";
+            QWebSocket* dead = captureSource_;
+            captureSource_ = nullptr;
+            captureLastDataMs_ = 0;
+            emit captureSourceDisconnected();
+            disconnect(dead, nullptr, this, nullptr);
+            dead->close();
+            dead->deleteLater();
+        }
     });
     idleTimer_.start();
 }
@@ -71,6 +84,14 @@ WebSocketServer::~WebSocketServer()
         disconnect(captureSource_, nullptr, this, nullptr);
         captureSource_->deleteLater();
         captureSource_ = nullptr;
+    }
+    // /secure-input 的 helper 同样是本类创建/持有的 socket；漏掉会随服务退出
+    // 留下一个未关闭的连接（对端 helper 也会一直重连等待）。
+    if (secureInputSource_) {
+        disconnect(secureInputSource_, nullptr, this, nullptr);
+        secureInputSource_->close();
+        secureInputSource_->deleteLater();
+        secureInputSource_ = nullptr;
     }
 
     server_->close();
@@ -119,6 +140,13 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
     // 连接属低频事件，降为 qDebug 避免默认日志噪音
     qDebug() << "WS new connection, path:" << url.path();
 
+    // 入站消息大小上限必须在任何 early-return 之前设置：/capture、/secure-input、
+    // /api/shell/ws 都是先 return 的特权通道，原实现把这一步放在后面，导致它们
+    // 完全不设协议层上限（分片重组可先吃到 16MB+ 才被上层丢弃）。
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    socket->setMaxAllowedIncomingMessageSize(kMaxInboundMessageBytes);
+#endif
+
     // 内部通道（helper / secure-input）必须来自本机回环地址：
     // 服务端监听 0.0.0.0，若不加限制，局域网内任意主机可连 /capture 伪造
     // 画面、劫持捕获控制，或连 /secure-input 混入锁屏输入。
@@ -137,9 +165,15 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
         qInfo() << "Helper connected to service WS via /capture";
         if (captureSource_) {
             qInfo() << "Replacing existing capture source";
-            captureSource_->deleteLater();
+            // 先断开旧源的所有信号：仅 deleteLater 的话，旧 socket 在本轮事件循环
+            // 结束前仍可能投递已排队的帧/消息，与新 helper 的帧混流导致画面抖动。
+            QWebSocket* old = captureSource_;
+            disconnect(old, nullptr, this, nullptr);
+            old->close();
+            old->deleteLater();
         }
         captureSource_ = socket;
+        captureLastDataMs_ = QDateTime::currentMSecsSinceEpoch();
         emit captureSourceConnected();
         connect(socket, &QWebSocket::disconnected, this, [this, socket]() {
             qWarning() << "Helper disconnected from /capture";
@@ -149,7 +183,11 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             }
             socket->deleteLater();
         });
-        connect(socket, &QWebSocket::binaryMessageReceived, this, [this](const QByteArray& msg) {
+        connect(socket, &QWebSocket::binaryMessageReceived, this, [this, socket](const QByteArray& msg) {
+            // 已被新 helper 替换的旧连接不再产生帧（信号可能断线前已入队）
+            if (captureSource_ != socket)
+                return;
+            captureLastDataMs_ = QDateTime::currentMSecsSinceEpoch();
             if (msg.size() < 5) return;
             QDataStream stream(msg);
             stream.setByteOrder(QDataStream::BigEndian);
@@ -167,7 +205,10 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
                 emit captureVideoFrameReceived(msg.mid(13), frameType == 0x01, ts);
             }
         });
-        connect(socket, &QWebSocket::textMessageReceived, this, [this](const QString& text) {
+        connect(socket, &QWebSocket::textMessageReceived, this, [this, socket](const QString& text) {
+            if (captureSource_ != socket)
+                return;
+            captureLastDataMs_ = QDateTime::currentMSecsSinceEpoch();
             QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
             if (doc.isObject())
                 emit captureMessageReceived(doc.object());
@@ -188,7 +229,12 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
         }
         qInfo() << "Secure input helper connected";
         if (secureInputSource_) {
-            secureInputSource_->deleteLater();
+            // 与 /capture 同理：断开旧 helper 的信号并主动关闭，避免替换窗口内
+            // 旧连接的消息继续生效（锁屏输入这类通道尤其不能串号）。
+            QWebSocket* old = secureInputSource_;
+            disconnect(old, nullptr, this, nullptr);
+            old->close();
+            old->deleteLater();
         }
         secureInputSource_ = socket;
         connect(socket, &QWebSocket::disconnected, this, [this, socket]() {
@@ -212,10 +258,7 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
 
     // Qt 5.15+ 可在协议层限制入站消息大小（分片会在接收阶段就被拒绝）；
     // 更早版本没有该 API，靠下面 onTextMessageReceived/onBinaryMessageReceived 的
-    // 手动长度检查兜底。
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    socket->setMaxAllowedIncomingMessageSize(kMaxInboundMessageBytes);
-#endif
+    // 手动长度检查兜底。（上限已在 handleNewSocket 开头统一设置）
 
     QString clientId = QUuid::createUuid().toString();
 
@@ -349,6 +392,18 @@ void WebSocketServer::onTextMessageReceived(const QString& message)
 
     if (message.size() > kMaxInboundTextBytes) {
         qWarning() << "Oversized text message from client, dropped:" << message.size();
+        // 不能静默丢弃：前端剪贴板写入后若无任何回应，会一直显示"已粘贴成功"，
+        // 远端剪贴板却停在旧内容（大截图粘贴失败尤其明显且无从排查）。
+        QJsonObject err;
+        err.insert(QStringLiteral("type"), QStringLiteral("error"));
+        err.insert(QStringLiteral("context"), QStringLiteral("inbound_too_large"));
+        err.insert(QStringLiteral("size"), message.size());
+        err.insert(QStringLiteral("limit"), kMaxInboundTextBytes);
+        err.insert(QStringLiteral("message"),
+                   QStringLiteral("消息过大：%1 字节（上限 %2）")
+                       .arg(message.size())
+                       .arg(kMaxInboundTextBytes));
+        sendJson(clientId, err);
         return;
     }
 
@@ -577,12 +632,15 @@ void WebSocketServer::broadcastJson(const QJsonObject& data)
 
     QJsonDocument doc(data);
     QByteArray message = doc.toJson(QJsonDocument::Compact);
+    // [P7] UTF-8→QString 转换提到循环外：同一条消息发给所有客户端，
+    // 旧实现每客户端重复转换一遍（QString 构造含 16 位宽字符分配）。
+    const QString text = QString::fromUtf8(message);
 
     for (auto it = clients_.constBegin(); it != clients_.constEnd(); ++it) {
         QWebSocket* socket = it.value();
         if (socket->state() == QAbstractSocket::ConnectedState) {
             pendingBytes_[it.key()] += qMax<qint64>(0,
-                socket->sendTextMessage(QString::fromUtf8(message)));
+                socket->sendTextMessage(text));
         }
     }
 }

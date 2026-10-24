@@ -18,6 +18,8 @@
 
 #include <QDBusConnection>
 #include <QDBusMessage>
+#include <QDBusArgument>
+#include <QDBusVariant>
 #include <QDBusObjectPath>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
@@ -247,8 +249,15 @@ bool InputManager::ensureXDisplay()
 {
     if (xDisplay_)
         return true;
+    // 失败限流：display 不可用时，mousemove 会以 60Hz 调到这里。无节流时每秒
+    // 做 60 次 XOpenDisplay（每次都是一次 X 协议连接/鉴权握手，失败路径可能上百
+    // 微秒到毫秒），主线程被持续占用。1.5s 重试一次足够覆盖 display 后启动的场景。
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (lastXOpenFailMs_ != 0 && nowMs - lastXOpenFailMs_ < 1500)
+        return false;
     Display* d = XOpenDisplay(nullptr);
     if (!d) {
+        lastXOpenFailMs_ = nowMs;
         // X display 仍不可用：纯 Wayland 且无 Xwayland 时，惰性发起 portal（只一次）。
         if (waylandMode_ && !portalInitStarted_) {
             portalInitStarted_ = true;
@@ -276,17 +285,27 @@ void InputManager::injectMouseMove(int x, int y) {
     // Wayland 门户模式：通过 RemoteDesktop D-Bus 注入
     if (waylandPortalMode_ && portalReady_) {
         // NotifyPointerMotionAbsolute(session, options, stream, x, y)
-        // stream=0 表示使用默认流
-        QDBusMessage msg = QDBusMessage::createMethodCall(
-            PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE,
-            QStringLiteral("NotifyPointerMotionAbsolute"));
-        msg << QVariant::fromValue(QDBusObjectPath(portalSessionPath_));
-        msg << QVariantMap();
-        msg << 0u;  // stream node id (0 = default)
-        msg << static_cast<double>(x);
-        msg << static_cast<double>(y);
-        QDBusConnection::sessionBus().asyncCall(msg);
-        return;
+        // 接口要求 x/y 是**流内 0..1 归一化浮点**（旧实现直接传像素，超出范围的
+        // 值会被门户钳到角落，表现为鼠标只能贴边）；stream 必须是 Start 应答
+        // streams 里给出的真实节点 id（不存在 "0=默认"）。
+        const int sw = portalStreamW_ > 0 ? portalStreamW_ : screenW_;
+        const int sh = portalStreamH_ > 0 ? portalStreamH_ : screenH_;
+        const bool streamOk = !portalStreamNode_.isEmpty();
+        if (sw > 0 && sh > 0 && streamOk) {
+            // 采集坐标（捕获区相对）→ 桌面绝对 → 流内归一化
+            const double nx = double(x + screenOffsetX_ - portalStreamX_) / double(sw);
+            const double ny = double(y + screenOffsetY_ - portalStreamY_) / double(sh);
+            QDBusMessage msg = QDBusMessage::createMethodCall(
+                PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE,
+                QStringLiteral("NotifyPointerMotionAbsolute"));
+            msg << QVariant::fromValue(QDBusObjectPath(portalSessionPath_));
+            msg << QVariantMap();
+            msg << portalStreamNode_.toUInt();
+            msg << qBound(0.0, nx, 1.0);
+            msg << qBound(0.0, ny, 1.0);
+            QDBusConnection::sessionBus().asyncCall(msg);
+            return;
+        }
     }
     // 首次注入时惰性打开 X display（env 已就绪）：X11 机器上此后走 XTest；
     // 成功会把 waylandMode_ 改回 false，避免下面误走 uinput。
@@ -303,7 +322,9 @@ void InputManager::injectMouseMove(int x, int y) {
     // XTest 真实设备语义（与按钮/键盘路径统一）+ XFlush 异步刷出：
     // 原实现 XWarpPointer（程序传送语义，不经指针处理管线）+ XSync（同步往返，
     // 60Hz mousemove 时主线程每秒阻塞等待 60 次）。
-    XTestFakeMotionEvent(d, -1, x, y, CurrentTime);
+    // 坐标补上捕获区在根窗口的原点偏移：多屏时主输出不一定在 (0,0)，
+    // 不补偏移会让所有点击系统性偏移 (offsetX,offsetY)。
+    XTestFakeMotionEvent(d, -1, x + screenOffsetX_, y + screenOffsetY_, CurrentTime);
     XFlush(d);
 }
 
@@ -313,9 +334,14 @@ QPoint InputManager::cursorPosition() const
     // 真实光标由本进程的 uinput 虚拟指针驱动 —— 直接回报最近一次注入坐标。
     if (waylandMode_ && uinputMouseFd_ >= 0)
         return QPoint(lastInjX_, lastInjY_);
+    // 惰性打开 X display：光标泵在采集启动后很快就开始跑，若不等首个输入事件
+    // 才打开，queryPointer 必然失败并回落到 QCursor::pos()（服务模式下恒 (0,0)），
+    // 前端光标 overlay 会一直钉在左上角。ensureXDisplay 带失败节流，可安全频繁调用。
+    if (!xDisplay_)
+        const_cast<InputManager*>(this)->ensureXDisplay();
     int x = -1, y = -1;
     if (queryPointer(xDisplay_, &x, &y) && x >= 0 && y >= 0)
-        return QPoint(x, y);
+        return QPoint(x - screenOffsetX_, y - screenOffsetY_);
     return QCursor::pos();
 }
 
@@ -325,7 +351,8 @@ void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
         injectMouseMove(x, y);
         // NotifyPointerButton(session, options, button_code, state)
         // button_code: Linux evdev button codes (0x110=LEFT, 0x111=RIGHT, 0x112=MIDDLE)
-        uint btnCode = (button == 0) ? 0x110 : (button == 1) ? 0x111 : 0x112;
+        // button 编号遵循前端 DOM 约定：0=左、1=中、2=右（与下方 X11 Button1/2/3 映射一致）
+        uint btnCode = (button == 0) ? 0x110 : (button == 1) ? 0x112 : 0x111;
         uint state = isDown ? 1u : 0u;
         QDBusMessage msg = QDBusMessage::createMethodCall(
             PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE,
@@ -455,31 +482,37 @@ void InputManager::focusLockScreenWindow(void* dpy)
     focusCheckedMs_ = now;
 }
 
-void InputManager::sendXModifier(X11KeySym ks, bool isDown) {
+bool InputManager::sendXModifier(X11KeySym ks, bool isDown) {
     // Wayland 门户优先
     if (waylandPortalMode_ && portalReady_) {
         unsigned short lkc = keysymToLinuxKeycode(static_cast<unsigned long>(ks));
-        if (lkc != 0)
+        if (lkc != 0) {
             sendPortalKey(lkc, isDown);
-        return;
+            return true;
+        }
+        return false;
     }
     // uinput 优先（Wayland 会话无门户时也自动初始化）
     if (uinputFd_ >= 0 || waylandMode_) {
         if (uinputFd_ < 0 && !initUinput())
-            return;
+            return false;
         unsigned short lkc = keysymToLinuxKeycode(static_cast<unsigned long>(ks));
-        if (lkc != 0)
+        if (lkc != 0) {
             sendUinputKey(lkc, isDown);
-        return;
+            return true;
+        }
+        return false;
     }
-    if (!xDisplay_) return;
+    if (!xDisplay_) return false;
     KeyCode kc = XKeysymToKeycode(xdisp(xDisplay_), static_cast<KeySym>(ks));
     if (kc != 0) {
         focusLockScreenWindow(xdisp(xDisplay_));
         XTestGrabControl(xdisp(xDisplay_), True);
         XTestFakeKeyEvent(xdisp(xDisplay_), kc, isDown, CurrentTime);
         XTestGrabControl(xdisp(xDisplay_), False);
+        return true;
     }
+    return false;
 }
 
 bool InputManager::initUinput()
@@ -690,8 +723,10 @@ bool InputManager::sendUinputMouseMove(int x, int y)
         sw = sz.width();
         sh = sz.height();
     }
-    int ax = sw > 0 ? qBound(0, x * 65535 / sw, 65535) : 0;
-    int ay = sh > 0 ? qBound(0, y * 65535 / sh, 65535) : 0;
+    // 采集坐标（捕获区相对）→ 桌面绝对：与 XTest/portal 路径一致，多屏时补上
+    // 捕获区在虚拟桌面中的原点偏移，否则副屏点击系统性偏移 (offsetX,offsetY)。
+    int ax = sw > 0 ? qBound(0, (x + screenOffsetX_) * 65535 / sw, 65535) : 0;
+    int ay = sh > 0 ? qBound(0, (y + screenOffsetY_) * 65535 / sh, 65535) : 0;
 
     // 每个事件单独 write：同一 struct 覆写再写只发最后一个 SYN，指针不会移动
     struct input_event ev = {};
@@ -884,9 +919,11 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         // 先同步修饰键状态（Ctrl/Alt/Shift），保证组合键（Ctrl+C 等）生效
         updateModifiers(ctrl, alt, shift);
         // Meta(Super) 修饰键同步：sendXModifier 内部按 portal 优先路由
+        // 注入失败不提交记账（与 Ctrl/Alt/Shift 一致），否则 metaDown_ 与真实
+        // 修饰键状态失同步，后续 Super 组合键永久丢失。
         if (meta != metaDown_) {
-            sendXModifier(static_cast<X11KeySym>(XK_Super_L), meta);
-            metaDown_ = meta;
+            if (sendXModifier(static_cast<X11KeySym>(XK_Super_L), meta))
+                metaDown_ = meta;
         }
         // 修饰键本身已由 updateModifiers 注入
         if (code == "ControlLeft" || code == "ControlRight" ||
@@ -1035,8 +1072,10 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
     // 释放，与 Ctrl/Alt/Shift 现有语义一致）。sendXModifier 内部按
     // portal/uinput/XTest 三路路由 —— Wayland/X11 均可注入 KEY_LEFTMETA。
     if (meta != metaDown_) {
-        sendXModifier(static_cast<X11KeySym>(XK_Super_L), meta);
-        metaDown_ = meta;
+        // 注入失败不提交记账（与 Ctrl/Alt/Shift 一致）：否则 metaDown_ 与真实
+        // 修饰键状态失同步，后续 Super 组合键永久丢失（远程端"Win 失灵"）。
+        if (sendXModifier(static_cast<X11KeySym>(XK_Super_L), meta))
+            metaDown_ = meta;
     }
 
     if (code == "ControlLeft" || code == "ControlRight" ||
@@ -1091,19 +1130,24 @@ void InputManager::updateModifiers(bool ctrl, bool alt, bool shift) {
     ensureXDisplay();
     bool needFlush = false;
     if (ctrl != ctrlDown_) {
-        sendXModifier(static_cast<X11KeySym>(XK_Control_L), ctrl);
-        ctrlDown_ = ctrl;
-        needFlush = true;
+        // 注入失败不提交记账：否则下一次按键的 diff 认为 Ctrl 已在按下状态，
+        // 组合键前缀永久丢失（远程端"Ctrl 失灵"）。
+        if (sendXModifier(static_cast<X11KeySym>(XK_Control_L), ctrl)) {
+            ctrlDown_ = ctrl;
+            needFlush = true;
+        }
     }
     if (alt != altDown_) {
-        sendXModifier(static_cast<X11KeySym>(XK_Alt_L), alt);
-        altDown_ = alt;
-        needFlush = true;
+        if (sendXModifier(static_cast<X11KeySym>(XK_Alt_L), alt)) {
+            altDown_ = alt;
+            needFlush = true;
+        }
     }
     if (shift != shiftDown_) {
-        sendXModifier(static_cast<X11KeySym>(XK_Shift_L), shift);
-        shiftDown_ = shift;
-        needFlush = true;
+        if (sendXModifier(static_cast<X11KeySym>(XK_Shift_L), shift)) {
+            shiftDown_ = shift;
+            needFlush = true;
+        }
     }
     if (needFlush && xDisplay_) {
         XFlush(xdisp(xDisplay_));
@@ -1331,10 +1375,45 @@ void InputManager::onPortalResponseSignal(const QDBusMessage &msg)
         portalStage_ = 2;
     } else if (portalStage_ == 2) {
         // Start Response：门户输入就绪
+        // results["streams"] = a(ua{sv})：元素为 (stream_node_id, 属性表)，
+        // 属性表含 position(ii)/size(ii)。像素坐标无法直接用于
+        // NotifyPointerMotionAbsolute（要求流内 0..1），必须在这里取几何。
+        QVariant streamsVar = results.value(QStringLiteral("streams"));
+        if (streamsVar.isValid() && streamsVar.canConvert<QDBusArgument>()) {
+            QDBusArgument arr = streamsVar.value<QDBusArgument>();
+            arr.beginArray();
+            while (!arr.atEnd()) {
+                arr.beginStructure();
+                uint nodeId = 0;
+                // a{sv} 必须读成 QDBusVariant 再转 QVariantMap：QDBusArgument
+                // 没有嵌套自读的 operator>>，QDBusVariant 是官方提供的嵌套承载类型。
+                QDBusVariant propsV;
+                arr >> nodeId;
+                arr >> propsV;
+                arr.endStructure();
+                if (portalStreamNode_.isEmpty()) {
+                    portalStreamNode_ = QString::number(nodeId);
+                    const QVariantMap pm = qdbus_cast<QVariantMap>(propsV.variant());
+                    const QVariant pos = pm.value(QStringLiteral("position"));
+                    const QVariant size = pm.value(QStringLiteral("size"));
+                    if (pos.isValid() && size.isValid()) {
+                        // position/size 均为 (ii)，用 QPoint 直接承接
+                        const QPoint p = qdbus_cast<QPoint>(pos);
+                        const QPoint s = qdbus_cast<QPoint>(size);
+                        portalStreamX_ = p.x();
+                        portalStreamY_ = p.y();
+                        portalStreamW_ = s.x();
+                        portalStreamH_ = s.y();
+                    }
+                    qInfo() << "InputManager: portal stream" << portalStreamNode_
+                            << "geometry" << portalStreamX_ << portalStreamY_
+                            << portalStreamW_ << "x" << portalStreamH_;
+                }
+            }
+            arr.endArray();
+        }
         portalReady_ = true;
         qInfo() << "InputManager: Wayland portal READY — input injection active!";
-        if (results.contains(QStringLiteral("streams")))
-            qInfo() << "InputManager: Portal streams available";
         portalStage_ = -1;
     }
 }

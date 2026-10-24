@@ -70,6 +70,10 @@ public:
     virtual void resetDamage() {}
     virtual int width() const { return 0; }
     virtual int height() const { return 0; }
+    // 捕获区在根窗口/虚拟桌面中的原点（多屏）。X11 按主输出裁剪时非 0，
+    // 注入端必须把前端坐标加上该偏移才能点中目标位置。
+    virtual int originX() const { return 0; }
+    virtual int originY() const { return 0; }
     // 区域抓取实现（如 X11 Damage）可返回 true，表示本次捕获已知有变化，
     // 上层可跳过全帧校验和以省 CPU
     virtual bool regionDirty() const { return false; }
@@ -126,6 +130,10 @@ public:
             return waylandCapturer_->width();
 #endif
 #ifdef Q_OS_WIN
+        // DXGI 自愈会按当前帧纹理修正内部尺寸（外部改了分辨率/热插拔），
+        // 这里优先读捕获器实时尺寸，避免 screen_info/编码器用陈旧的枚举尺寸。
+        if (useDXGI_ && dxgiCapturer_ && dxgiCapturer_->width() > 0)
+            return dxgiCapturer_->width();
         // 多屏：必须返回**当前选中输出**的尺寸，而不是 screen_（主屏 QScreen）。
         // 选了非主输出（如副显示器）时二者不同，返回主屏尺寸会让编码器按错误尺寸
         // 初始化、每帧尺寸校验失败 → 周期性重建编码器、坐标映射错位。
@@ -143,6 +151,8 @@ public:
             return waylandCapturer_->height();
 #endif
 #ifdef Q_OS_WIN
+        if (useDXGI_ && dxgiCapturer_ && dxgiCapturer_->height() > 0)
+            return dxgiCapturer_->height();
         if (winCurrentIndex_ >= 0 && winCurrentIndex_ < winOutputs_.size()
             && winOutputs_[winCurrentIndex_].h > 0)
             return winOutputs_[winCurrentIndex_].h;
@@ -150,6 +160,26 @@ public:
         return screen_ ? screen_->size().height() : 0;
     }
 
+    // 当前捕获区在根窗口/虚拟桌面中的原点（Linux X11 多屏；其他平台为 0）。
+    // 注入端据此把前端坐标换算成屏幕绝对坐标。
+    int originX() const {
+#ifdef Q_OS_LINUX
+        if (useX11_ && x11Capturer_)
+            return x11Capturer_->originX();
+        if (useWayland_ && waylandCapturer_)
+            return waylandCapturer_->originX();
+#endif
+        return 0;
+    }
+    int originY() const {
+#ifdef Q_OS_LINUX
+        if (useX11_ && x11Capturer_)
+            return x11Capturer_->originY();
+        if (useWayland_ && waylandCapturer_)
+            return waylandCapturer_->originY();
+#endif
+        return 0;
+    }
     static bool changeDisplayResolution(int w, int h);
     static QJsonArray enumerateSupportedResolutions();
 
@@ -179,6 +209,9 @@ private:
     void cleanupPlatform();
     // 统一出帧入口：各平台分支一律经由它 emit，附带"画面是否真实变化"的累计。
     void emitCapturedFrame(const QImage& frame);
+    // 已算过 quickFrameChecksum 的路径用这个重载：同一帧不重复做全帧采样扫描
+    //（1080p 一次约 36 行 × 7.7KB，变化帧会被去重逻辑和这里各算一遍）。
+    void emitCapturedFrame(const QImage& frame, quint16 knownChecksum);
 
     QTimer* captureTimer_ = nullptr;
     QScreen* screen_ = nullptr;

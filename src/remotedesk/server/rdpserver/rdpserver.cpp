@@ -21,6 +21,7 @@
 #include <QBuffer>
 #include <QCoreApplication>
 #include <QDir>
+#include <QSaveFile>
 #include <QTimer>
 
 // 高频输入事件（鼠标移动/点击/滚轮/按键）逐条打日志会刷爆日志文件，
@@ -57,6 +58,7 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #include <QStandardPaths>
 #include <QNetworkInterface>
 #include <QScreen>
+#include <QSysInfo>
 #include <QThread>
 #include <QTimer>
 #include <QPointer>
@@ -133,7 +135,10 @@ void JpegCompressor::enqueue(const QImage& frame)
     // QImage 隐式共享的引用计数是原子的，但两个线程对同一底层数据的
     // detach（写时复制）/释放时序在 Qt 5.7 下仍可能产生竞态，
     // 导致堆损坏并在后续 emit（QMetaObject::activate）处崩溃（本次现象）。
-    queue_.enqueue(frame.copy());
+    //
+    // 采集侧几乎总是交付一块新分配/已 detach 的 QImage（captureFrame 内已 copy），
+    // 这种帧不必再拷一次；只有真正共享底层数据的帧才走深拷贝兜底。
+    queue_.enqueue(frame.isDetached() ? frame : frame.copy());
     cond_.wakeOne();
 }
 
@@ -272,6 +277,12 @@ RDPServer::~RDPServer()
         configSaveTimer_->stop();
         saveServerConfig(QString());
     }
+    // 其余定时器 lambda 都捕获 this 并触碰 wsServer_/videoEncoder_：显式先停，
+    // 不依赖"析构期间不跑事件循环"这一隐式前提（对象销毁顺序调整后即变隐患）。
+    if (configSaveTimer_) configSaveTimer_->stop();
+    if (idrFallbackTimer_) idrFallbackTimer_->stop();
+    if (webrtcKfTimer_) webrtcKfTimer_->stop();
+    if (cursorTimer_) cursorTimer_->stop();
     if (screenCapturer_)
         screenCapturer_->stop();
     if (jpegCompressor_)
@@ -281,6 +292,10 @@ RDPServer::~RDPServer()
     // 且 worker 可能正访问已销毁的成员。线程卡在大文件 IO/拖拽轮询时阻塞析构
     // 优于崩溃，故超时后无限等待。
     if (transferThread_ && transferThread_->isRunning()) {
+        // 先解除下载线程的背压等待：主线程马上要阻塞在 wait()，事件循环不再处理
+        // bytesWritten → 积压计数永不下降 → 工作线程永远醒不过来（互等死锁）。
+        if (fileTransferService_)
+            fileTransferService_->abortPendingTransfer();
         transferThread_->quit();
         if (!transferThread_->wait(3000)) {
             qWarning() << "RDPServer: transfer thread did not stop in 3s, waiting...";
@@ -293,6 +308,13 @@ RDPServer::~RDPServer()
             qWarning() << "RDPServer: xdnd thread did not stop in 3s, waiting...";
             xdndThread_->wait();
         }
+    }
+    // [B8] join IME 工作线程：最坏 ~9s（命令链各步超时之和）。不 join 直接析构，
+    // 线程还在 emit imeResultReady（QMetaObject::activate 解引用 d_ptr）会
+    // use-after-free；join 阻塞析构优于崩溃，与上面两个线程的策略一致。
+    if (imeWorker_ && imeWorker_->joinable()) {
+        qInfo() << "RDPServer: waiting for IME worker thread to finish...";
+        imeWorker_->join();
     }
     if (sslConfiguration_) {
         delete sslConfiguration_;
@@ -321,6 +343,26 @@ static QString codecToString(CodecType c)
     }
 }
 
+// server_config.json 原子落盘（QSaveFile：临时文件 + commit 原子替换）。
+// 主服务与 helper 进程都可能写这份文件，QSaveFile 保证任何时刻磁盘上
+// 要么是旧完整内容要么是新完整内容，不会留下截断 JSON（截断文件下次
+// 加载会被判损坏，users 等字段全部丢失 = 登录账号全没）。
+static void writeServerConfigAtomic(const QString& path, const QJsonObject& root)
+{
+    QSaveFile save(path);
+    if (!save.open(QIODevice::WriteOnly)) {
+        qWarning() << "Failed to save server config to" << path
+                   << ":" << save.errorString();
+        return;
+    }
+    save.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    if (save.commit())
+        qInfo() << "Server config saved to" << path;
+    else
+        qWarning() << "Failed to commit server config:" << path
+                   << ":" << save.errorString();
+}
+
 void RDPServer::loadServerConfig(const QString& configPath)
 {
     QString path = configPath.isEmpty()
@@ -329,18 +371,34 @@ void RDPServer::loadServerConfig(const QString& configPath)
 
     QJsonObject root;
     bool exists = false;
+    bool filePresent = false;
 
     QFile file(path);
-    if (file.exists() && file.open(QIODevice::ReadOnly)) {
-        QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-        file.close();
-        if (doc.isObject()) {
-            root = doc.object();
-            exists = true;
+    if (file.exists()) {
+        filePresent = true;
+        if (file.open(QIODevice::ReadOnly)) {
+            QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+            file.close();
+            if (doc.isObject()) {
+                root = doc.object();
+                exists = true;
+            }
         }
     }
 
     if (!exists) {
+        // 文件存在但解析失败/不可读 ≠ 文件不存在。前者直接覆盖会把 users 等
+        // 全部旧字段冲掉（登录账号全没）：先改名留档再按全新安装写默认值。
+        if (filePresent) {
+            const QString bak = path + QStringLiteral(".corrupt-")
+                + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMddHHmmss"));
+            if (QFile::rename(path, bak))
+                qCritical() << "server config corrupted (invalid/unreadable JSON), moved to"
+                            << bak << "and recreated with defaults";
+            else
+                qCritical() << "server config corrupted (invalid/unreadable JSON) and cannot"
+                            << "be moved aside; recreating with defaults";
+        }
         qInfo() << "No server config found at" << path << "creating with defaults";
         root["ssl"] = false;
         root["httpPort"] = 8080;
@@ -352,12 +410,7 @@ void RDPServer::loadServerConfig(const QString& configPath)
         root["scale"] = 75;
         root["codec"] = "h264";
         root["hw_encode"] = "auto";
-
-        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-            file.close();
-            qInfo() << "Default server config saved to" << path;
-        }
+        writeServerConfigAtomic(path, root);
     }
 
     if (root.contains("ssl"))
@@ -393,6 +446,10 @@ void RDPServer::loadServerConfig(const QString& configPath)
         configHwEncodeMode_ = (m == "on") ? HwEncodeMode::On
                           : (m == "off") ? HwEncodeMode::Off : HwEncodeMode::Auto;
     }
+    if (root.contains("unlockPassword"))
+        unlockPassword_ = root["unlockPassword"].toString();
+    if (root.contains("systemName"))
+        systemName_ = root["systemName"].toString();
 
     qInfo() << "Server config loaded: ssl =" << useSsl_ << "httpPort =" << httpPort_
             << "fps =" << configFps_ << "quality =" << configQuality_ << "scale =" << configScale_
@@ -435,42 +492,18 @@ void RDPServer::saveServerConfig(const QString& configPath)
     root["httpPort"] = httpPort_;
     root["fps"] = configFps_;
     root["quality"] = configQuality_;
-    root["scale"] = configScale_;
+    // 持久化用户手动选择的缩放（userScale_），而不是生效值 configScale_：
+    // high/verylow 画质档位会临时把 configScale_ 改成 100/≤50，若按旧逻辑写
+    // configScale_，选一次档位再重启，用户手动设的缩放就被永久覆盖。
+    root["scale"] = userScale_;
     root["codec"] = codecToString(configCodec_);
     root["hw_encode"] = (configHwEncodeMode_ == HwEncodeMode::On) ? "on"
                       : (configHwEncodeMode_ == HwEncodeMode::Off) ? "off" : "auto";
 
-    // 原子写：先写临时文件再改名。旧实现直接 WriteOnly|Truncate 覆盖原文件，
-    // 写一半断电/被杀会留下截断的 JSON，下次启动 loadServerConfig 解析失败，
-    // 端口/账号等配置全部回落默认值（users 字段丢失 = 登录账号全没了）。
-    // 同目录临时文件保证 rename 不跨设备；QSaveFile 在 Qt5.10+ 才有 commit 语义，
-    // 这里手写等价逻辑以兼容 Qt5.7/5.9。
-    const QString tmpPath = path + QStringLiteral(".tmp");
-    {
-        QFile tmpFile(tmpPath);
-        if (!tmpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            qWarning() << "Failed to save server config to" << path
-                       << "(cannot open temp file:" << tmpPath << ")";
-            return;
-        }
-        QJsonDocument doc(root);
-        tmpFile.write(doc.toJson(QJsonDocument::Indented));
-        tmpFile.flush();
-        if (tmpFile.error() != QFileDevice::NoError) {
-            qWarning() << "Failed to write server config temp file:" << tmpPath;
-            tmpFile.close();
-            QFile::remove(tmpPath);
-            return;
-        }
-        tmpFile.close();
-    }
-    QFile::remove(path); // Windows 的 rename 不覆盖已存在文件，先删旧文件
-    if (QFile::rename(tmpPath, path)) {
-        qInfo() << "Server config saved to" << path;
-    } else {
-        qWarning() << "Failed to replace server config:" << path
-                   << "(temp file kept at" << tmpPath << ")";
-    }
+    // 原子替换：旧实现 QFile::remove(path) 后再 rename，两步之间进程被杀/
+    // 断电会永久丢失配置文件；Windows 上 remove 失败则 rename 必失败。
+    // QSaveFile::commit 全程原子（Qt 5.1+ 即有，AuthManager 同款）。
+    writeServerConfigAtomic(path, root);
 }
 
 void RDPServer::loadSslConfig()
@@ -775,8 +808,10 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 // [B16] 与 startCapture 的处理器保持一致：坐标归一化基准 + 锁屏
                 // 焦点抓取开关。前台路径缺这两个调用 → 锁屏密码输入失焦逻辑失效、
                 // 坐标回退物理像素错位。
-                if (inputManager_)
+                if (inputManager_) {
                     inputManager_->setScreenSize(screenCapturer_->width(), screenCapturer_->height());
+                    inputManager_->setScreenOffset(screenCapturer_->originX(), screenCapturer_->originY());
+                }
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                 if (inputManager_)
                     inputManager_->setScreenLocked(locked);
@@ -842,7 +877,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         // 服务模式：helper 进程的截屏帧通过 WebSocket 传入
         connect(wsServer_.get(), &WebSocketServer::captureFrameReceived,
             this, [this](const QByteArray& jpegData) {
-                if (wsServer_->clients().isEmpty())
+                if (wsServer_->clientCount() == 0)
                     return;
                 QByteArray packet;
                 QDataStream stream(&packet, QIODevice::WriteOnly);
@@ -885,7 +920,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                             << "hw =" << captureHwEncode_ << "codec =" << captureCodecName_
                             << "reason =" << msg["reason"].toString();
                     // 能力变化 → 重新广播模式信息，前端据此更新 videoSupported/hwEncode
-                    if (!wsServer_->clients().isEmpty()) {
+                    if (wsServer_->clientCount() != 0) {
                         QJsonObject mode;
                         mode["type"] = "mode_changed";
                         mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
@@ -899,6 +934,10 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     if (!captureVideoCapable_ && currentMode_ == ServerMode::Video)
                         switchToImageMode();
                     return;
+                } else if (t == "capture_hb") {
+                    // [N2] helper 保活心跳：仅刷新 /capture 空闲计时（websocketserver
+                    // 收到任何上行文本都已刷新），绝不能转发给浏览器。
+                    return;
                 } else if (t == "codec_config") {
                     // helper 上报 SPS/PPS：缓存供新客户端补发，然后照常广播给浏览器
                     lastCodecExtra_ = QByteArray::fromBase64(msg["extradata"].toString().toLatin1());
@@ -907,7 +946,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
             });
         connect(wsServer_.get(), &WebSocketServer::captureSourceConnected,
             this, [this]() {
-                bool hasClients = !wsServer_->clients().isEmpty();
+                bool hasClients = wsServer_->clientCount() != 0;
                 qInfo() << "Service: capture source connected, hasClients =" << hasClients;
                 // [N1] helper 自带剪贴板通道，挂起 service 进程的 xclip 轮询，
                 // 避免双通道重复广播 + 无谓的轮询进程开销
@@ -1004,6 +1043,21 @@ bool RDPServer::setupHttpServer()
 
 void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
 {
+    // HTTP 空闲连接兜底：监听端口对内网开放，任何半开连接（SYN 后不再发请求、
+    // 或握手后不发数据）都会常驻一个 socket + 缓冲，长期累积耗尽句柄。
+    // 30s 内没有完成请求/没有新数据就断开（下载/上传路径自身会持续有字节流动，
+    // 且成功接管后会 disconnect/切换角色，不受影响）。
+    auto armIdleTimeout = [](QTcpSocket* s) {
+        QTimer* idle = new QTimer(s);
+        idle->setObjectName(QStringLiteral("httpIdle"));
+        idle->setSingleShot(true);
+        idle->start(30000);
+        QObject::connect(idle, &QTimer::timeout, s, [s]() {
+            if (s->state() == QAbstractSocket::ConnectedState)
+                s->abort();
+        });
+    };
+
     if (useSsl_ && QSslSocket::supportsSsl() && sslConfiguration_) {
         QSslSocket* sslSocket = new QSslSocket(this);
         if (!sslSocket->setSocketDescriptor(socketDescriptor)) {
@@ -1012,6 +1066,7 @@ void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
             return;
         }
         sslSocket->setSslConfiguration(*sslConfiguration_);
+        armIdleTimeout(sslSocket);
         // 服务端握手：在 incomingConnection 内同步启动最稳妥——此刻尚未返回事件循环，
         // 不会有任何 readyRead 抢先读走 ClientHello（否则明文 ClientHello 进了普通缓冲、
         // TLS 层收不到，握手会卡死）。OpenSSL 已与 Qt QSslSocket 统一为 1.0.x，底层 BIO
@@ -1044,6 +1099,7 @@ void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
             delete tcpSocket;
             return;
         }
+        armIdleTimeout(tcpSocket);
         connect(tcpSocket, &QTcpSocket::readyRead, this, &RDPServer::onHttpRequest);
         connect(tcpSocket, &QTcpSocket::disconnected, tcpSocket, &QTcpSocket::deleteLater);
     }
@@ -1054,6 +1110,16 @@ void RDPServer::onHttpNewConnection()
     QTcpSocket* socket = httpServer_->nextPendingConnection();
     if (!socket)
         return;
+
+    // 非 SSL 监听（HTTP 端口）同样要有空闲兜底
+    QTimer* idle = new QTimer(socket);
+    idle->setObjectName(QStringLiteral("httpIdle"));
+    idle->setSingleShot(true);
+    idle->start(30000);
+    connect(idle, &QTimer::timeout, socket, [socket]() {
+        if (socket->state() == QAbstractSocket::ConnectedState)
+            socket->abort();
+    });
 
     connect(socket, &QTcpSocket::readyRead, this, &RDPServer::onHttpRequest);
     connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
@@ -1075,6 +1141,16 @@ QByteArray RDPServer::loadHtmlResource()
 
         html = html.replace("ws://", QString("ws%1://").arg(sslConfiguration_ ? "s" : "").toUtf8());
         html = html.replace("websocketPort", QString("%1").arg(wsPort_).toUtf8());
+
+        // 页面标题：优先用配置的 systemName（多台被控机靠它区分标签页），
+        // 未配置则回退主机名（如 localhost.localdomain 这类无辨识度输出）。
+        QString hostName = systemName_;
+        if (hostName.isEmpty()) {
+            hostName = QSysInfo::machineHostName();
+            if (hostName.isEmpty())
+                hostName = QStringLiteral("远程桌面");
+        }
+        html = html.replace("__REMOTE_HOSTNAME__", hostName.toHtmlEscaped().toUtf8());
 
         cachedHtml = html;
         return cachedHtml;
@@ -1260,20 +1336,25 @@ void RDPServer::handleApiFileDownload(QTcpSocket* socket, const QString& path, c
                 const QString e = ranged.mid(dash + 1).trimmed();
                 if (!s.isEmpty()) {
                     start = s.toLongLong(&okStart);
+                    // "bytes=N-M" / "bytes=N-"：只有 M 存在时才覆盖 end，
+                    // 缺省保持 totalSize-1（由调用方初始值保证）。
+                    if (okStart && !e.isEmpty()) {
+                        bool okEnd = false;
+                        const qint64 ev = e.toLongLong(&okEnd);
+                        if (okEnd)
+                            end = qMin(ev, st->totalSize - 1);
+                    }
                 } else {
-                    // "bytes=-N" → 末尾 N 字节
+                    // [FIX] "bytes=-N" → 末尾 N 字节，end 必须恒为 totalSize-1。
+                    // 旧代码在此分支后又用同一个 e(=N) 去设 end，把区间算成
+                    // [total-N, N]：文件稍大（total > 2N）就 end<start → 误返 416，
+                    // 小文件则返回错误切片，断点续传/尾部请求全错。
                     bool okTail = false;
                     const qint64 tail = e.toLongLong(&okTail);
                     if (okTail && tail > 0) {
                         start = qMax<qint64>(0, st->totalSize - tail);
                         okStart = true;
                     }
-                }
-                if (okStart && !e.isEmpty()) {
-                    bool okEnd = false;
-                    const qint64 ev = e.toLongLong(&okEnd);
-                    if (okEnd)
-                        end = qMin(ev, st->totalSize - 1);
                 }
             }
             if (!okStart)
@@ -1565,6 +1646,15 @@ void RDPServer::onHttpRequest()
     // 累积本次 readyRead 到达的全部字节（不再逐行读取，便于跨 TCP 包重组）
     st.buffer += socket->readAll();
 
+    // 一旦开始收到请求数据就撤掉空闲兜底：上传/下载可能持续很久且期间
+    // 没有新的 readyRead（下载只有 bytesWritten），不能按"无读事件"判空闲。
+    if (!st.buffer.isEmpty()) {
+        if (QTimer* idle = socket->findChild<QTimer*>(QStringLiteral("httpIdle"))) {
+            idle->stop();
+            idle->deleteLater();
+        }
+    }
+
     // 解析请求头（仅一次）：得到 Content-Length 与请求头文本
     if (!st.headerDone) {
         int headerEnd = st.buffer.indexOf("\r\n\r\n");
@@ -1591,8 +1681,8 @@ void RDPServer::onHttpRequest()
             int lineEnd = st.headerText.indexOf('\n', clIdx);
             st.contentLength = st.headerText.mid(colonIdx + 1, lineEnd - colonIdx - 1).trimmed().toInt();
         }
-        if (st.contentLength > 1048576) { // 1MB 上限
-            QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain; charset=utf-8", "POST body too large");
+        if (st.contentLength < 0 || st.contentLength > 1048576) { // 负值或非数字会卡死 body 等待
+            QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain; charset=utf-8", "invalid Content-Length");
             socket->write(resp);
             socket->flush();
             socket->disconnectFromHost();
@@ -2321,7 +2411,7 @@ void RDPServer::start()
         qWarning() << "Screen capture unavailable (no display), serving shell-only mode";
 
     // 如果没有客户端连接，暂停捕获以降低 CPU
-    if (wsServer_->clients().isEmpty())
+    if (wsServer_->clientCount() == 0)
         screenCapturer_->suspend();
 
     isRunning_ = true;
@@ -2345,6 +2435,7 @@ bool RDPServer::startCapture()
                 // 输入坐标归一化基准与前端 canvas（screen_info）保持一致
                 if (inputManager_) {
                     inputManager_->setScreenSize(screenCapturer_->width(), screenCapturer_->height());
+                    inputManager_->setScreenOffset(screenCapturer_->originX(), screenCapturer_->originY());
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                     // 锁屏时才允许 focusLockScreenWindow 抢焦点投递密码输入，
                     // 阻止普通桌面下强设焦点到全屏/置顶窗口而丢焦点（键盘失焦 bug）。
@@ -2398,6 +2489,24 @@ bool RDPServer::startCapture()
     if (!screenCapturer_->start(configFps_)) {
         qCritical() << "startCapture: failed to start screen capture";
         captureAvailable_ = false;
+        // 必须告知前端：否则表现为"连上了、一直黑、没有任何解释"。
+        // Linux 服务模式每 3 秒会重试（DISPLAY 是 WSL 启动后才就绪的常见情形），
+        // 一旦成功这里会再广播 available=true 把提示撤掉。
+        if (wsServer_) {
+            QJsonObject st;
+            st["type"] = "capture_status";
+            st["available"] = false;
+            st["hint"] = QString::fromUtf8(
+#ifdef Q_OS_LINUX
+                "未检测到可用的图形显示（X11/Wayland），正在后台自动重试。"
+                "WSL 请确认已启用 WSLg（Windows 11 默认）；"
+                "无头环境可安装 Xvfb 后重启服务。"
+#else
+                "屏幕采集当前不可用，正在后台自动重试。"
+#endif
+                );
+            wsServer_->broadcastJson(st);
+        }
         return false;
     }
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
@@ -2407,13 +2516,20 @@ bool RDPServer::startCapture()
     captureAvailable_ = screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
     if (!captureAvailable_)
         qWarning() << "startCapture: screen capture unavailable";
-    if (wsServer_->clients().isEmpty())
+    if (wsServer_->clientCount() == 0)
         screenCapturer_->suspend();
     qInfo() << "startCapture: screen capturer started";
 
     // 捕获变为可用（如 Linux 服务进程启动后 DISPLAY 才出现），通知已连接客户端
     // 重新评估模式：捕获可用 + 编码器 → webrtc=true，客户端随即升级到 WebRTC
     if (captureAvailable_) {
+        // 撤掉之前可能显示过的"采集不可用"提示
+        if (wsServer_) {
+            QJsonObject st;
+            st["type"] = "capture_status";
+            st["available"] = true;
+            wsServer_->broadcastJson(st);
+        }
         QJsonObject mode;
         mode["type"] = "mode_changed";
         mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
@@ -2659,7 +2775,7 @@ void RDPServer::onPrepareForSleep(bool sleeping)
     } else {
         preparedForSleep_ = false;
         // 休眠恢复：采集流已断，若仍有客户端在线则重建捕获
-        if (!wsServer_->clients().isEmpty()) {
+        if (wsServer_->clientCount() != 0) {
             if (screenCapturer_) {
                 qInfo() << "Re-establishing screen capture after sleep";
                 restartCapture();
@@ -2738,11 +2854,17 @@ void RDPServer::handleImeCycle(const QString& clientId)
     // [P1 perf] 命令链（ibus/gsettings 各 2~3s，最坏 2+2+3+2=9s）原先在主线程
     // waitForFinished 同步等待，期间采集/WS/输入全部停摆 → 整体移到工作线程；
     // 结果经 imeResultReady 信号（auto=queued）回主线程发送（sendJson 操作
-    // QWebSocket，必须留在主线程）。RDPServer 为应用级单例，退出窗口极小，
-    // QPointer 复查缩小风险。
+    // QWebSocket，必须留在主线程）。
+    // [B8] 线程生命周期由 imeWorker_ 成员持有、析构时 join（原 detach 后无法
+    // 回收，退出瞬间线程仍在 emit → use-after-free）。同刻只允许一个在飞。
+    if (imeWorker_ && imeWorker_->joinable()) {
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "ime_state" }, { "error", "busy" } });
+        return;
+    }
     QPointer<RDPServer> self(this);
     const QString cid = clientId;
-    std::thread([self, cid, prefix]() {
+    imeWorker_.reset(new std::thread([self, cid, prefix]() {
         // 执行一条完整命令（prefix 非空时包装为 sudo -u ... env ...），返回 exit code
         auto runCmd = [&prefix](const QStringList& cmd, int timeoutMs, QString* out) -> int {
             QProcess p;
@@ -2806,7 +2928,7 @@ void RDPServer::handleImeCycle(const QString& clientId)
                 { "engine", now.isEmpty() ? next : now },
                 { "ok", ok },
             });
-    }).detach();
+    }));
 #else
     Q_UNUSED(clientId);
 #endif
@@ -2851,6 +2973,78 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
 {
     qInfo() << "System action requested:" << action << "from" << clientId.left(8);
 
+#ifdef Q_OS_WIN32
+    if (action == "unlock_screen") {
+        // Windows 免密解锁：锁屏 UI 运行在 winlogon 安全桌面，普通进程（含
+        // helper，同在用户会话）的 SendInput 到不了那里，唯一通路是
+        // secure-input 进程（服务端在收到 screen_locked=true 时自动拉起）。
+        // 因此本动作不转发 helper，由服务端把配置的 unlockPassword 逐字合成
+        // keydown/keyup 经 secure-input 注入，末尾补回车。
+        const QString pwd = unlockPassword_;
+        if (!screenLocked_) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "unlock_result" }, { "ok", true },
+                { "message", "屏幕未锁定" } });
+        } else if (pwd.isEmpty()) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "unlock_result" }, { "ok", false },
+                { "message", "未配置解锁密码：在 server_config.json 中设置 unlockPassword（明文，局域网自用）" } });
+        } else {
+            bool justStarted = false;
+            if (!wsServer_->isSecureInputConnected()) {
+                startSecureInputProcess();
+                justStarted = true; // 进程刚拉起，连接建立需要时间，注入整体延后
+            }
+            if (!justStarted && !wsServer_->isSecureInputConnected()) {
+                wsServer_->sendJson(clientId, QJsonObject {
+                    { "type", "unlock_result" }, { "ok", false },
+                    { "message", "安全输入通道未就绪，请稍后重试" } });
+                return;
+            }
+            auto sendKey = [this](int keycode, bool isDown, const QString& code = QString(), bool isChar = false) {
+                QJsonObject k {
+                    { "type", isDown ? QLatin1String("keydown") : QLatin1String("keyup") },
+                    { "keycode", keycode }, { "code", code },
+                    { "ctrl", false }, { "alt", false }, { "shift", false } };
+                if (isChar) k["isChar"] = true;
+                wsServer_->sendToSecureInput(k);
+            };
+            // 与前端 unlockScreen 同节奏：按下 10ms、字符间隔 20ms，太密会被
+            // LogonUI 吞字。
+            const int base = justStarted ? 1500 : 0;
+            const int n = pwd.size();
+            for (int i = 0; i < n; ++i) {
+                const int cp = pwd.at(i).unicode();
+                QTimer::singleShot(base + 30 * i, this, [this, sendKey, cp]() {
+                    sendKey(cp, true, QString(), true);
+                    QTimer::singleShot(10, this, [this, sendKey, cp]() {
+                        sendKey(cp, false, QString(), true);
+                    });
+                });
+            }
+            QTimer::singleShot(base + 30 * n + 40, this, [this, sendKey]() {
+                sendKey(13, true, QStringLiteral("Enter"));
+                QTimer::singleShot(10, this, [this, sendKey]() {
+                    sendKey(13, false, QStringLiteral("Enter"));
+                });
+            });
+            // 注入完毕后验证：helper 解锁成功会广播 screen_locked=false
+            const QString cid = clientId;
+            QTimer::singleShot(base + 30 * n + 5000, this, [this, cid]() {
+                if (screenLocked_) {
+                    wsServer_->sendJson(cid, QJsonObject {
+                        { "type", "unlock_result" }, { "ok", false },
+                        { "message", "密码未通过验证（unlockPassword 与 Windows 登录密码不一致？）" } });
+                }
+            });
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "unlock_result" }, { "ok", true }, { "pending", true },
+                { "message", "正在注入解锁密码…" } });
+        }
+        return;
+    }
+#endif
+
     // 服务模式（有 helper，如 Windows）：系统操作必须在用户会话执行。
     // 服务进程运行在 Session 0（Windows）或独立会话，直接执行只会作用于
     // 不可见的服务会话（显示桌面/任务管理器/注销均无效）。转发 helper。
@@ -2884,14 +3078,99 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
     };
 
     if (action == "lock") {
-        // 锁屏链：xdg-screensaver（DE 无关）→ gnome-screensaver-command → loginctl（Wayland/X11 通用）
-        QString lock = firstOf({ "xdg-screensaver", "gnome-screensaver-command", "loginctl" });
-        if (lock.endsWith(QStringLiteral("xdg-screensaver")))
-            launch(lock, { "lock" });
-        else if (lock.endsWith(QStringLiteral("gnome-screensaver-command")))
-            launch(lock, { "-l" });
-        else
-            launch(lock, { "lock-session" });
+        // 锁屏链：每步执行后都验证 LockedHint，命令“退出 0 但没锁上”不算成功。
+        //  1) loginctl lock-session <桌面会话> —— DE 无关，GNOME/light-locker/
+        //     xfce4-screensaver 注册 logind 后由此触发。
+        //  2) xdg-screensaver / gnome-screensaver-command / xflock4 —— 以会话用户
+        //     身份（runuser + DISPLAY/XAUTHORITY/DBUS_SESSION_BUS_ADDRESS）执行，
+        //     覆盖 locker 未注册 logind 的环境。
+        //  3) dm-tool lock（lightdm，需 XDG_SEAT_PATH）—— 兜底：GNOME 40 的
+        //     ScreenShield 在部分发行版（Anolis 8.10 实测）是空实现，前两步全部
+        //     静默失败，只有 lightdm 切 greeter VT 能真正锁住屏幕。
+        //     对应解锁走 unlock_screen 的 unlock-session + chvt。
+        QString sh = findBin("sh");
+        if (sh.isEmpty()) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "lock_result" }, { "ok", false },
+                { "message", "系统缺少 sh，无法执行锁屏" } });
+            return;
+        }
+        QStringList lines;
+        lines << "SESS=''; UID_=''; VT=''; DISP=''";
+        lines << "for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do";
+        lines << "  t=$(loginctl show-session \"$s\" -p Type --value 2>/dev/null)";
+        lines << "  seat=$(loginctl show-session \"$s\" -p Seat --value 2>/dev/null)";
+        lines << "  cls=$(loginctl show-session \"$s\" -p Class --value 2>/dev/null)";
+        lines << "  act=$(loginctl show-session \"$s\" -p Active --value 2>/dev/null)";
+        // Class=user 排除 lightdm greeter 会话（同为 x11/seat0，但它不是桌面）
+        lines << "  if { [ \"$t\" = x11 ] || [ \"$t\" = wayland ]; } && [ \"$seat\" = seat0 ] && [ \"$cls\" = user ]; then";
+        lines << "    SESS=\"$s\"";
+        lines << "    UID_=$(loginctl show-session \"$s\" -p User --value 2>/dev/null)";
+        lines << "    VT=$(loginctl show-session \"$s\" -p VTNr --value 2>/dev/null)";
+        lines << "    DISP=$(loginctl show-session \"$s\" -p Display --value 2>/dev/null)";
+        lines << "    [ \"$act\" = yes ] && break";
+        lines << "  fi";
+        lines << "done";
+        lines << "DISP_USE=\"${DISP:-$DISPLAY}\"";
+        lines << "XAUTH_USE=\"${XAUTHORITY:-}\"";
+        lines << "HOW=''";
+        lines << "if [ -n \"$SESS\" ]; then";
+        lines << "  loginctl lock-session \"$SESS\" >/dev/null 2>&1";
+        lines << "  sleep 2";
+        lines << "  [ \"$(loginctl show-session \"$SESS\" -p LockedHint --value 2>/dev/null)\" = yes ] && HOW=loginctl";
+        lines << "fi";
+        lines << "if [ -z \"$HOW\" ]; then";
+        lines << "  RU=''";
+        lines << "  [ \"$(id -u)\" = 0 ] && [ -n \"$UID_\" ] && RU=\"runuser -u $UID_ --\"";
+        lines << "  DBUS=\"unix:path=/run/user/$UID_/bus\"";
+        lines << "  for c in \"xdg-screensaver lock\" \"gnome-screensaver-command -l\" \"xflock4\"; do";
+        lines << "    bin=${c%% *}";
+        lines << "    command -v \"$bin\" >/dev/null 2>&1 || continue";
+        lines << "    $RU env DISPLAY=\"$DISP_USE\" XAUTHORITY=\"$XAUTH_USE\" DBUS_SESSION_BUS_ADDRESS=\"$DBUS\" $c >/dev/null 2>&1";
+        lines << "    sleep 2";
+        lines << "    if [ -n \"$SESS\" ] && [ \"$(loginctl show-session \"$SESS\" -p LockedHint --value 2>/dev/null)\" = yes ]; then HOW=\"$bin\"; break; fi";
+        lines << "  done";
+        lines << "fi";
+        lines << "if [ -z \"$HOW\" ] && [ \"$(id -u)\" = 0 ] && command -v dm-tool >/dev/null 2>&1 && pgrep -x lightdm >/dev/null 2>&1; then";
+        lines << "  XDG_SEAT_PATH=/org/freedesktop/DisplayManager/Seat0 dm-tool lock >/dev/null 2>&1 && HOW=dm-tool";
+        lines << "fi";
+        lines << "echo \"HOW=$HOW SESS=$SESS\"";
+
+        QProcess* proc = new QProcess(this);
+        const QString cid = clientId;
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, proc, cid](int, QProcess::ExitStatus) {
+            const QString out = QString::fromLocal8Bit(proc->readAllStandardOutput()).trimmed();
+            QString how;
+            const QStringList toks = out.split(QLatin1Char(' '));
+            for (const QString& tok : toks) {
+                if (tok.startsWith(QLatin1String("HOW="))) {
+                    how = tok.mid(4);
+                    break;
+                }
+            }
+            const bool ok = !how.isEmpty();
+            QString msg;
+            if (how == QLatin1String("loginctl"))
+                msg = QStringLiteral("已锁屏");
+            else if (how == QLatin1String("dm-tool"))
+                msg = QStringLiteral("已锁屏（登录器接管，画面为黑属正常，用「解锁屏幕」切回）");
+            else if (ok)
+                msg = QStringLiteral("已锁屏（%1）").arg(how);
+            else
+                msg = QStringLiteral("未能锁定屏幕：无可用的锁屏机制");
+            qInfo() << "lock result:" << ok << how << msg;
+            wsServer_->sendJson(cid, QJsonObject {
+                { "type", "lock_result" }, { "ok", ok }, { "message", msg } });
+            proc->deleteLater();
+        });
+        connect(proc, &QProcess::errorOccurred, this, [this, proc, cid](QProcess::ProcessError) {
+            wsServer_->sendJson(cid, QJsonObject {
+                { "type", "lock_result" }, { "ok", false },
+                { "message", "锁屏命令启动失败: " + proc->errorString() } });
+            proc->deleteLater();
+        });
+        proc->start(sh, { QStringLiteral("-c"), lines.join(QLatin1Char('\n')) });
     } else if (action == "unlock_screen") {
         // 免密解锁：让被控端从锁屏界面切回桌面（方案A）。
         //  1) loginctl unlock-session —— 解开 light-locker / gnome-screensaver 这类
@@ -2915,20 +3194,21 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         lines << "for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do";
         lines << "  t=$(loginctl show-session \"$s\" -p Type --value 2>/dev/null)";
         lines << "  seat=$(loginctl show-session \"$s\" -p Seat --value 2>/dev/null)";
-        lines << "  tty=$(loginctl show-session \"$s\" -p TTY --value 2>/dev/null)";
-        // 必须带真实 ttyN 才算桌面会话：lightdm greeter 会话同为图形会话但 TTY 为空，
-        // 若先命中它会拿到空 VT 导致误判失败。
-        lines << "  if { [ \"$t\" = x11 ] || [ \"$t\" = wayland ]; } && [ \"$seat\" = seat0 ] && [ \"${tty#tty}\" != \"$tty\" ]; then";
-        lines << "    VT=\"$tty\"; SESS=\"$s\"; break";
+        lines << "  cls=$(loginctl show-session \"$s\" -p Class --value 2>/dev/null)";
+        // VTNr 而非 TTY：GNOME 等会话 TTY 可能为空（.242 实测），VTNr 始终有效；
+        // Class=user 排除 lightdm greeter 会话（同为 x11/seat0 但 VT 是 greeter 的）。
+        lines << "  if { [ \"$t\" = x11 ] || [ \"$t\" = wayland ]; } && [ \"$seat\" = seat0 ] && [ \"$cls\" = user ]; then";
+        lines << "    VT=$(loginctl show-session \"$s\" -p VTNr --value 2>/dev/null)";
+        lines << "    SESS=\"$s\"; break";
         lines << "  fi";
         lines << "done";
         lines << "[ -n \"$SESS\" ] && loginctl unlock-session \"$SESS\" >/dev/null 2>&1";
         lines << "CUR=$(cat /sys/class/tty/tty0/active 2>/dev/null)";
-        lines << "if [ -n \"$VT\" ] && [ \"$CUR\" != \"$VT\" ]; then";
-        lines << "  chvt \"${VT#tty}\" >/dev/null 2>&1";
+        lines << "if [ -n \"$VT\" ] && [ \"$CUR\" != \"tty$VT\" ]; then";
+        lines << "  chvt \"$VT\" >/dev/null 2>&1";
         lines << "  CUR=$(cat /sys/class/tty/tty0/active 2>/dev/null)";
         lines << "fi";
-        lines << "echo \"VT=$VT CUR=$CUR\"";
+        lines << "echo \"VT=tty$VT CUR=$CUR\"";
 
         QProcess* proc = new QProcess(this);
         const QString cid = clientId;
@@ -3096,7 +3376,7 @@ void RDPServer::onClientConnected(const QString& clientId)
     qInfo() << "Client connected:" << clientId;
 
     // 首个客户端连接 → 阻止被控端睡眠/熄屏（远程会话期间保持唤醒）
-    if (wsServer_->clients().count() == 1)
+    if (wsServer_->clientCount() == 1)
         updateSleepInhibit(true);
 
     // 有客户端连接 → 恢复屏幕捕获
@@ -3125,6 +3405,12 @@ void RDPServer::onClientConnected(const QString& clientId)
 
     // 发送屏幕分辨率
     if (screenCapturer_) {
+        // 新连接的初始归一化基准/多屏偏移也要立刻同步（首次 startCapture 后
+        // 没有锁屏事件的话，旧代码要等到 set_output/set_resolution 才设置）。
+        if (inputManager_) {
+            inputManager_->setScreenSize(screenCapturer_->width(), screenCapturer_->height());
+            inputManager_->setScreenOffset(screenCapturer_->originX(), screenCapturer_->originY());
+        }
         QJsonObject info;
         info["type"] = "screen_info";
         info["width"] = screenCapturer_->width();
@@ -3233,6 +3519,12 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 {
     qInfo() << "Client disconnected:" << clientId;
 
+    // 剪贴板读取是异步的：等待期间断线的客户端必须从待推送列表移除，
+    // 否则 contentReady 回来后会向已不存在的 clientId 发送（静默失败），
+    // 且列表随每次连接/断线累积。
+    if (!pendingClipboardClientIds_.isEmpty())
+        pendingClipboardClientIds_.removeAll(clientId);
+
     // 清理该客户端在途的文件上传：上传会话 key 含每连接唯一的 clientId，断线后
     // 该 key 永不再命中 → 不主动清理就会残留裸 QFile 句柄与半个 .part 临时文件。
     // FileTransferService 跑在 transferThread_，所以用队列连接投递过去执行。
@@ -3256,7 +3548,13 @@ void RDPServer::onClientDisconnected(const QString& clientId)
             up["meta"] = false;
             if (serviceMode_ && wsServer_->isCaptureSourceConnected())
                 wsServer_->sendToCaptureSource(up); // helper 消息为扁平结构，与转发路径一致
-            if (inputManager_)
+            // 锁屏时输入只走 secure-input：helper 的 locked 门会丢弃转发来的 keyup，
+            // 若回放不补发 secure-input，winlogon 桌面会被残留的 Shift/Ctrl 卡住。
+            if (screenLocked_ && secureInputRunning_)
+                wsServer_->sendToSecureInput(up);
+            // 服务模式下本进程在 Session0，本地注入打到无人可见的桌面且会污染
+            // 本侧修饰键状态，故仅在非服务模式（桌面实例）直接注入。
+            if (inputManager_ && !serviceMode_)
                 inputManager_->injectKeyboard(up["keycode"].toInt(), it.key(), false,
                                               false, false, false, false,
                                               up["isChar"].toBool(), false);
@@ -3271,7 +3569,7 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 #endif
 
     // 没有客户端了 → 暂停屏幕捕获，降低 CPU
-    if (wsServer_->clients().isEmpty()) {
+    if (wsServer_->clientCount() == 0) {
         updateSleepInhibit(false); // 远程会话结束，解除睡眠抑制
         if (screenCapturer_)
             screenCapturer_->suspend();
@@ -3337,6 +3635,14 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             clipData = QByteArray::fromBase64(input["data"].toString().toLatin1());
         } else {
             clipData = input["text"].toString().toUtf8();
+        }
+        // 单条剪贴板消息上限：广播是同步写给所有客户端，且服务端还要转发/落剪贴板。
+        // 没有上限时一个恶意的超大 base64/文本帧会让广播路径长时间占用主线程。
+        // 正常剪贴板（文本或截图 PNG）远小于 8MB。
+        static const int kMaxClipboardBytes = 8 * 1024 * 1024;
+        if (clipData.size() > kMaxClipboardBytes) {
+            qWarning() << "Clipboard payload too large, ignored:" << clipData.size();
+            return;
         }
         if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
             // 服务模式：剪贴板在用户会话的 helper 进程中读写，转发给 helper；
@@ -3523,6 +3829,13 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     }
     if (type == "config") {
         // 画质/帧率/缩放配置
+        // 一条 config 消息常同时带 quality/fps/scale/codec/hw_encode。旧实现每命中一项
+        // 就立即重建一次编码器（每次几十到上百毫秒，且要重发 IDR），一次切换画质会重建
+        // 3~5 次 → 明显卡顿。这里统一收集：帧率/尺寸/协议/硬编变化最多重建一次；
+        // 仅画质变化时直接改码率，不重建。
+        bool needEncoderRebuild = false;
+        bool needBitrateRefresh = false;
+        const int scaleBeforeQuality = configScale_;
         QString qname = input["quality"].toString();
         int jpegQ = -1;
         if (qname == "high") {
@@ -3547,22 +3860,33 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         int videoQualityLevel = jpegQ;
         if (qname == "verylow")
             videoQualityLevel = 15;
-        if (jpegQ > 0 && jpegCompressor_) {
+        if (jpegQ > 0) {
+            // configQuality_ 与落盘不能依赖 jpegCompressor_ 存在：服务模式下
+            // 压缩在 helper 侧，本进程可能没有压缩器，旧写法会让画质设置
+            // 永远不更新也不持久化（重启后仍旧值）。
             configQuality_ = videoQualityLevel;
-            jpegCompressor_->setQuality(jpegQ);
-            jpegCompressor_->setScalePercent(configScale_);
+            scheduleSaveConfig();
+            if (jpegCompressor_) {
+                jpegCompressor_->setQuality(jpegQ);
+                jpegCompressor_->setScalePercent(configScale_);
 #ifdef USE_FFMPEG
-            // 画质档位同时决定视频码率（videoBitrateFor 按 configQuality_ 估算）。
-            // 显式重建编码器让画质在视频/WebRTC 模式下即时生效，避免依赖
-            // “前端附带 fps → fps 分支重建”这条隐式链路（若前端只发 quality 则失效）。
-            if (currentMode_ == ServerMode::Video && videoEncoder_)
-                reinitVideoEncoderForScale();
+                // 画质档位决定目标码率，但编码器本身（协议/尺寸/帧率）没变，
+                // 只需动态改码率，不走重建（重建会丢 IDR、卡顿）。
+                // 例外：verylow/high 会联动改 configScale_（编码分辨率变化），
+                // 仅刷码率会让编码器停在旧分辨率 → 必须走重建。
+                if (currentMode_ == ServerMode::Video && videoEncoder_) {
+                    if (configScale_ != scaleBeforeQuality)
+                        needEncoderRebuild = true;
+                    else
+                        needBitrateRefresh = true;
+                }
 #endif
-            // 画面静止时帧校验和去重会跳过重编码/广播，导致切换画质后
-            // 仍用旧质量显示当前画面（看起来“没效果”）。强制下一帧通过去重，
-            // 让当前画面立即按新质量/新缩放重新压缩并发送。
-            if (screenCapturer_)
-                screenCapturer_->forceNextFrame();
+                // 画面静止时帧校验和去重会跳过重编码/广播，导致切换画质后
+                // 仍用旧质量显示当前画面（看起来“没效果”）。强制下一帧通过去重，
+                // 让当前画面立即按新质量/新缩放重新压缩并发送。
+                if (screenCapturer_)
+                    screenCapturer_->forceNextFrame();
+            }
         }
         int newFps = input["fps"].toInt();
         // [H22] 配置侧同步钳制（configFps_ 也参与编码器 GOP/间隔计算）
@@ -3576,11 +3900,14 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             // 帧率改变需按新 fps 重建编码器，否则 time_base/gop_size 仍是旧值，
             // 导致 IDR 间隔与捕获帧率不匹配
             if (currentMode_ == ServerMode::Video && videoEncoder_)
-                reinitVideoEncoderForScale();
+                needEncoderRebuild = true;
 #endif
         }
         int newScale = input["scale"].toInt();
         if (newScale >= 10 && newScale <= 100) {
+            // 仅当生效缩放（configScale_）真实变化才重建：high/verylow 档位可能已把
+            // configScale_ 设成相同值，重复重建会丢 IDR 造成画面卡顿。
+            const bool scaleChanged = (configScale_ != newScale);
             userScale_ = newScale;
             configScale_ = newScale;
             if (jpegCompressor_)
@@ -3589,8 +3916,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 #ifdef USE_FFMPEG
             // 视频模式下缩放档位改变需按新尺寸重建编码器，
             // 否则始终全分辨率 H.264 软编（CPU 高且 scale 无效）
-            if (currentMode_ == ServerMode::Video && videoEncoder_)
-                reinitVideoEncoderForScale();
+            if (scaleChanged && currentMode_ == ServerMode::Video && videoEncoder_)
+                needEncoderRebuild = true;
 #endif
         }
         // 编码协议（h264/hevc/vp8/vp9/av1）与硬件编码开关（auto/on/off）：
@@ -3608,7 +3935,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 scheduleSaveConfig(); // [P2] 去抖落盘
 #ifdef USE_FFMPEG
                 if (currentMode_ == ServerMode::Video && videoEncoder_ && !webrtcBusy) {
-                    reinitVideoEncoderForScale();
+                    needEncoderRebuild = true;
                 } else if (webrtcBusy) {
                     qWarning() << "Ignoring codec switch while WebRTC active (WebRTC stays H.264)";
                 }
@@ -3625,13 +3952,32 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 scheduleSaveConfig(); // [P2] 去抖落盘
 #ifdef USE_FFMPEG
                 if (currentMode_ == ServerMode::Video && videoEncoder_ && !webrtcBusy) {
-                    reinitVideoEncoderForScale();
+                    needEncoderRebuild = true;
                 } else if (webrtcBusy) {
                     qWarning() << "Ignoring hw_encode switch while WebRTC active";
                 }
 #endif
             }
         }
+#ifdef USE_FFMPEG
+        // 统一收尾：先重建（重建内部会按新尺寸/帧率重算基准码率），
+        // 否则仅刷新码率，避免一次配置触发多次重建。
+        if (needEncoderRebuild) {
+            reinitVideoEncoderForScale();
+        } else if (needBitrateRefresh && videoEncoder_ && screenCapturer_) {
+            int sw = screenCapturer_->width();
+            int sh = screenCapturer_->height();
+            int encW = sw, encH = sh;
+            if (configScale_ < 100) {
+                const int tw = encW * configScale_ / 100;
+                const int th = encH * configScale_ / 100;
+                if (tw > 0 && th > 0) { encW = tw; encH = th; }
+            }
+            videoBaseBitrate_ = videoBitrateFor(encW, encH, configFps_, configCodec_);
+            if (videoBaseBitrate_ > 0)
+                videoEncoder_->setBitrate(videoBaseBitrate_);
+        }
+#endif
     } else if (type == "file_list") {
         emit requestFileList(clientId, input["path"].toString());
     } else if (type == "file_download") {
@@ -3656,6 +4002,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 inputManager_->setScreenSize(
                     screenCapturer_ && screenCapturer_->width() > 0 ? screenCapturer_->width() : w,
                     screenCapturer_ && screenCapturer_->height() > 0 ? screenCapturer_->height() : h);
+            if (inputManager_ && screenCapturer_)
+                inputManager_->setScreenOffset(screenCapturer_->originX(), screenCapturer_->originY());
 #ifdef USE_FFMPEG
             // 分辨率变化后必须重建编码器：sws/编码器上下文仍按旧尺寸建立，
             // 继续投帧会让 sws_scale 按旧宽度读新帧 → 堆越界读。
@@ -3680,6 +4028,12 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         int index = input["index"].toInt();
         if (screenCapturer_ && screenCapturer_->refreshOutputs()
                 && screenCapturer_->switchOutput(index)) {
+            // 切换输出后捕获区尺寸与根窗口原点都变了：输入归一化基准和偏移
+            // 必须同步，否则点击会按旧输出/旧偏移落点（多屏错位的主因之一）。
+            if (inputManager_) {
+                inputManager_->setScreenSize(screenCapturer_->width(), screenCapturer_->height());
+                inputManager_->setScreenOffset(screenCapturer_->originX(), screenCapturer_->originY());
+            }
             QJsonObject info;
             info["type"] = "screen_info";
             info["width"] = screenCapturer_->width();
@@ -3721,14 +4075,24 @@ void RDPServer::injectPasteShortcut()
         { "type", "keyup" },
         { "keycode", 86 },
         { "code", "KeyV" },
+        // 显式带 false：helper 依据这些标志维护修饰键状态，
+        // 缺省不传会让 Ctrl 在远端保持按下（解锁后键盘卡住/被污染）。
+        { "ctrl", false },
+        { "alt", false },
+        { "shift", false },
+        { "meta", false },
     };
 
     if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
         // 服务模式（有 helper，如 Windows）：由 helper 进程注入
         wsServer_->sendToCaptureSource(down);
         wsServer_->sendToCaptureSource(up);
-        if (screenLocked_ && secureInputRunning_)
+        // 锁屏态必须成对发送 down/up：旧实现只发 down，V 与 Ctrl 在安全输入
+        // helper 里永远保持按下 → 解锁后键盘卡住（后续输入全被修饰键污染）。
+        if (screenLocked_ && secureInputRunning_) {
             wsServer_->sendToSecureInput(down);
+            wsServer_->sendToSecureInput(up);
+        }
     } else if (inputManager_) {
 #ifdef Q_OS_LINUX
         // Linux 服务模式无 helper：本进程注入（inputManager_ 在 startCapture 时已按
@@ -3747,9 +4111,16 @@ void RDPServer::injectPasteShortcut()
 
 void RDPServer::onFrameCaptured(const QImage& frame)
 {
-    lastCapturedFrame_ = frame;
+    // 仅图片模式需要缓存首帧（onClientConnected 用它给新客户端补图）。视频模式下
+    // 无条件持有会让 QImage 引用计数始终 >1 → VideoEncoder::encode 的 isDetached()
+    // 快路径永远失败 → 每帧多一次整帧深拷贝（1080p@30 ≈ 240MB/s）。
+    if (currentMode_ == ServerMode::Image) {
+        lastCapturedFrame_ = frame;
+    } else if (!lastCapturedFrame_.isNull()) {
+        lastCapturedFrame_ = QImage();
+    }
 
-    if (wsServer_->clients().isEmpty())
+    if (wsServer_->clientCount() == 0)
         return;
 
 #ifdef USE_FFMPEG
@@ -3782,7 +4153,12 @@ void RDPServer::broadcastCursorPos()
     // 静止桌面（Damage 为空）时完全不上报 → 前端光标 overlay 卡死在旧位置；
     // 运动时上报率 = 帧率且被整条抓屏路径延迟拖累。独立 33Hz 定时器后
     // 光标 overlay 只滞后注入 ~30ms（+前端开环预测见 index.html）。
-    if (!wsServer_ || wsServer_->clients().isEmpty())
+    if (!wsServer_ || wsServer_->clientCount() == 0)
+        return;
+
+    // 服务模式 + helper 已连：光标位置由 helper（winlogon 会话内真实位置）经
+    // /capture 通道上报，本进程 QCursor/XQueryPointer 再广播会形成双源互相拉扯。
+    if (serviceMode_ && wsServer_->isCaptureSourceConnected())
         return;
 
     // Linux 服务模式为 QCoreApplication，QCursor::pos() 恒为 (0,0)；
@@ -4002,7 +4378,15 @@ void RDPServer::switchToImageMode()
     // if (videoEncoder_) {
     //     videoEncoder_->shutdown();
     // }
-    videoEncoder_.reset(); // unique_ptr 释放对象
+    // [N6] 切图片模式是用户高频操作：线程卡死时走退役（断信号+故意泄漏），
+    // 不能经析构 qFatal 把整个服务带走；正常停止仍照常 reset 释放。
+    if (videoEncoder_ && !videoEncoder_->shutdownRetire()) {
+        qWarning() << "Encoder thread wedged on image-mode switch; retiring encoder";
+        QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
+        retiredEncoders_.push_back(std::move(videoEncoder_));
+    } else {
+        videoEncoder_.reset(); // unique_ptr 释放对象
+    }
     // 编码器销毁后，缓存的关键帧与 codec extradata 全部作废：
     // 若保留，下次切回视频模式时新客户端会收到上一次编码器的 IDR/SPS/PPS，
     // 而前端已按新的 codec_config 配置解码器 → 花屏或黑屏。
@@ -4105,10 +4489,22 @@ bool RDPServer::switchToVideoMode()
         if (!videoEncoder_->initialize(configCodec_, sw, sh, encW, encH,
                 configFps_, videoBitrateFor(encW, encH, configFps_, configCodec_), configHwEncodeMode_)) {
             qWarning() << "Failed to initialize video encoder (H.264 fallback), staying in image mode";
+            // 两次 initialize 都失败：残留的编码器上下文不可用，尽早释放。
+            // 否则对象留在"半初始化"状态（编码线程已启动、上下文为空），
+            // 下次切视频模式时复用会出现状态错乱/编码线程空转。
+            // [N6] 线程卡死则断信号退役（故意泄漏），不 qFatal 连坐服务。
+            if (!videoEncoder_->shutdownRetire()) {
+                QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
+                retiredEncoders_.push_back(std::move(videoEncoder_));
+            }
             return false;
         }
     }
     videoBaseBitrate_ = videoBitrateFor(encW, encH, configFps_, configCodec_);
+    // 新编码器就绪：上一会话的缓存 IDR / 静态复用标记作废（与 reinit 路径一致）
+    lastKeyframeData_.clear();
+    lastKeyframeTs_ = 0;
+    staticIdrEpochValid_ = false;
 
     currentMode_ = ServerMode::Video;
     // 视频模式恢复增量抓取（低延迟、省 CPU）；图片模式关闭此开关时已恒全量。
@@ -4191,7 +4587,21 @@ void RDPServer::reinitVideoEncoderForScale()
         if (tw > 0 && th > 0) { ew = tw; eh = th; }
     }
 
-    videoEncoder_->shutdown();
+    // [N6] 重建走可退役停机：线程卡死在驱动调用时不 abort/qFatal——
+    // 断开信号后把旧编码器故意泄漏到墓地，新建一个继续推流，服务不受连坐。
+    if (!videoEncoder_->shutdownRetire()) {
+        qWarning() << "Encoder thread wedged during reinit; retiring old encoder and rebuilding a fresh one";
+        QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
+        retiredEncoders_.push_back(std::move(videoEncoder_));
+        createVideoEncoder();
+        if (!videoEncoder_)
+            return;
+    }
+    // 重建后旧编码器的比特流上下文作废：缓存 IDR/extradata/静态复用标记必须清空，
+    // 否则新客户端补发或 PLI 复用会把旧编码器的关键帧喂给新会话（花屏/黑屏）。
+    lastKeyframeData_.clear();
+    lastKeyframeTs_ = 0;
+    staticIdrEpochValid_ = false;
     if (videoEncoder_->initialize(configCodec_, sw, sh, ew, eh,
             configFps_, videoBitrateFor(ew, eh, configFps_, configCodec_), configHwEncodeMode_)) {
         videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_, configCodec_);
@@ -4210,6 +4620,10 @@ void RDPServer::reinitVideoEncoderForScale()
             qInfo() << "Video encoder re-initialized (H.264 fallback) at" << ew << "x" << eh;
         } else {
             qWarning() << "Failed to re-initialize video encoder (H.264 fallback) for scale" << configScale_;
+            // 两种编码器都建不起来（无可用编码器/设备被占用）：继续留在视频模式
+            // 只会黑屏——videoEncoder_ 已 shutdown，没有任何帧能出。退回图片模式
+            // 保证画面可见，用户下次改配置时会重新尝试视频。
+            switchToImageMode();
         }
     }
 }
