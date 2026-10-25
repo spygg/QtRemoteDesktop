@@ -213,6 +213,7 @@ pkg_for() {
         mlocate) case "$d" in apt) echo "mlocate";; pacman) echo "mlocate";; *) echo "mlocate";; esac ;;
         drm) case "$d" in apt) echo "libdrm-dev";; dnf|yum|zypper) echo "libdrm-devel";; pacman) echo "libdrm";; apk) echo "libdrm-dev";; *) echo "libdrm-devel";; esac ;;
         Xrandr) case "$d" in apt|apk) echo "libxrandr-dev";; dnf|yum|zypper) echo "libXrandr-devel";; pacman) echo "libxrandr";; *) echo "libXrandr-devel";; esac ;;
+        yasm) case "$d" in apt|dnf|yum|zypper|pacman|apk) echo "yasm";; *) echo "yasm";; esac ;;
         *) echo "$id" ;;
     esac
 }
@@ -308,6 +309,15 @@ check_deps() {
             if ! have_header "$(hdr_for drm)"; then
                 echo "  [可选] libdrm: 未找到（RK3588 MPP 硬编可能不可用）"
                 MISSING_OPT="$MISSING_OPT drm"
+            fi ;;
+    esac
+    # x86/x86_64：FFmpeg x86asm 汇编优化（nasm/yasm）。缺汇编器时 ffmpeg configure
+    # 自动禁用 x86asm 并退化为纯 C（sws 约慢 3x），这里提前提示安装，装上即自动启用。
+    case "$(uname -m)" in
+        x86_64|amd64|i686|i386)
+            if ! command -v nasm >/dev/null 2>&1 && ! command -v yasm >/dev/null 2>&1; then
+                echo "  [可选] nasm/yasm: 未找到（x86 FFmpeg 汇编优化将禁用，sws 约慢 3x）"
+                MISSING_OPT="$MISSING_OPT yasm"
             fi ;;
     esac
 
@@ -469,6 +479,30 @@ build_ffmpeg() {
             gcc14_flags="$gcc14_flags $f"
         fi
     done
+    # x86 必须保留 NASM 汇编：libswscale 的 RGB32->YUV420P 有 SSE 实现，
+    # 实测 1920x1200 单线程 11.5ms（纯 C）→ 3.9ms（asm），8 条带 3.3→1.2ms，
+    # 折算 60fps 下每帧省 ~2ms、约 0.13 核。此前无条件 --disable-x86asm 把
+    # x86 也退化成纯 C，是 192.168.1.12 上 CPU 偏高的直接原因之一。
+    # ARM 没有 x86 asm，该开关无影响；仅当 x86 且工具链缺 nasm/yasm 时才关闭。
+    local ffasm_flag="--disable-x86asm"
+    case "$FFMPEG_ARCH" in
+        x86_64|x86_32)
+            if command -v nasm >/dev/null 2>&1 || command -v yasm >/dev/null 2>&1; then
+                ffasm_flag=""
+            else
+                echo "[warn] 未安装 nasm/yasm，x86 FFmpeg 将退化为纯 C（sws 约慢 3x）" >&2
+            fi
+            ;;
+    esac
+    # 内联汇编（inline asm）不再无条件禁用：
+    #   - ARM/aarch64：ffmpeg 的 NEON 优化（h264 解码/缩放等）完全依赖内联汇编
+    #     （arm 无外部汇编器机制），此前 --disable-inline-asm 把 ARM 也退化成纯 C，
+    #     实测解码性能损失明显；
+    #   - x86：mathops.h 的 GCC13 "ic" 约束问题已由上方 sed patch 修复，GCC14
+    #     告警由下方 gcc14_flags 兜底，内联汇编可作为 x86asm 的补充启用。
+    # 启用后若个别老 GCC 版本出现汇编语法错误，configure 日志会指明具体文件，
+    # 届时按文件做等价 patch 即可（不要整平台退回纯 C）。
+    local ff_inline_asm_flag=""
     ( cd "$ffbuild" && PKG_CONFIG_PATH="$OPENH264_INSTALL/lib/pkgconfig" \
         "$FFMPEG_SRC/configure" \
         --cc=gcc --ld=gcc --arch="$FFMPEG_ARCH" \
@@ -478,7 +512,7 @@ build_ffmpeg() {
         --disable-everything --enable-swscale --enable-libopenh264 \
         --enable-encoder=libopenh264 \
         --enable-decoder=h264 --enable-decoder=mjpeg --enable-decoder=mpeg4 \
-        --disable-x86asm --disable-inline-asm --enable-static --disable-shared \
+        $ffasm_flag $ff_inline_asm_flag --enable-static --disable-shared \
         --extra-cflags="-I$OPENH264_INSTALL/include $gcc14_flags" \
         --extra-ldflags="-L$OPENH264_INSTALL/lib" \
         --prefix="$FFMPEG_INSTALL" )
@@ -619,7 +653,8 @@ verify
 
 # 编译成功（verify 通过）后：复制 onekeydeploy.sh 并切换到可执行目录
 deploy_onekey
-echo "可执行目录: $EXE_DIR"
+cd "$EXE_DIR" || exit 1
+echo "已切换到可执行目录: $EXE_DIR"
 
 echo ""
 echo "=============================================="

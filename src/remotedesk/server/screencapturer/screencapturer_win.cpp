@@ -423,6 +423,7 @@ public:
         // 而强制帧（新客户端接入 / request_keyframe 的喂帧泵）必须产出内容，
         // 否则新客户端一直黑屏。直接复用上一帧缓存（内容相同，但下游能拿到
         // 一帧真实的 IDR）。
+        bool forcedThisCall = forceNext_;
         if (forceNext_) {
             forceNext_ = false;
             if (!lastFrame_.isNull()) {
@@ -437,11 +438,18 @@ public:
         IDXGIResource* desktopResource = nullptr;
         DXGI_OUTDUPL_FRAME_INFO frameInfo;
 
-        // resetDuplication 重建失败时 deskDupl_ 为空，必须先重建再取帧，否则空指针崩溃
+        // resetDuplication 重建失败时 deskDupl_ 为空，必须先重建再取帧，否则空指针崩溃。
+        // 必须返回 false：true 会让上层当作"捕获成功但无新帧"，从而清零失败计数、
+        // 广播解锁并把强制帧请求吞掉（新客户端一直黑屏）；false 才会累计失败并
+        // 在持续失败后回退 GDI。
         if (!deskDupl_) {
             resetDuplication();
-            if (!deskDupl_)
-                return true; // 跳过本帧，下次再试
+            if (!deskDupl_) {
+                // 强制帧请求尚未产出任何内容，保留到下一次成功抓取，避免丢失
+                if (forcedThisCall)
+                    forceNext_ = true;
+                return false;
+            }
         }
 
         // [P1 perf] 超时从 100ms 降到 16ms：AcquireNextFrame 是同步等待，超时即阻塞采集线程。

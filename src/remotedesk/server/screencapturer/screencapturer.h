@@ -86,6 +86,10 @@ public:
     // 回 updated=false，强制帧被吃掉，静止桌面下最长要等 ~2s 才有画面。
     // 无增量检测的平台天然每帧全量，默认 no-op。
     virtual void requestFullCapture() {}
+    // 无客户端观看时暂停采集。Wayland/PipeWire 的帧生产在独立线程里持续
+    // 运行（光标闪烁/面板刷新会不断出帧），暂停可把整帧拷贝降到 1fps。
+    // 仅有后台生产线程的平台需要实现；默认 no-op。
+    virtual void setPaused(bool) {}
 };
 
 class ScreenCapturer : public QObject {
@@ -287,6 +291,9 @@ private:
     PlatformCapturer* waylandCapturer_ = nullptr;
     bool useWayland_ = false;
     int captureFailCount_ = 0;
+    // captureFrame 防重入：Wayland 流 ERROR 重建会在本定时器槽内跑嵌套事件
+    // 循环，同一 timer 会再次派发进来（此时平台捕获器正处于 teardown 半状态）。
+    bool inCaptureFrame_ = false;
 
     // 真实锁屏状态查询（logind LockedHint 优先，gnome-screensaver 兜底），
     // 带 2s 缓存。返回 1=已锁屏 0=未锁屏 -1=查询失败（调用方回退旧启发式）。
@@ -300,5 +307,15 @@ private:
     QElapsedTimer lockQueryTimer_;
 #endif
 };
+
+#ifdef Q_OS_LINUX
+// 量一次"子窗口画完了，根缓冲区什么时候才真的有这块像素"，单位 ms；-1 = 无从判断
+// （连不上 X，或根窗口读不出来，如 WSLg 的 rootless XWayland）。
+// 用途：无垂直同步/RandR 刷新时序的屏幕（Xvfb/Xvnc/无 EDID 的 Xorg）上，xfwm4 的合成器
+// 会退化成 ~1Hz 定时器，采集端从根窗口抓到的像素本身就是旧的（.9 实测：桌面内容 6.33Hz
+// 变化、根窗口 1.00Hz → 端到端只有 3.1fps）。接真实显示器的会话按刷新率合成，只会量出
+// 十几毫秒 —— 调用方据此决定**不动**用户自己的桌面设置。
+int measureCompositorRepaintLagMs(const char* display);
+#endif
 
 #endif

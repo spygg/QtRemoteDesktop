@@ -149,12 +149,17 @@ void ScreenCapturer::captureFrame()
     }
 
     quint16 checksum = quickFrameChecksum(frame);
-    if (checksum == lastFrameChecksum_) {
+    // 同 Linux/Windows：forceFrameCount_ > 0 时绕过校验和去重，否则静止桌面
+    // 新客户端接入会一直黑屏（mac 采集没有 XDamage 之类的事件可依赖）。
+    if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
         idleCount_++;
         if (idleCount_ > static_cast<int>(fps_ * 2))
             enterIdleThrottle();
         return;
     }
+    forceSendNextFrame_ = false;
+    if (forceFrameCount_ > 0)
+        forceFrameCount_--;
     idleCount_ = 0;
     leaveIdleThrottle();
     lastFrameChecksum_ = checksum;

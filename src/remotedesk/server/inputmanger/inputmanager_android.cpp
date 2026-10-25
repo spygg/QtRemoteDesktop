@@ -33,5 +33,6 @@ void InputManager::sendModifierEvent(int, bool)
 
 QPoint InputManager::cursorPosition() const
 {
-    return QCursor::pos();
+    // 与其它平台统一：返回捕获区相对坐标。
+    return QCursor::pos() - QPoint(screenOffsetX_, screenOffsetY_);
 }

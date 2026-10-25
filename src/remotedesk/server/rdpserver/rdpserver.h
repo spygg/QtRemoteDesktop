@@ -50,6 +50,7 @@ class InputManager;
 // 避免在主线程用 waitForReadyRead 同步阻塞等待 TCP 分片的 body 到齐。
 struct HttpParseState {
     bool headerDone = false;     // 请求头是否已解析（含 Content-Length）
+    bool dispatched = false;     // 请求是否已交给处理器（防止同一 socket 重复派发）
     int contentLength = 0;       // 期望的 POST body 字节数
     QString headerText;          // 已解析的请求头文本（用于路径/方法/鉴权提取）
     QByteArray buffer;           // 累积的原始字节（请求头 + 已到 body 片段）
@@ -118,6 +119,9 @@ public:
     bool startCapture();
     bool restartCapture();
     bool isCaptureConnected() const;
+    // 采集启动中（Linux Wayland 初始化会在主线程跑最长 5s 的嵌套事件循环，
+    // 期间巡检/切分辨率等操作若重入会析构正在 start() 的采集器）。
+    bool isCaptureStarting() const { return captureStarting_; }
     bool isCaptureSourceConnected() const;
     bool isScreenLocked() const { return screenLocked_; }
 
@@ -141,6 +145,9 @@ private slots:
     void onPrepareForSleep(bool sleeping);
     // IME 工作线程结果落地（主线程）：sendJson 操作 QWebSocket 必须在主线程
     void onImeResultReady(const QString& clientId, const QJsonObject& state);
+    // IME 工作线程结束（主线程）：回收 std::thread，否则 joinable 状态会让
+    // 后续所有 ime_switch 请求被 "busy" 永久拒绝。
+    void onImeWorkerFinished();
 #ifdef USE_WEBRTC
     void onWebRtcMessage(const QString& clientId, const QJsonObject& msg);
 #endif
@@ -152,6 +159,8 @@ signals:
     void requestUploadDone(const QString& clientId, const QString& path);
     // IME 工作线程 → 主线程结果回传（auto=跨线程 queued 投递）
     void imeResultReady(const QString& clientId, const QJsonObject& state);
+    // IME 工作线程退出通知（所有返回路径都发，主线程据此 join + 复位）
+    void imeWorkerFinished();
 
 private:
     // 返回 false = HTTP 端口绑定失败（致命，initialize 应中止启动）
@@ -295,6 +304,10 @@ private:
     int configQuality_ = 60;
     int configScale_ = 75;
     CodecType configCodec_ = CodecType::H264;        // 编码协议（h264/hevc/vp8/vp9/av1）
+    // WebRTC 固定 H.264，进入会话时临时改写 configCodec_（编码器只认这个成员），
+    // 用户原本的选择单独保存：落盘写回原值，离开视频模式时恢复。
+    CodecType codecBeforeWebRtc_ = CodecType::H264;
+    bool codecOverriddenForWebRtc_ = false;
     HwEncodeMode configHwEncodeMode_ = HwEncodeMode::Auto; // 硬件编码开关（auto/on/off）
     int userScale_ = 75;
     bool screenLocked_ = false;
@@ -306,6 +319,10 @@ private:
     QString systemName_;
     bool secureInputRunning_ = false;
     bool captureAvailable_ = true;
+    // 采集启动重入保护：startCapture() 全程置位（Wayland 初始化/切换视频模式
+    // 都在其中），期间巡检定时器与 set_resolution 必须跳过，否则会释放/重启
+    // 正在执行 start() 的采集器（use-after-free）。
+    bool captureStarting_ = false;
     QString shellCurrentDir_;
     QMap<QString, QString> shellCwdByToken_; // [B9] 会话令牌 → shell CWD
     // [B-1] 客户端 → 按下的键集合（code → 最近 keydown 载荷，保留 keycode 供

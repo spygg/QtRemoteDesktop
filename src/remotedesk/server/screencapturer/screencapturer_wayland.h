@@ -13,6 +13,8 @@
 #include <QMutex>
 #include <QSize>
 
+#include <atomic>
+
 struct pw_thread_loop;
 struct pw_context;
 struct pw_core;
@@ -29,6 +31,7 @@ public:
     bool initialize() override;
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override;
     void resetDamage() override {}
+    void setPaused(bool paused) override;
     int width() const override { return width_; }
     int height() const override { return height_; }
 
@@ -59,6 +62,11 @@ private:
     bool initialized_ = false;
     uint64_t frameCount_ = 0;
     uint64_t lastDeliveredFrame_ = 0; // 已交付给上层的帧序号（静止桌面去重，避免空拷贝）
+
+    // 无客户端观看（上层 suspend）时置位：streamProcess 把整帧拷贝降到 1fps。
+    std::atomic<bool> paused_ { false };
+    // 暂停期间上一次拷贝的时刻（ms）。只在 PipeWire 线程（streamProcess）读写。
+    qint64 lastPausedCopyMs_ = 0;
 
     // 最新帧（PipeWire 线程写入，capture 线程读取）
     QImage frame_;

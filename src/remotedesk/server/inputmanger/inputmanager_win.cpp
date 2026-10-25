@@ -7,8 +7,10 @@
 
 QPoint InputManager::cursorPosition() const
 {
-    // Windows 下 QCursor::pos() 正常可用
-    return QCursor::pos();
+    // QCursor::pos() 是虚拟桌面绝对坐标；统一换算成"捕获区相对坐标"，
+    // 与 X11/Wayland 实现保持一致（调用方不再二次减偏移）。
+    // 多屏时副屏在主屏左/上会让绝对值/相对值为负，这是合法值。
+    return QCursor::pos() - QPoint(screenOffsetX_, screenOffsetY_);
 }
 
 static bool sendInputChecked(UINT count, LPINPUT inputs, int cbSize)
@@ -91,7 +93,12 @@ void InputManager::sendModifierEvent(int vk, bool isDown)
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar, bool meta)
 {
     // 优先处理 isChar 模式：直接发送 Unicode 字符（中文输入法提交的最终字符）
-    if (isChar && isDown && keycode > 0) {
+    if (isChar) {
+        // keydown 已按 KEYEVENTF_UNICODE 成对发送 down+up，不存在"按住"状态；
+        // 对应的 keyup 若继续走下面的 VK 分支，会把 Unicode 码点当虚拟键码再发
+        // 一次 keyup（如 'A'=65 → VK 'A'），可能错误释放用户正按住的键。
+        if (!isDown || keycode <= 0)
+            return;
         wchar_t ch = static_cast<wchar_t>(keycode);
         INPUT inpDown = {};
         inpDown.type = INPUT_KEYBOARD;

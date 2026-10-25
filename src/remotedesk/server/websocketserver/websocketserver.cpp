@@ -69,6 +69,28 @@ WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent
             dead->close();
             dead->deleteLater();
         }
+        // /secure-input 单向通道：靠 ping/pong 判活（见 secureInputLastPongMs_ 注释）。
+        if (secureInputSource_) {
+            QWebSocket* s = secureInputSource_;
+            if (s->state() != QAbstractSocket::ConnectedState) {
+                qWarning() << "Secure input helper socket not connected, dropping";
+                secureInputSource_ = nullptr;
+                secureInputLastPongMs_ = 0;
+                disconnect(s, nullptr, this, nullptr);
+                s->deleteLater();
+            } else if (secureInputLastPongMs_ > 0
+                       && now - secureInputLastPongMs_ > 3 * kIdleSweepIntervalMs) {
+                // 三个扫描周期（90s）没有 pong = 对端已失联（无 FIN 的半开连接）
+                qWarning() << "Secure input helper ping timeout, dropping";
+                secureInputSource_ = nullptr;
+                secureInputLastPongMs_ = 0;
+                disconnect(s, nullptr, this, nullptr);
+                s->close();
+                s->deleteLater();
+            } else {
+                s->ping();
+            }
+        }
     });
     idleTimer_.start();
 }
@@ -237,10 +259,19 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             old->deleteLater();
         }
         secureInputSource_ = socket;
+        secureInputLastPongMs_ = QDateTime::currentMSecsSinceEpoch();
+        // 心跳：idleTimer_ 每 30s ping 一次，pong 回来才刷新活跃时间；
+        // 单向通道没有上行数据，这是唯一能发现半开连接的办法。
+        connect(socket, &QWebSocket::pong, this, [this, socket](quint64, const QByteArray&) {
+            if (secureInputSource_ == socket)
+                secureInputLastPongMs_ = QDateTime::currentMSecsSinceEpoch();
+        });
         connect(socket, &QWebSocket::disconnected, this, [this, socket]() {
             qWarning() << "Secure input helper disconnected";
-            if (secureInputSource_ == socket)
+            if (secureInputSource_ == socket) {
                 secureInputSource_ = nullptr;
+                secureInputLastPongMs_ = 0;
+            }
             socket->deleteLater();
         });
         return;
@@ -507,6 +538,7 @@ void WebSocketServer::closeSecureInput()
     if (secureInputSource_) {
         QWebSocket* s = secureInputSource_;
         secureInputSource_ = nullptr;
+        secureInputLastPongMs_ = 0;
         s->close();
         s->deleteLater(); // close() 异步，disconnected lambda 因已置空不会再执行，需显式释放
     }

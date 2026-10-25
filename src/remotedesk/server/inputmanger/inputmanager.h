@@ -46,6 +46,8 @@ public:
     bool initUinput();
     void destroyUinput();
     bool isUinputActive() const { return uinputFd_ >= 0; }
+    // 当前是否判定为 Wayland 桌面（输入必须走 uinput）
+    bool isWaylandInput() const { return waylandMode_; }
     // 桌面会话是否为 Wayland：WAYLAND_DISPLAY 已设，或 $XDG_RUNTIME_DIR 下存在
     // 合成器 socket（wayland-*，SSH/systemd 启动的进程常缺 WAYLAND_DISPLAY 但
     // socket 仍在）。决定输入通道：Wayland 桌面必须走 uinput（内核 evdev，

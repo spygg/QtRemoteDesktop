@@ -22,7 +22,10 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QSaveFile>
+#include <QScopedValueRollback>
 #include <QTimer>
+#include <QVector>
+#include <algorithm>
 
 // 高频输入事件（鼠标移动/点击/滚轮/按键）逐条打日志会刷爆日志文件，
 // 只对 auth 等低频事件保留日志，便于排查连接/认证问题。
@@ -128,9 +131,6 @@ void JpegCompressor::shutdown()
 
 void JpegCompressor::enqueue(const QImage& frame)
 {
-    QMutexLocker locker(&mutex_);
-    if (queue_.size() >= kMaxQueueSize)
-        queue_.dequeue();
     // 深拷贝：编码线程与采集线程不再共享 QImage 底层数据。
     // QImage 隐式共享的引用计数是原子的，但两个线程对同一底层数据的
     // detach（写时复制）/释放时序在 Qt 5.7 下仍可能产生竞态，
@@ -138,7 +138,14 @@ void JpegCompressor::enqueue(const QImage& frame)
     //
     // 采集侧几乎总是交付一块新分配/已 detach 的 QImage（captureFrame 内已 copy），
     // 这种帧不必再拷一次；只有真正共享底层数据的帧才走深拷贝兜底。
-    queue_.enqueue(frame.isDetached() ? frame : frame.copy());
+    //
+    // 拷贝必须放在锁外：持锁做 1080p≈8MB 的 copy 会把压缩线程的出队一起卡住
+    //（与 VideoEncoder::encode 的 [V-2] 同理）。
+    QImage owned = frame.isDetached() ? frame : frame.copy();
+    QMutexLocker locker(&mutex_);
+    if (queue_.size() >= kMaxQueueSize)
+        queue_.dequeue();
+    queue_.enqueue(owned);
     cond_.wakeOne();
 }
 
@@ -205,6 +212,7 @@ RDPServer::RDPServer(QObject* parent)
 {
     // IME 工作线程结果回传：工作线程 emit（auto 连接 → queued 投递到主线程执行）
     connect(this, &RDPServer::imeResultReady, this, &RDPServer::onImeResultReady);
+    connect(this, &RDPServer::imeWorkerFinished, this, &RDPServer::onImeWorkerFinished);
 
     // 周期关键帧：只要有视频客户端（WebRTC/RTP 或 WS-MSE/WebCodecs）在线，
     // 每 2s 强制一帧 IDR。静态桌面下编码器不会再自然产 IDR，若不定时补帧，
@@ -267,6 +275,22 @@ RDPServer::RDPServer(QObject* parent)
 
 RDPServer::~RDPServer()
 {
+    // WebRTC 会话是 QObject 子对象：若仅依赖基类析构，它们会在本类所有成员
+    // （wsServer_ 等）销毁之后才 close()；close() 内 metaRTC 的回调仍可能
+    // 同步触发 failed/closed → 槽函数访问已销毁成员。必须在成员有效时显式停止。
+#ifdef USE_WEBRTC
+    if (!webrtcSessions_.isEmpty()) {
+        const QList<QString> ids = webrtcSessions_.keys();
+        for (const QString& id : ids) {
+            WebRtcSession* session = webrtcSessions_.take(id);
+            if (session) {
+                session->close();
+                delete session;
+            }
+        }
+        webrtcExcluded_.clear();
+    }
+#endif
     // 成员按声明的逆序析构：screenCapturer_ 在 jpegCompressor_ 之前声明，
     // 会自动先析构 jpegCompressor_。若不显式停机，工作线程尚在 emit jpegCompressed、
     // 或主线程 captureTimer 仍在向 jpegCompressor_->enqueue 时对象已被销毁，
@@ -363,6 +387,113 @@ static void writeServerConfigAtomic(const QString& path, const QJsonObject& root
                    << ":" << save.errorString();
 }
 
+// 首次启动（配置文件不存在）时的默认档位探测。
+//
+// 背景：默认值若按桌面 x86 写死（60fps / scale 100 / quality 60），弱机
+// （Android chroot、ARM 单板）首次运行就直接过载 —— 实测 Cortex-A55
+// 1600x1200 单帧色彩转换 86ms + 编码 38ms，配置 60fps 相当于超载 8 倍。
+// 这里用一次轻量基准（RGB32→YUV420P 色彩转换 + JPEG 编码，各取中位数）
+// 量化本机每百万像素的耗时，再按档位生成 fps/scale/quality；只跑一次，
+// 且只在生成默认配置时执行，不覆盖已有配置。
+struct ProbeDefaults {
+    int fps;
+    int quality;
+    int scale;
+    double swsMsPerMp;   // 色彩转换每百万像素耗时（无 FFmpeg 时为 0）
+    double jpegMsPerMp;  // JPEG 编码每百万像素耗时
+};
+
+static ProbeDefaults probeMachineDefaults()
+{
+    constexpr int PW = 1280, PH = 800;
+    const double megaPixels = static_cast<double>(PW) * PH / 1e6;
+
+    QImage probe(PW, PH, QImage::Format_RGB32);
+    for (int y = 0; y < PH; ++y) {
+        QRgb* line = reinterpret_cast<QRgb*>(probe.scanLine(y));
+        for (int x = 0; x < PW; ++x)
+            line[x] = qRgb((x * 7) & 0xff, (y * 5) & 0xff, (x + y) & 0xff);
+    }
+
+    QVector<double> jpegSamples;
+    for (int i = 0; i < 5; ++i) {
+        QByteArray out;
+        QBuffer buf(&out);
+        buf.open(QIODevice::WriteOnly);
+        QElapsedTimer t;
+        t.start();
+        probe.save(&buf, "JPEG", 35);
+        if (i >= 1) // 第 1 次含 JPEG 插件加载/表初始化，不计入
+            jpegSamples.append(t.nsecsElapsed() / 1e6);
+    }
+    double jpegMs = 0;
+    if (!jpegSamples.isEmpty()) {
+        std::sort(jpegSamples.begin(), jpegSamples.end());
+        jpegMs = jpegSamples[jpegSamples.size() / 2];
+    }
+
+    double swsMs = 0;
+#ifdef USE_FFMPEG
+    SwsContext* sws = sws_getContext(PW, PH, AV_PIX_FMT_RGB32, PW, PH, AV_PIX_FMT_YUV420P,
+                                     SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+    if (sws) {
+        uint8_t* dst[4] = { nullptr, nullptr, nullptr, nullptr };
+        int dstStride[4] = { 0, 0, 0, 0 };
+        if (av_image_alloc(dst, dstStride, PW, PH, AV_PIX_FMT_YUV420P, 32) >= 0) {
+            const uint8_t* src[1] = { probe.bits() };
+            int srcStride[1] = { static_cast<int>(probe.bytesPerLine()) };
+            QVector<double> swsSamples;
+            for (int i = 0; i < 4; ++i) {
+                QElapsedTimer t;
+                t.start();
+                sws_scale(sws, src, srcStride, 0, PH, dst, dstStride);
+                if (i >= 1)
+                    swsSamples.append(t.nsecsElapsed() / 1e6);
+            }
+            if (!swsSamples.isEmpty()) {
+                std::sort(swsSamples.begin(), swsSamples.end());
+                swsMs = swsSamples[swsSamples.size() / 2];
+            }
+            av_freep(&dst[0]);
+        }
+        sws_freeContext(sws);
+    }
+#endif
+
+    ProbeDefaults d;
+    d.swsMsPerMp = swsMs / megaPixels;
+    d.jpegMsPerMp = jpegMs / megaPixels;
+
+    // 每百万像素总开销分档（单线程口径）：
+    //   ≤4ms   普通 x86 桌面（实测 sws+jpeg ≈1~3ms/MP）
+    //   ≤12ms  x86 低功耗 / 较强 ARM
+    //   ≤30ms  4 核级 ARM
+    //   ≤60ms  Cortex-A55 级弱机（实测 A55：sws 37.8 + jpeg 10.7 ≈ 48.7ms/MP）
+    // 编码线程里的色彩转换已按核数分条带并行（实测 8 条带 ≈3.3x），
+    // 所以单线程耗时高不代表跑不动，档位按"并行后 + 采集仍串行"的预算定。
+    const double cost = d.swsMsPerMp + d.jpegMsPerMp;
+    if (jpegMs <= 0) {
+        // JPEG 编码完全失败（多为 Qt 插件缺依赖库）：图片模式本身就不可用，
+        // 探测结果不可信，直接给最保守档并告警。
+        d.fps = 20; d.quality = 35; d.scale = 50;
+        qWarning() << "Machine probe: JPEG encoding unavailable, using lowest default tier";
+    } else if (cost <= 4.0) {
+        d.fps = 60; d.quality = 60; d.scale = 100;
+    } else if (cost <= 12.0) {
+        d.fps = 40; d.quality = 50; d.scale = 100;
+    } else if (cost <= 30.0) {
+        d.fps = 30; d.quality = 40; d.scale = 75;
+    } else if (cost <= 60.0) {
+        d.fps = 24; d.quality = 35; d.scale = 60;
+    } else {
+        d.fps = 20; d.quality = 35; d.scale = 50;
+    }
+    qInfo() << "Machine probe: sws =" << d.swsMsPerMp << "ms/MP, jpeg =" << d.jpegMsPerMp
+            << "ms/MP -> defaults fps =" << d.fps << ", scale =" << d.scale
+            << ", quality =" << d.quality;
+    return d;
+}
+
 void RDPServer::loadServerConfig(const QString& configPath)
 {
     QString path = configPath.isEmpty()
@@ -403,11 +534,13 @@ void RDPServer::loadServerConfig(const QString& configPath)
         root["ssl"] = false;
         root["httpPort"] = 8080;
         root["console"] = false;
-        // 默认 60fps：30fps 的 33ms 采样量化是运动不连贯的直接来源。静态桌面
-        // 有 checksum/XDamage 去重兜底不会白耗 CPU；已有配置文件不受影响。
-        root["fps"] = 60;
-        root["quality"] = 60;
-        root["scale"] = 75;
+        // 默认档位按本机实测性能生成，不再写死桌面档（60fps/scale 75/quality 60）。
+        // 弱机（Android chroot、ARM 单板）沿用桌面档会在首次运行就长期过载。
+        // 静态桌面有 checksum/XDamage 去重兜底，强机仍可跑满高帧率。
+        const ProbeDefaults defaults = probeMachineDefaults();
+        root["fps"] = defaults.fps;
+        root["quality"] = defaults.quality;
+        root["scale"] = defaults.scale;
         root["codec"] = "h264";
         root["hw_encode"] = "auto";
         writeServerConfigAtomic(path, root);
@@ -496,7 +629,9 @@ void RDPServer::saveServerConfig(const QString& configPath)
     // high/verylow 画质档位会临时把 configScale_ 改成 100/≤50，若按旧逻辑写
     // configScale_，选一次档位再重启，用户手动设的缩放就被永久覆盖。
     root["scale"] = userScale_;
-    root["codec"] = codecToString(configCodec_);
+    // WebRTC 期间 configCodec_ 被临时改成 H.264：落盘必须写用户原本的选择，
+    // 否则用一次 WebRTC 就会把 HEVC 等配置永久覆盖成 H.264。
+    root["codec"] = codecToString(codecOverriddenForWebRtc_ ? codecBeforeWebRtc_ : configCodec_);
     root["hw_encode"] = (configHwEncodeMode_ == HwEncodeMode::On) ? "on"
                       : (configHwEncodeMode_ == HwEncodeMode::Off) ? "off" : "auto";
 
@@ -606,6 +741,12 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     saveServerConfig(configPath);
 
     wsPort_ = httpPort_ + 1;
+    if (httpPort_ >= 65535) {
+        // quint16 溢出会让 wsPort_ 变成 0，listen(0) 随机挑一个临时端口，
+        // 浏览器按 httpPort+1 永远连不上。65535 时改用相邻低位端口。
+        wsPort_ = httpPort_ - 1;
+        qWarning() << "httpPort 65535 leaves no room for wsPort, using" << wsPort_;
+    }
 
     if (useSsl_)
         loadSslConfig();
@@ -1646,14 +1787,11 @@ void RDPServer::onHttpRequest()
     // 累积本次 readyRead 到达的全部字节（不再逐行读取，便于跨 TCP 包重组）
     st.buffer += socket->readAll();
 
-    // 一旦开始收到请求数据就撤掉空闲兜底：上传/下载可能持续很久且期间
-    // 没有新的 readyRead（下载只有 bytesWritten），不能按"无读事件"判空闲。
-    if (!st.buffer.isEmpty()) {
-        if (QTimer* idle = socket->findChild<QTimer*>(QStringLiteral("httpIdle"))) {
-            idle->stop();
-            idle->deleteLater();
-        }
-    }
+    // 收到新数据就续期，但**不能撤掉**：请求头/请求体只到一半、对端静默时
+    // （半开连接），撤掉定时器会让这个 socket 永久驻留。直到请求完整后才
+    // 停表删除（见下方 body 到齐处），下载路径由 pumpFileDownload 自己接管。
+    if (QTimer* idle = socket->findChild<QTimer*>(QStringLiteral("httpIdle")))
+        idle->start(30000);
 
     // 解析请求头（仅一次）：得到 Content-Length 与请求头文本
     if (!st.headerDone) {
@@ -1704,6 +1842,21 @@ void RDPServer::onHttpRequest()
     if (bodySoFar.size() < st.contentLength)
         return;
     QByteArray body = bodySoFar.left(st.contentLength);
+
+    // 一个请求只派发一次：响应头固定 Connection: close，但客户端若在 socket
+    // 关闭前继续发数据（流水线/异常客户端），readyRead 会再次触发本函数，
+    // 而 buffer 从未消费 → 同一请求被重复处理（下载状态被覆盖泄漏、登录/POST
+    // 重复执行）。
+    if (st.dispatched)
+        return;
+    st.dispatched = true;
+
+    // 请求已完整到达：撤掉空闲兜底。下载/上传后续字节由各自状态机驱动，
+    // 不再有 readyRead，继续计时会把正常的大文件传输误杀。
+    if (QTimer* idle = socket->findChild<QTimer*>(QStringLiteral("httpIdle"))) {
+        idle->stop();
+        idle->deleteLater();
+    }
 
     QString requestStr = st.headerText;
 
@@ -2370,6 +2523,21 @@ void RDPServer::start()
         return;
     }
 
+    // 先启动屏幕捕获：编码器必须按**采集到的真实像素尺寸**初始化。
+    // start() 之前 screenCapturer_->width() 在 Linux/Windows 高 DPI 下取的是
+    // QScreen 逻辑尺寸，与 X11/DXGI 的实际像素不一致；按逻辑尺寸建好的编码器
+    // 每帧都会触发 sizeMismatch 重建（周期性卡顿/黑帧）。
+    if (!screenCapturer_->start(configFps_)) {
+        qCritical() << "Failed to start screen capture";
+        captureAvailable_ = false;
+        return;
+    }
+
+    // 检测捕获是否可用（无 X 时 width/height 为 0）
+    captureAvailable_ = screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
+    if (!captureAvailable_)
+        qWarning() << "Screen capture unavailable (no display), serving shell-only mode";
+
     // 尝试初始化视频编码器（按缩放档位编码，缩放由编码线程 sws 完成）
 #ifdef USE_FFMPEG
     {
@@ -2398,18 +2566,6 @@ void RDPServer::start()
     }
 #endif
 
-    // 启动屏幕捕获（使用配置文件中的 fps）
-    if (!screenCapturer_->start(configFps_)) {
-        qCritical() << "Failed to start screen capture";
-        captureAvailable_ = false;
-        return;
-    }
-
-    // 检测捕获是否可用（无 X 时 width/height 为 0）
-    captureAvailable_ = screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
-    if (!captureAvailable_)
-        qWarning() << "Screen capture unavailable (no display), serving shell-only mode";
-
     // 如果没有客户端连接，暂停捕获以降低 CPU
     if (wsServer_->clientCount() == 0)
         screenCapturer_->suspend();
@@ -2420,6 +2576,22 @@ void RDPServer::start()
 
 bool RDPServer::startCapture()
 {
+    // 采集重启（休眠恢复 / display 切换 / 采集失败重试）会重建 ScreenCapturer，
+    // 旧编码器绑定的源尺寸随之失效。重建前若处于视频模式，用户意图应保留：
+    // 先切图片释放旧编码器/WebRTC，采集成功后按新模式恢复视频，而不是把
+    // 正在观看的客户端降级回图片模式。
+    const ServerMode modeBeforeRestart = currentMode_;
+    // 重入保护：Wayland 初始化在 ScreenCapturer::start() 里跑最长 5s 的嵌套
+    // 事件循环（QCoreApplication::processEvents），Linux 服务的 3s display 巡检
+    // 定时器会在其中被派发 → restartCapture() 会 reset() 掉"start() 还在栈上"的
+    // 采集器（use-after-free）；startCapture() 重入则会先 cleanupPlatform()
+    // 销毁正在使用的 waylandCapturer_/x11Capturer_。启动期间一律拒绝重入，
+    // 巡检侧（isCaptureStarting()）与 set_resolution 也据此跳过。
+    if (captureStarting_) {
+        qWarning() << "startCapture: capture start already in progress, ignoring reentrant call";
+        return false;
+    }
+    QScopedValueRollback<bool> startingGuard(captureStarting_, true);
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // Linux: DISPLAY may not have been set at init, recreate input manager
     inputManager_ = std::unique_ptr<InputManager>(new InputManager(this));
@@ -2512,6 +2684,10 @@ bool RDPServer::startCapture()
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // 预热焦点窗口：首次按键不再触发 X 窗口树遍历，降低首键延迟
     inputManager_->primeFocusWindow();
+    // Wayland 桌面的输入必须走 uinput，而设备创建含 udev 就绪等待（键盘+指针+
+    // 滚轮共约 0.6s）。在启动期建好，避免首次按键/移动时主线程明显卡顿。
+    if (inputManager_->isWaylandInput() && !inputManager_->isUinputActive())
+        inputManager_->initUinput();
 #endif
     captureAvailable_ = screenCapturer_->width() > 0 && screenCapturer_->height() > 0;
     if (!captureAvailable_)
@@ -2519,6 +2695,15 @@ bool RDPServer::startCapture()
     if (wsServer_->clientCount() == 0)
         screenCapturer_->suspend();
     qInfo() << "startCapture: screen capturer started";
+
+    // 重启前是视频模式且采集可用：按新采集源的尺寸重建编码器并恢复视频，
+    // 否则休眠恢复/display 切换会把在线客户端永久踢回图片模式。
+    if (modeBeforeRestart == ServerMode::Video && captureAvailable_) {
+        if (switchToVideoMode())
+            qInfo() << "startCapture: restored video mode after capture restart";
+        else
+            qWarning() << "startCapture: failed to restore video mode after capture restart";
+    }
 
     // 捕获变为可用（如 Linux 服务进程启动后 DISPLAY 才出现），通知已连接客户端
     // 重新评估模式：捕获可用 + 编码器 → webrtc=true，客户端随即升级到 WebRTC
@@ -2553,6 +2738,12 @@ bool RDPServer::isCaptureConnected() const
 
 bool RDPServer::restartCapture()
 {
+    // 与 startCapture 共用重入守卫：采集启动期间（含其内部的嵌套事件循环）
+    // reset() 当前采集器会把正在 start() 的对象释放掉。
+    if (captureStarting_) {
+        qWarning() << "restartCapture: capture start in progress, skipping restart";
+        return false;
+    }
     // Tear down the existing capturer (drops the X11 connection / Display*),
     // then start fresh so the new ScreenCapturer picks up the current DISPLAY /
     // XAUTHORITY environment. Used when the active X session changes at runtime
@@ -2865,6 +3056,13 @@ void RDPServer::handleImeCycle(const QString& clientId)
     QPointer<RDPServer> self(this);
     const QString cid = clientId;
     imeWorker_.reset(new std::thread([self, cid, prefix]() {
+        // 所有返回路径（含提前 return）都要通知主线程回收线程对象：
+        // 线程结束后 joinable() 仍为 true，不复位 imeWorker_ 会让之后每次
+        // ime_switch 都命中上面的 busy 分支，输入法切换永久失效。
+        struct FinishNotifier {
+            QPointer<RDPServer> s;
+            ~FinishNotifier() { if (s) emit s->imeWorkerFinished(); }
+        } finishNotifier { self };
         // 执行一条完整命令（prefix 非空时包装为 sudo -u ... env ...），返回 exit code
         auto runCmd = [&prefix](const QStringList& cmd, int timeoutMs, QString* out) -> int {
             QProcess p;
@@ -2932,6 +3130,15 @@ void RDPServer::handleImeCycle(const QString& clientId)
 #else
     Q_UNUSED(clientId);
 #endif
+}
+
+void RDPServer::onImeWorkerFinished()
+{
+    // 信号在本线程函数返回前发出，这里 join 只会等待最后几个指令周期。
+    // join 后再 reset，下一条 ime_switch 才能真正启动新线程。
+    if (imeWorker_ && imeWorker_->joinable())
+        imeWorker_->join();
+    imeWorker_.reset();
 }
 
 void RDPServer::onImeResultReady(const QString& clientId, const QJsonObject& state)
@@ -3171,6 +3378,12 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
             proc->deleteLater();
         });
         proc->start(sh, { QStringLiteral("-c"), lines.join(QLatin1Char('\n')) });
+        // 命令挂死（runuser/lock 工具卡在会话总线上）时不留常驻子进程：
+        // 15s 后强杀，finished 处理器会照常回一条 "未锁定" 结果。
+        QTimer::singleShot(15000, proc, [proc]() {
+            if (proc->state() != QProcess::NotRunning)
+                proc->kill();
+        });
     } else if (action == "unlock_screen") {
         // 免密解锁：让被控端从锁屏界面切回桌面（方案A）。
         //  1) loginctl unlock-session —— 解开 light-locker / gnome-screensaver 这类
@@ -3240,6 +3453,10 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
             proc->deleteLater();
         });
         proc->start(sh, { QStringLiteral("-c"), lines.join(QLatin1Char('\n')) });
+        QTimer::singleShot(15000, proc, [proc]() {
+            if (proc->state() != QProcess::NotRunning)
+                proc->kill();
+        });
     } else if (action == "show_desktop") {
         // 显示桌面链：
         //  0) X11 EWMH 直发 _NET_SHOWING_DESKTOP —— 最可靠，不依赖外部工具；
@@ -3555,7 +3772,7 @@ void RDPServer::onClientDisconnected(const QString& clientId)
             // 服务模式下本进程在 Session0，本地注入打到无人可见的桌面且会污染
             // 本侧修饰键状态，故仅在非服务模式（桌面实例）直接注入。
             if (inputManager_ && !serviceMode_)
-                inputManager_->injectKeyboard(up["keycode"].toInt(), it.key(), false,
+                inputManager_->injectKeyboard(up["keycode"].toInt(), up["code"].toString(), false,
                                               false, false, false, false,
                                               up["isChar"].toBool(), false);
         }
@@ -3592,13 +3809,21 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     // 卡住，一并跟踪。所有模式（直连/转发 helper）统一在此记录，断开时回放 keyup。
     if (type == QLatin1String("keydown") || type == QLatin1String("keyup")) {
         const QString code = input["code"].toString();
-        if (!code.isEmpty()) {
+        // isChar 事件前端固定发 code:''（index.html 的输入法/锁屏密码路径），
+        // 直接用 code 当跟踪键会全部落空，断线时这些真正按下过的键不会被释放。
+        // Linux 端 isChar 会映射成真实 keysym 注入，卡住即无限自动重复。
+        const int keycode = input["keycode"].toInt();
+        const bool isChar = input["isChar"].toBool();
+        const QString trackKey = !code.isEmpty()
+                ? code
+                : (isChar && keycode > 0 ? QStringLiteral("char:%1").arg(keycode) : QString());
+        if (!trackKey.isEmpty()) {
             if (type == QLatin1String("keydown")) {
-                pressedKeysByClient_[clientId][code] = input;
+                pressedKeysByClient_[clientId][trackKey] = input;
             } else {
                 auto it = pressedKeysByClient_.find(clientId);
                 if (it != pressedKeysByClient_.end()) {
-                    it->remove(code);
+                    it->remove(trackKey);
                     if (it->isEmpty())
                         pressedKeysByClient_.erase(it);
                 }
@@ -3891,7 +4116,10 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         int newFps = input["fps"].toInt();
         // [H22] 配置侧同步钳制（configFps_ 也参与编码器 GOP/间隔计算）
         if (newFps > 60) newFps = 60;
-        if (newFps >= 1) {
+        // 只在帧率**真的变化**时才处理：前端切画质也顺手带上了当前 fps
+        // （index.html 的 quality 分支），无条件重建会让"只改画质"变成
+        // shutdown/initialize + 丢 IDR + 客户端等关键帧，画面卡一下。
+        if (newFps >= 1 && newFps != configFps_) {
             configFps_ = newFps;
             if (screenCapturer_)
                 screenCapturer_->setFps(newFps);
@@ -3931,15 +4159,24 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         if (!codecStr.isEmpty()) {
             CodecType c = codecFromString(codecStr);
             if (c != configCodec_) {
-                configCodec_ = c;
-                scheduleSaveConfig(); // [P2] 去抖落盘
+                if (webrtcBusy) {
+                    // WebRTC 固定 H.264，编码器不能切；但用户这次选择仍然有效：
+                    // 记到"用户原值"里供落盘和离开视频模式后恢复，不能把临时的
+                    // H.264 当成用户配置持久化（否则用一次 WebRTC 就永久丢选择）。
+                    qWarning() << "Ignoring codec switch while WebRTC active (WebRTC stays H.264),"
+                               << "remembered for later:" << codecToString(c);
+                    codecBeforeWebRtc_ = c;
+                    codecOverriddenForWebRtc_ = true;
+                    scheduleSaveConfig(); // [P2] 去抖落盘
+                } else {
+                    configCodec_ = c;
+                    codecOverriddenForWebRtc_ = false;
+                    scheduleSaveConfig(); // [P2] 去抖落盘
 #ifdef USE_FFMPEG
-                if (currentMode_ == ServerMode::Video && videoEncoder_ && !webrtcBusy) {
-                    needEncoderRebuild = true;
-                } else if (webrtcBusy) {
-                    qWarning() << "Ignoring codec switch while WebRTC active (WebRTC stays H.264)";
-                }
+                    if (currentMode_ == ServerMode::Video && videoEncoder_)
+                        needEncoderRebuild = true;
 #endif
+                }
             }
         }
         QString hwModeStr = input["hw_encode"].toString();
@@ -3988,6 +4225,14 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     } else if (type == "file_upload_done") {
         emit requestUploadDone(clientId, input["path"].toString());
     } else if (type == "set_resolution" && !serviceMode_) {
+        // 采集启动期间不允许停/起采集器：此时可能正处在 Wayland 初始化的
+        // 嵌套事件循环里，stop()+start() 会销毁正在使用的平台捕获器。
+        if (captureStarting_) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "error" },
+                { "message", "屏幕采集正在启动，请稍后重试" } });
+            return;
+        }
         int w = input["width"].toInt();
         int h = input["height"].toInt();
         if (ScreenCapturer::changeDisplayResolution(w, h)) {
@@ -4014,8 +4259,15 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 #endif
             QJsonObject info;
             info["type"] = "screen_info";
-            info["width"] = w;
-            info["height"] = h;
+            // 必须广播**实际**尺寸：显示器可能未精确应用请求的模式（如 Android
+            // 上 1800x1200 被 XFCE 改成 1600x1200）。广播请求值会让前端按错误
+            // 宽高做坐标映射，所有点击系统性偏移。
+            const int actualW = (screenCapturer_ && screenCapturer_->width() > 0)
+                    ? screenCapturer_->width() : w;
+            const int actualH = (screenCapturer_ && screenCapturer_->height() > 0)
+                    ? screenCapturer_->height() : h;
+            info["width"] = actualW;
+            info["height"] = actualH;
             wsServer_->broadcastJson(info);
         } else {
             QJsonObject err;
@@ -4162,12 +4414,22 @@ void RDPServer::broadcastCursorPos()
         return;
 
     // Linux 服务模式为 QCoreApplication，QCursor::pos() 恒为 (0,0)；
-    // 由 InputManager 用 XQueryPointer 提供真实光标位置
-    QPoint cursorPos = inputManager_ ? inputManager_->cursorPosition() : QCursor::pos();
-    if (cursorPos.x() < 0 || cursorPos.y() < 0)
-        return;
-    int relativeX = cursorPos.x() - screenGeometry_.x();
-    int relativeY = cursorPos.y() - screenGeometry_.y();
+    // 由 InputManager 用 XQueryPointer 提供真实光标位置。
+    // cursorPosition() 各平台统一返回"捕获区相对坐标"（InputManager 内已减去
+    // 捕获区原点）。这里不能再减一次 origin：副屏捕获时会双重偏移；且负值在
+    // 多屏布局（副屏位于主屏左/上方）下是合法值，不能据此丢弃，否则 overlay
+    // 在副屏上永久冻结。
+    QPoint cursorPos;
+    if (inputManager_) {
+        cursorPos = inputManager_->cursorPosition();
+    } else {
+        const bool useCaptureOrigin = screenCapturer_ && screenCapturer_->width() > 0;
+        const int originX = useCaptureOrigin ? screenCapturer_->originX() : screenGeometry_.x();
+        const int originY = useCaptureOrigin ? screenCapturer_->originY() : screenGeometry_.y();
+        cursorPos = QCursor::pos() - QPoint(originX, originY);
+    }
+    const int relativeX = cursorPos.x();
+    const int relativeY = cursorPos.y();
 
     if (lastCursorPos_.x() != relativeX || lastCursorPos_.y() != relativeY) {
         lastCursorPos_ = QPoint(relativeX, relativeY);
@@ -4184,6 +4446,10 @@ void RDPServer::broadcastCursorPos()
 
 void RDPServer::onJpegCompressed(const QByteArray& jpegData)
 {
+    // 模式门：压缩线程与主线程异步，切到视频模式前已入队的 JPEG 结果仍会到达。
+    // 若照常广播，MSE/WebCodecs 客户端会在视频流中收到 0x03 图片帧并覆盖画面。
+    if (currentMode_ != ServerMode::Image)
+        return;
     // 构造二进制包： [1字节类型标识(0x03)] [4字节大端长度] [JPEG数据]
     QByteArray packet;
     QDataStream stream(&packet, QIODevice::WriteOnly);
@@ -4198,6 +4464,10 @@ void RDPServer::onJpegCompressed(const QByteArray& jpegData)
 void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 timestamp)
 {
 #ifdef USE_FFMPEG
+    // 模式门：编码线程与主线程异步，切回图片模式后仍在途的编码帧不能广播，
+    // 否则前端会收到无解码器对应的 0x01/0x02 视频帧（花屏/误触发降级）。
+    if (currentMode_ != ServerMode::Video)
+        return;
     // 缓存最近关键帧，供新客户端接入时立即回放以引导出图
     if (isKeyframe) {
         lastKeyframeData_ = data;
@@ -4396,6 +4666,16 @@ void RDPServer::switchToImageMode()
 #endif
 
     currentMode_ = ServerMode::Image;
+
+#ifdef USE_WEBRTC
+    // 图片模式不涉及编码：恢复 WebRTC 强制 H.264 之前的用户选择，
+    // 否则用一次 WebRTC 后选择就被永久钉在 H.264。
+    if (codecOverriddenForWebRtc_) {
+        configCodec_ = codecBeforeWebRtc_;
+        codecOverriddenForWebRtc_ = false;
+        qInfo() << "Restored user codec after WebRTC:" << codecToString(configCodec_);
+    }
+#endif
 
     // 图片模式恒全量抓取：规避增量 XDamage 漏报子窗口（任务栏/顶部面板）
     // 重绘导致的局部黑块，且图片模式多为低动态，全量抓取的 CPU 成本可接受。
@@ -4731,28 +5011,34 @@ void RDPServer::startWebRtcSession(const QString& clientId)
     return;
 #endif
 
-    // WebRTC 的轨道与 NAL 解析在 WebRtcSession 内是**固定 H.264** 实现
-    //（addVideoTrack(Yang_VED_H264)、NAL type = byte & 0x1F）。若当前配置是
-    // HEVC/VP9 且编码器初始化成功（典型：开着硬件编码），编码器会产出非 H.264 帧，
-    // 而 sendFrame 永远匹配不到 H.264 的 NAL 类型 → 一帧都发不出去（黑屏）。
-    // 因此进入 WebRTC 前强制 H.264（只改本进程内存值，不写回配置文件，
-    // 用户下次切回 WS 视频模式时仍可用原选择）。
-    const bool codecForcedToH264 = (configCodec_ != CodecType::H264);
-    if (codecForcedToH264) {
-        qWarning() << "WebRTC requires H.264; overriding configured codec"
-                   << codecToString(configCodec_) << "-> h264";
-        configCodec_ = CodecType::H264;
-    }
-
-    // WebRTC 依赖 H.264 编码器，先确保处于视频模式
+    // WebRTC 依赖 H.264 编码器，先确保处于视频模式。
+    // 顺序很重要：必须在强制 H.264 **之前**切换 —— switchToVideoMode() 广播的
+    // mode_changed 要带上用户原本选择的 codec，否则前端会把 H.264 当成用户配置
+    // 记进 localStorage，稍后回传 config 时把用户选择永久覆盖。
     if (!switchToVideoMode()) {
         failNoEncoder("no_encoder");
         return;
     }
 
-    // 已经在视频模式时 switchToVideoMode() 会直接返回 true，不会按新 codec 重建，
-    // 这里补一次重建：本地编码器直接重建；服务模式（编码在 helper）重新下发
-    // config+video_on，让 helper 按 H.264 重建编码器。
+    // WebRTC 的轨道与 NAL 解析在 WebRtcSession 内是**固定 H.264** 实现
+    //（addVideoTrack(Yang_VED_H264)、NAL type = byte & 0x1F）。若当前配置是
+    // HEVC/VP9 且编码器初始化成功（典型：开着硬件编码），编码器会产出非 H.264 帧，
+    // 而 sendFrame 永远匹配不到 H.264 的 NAL 类型 → 一帧都发不出去（黑屏）。
+    // 因此进入 WebRTC 时临时改写 configCodec_（用户原值保留在 codecBeforeWebRtc_）。
+    const bool codecForcedToH264 = (configCodec_ != CodecType::H264);
+    if (codecForcedToH264) {
+        if (!codecOverriddenForWebRtc_) {
+            codecBeforeWebRtc_ = configCodec_;
+            codecOverriddenForWebRtc_ = true;
+        }
+        qWarning() << "WebRTC requires H.264; overriding configured codec"
+                   << codecToString(configCodec_) << "-> h264";
+        configCodec_ = CodecType::H264;
+    }
+
+    // 视频模式刚按用户 codec 初始化过编码器，这里补一次重建：本地编码器直接
+    // 重建；服务模式（编码在 helper）重新下发 config+video_on，让 helper 按
+    // H.264 重建编码器。
     if (codecForcedToH264) {
         if (videoEncoder_ && screenCapturer_)
             reinitVideoEncoderForScale();
@@ -4825,8 +5111,26 @@ void RDPServer::startWebRtcSession(const QString& clientId)
     // 外网 STUN 在内网不可达时会拖长 ICE 收集，导致 12s 回退定时器先触发而误关会话。
     webrtcIceServers_ = QVector<QString>();
 
-    if (!session->create(webrtcIceServers_, configFps_))
+    if (!session->create(webrtcIceServers_, configFps_)) {
+        // 必须显式告知失败：否则客户端停在"等待 offer"，只能等 12s 超时才降级。
         stopWebRtcSession(clientId);
+        // WebRTC 未能建立时编码器无需再钉在 H.264：恢复用户 codec，否则
+        // WS/MSE 回退流会一直用 H.264，用户配置被静默改写（重启进程才恢复）。
+        if (codecOverriddenForWebRtc_) {
+            configCodec_ = codecBeforeWebRtc_;
+            codecOverriddenForWebRtc_ = false;
+            qInfo() << "WebRTC create failed, restored user codec:" << codecToString(configCodec_);
+            if (videoEncoder_ && screenCapturer_)
+                reinitVideoEncoderForScale();
+            else if (serviceMode_)
+                sendVideoParamsToCaptureSource(QStringLiteral("video_on"));
+        }
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "signal_state" },
+            { "state", "failed" },
+            { "reason", QStringLiteral("create_failed") },
+        });
+    }
 }
 
 void RDPServer::stopWebRtcSession(const QString& clientId)
@@ -4854,6 +5158,17 @@ void RDPServer::onWebRtcMessage(const QString& clientId, const QJsonObject& msg)
     } else if (type == "signal_answer") {
         if (WebRtcSession* s = webrtcSessions_.value(clientId)) {
             s->handleAnswer(msg["sdp"].toString());
+            // handleAnswer 失败会同步 emit failed → stopWebRtcSession 已删除会话
+            // 并把该客户端移出 webrtcExcluded_。若不检查就继续执行下面的插入，
+            // 客户端既没有 RTP 会话、又被 WS 广播永久排除 → 永久黑屏（只能重连）。
+            if (!webrtcSessions_.contains(clientId)) {
+                wsServer_->sendJson(clientId, QJsonObject {
+                    { "type", "signal_state" },
+                    { "state", "failed" },
+                    { "reason", QStringLiteral("answer_failed") },
+                });
+                return;
+            }
             // answer 生效即开始 RTP 推流（sendFrame 以 remoteSet_ 为门禁，
             // metaRTC 不回调 Connected），该客户端从 WS 媒体广播中排除，
             // 避免 RTP+WS 双流同时推送浪费带宽。

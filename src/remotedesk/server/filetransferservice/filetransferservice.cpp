@@ -570,6 +570,10 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
             // 与 addToTar 一致：跳过符号链接（防越权读 + 链接环无限递归）
             if (fi.isSymLink())
                 continue;
+            // FIFO / 字符设备 / socket 不是常规文件：open() 会永久阻塞
+            //（FIFO 等写入方、设备节点等硬件），整个下载循环卡死且无进度。
+            if (!fi.isDir() && !fi.isFile())
+                continue;
             TarEntry e;
             e.absPath = fi.absoluteFilePath();
             e.tarName = prefix.isEmpty() ? fi.fileName() : prefix + "/" + fi.fileName();
@@ -729,16 +733,41 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     // [C5-①] 下游积压超限时暂停产出：WS 发送队列/主线程信号队列无法无限吸收
     // GB 级目录的分块。工作线程阻塞等待排空；断线时回调返回 0（不会死等）。
     static const qint64 kWsBacklogLimit = 4 * 1024 * 1024;
+    // 客户端连着但长时间不读（TCP 零窗口）时，积压永远不降：没有超时的话
+    // 传输线程会永久卡在 wait 里，后续下载请求也全部排队等不到执行。
+    static const qint64 kBackpressureStallMs = 30 * 1000;
+    bool stalled = false;
+    bool stallReported = false;
     auto abortedNow = [this]() {
         return backpressureAbort_.load(std::memory_order_relaxed);
     };
-    auto waitBackpressure = [this, &abortedNow]() {
+    auto haltedNow = [&abortedNow, &stalled]() {
+        return abortedNow() || stalled;
+    };
+    auto reportStall = [&, this]() {
+        if (!stalled || stallReported)
+            return;
+        stallReported = true;
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_download"},
+            {"path", path},
+            {"error", "传输停滞：客户端超过 30 秒未接收数据，已中止下载"}
+        });
+    };
+    auto waitBackpressure = [this, &haltedNow, &stalled]() {
+        qint64 waitedMs = 0;
         while (backpressureQuery_ && backpressureQuery_() > kWsBacklogLimit) {
             // 关闭流程置位后立即退出：主线程正阻塞在 wait()，积压不会再下降
-            if (abortedNow())
-                return;
+            if (haltedNow())
+                return false;
             QThread::msleep(20);
+            waitedMs += 20;
+            if (waitedMs >= kBackpressureStallMs) {
+                stalled = true;
+                return false;
+            }
         }
+        return true;
     };
 
     QString safePath = sanitizeFilePath(path);
@@ -799,9 +828,9 @@ void FileTransferService::processDownload(const QString& clientId, const QString
             // 隐式共享入队。旧实现 left(n) 深拷贝一遍 + remove(0,n) 把剩余数据
             // memmove 一遍，每个 512KB 块都双重全量拷贝。
             while (pend.size() >= CHUNK_SIZE || (force && !pend.isEmpty())) {
-                waitBackpressure();
-                if (abortedNow()) {
-                    pend.clear();   // 进程正在退出，丢弃未发数据直接返回
+                if (!waitBackpressure()) {
+                    pend.clear();   // 进程退出或下游停滞：丢弃未发数据
+                    reportStall();
                     return;
                 }
                 QByteArray chunk;
@@ -824,7 +853,7 @@ void FileTransferService::processDownload(const QString& clientId, const QString
         // int 溢出（>2GB 文件 open 失败/短读时触发）。按 256KB 分块并沿途 flush。
         auto appendZeros = [&](qint64 n) {
             while (n > 0) {
-                if (abortedNow())
+                if (haltedNow())
                     return;
                 const int take = int(qMin<qint64>(n, 256 * 1024));
                 pend += QByteArray(take, '\0');
@@ -834,8 +863,8 @@ void FileTransferService::processDownload(const QString& clientId, const QString
         };
 
         for (const TarEntry& e : entries) {
-            if (abortedNow())
-                return;   // 关闭中：停止继续遍历目录
+            if (haltedNow())
+                return;   // 关闭中/下游停滞：停止继续遍历目录
             // header（根条目 tarName 与 addToTar 一致：目录带尾斜杠）
             pend += tarHeaderFor(e.isDir ? e.tarName + "/" : e.tarName,
                                  e.isDir ? 0 : e.size, e.isDir ? '5' : '0');
@@ -854,7 +883,7 @@ void FileTransferService::processDownload(const QString& clientId, const QString
             qint64 remain = e.size;
             char buf[256 * 1024];
             while (remain > 0) {
-                if (abortedNow())
+                if (haltedNow())
                     return;
                 const qint64 n = f.read(buf, qMin<qint64>(sizeof(buf), remain));
                 if (n <= 0) {
@@ -875,6 +904,8 @@ void FileTransferService::processDownload(const QString& clientId, const QString
 
         pend += QByteArray(1024, '\0'); // tar 结束块
         flush(true);
+        if (haltedNow())
+            return; // 已发送停滞/中止错误，不能再补发 file_download_end
 
         if (offset != totalSize)
             qWarning() << "WS tar: size mismatch" << path
@@ -934,7 +965,7 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     qint64 lastBytes = 0;
 
     while (offset < totalSize) {
-        if (abortedNow())
+        if (haltedNow())
             return;
         // [B8] 必须先按 qint64 求差再收窄：≥2GiB 文件剩余量超 INT_MAX，
         // 直接 (int) 强转回绕为负 → qMin 得负 → read 负数 → 提前断流截断。
@@ -956,9 +987,10 @@ void FileTransferService::processDownload(const QString& clientId, const QString
             return;
         }
 
-        waitBackpressure();
-        if (abortedNow())
+        if (!waitBackpressure()) {
+            reportStall();
             return;
+        }
         emit downloadChunkReady(clientId, path, offset, chunk, totalSize);
         offset += chunk.size();
 

@@ -47,8 +47,13 @@ void ScreenCapturer::captureFrame()
     }
 
     quint16 checksum = quickFrameChecksum(frame);
-    if (checksum == lastFrameChecksum_)
+    // 强制帧（新客户端接入 / 输入注入 / 切回图片模式）必须绕过校验和去重：
+    // 静止桌面下画面不变，否则客户端永远等不到首帧（黑屏）。
+    if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_)
         return;
+    forceSendNextFrame_ = false;
+    if (forceFrameCount_ > 0)
+        forceFrameCount_--;
     lastFrameChecksum_ = checksum;
 
     emitCapturedFrame(frame);

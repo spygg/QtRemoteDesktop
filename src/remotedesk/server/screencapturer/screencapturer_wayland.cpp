@@ -191,6 +191,10 @@ bool WaylandCapturer::initialize()
         return false;
     }
 
+    // 重建时不能沿用上一次会话的 node id：PipeWireStreamAdded 超时后旧 node
+    // 会让等待循环立刻通过，然后 createStream(旧 node) 失败，重建永远起不来。
+    nodeId_ = 0;
+
     pw_init(nullptr, nullptr);
 
     // 1) GNOME Mutter 私有 ScreenCast（无需交互授权）
@@ -752,6 +756,20 @@ void WaylandCapturer::streamProcess()
             qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
             qputenv("QTRD_WAYLAND_HEIGHT", QByteArray::number(height_));
         }
+        // [R1] 无人观看时把整帧拷贝从"每帧"降到 1fps。PipeWire 的帧生产在
+        // 本线程持续运行（光标闪烁/面板刷新会不断出帧），1920x1200 RGBA 每帧
+        // ~9MB 的 copy+堆分配在 30fps 下 ≈ 270MB/s，纯属白耗。
+        // 不能完全停：resume 后首帧直接从 frame_ 取，完全停会让重连客户端看到
+        // 暂停前的旧画面（锁屏等一次性变化会一直显示不对）。1fps 下 frame_
+        // 最多陈旧 1s，按帧速率看等价于实时。
+        if (paused_.load(std::memory_order_relaxed)) {
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            if (lastPausedCopyMs_ != 0 && nowMs - lastPausedCopyMs_ < 1000) {
+                pw_stream_queue_buffer(stream_, buf);
+                return;
+            }
+            lastPausedCopyMs_ = nowMs;
+        }
         QImage img(static_cast<const uchar*>(d->data),
                    realW, realH,
                    stride,
@@ -817,6 +835,13 @@ void WaylandCapturer::abortPipewireSetup()
     if (loop_) { pw_thread_loop_destroy(loop_); loop_ = nullptr; }
 }
 
+void WaylandCapturer::setPaused(bool paused)
+{
+    // 只置标志：帧丢弃/降频由 PipeWire 线程在 streamProcess 里执行，
+    // 这样暂停不会阻塞主线程（不能在主线程 stop 流，重建/销毁会死锁）。
+    paused_.store(paused, std::memory_order_relaxed);
+}
+
 bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
 {
     // PipeWire 流已进入 ERROR（compositor 撤销共享 / 会话失效 / 设备错误）：
@@ -836,6 +861,12 @@ bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
             if (initialize()) {
                 streamErrorRetryMs_ = 0;
                 qInfo() << "WaylandCapturer: PipeWire stream rebuilt";
+            } else {
+                // teardownPipewire() 已把 streamError_ 清零；若这里不重新置位，
+                // 上面 5s 重建门禁永远不会再进入 → compositor 撤销共享后画面
+                // 永久冻结，只能重启进程。
+                streamError_ = true;
+                qWarning() << "WaylandCapturer: PipeWire rebuild failed, will retry in 5s";
             }
         }
         if (updated) *updated = false;

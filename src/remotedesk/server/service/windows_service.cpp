@@ -72,7 +72,7 @@ DWORD WINAPI WindowsService::serviceCtrlHandler(DWORD ctrlCode, DWORD eventType,
     return NO_ERROR;
 }
 
-DWORD WindowsService::launchHelperProcess()
+DWORD WindowsService::launchHelperProcess(HANDLE* outProcess)
 {
     DWORD sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF) {
@@ -178,7 +178,10 @@ DWORD WindowsService::launchHelperProcess()
                 << "token: user (explorer.exe in session" << sessionId << ")"
                 << "env:" << (envBlock ? "user" : "inherited(SYSTEM)");
         CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+        if (outProcess)
+            *outProcess = pi.hProcess;   // 生命周期交给调用方
+        else
+            CloseHandle(pi.hProcess);
         return pi.dwProcessId;
     }
     qWarning() << "LaunchHelper: CreateProcessAsUser failed, error:" << GetLastError();
@@ -242,6 +245,7 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
 
             QTimer helperTimer;
             DWORD helperPid = 0;
+            HANDLE helperProc = NULL;     // helper 进程句柄：判活/终止都用它，避免 PID 复用误杀
             qint64 helperSpawnMs = 0;     // helper 最近一次启动时刻
             qint64 lastCaptureMs = 0;     // 最近一次观察到 /capture 已连接的时刻
             QObject::connect(&helperTimer, &QTimer::timeout, [&]() {
@@ -253,8 +257,14 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
                     ResetEvent(s_sessionChangeEvent);
                     if (helperPid != 0) {
                         qInfo() << "Session change detected, terminating helper PID" << helperPid;
-                        HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
-                        if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+                        if (helperProc) {
+                            TerminateProcess(helperProc, 1);
+                            CloseHandle(helperProc);
+                            helperProc = NULL;
+                        } else {
+                            HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
+                            if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+                        }
                         helperPid = 0;
                     }
                     helperTimer.setInterval(1000);
@@ -268,14 +278,17 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
                 }
 
                 if (helperPid != 0) {
-                    // 用 WaitForSingleObject 判活，比 GetExitCodeProcess==STILL_ACTIVE
-                    // 可靠（PID 复用/句柄失效都不会误判为"还在跑"）。
+                    // 有句柄时对句柄判活：既可靠又不会因 PID 复用把无关进程当成 helper。
                     bool alive = false;
-                    HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION,
-                                               FALSE, helperPid);
-                    if (hProc) {
-                        alive = (WaitForSingleObject(hProc, 0) == WAIT_TIMEOUT);
-                        CloseHandle(hProc);
+                    if (helperProc) {
+                        alive = (WaitForSingleObject(helperProc, 0) == WAIT_TIMEOUT);
+                    } else {
+                        HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION,
+                                                   FALSE, helperPid);
+                        if (hProc) {
+                            alive = (WaitForSingleObject(hProc, 0) == WAIT_TIMEOUT);
+                            CloseHandle(hProc);
+                        }
                     }
                     if (alive) {
                         // 关键：进程活着 != 健康。helper 卡死 / WS 断开 / 连错端口时
@@ -286,13 +299,21 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
                             return;   // 宽限期内，等它连上
                         qWarning() << "Helper PID" << helperPid << "alive but /capture not"
                                    << "connected for" << (now - lastOk) << "ms - terminating";
-                        HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
-                        if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+                        if (helperProc) {
+                            TerminateProcess(helperProc, 1);
+                        } else {
+                            HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
+                            if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+                        }
+                    }
+                    if (helperProc) {
+                        CloseHandle(helperProc);
+                        helperProc = NULL;
                     }
                     helperPid = 0;
                     lastCaptureMs = 0;
                 }
-                DWORD pid = launchHelperProcess();
+                DWORD pid = launchHelperProcess(&helperProc);
                 if (pid != 0) {
                     helperPid = pid;
                     helperSpawnMs = now;
@@ -304,7 +325,7 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
                 }
             });
             helperTimer.start(5000);
-            helperPid = launchHelperProcess();
+            helperPid = launchHelperProcess(&helperProc);
             helperSpawnMs = QDateTime::currentMSecsSinceEpoch();
 
             app.exec();
@@ -314,8 +335,14 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
             // 继续抓屏/占端口，下次启动还会与新 helper 抢 /capture。
             if (helperPid != 0) {
                 qInfo() << "Service stopping, terminating helper PID" << helperPid;
-                HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
-                if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+                if (helperProc) {
+                    TerminateProcess(helperProc, 1);
+                    CloseHandle(helperProc);
+                    helperProc = NULL;
+                } else {
+                    HANDLE hKill = OpenProcess(PROCESS_TERMINATE, FALSE, helperPid);
+                    if (hKill) { TerminateProcess(hKill, 1); CloseHandle(hKill); }
+                }
             }
         }
     }

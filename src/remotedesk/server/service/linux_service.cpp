@@ -1,5 +1,6 @@
 #include "linux_service.h"
 #include "rdpserver.h"
+#include "screencapturer.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -257,30 +258,50 @@ static bool detectWslgDisplay(char* dpyOut, size_t dpySize, char* authOut, size_
 // 但 XGetImage(root) 恒返回 BadMatch，没有任何像素可取。把它当桌面用只会永久黑屏。
 // 由上层在"采集连续启动失败"时记入，探测链后续跳过。
 static char g_badDisplays[4][64] = {};
+static qint64 g_badDisplayUntilMs[4] = {};
 static int g_badCount = 0;
+
+// 黑名单不是永久判决：会话切换/登录瞬间的采集失败也会连续两次触发
+// （X server 尚未就绪），永久拉黑会让该 display 在进程余下生命周期内
+// 再也不被选中，用户只能看到 Xvfb 虚拟屏。这里给每项一个有效期，
+// 到期后重新参与探测；真正抓不了的 display（WSLg rootless）只会每
+// 5 分钟多失败两次，代价可忽略。
+static const qint64 kBadDisplayTtlMs = 5 * 60 * 1000;
 
 static bool isBadDisplay(const char* d)
 {
     if (!d || !d[0]) return false;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
     for (int i = 0; i < g_badCount; ++i) {
-        if (strcmp(g_badDisplays[i], d) == 0) return true;
+        if (strcmp(g_badDisplays[i], d) == 0)
+            return now < g_badDisplayUntilMs[i];
     }
     return false;
 }
 
 static void markBadDisplay(const char* d)
 {
-    if (!d || !d[0] || isBadDisplay(d)) return;
+    if (!d || !d[0]) return;
+    // 已有同名条目（可能已过期）：原地续期，避免重复占满环
+    for (int i = 0; i < g_badCount; ++i) {
+        if (strcmp(g_badDisplays[i], d) == 0) {
+            g_badDisplayUntilMs[i] = QDateTime::currentMSecsSinceEpoch() + kBadDisplayTtlMs;
+            return;
+        }
+    }
     if (g_badCount >= 4) {
         // 环形覆盖最旧的一项
-        for (int i = 1; i < 4; ++i)
+        for (int i = 1; i < 4; ++i) {
             memcpy(g_badDisplays[i - 1], g_badDisplays[i], sizeof(g_badDisplays[0]));
+            g_badDisplayUntilMs[i - 1] = g_badDisplayUntilMs[i];
+        }
         g_badCount = 3;
     }
     snprintf(g_badDisplays[g_badCount], sizeof(g_badDisplays[0]), "%s", d);
+    g_badDisplayUntilMs[g_badCount] = QDateTime::currentMSecsSinceEpoch() + kBadDisplayTtlMs;
     ++g_badCount;
     qWarning() << "detectUserX11Env: marked display as unusable (reachable but not capturable):"
-               << d;
+               << d << "(retry after" << kBadDisplayTtlMs / 1000 << "s)";
 }
 
 // 当前 DISPLAY 是否需要继续往下探测（空 / 不可连 / 已知抓不了）
@@ -305,6 +326,230 @@ static int g_virtualDisplayNum = -1;
 // 事件循环被彻底饿死 —— 表现不只是"黑屏"，而是 8080 网页都打不开。
 static qint64 g_virtualRetryAtMs = 0;
 static int g_virtualFailCount = 0;
+
+// 关掉 XFCE 合成器的看门狗一组辅助函数，理由见下面 disableXfceCompositing。
+static bool readProcessEnvValue(pid_t pid, const char* key, char* out, size_t cap)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/environ", static_cast<int>(pid));
+    const int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return false;
+    char buf[8192]; // 桌面会话的 environ 通常 2~3KB，读不满就退化为找不到
+    const ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n <= 0)
+        return false;
+    const size_t klen = strlen(key);
+    for (ssize_t i = 0; i < n; ) {
+        const char* entry = buf + i;
+        size_t elen = 0;
+        while (i + static_cast<ssize_t>(elen) < n && entry[elen])
+            ++elen;
+        if (i + static_cast<ssize_t>(elen) >= n)
+            break; // 读到的 environ 被截断，最后一条没有结束符，别再往后当字符串用
+        if (elen > klen && strncmp(entry, key, klen) == 0 && entry[klen] == '=') {
+            snprintf(out, cap, "%s", entry + klen + 1);
+            return true;
+        }
+        i += static_cast<ssize_t>(elen) + 1;
+    }
+    return false;
+}
+
+static bool isProcessNamed(pid_t pid, const char* name)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/comm", static_cast<int>(pid));
+    const int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return false;
+    char comm[64];
+    const ssize_t n = read(fd, comm, sizeof(comm) - 1);
+    close(fd);
+    if (n <= 0)
+        return false;
+    comm[n] = '\0';
+    if (comm[n - 1] == '\n')
+        comm[n - 1] = '\0';
+    return strcmp(comm, name) == 0;
+}
+
+// 用会话总线写一次属性；xfconf-query 连不上总线/属性不存在都会非 0 退出。
+static bool xfconfSetCompositing(const char* query, const char* display,
+                                 const char* home, const char* dbusAddr)
+{
+    const pid_t pid = fork();
+    if (pid == 0) {
+        setenv("DISPLAY", display, 1);
+        setenv("HOME", home, 1);
+        setenv("DBUS_SESSION_BUS_ADDRESS", dbusAddr, 1);
+        execl(query, "xfconf-query", "-c", "xfwm4", "-p", "/general/use_compositing",
+              "-t", "bool", "-s", "false", static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    if (pid < 0)
+        return false;
+    int status = 0;
+    for (int i = 0; i < 40; ++i) { // 上限 4s：总线上的 xfsettingsd 冷启动时也慢
+        if (waitpid(pid, &status, WNOHANG) == pid)
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        usleep(100000);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    return false;
+}
+
+static const char* xfconfQueryPath()
+{
+    static const char* kQueryPaths[] = { "/usr/bin/xfconf-query",
+                                         "/usr/local/bin/xfconf-query", nullptr };
+    for (int i = 0; kQueryPaths[i]; ++i) {
+        if (access(kQueryPaths[i], X_OK) == 0)
+            return kQueryPaths[i];
+    }
+    return nullptr; // 没装 xfconf：不是 XFCE 生态，没有可关的合成器
+}
+
+static int findProcessesNamed(const char* name, pid_t* out, int max)
+{
+    int n = 0;
+    DIR* dir = opendir("/proc");
+    for (dirent* e = dir ? readdir(dir) : nullptr; e; e = readdir(dir)) {
+        char* end = nullptr;
+        const long p = strtol(e->d_name, &end, 10);
+        if (end == e->d_name || (end && *end) || p <= 0)
+            continue;
+        if (n < max && isProcessNamed(static_cast<pid_t>(p), name))
+            out[n++] = static_cast<pid_t>(p);
+    }
+    if (dir)
+        closedir(dir);
+    return n;
+}
+
+// 根缓冲区晚于窗口内容多少毫秒才算"被合成器限流"。健康值：无合成器 ~10ms、
+// 有刷新时序的屏幕上按刷新率 ~10-30ms；限流时实测 500-1000ms（1Hz 定时器）。
+// 300ms 把两类分得很开，又不会因为偶发调度抖动误判。
+static const int kThrottledCompositingLagMs = 300;
+
+// 分离出去的看门狗：借会话总线把 xfwm4 的合成关掉。
+// 为什么必须"等会话起来 + 借它的总线"：服务环境里没有会话总线，裸跑 xfconf-query 会
+// 自己 fork 出一对 dbus-daemon/xfconfd（每次启动泄漏一对），写进另一份配置库，xfwm4
+// 完全看不到 —— 实测离线读到 false、会话里读到 true。所以从 /proc/<xfwm4>/environ 取
+// 该会话的 DBUS_SESSION_BUS_ADDRESS；xfwm4 监听这个属性，会话已在跑时改动即时生效。
+// probeFirst=false —— 虚拟屏会话（我们自己 startxfce4 拉起的）：那块屏必然没有刷新
+//   时序，直接关。
+// probeFirst=true  —— 用户自己登录/`startx` 的会话：配置归用户，先在**当前这块屏**上
+//   实测一次根缓冲区延迟，只有确认被限流才动它；接真实显示器的桌面量出十几毫秒，
+//   我们一行设置都不改（代价是子进程里最多 1.5s 的探测，不碰服务事件循环）。
+static void runXfceCompositingWatchdog(const char* display, const char* home, bool probeFirst)
+{
+    const char* query = xfconfQueryPath();
+    if (!query)
+        return;
+
+    char dpy[64], hom[256];
+    snprintf(dpy, sizeof(dpy), "%s", display);
+    snprintf(hom, sizeof(hom), "%s", home);
+
+    const pid_t outer = fork();
+    if (outer == 0) {
+        if (fork() > 0)
+            _exit(0);          // 双 fork：看门狗挂到 init，不给服务留僵尸
+        setsid();
+        if (probeFirst) {
+            const int lag = measureCompositorRepaintLagMs(dpy);
+            if (lag < kThrottledCompositingLagMs) {
+                dprintf(STDERR_FILENO, "qtrd: compositor painted root %d ms after a window "
+                                       "redraw on %s -> compositing is fine, user settings "
+                                       "untouched\n", lag < 0 ? -1 : lag, dpy);
+                _exit(0);
+            }
+            dprintf(STDERR_FILENO, "qtrd: compositor painted root %d ms after a window redraw "
+                                   "on %s -> captured pixels are stale, turning xfwm4 "
+                                   "compositing off\n", lag, dpy);
+        }
+        int tried[8];
+        int nTried = 0;
+        for (int attempt = 0; attempt < 120; ++attempt) { // 弱机冷启动 xfwm4 可能要十几秒
+            pid_t wf[8];
+            const int n = findProcessesNamed("xfwm4", wf, 8);
+            for (int i = 0; i < n; ++i) {
+                bool alreadyTried = false;
+                for (int k = 0; k < nTried; ++k)
+                    alreadyTried = alreadyTried || tried[k] == static_cast<int>(wf[i]);
+                if (alreadyTried)
+                    continue;
+                if (nTried < 8)
+                    tried[nTried++] = static_cast<int>(wf[i]);
+                char addr[512];
+                if (readProcessEnvValue(wf[i], "DBUS_SESSION_BUS_ADDRESS", addr, sizeof(addr))
+                    && xfconfSetCompositing(query, dpy, hom, addr)) {
+                    dprintf(STDERR_FILENO,
+                            "qtrd: turned off xfwm4 compositing (display %s) -> root repaint "
+                            "no longer throttled to ~1Hz\n", dpy);
+                    _exit(0);
+                }
+            }
+            usleep(500000);
+        }
+        dprintf(STDERR_FILENO, "qtrd: xfwm4 compositing left ON (display %s)"
+                               " -> screen updates throttled to ~1Hz\n", dpy);
+        _exit(1);
+    }
+    if (outer > 0) {
+        int status = 0;
+        waitpid(outer, &status, 0); // 中间进程立刻退出，这里只是回收它
+    }
+}
+
+// 虚拟屏会话（我们自己在 Xvfb/Xvnc 上 startxfce4）：那块屏必然没有刷新时序，直接关。
+static void disableXfceCompositing(const char* display, const char* home)
+{
+    runXfceCompositingWatchdog(display, home, false);
+    qInfo() << "startDesktopSession: queued xfwm4 compositing shutdown on" << display
+            << "(it throttles root repaints to ~1Hz on headless displays)";
+}
+
+// 用户自己登录/`startx` 起来的会话：先实测再决定，每个 display 只判一次。
+static void maybeDisableThrottledCompositing()
+{
+    static QByteArray checked[4];
+    static int checkedCount = 0;
+
+    const char* display = getenv("DISPLAY");
+    if (!display || !display[0])
+        return;
+    const QByteArray dpy(display);
+    for (int i = 0; i < checkedCount; ++i) {
+        if (checked[i] == dpy)
+            return; // 这块屏已经判过
+    }
+
+    if (!xfconfQueryPath())
+        return;
+    pid_t wf[8];
+    if (findProcessesNamed("xfwm4", wf, 8) <= 0)
+        return; // 不是 xfwm4 管的桌面：就算限流也没有我们能写的开关。
+                // 不记账，下次再判 —— startx 之后 xfwm4 可能还没起来。
+    if (checkedCount >= 4)
+        return; // 记账表满了就停手：宁可不判，也不能对同一块屏反复起看门狗
+    checked[checkedCount++] = dpy;
+
+    const char* home = getenv("HOME");
+    runXfceCompositingWatchdog(display, home && home[0] ? home : "/root", true);
+    qInfo() << "Linux service: measuring compositor repaint lag on" << display
+            << "(only disables xfwm4 compositing if the root really lags)";
+}
+
+// 虚拟屏会话是我们自己 startxfce4 拉起来的，startDesktopSession 里已经无条件关过合成；
+// 只有"会话不是我们起的"（用户登录 / 自己 startx）才需要走先实测再改设置这条路。
+static bool desktopSessionIsOurs()
+{
+    return g_desktopPid > 0 && kill(g_desktopPid, 0) == 0;
+}
 
 // 在虚拟屏上拉起一个桌面会话。WSL / 无头环境里 Xvfb 本身是空屏，
 // 有桌面会话用户才真的"看得到东西、能操作"。
@@ -341,6 +586,9 @@ static void startDesktopSession(const char* display)
     char runtimeDir[256];
     snprintf(runtimeDir, sizeof(runtimeDir), "/tmp/qtrd-runtime-%s", display + (display[0] == ':' ? 1 : 0));
     mkdir(runtimeDir, 0700);
+
+    if (strstr(launcher, "xfce") != nullptr)
+        disableXfceCompositing(display, home);
 
     const pid_t pid = fork();
     if (pid == 0) {
@@ -485,7 +733,13 @@ static bool ensureVirtualDisplay()
     // 复用本进程之前拉起的实例
     if (g_xvfbPid > 0 && g_virtualDisplayNum >= 0) {
         char addr[32];
-        if (kill(g_xvfbPid, 0) == 0
+        char dpy[16], tcpDpy[24];
+        snprintf(dpy, sizeof(dpy), ":%d", g_virtualDisplayNum);
+        snprintf(tcpDpy, sizeof(tcpDpy), "127.0.0.1:%d", g_virtualDisplayNum);
+        // 被上层标记"能连但抓不了"的 display 不能复用：否则会在
+        // "标记不可用 → 3 秒后重探测 → 又复用同一个"之间死循环，画面永久黑屏。
+        const bool bad = isBadDisplay(dpy) || isBadDisplay(tcpDpy);
+        if (!bad && kill(g_xvfbPid, 0) == 0
             && resolveVirtualDisplayAddr(g_virtualDisplayNum, addr, sizeof(addr), 200)) {
             setenv("DISPLAY", addr, 1);
             unsetenv("XAUTHORITY");   // 虚拟屏（Xvfb -ac / Xvnc None）无 cookie
@@ -495,10 +749,15 @@ static bool ensureVirtualDisplay()
             virtualDisplaySucceeded();
             return true;
         }
-        // 进程还在但 socket 不可用 = 半死状态。必须显式杀掉再重来，
-        // 否则下面把 pid 清零就再也回收不了，会一路泄漏 X server 进程。
-        kill(g_xvfbPid, SIGKILL);
-        waitpid(g_xvfbPid, nullptr, WNOHANG);
+        // 已判定不可用 / 进程退出 / socket 不可用：显式杀掉旧 server 重新选。
+        // waitpid 必须阻塞到回收：SIGKILL 是异步的，WNOHANG 通常返回 0，
+        // 随后 pid 被清零就再无人回收 → 僵尸进程长期累积。
+        if (kill(g_xvfbPid, 0) == 0) {
+            kill(g_xvfbPid, SIGKILL);
+            waitpid(g_xvfbPid, nullptr, 0);
+        } else {
+            waitpid(g_xvfbPid, nullptr, WNOHANG);
+        }
         g_xvfbPid = 0;
         g_virtualDisplayNum = -1;
     }
@@ -672,14 +931,21 @@ static bool ensureVirtualDisplay()
             if (started) break;
             if (!childExited) {
                 kill(pid, SIGKILL);
-                waitpid(pid, &status, WNOHANG);
+                // SIGKILL 是异步的：单次 WNOHANG 通常返回 0，子进程会以僵尸形式
+                // 常驻到本进程退出（每试一个不可用的 X server 就多一个）。
+                // 有界等待真正回收；回收后的 status 是 SIGKILL 而非原始失败原因，
+                // 因此下面只对"自己退出"的情况打状态日志。
+                for (int r = 0; r < 20 && waitpid(pid, &status, WNOHANG) != pid; ++r)
+                    usleep(50 * 1000);
             }
-            if (WIFSIGNALED(status))
-                qWarning() << "detectUserX11Env:" << servers[s].argv0 << "on" << dpy
-                           << "died from signal" << WTERMSIG(status);
-            else if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
-                qWarning() << "detectUserX11Env:" << servers[s].argv0 << "on" << dpy
-                           << "exited with code" << WEXITSTATUS(status);
+            if (childExited) {
+                if (WIFSIGNALED(status))
+                    qWarning() << "detectUserX11Env:" << servers[s].argv0 << "on" << dpy
+                               << "died from signal" << WTERMSIG(status);
+                else if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+                    qWarning() << "detectUserX11Env:" << servers[s].argv0 << "on" << dpy
+                               << "exited with code" << WEXITSTATUS(status);
+            }
             // 回读子进程 stderr 的前几行（含 execl 失败原因 / X server 的 Fatal error）
             if (FILE* ef = fopen(errLog, "r")) {
                 char line[256];
@@ -1446,6 +1712,12 @@ int LinuxService::run(int argc, char* argv[])
     // 这样前端在无头环境下就会显示 shell 页面，而非远程桌面
     server.startCapture();
 
+    // 采集落在用户自己的会话上（不是我们 startxfce4 起的虚拟屏）时，xfwm4 的合成可能
+    // 把根窗口重绘限流到 ~1Hz（无刷新时序的屏幕），采集端拿到的像素本身就是旧的。
+    // 这里只派子进程做一次实测，健康桌面（接真实显示器，十几毫秒）一行设置都不改。
+    if (!desktopSessionIsOurs())
+        maybeDisableThrottledCompositing();
+
     // 持续监控 display 环境。detectUserX11Env 现在每次都会重新扫描 /proc，
     // 并以当前 display 为基线：只有当出现更优的真实用户会话（confirmed 且分数
     // 更高，例如 GDM greeter :1024 → 用户桌面 :0）时才切换 DISPLAY。因此这里
@@ -1453,6 +1725,41 @@ int LinuxService::run(int argc, char* argv[])
     // greeter 上时永远注意不到之后出现的真实会话，只能靠 systemctl restart 恢复。
     QTimer* checkTimer = new QTimer(&app);
     QObject::connect(checkTimer, &QTimer::timeout, [checkTimer, &server]() {
+        // 回收已退出的桌面会话子进程：kill(pid, 0) 对僵尸仍返回成功，不回收
+        // 就会既泄漏 PID 表又把僵尸误判成"会话还活着"。只 wait 自己记录过的
+        // pid —— waitpid(-1) 会抢走 Qt QProcess 的子进程回收。
+        if (g_desktopPid > 0 && waitpid(g_desktopPid, nullptr, WNOHANG) == g_desktopPid) {
+            qInfo() << "Linux service: desktop session exited, pid" << g_desktopPid;
+            g_desktopPid = 0;
+        }
+
+        // 采集正在启动时整个 tick 跳过：Wayland 初始化会在主线程跑最长 5s 的
+        // 嵌套事件循环，本定时器正是在其中被派发的。此时重扫 /proc 毫无意义，
+        // 重入 start/restart 还会析构正在 start() 的采集器（use-after-free）。
+        if (server.isCaptureStarting())
+            return;
+
+        // [P1] 健康时给 /proc 全量探测降频。detectUserX11Env() 每次都要遍历
+        // /proc 读各进程 environ（单进程上限 1MB）并对每个候选 display 做连接
+        // 探活，3s 一次在主线程上纯属白跑（桌面已连上时没有任何状态会变）。
+        // 采集健康时改为每 5 个 tick（15s）全扫一次；其余 tick 只做一次
+        // readdir 比较 /tmp/.X11-unix 的 socket 集合 —— 新会话出现（xrdp/VNC
+        // 新建 :N、Xvfb 兜底）必然改变该集合，立即恢复全扫，自动切换不受影响。
+        static int healthyTickSkip = 0;
+        static QByteArray lastXSocketSet;
+        QByteArray xSocketSet;
+        {
+            QDir xs(QStringLiteral("/tmp/.X11-unix"));
+            const QStringList names = xs.entryList(
+                QDir::Files | QDir::System | QDir::NoDotAndDotDot, QDir::Name);
+            xSocketSet = names.join(QLatin1Char(',')).toUtf8();
+        }
+        const bool xSocketChanged = (xSocketSet != lastXSocketSet);
+        lastXSocketSet = xSocketSet;
+        if (server.isCaptureConnected() && !xSocketChanged && ++healthyTickSkip < 5)
+            return;
+        healthyTickSkip = 0;
+
         // 记录当前 display，重新探测
         QByteArray prevDisplay;
         if (const char* d = getenv("DISPLAY")) prevDisplay = d;
@@ -1501,6 +1808,12 @@ int LinuxService::run(int argc, char* argv[])
             failStreak = 0;
         }
         // display 未变且 capture 已连接（健康或锁屏）：保持现状，等待更优 display 出现
+        //
+        // 服务比桌面先起（systemd 开机）时，启动那一次判定的 DISPLAY 还是空的/虚拟屏，
+        // 用户随后登录或 startx 起来的 xfwm4 得在这里补判。每块屏只判一次，健康时
+        // 本分支 15s 才走到一次，代价是一次 /proc 扫描。
+        if (!desktopSessionIsOurs())
+            maybeDisableThrottledCompositing();
     });
     checkTimer->start(3000);
 

@@ -881,6 +881,14 @@
     <div id="container">
         <canvas id="screen"></canvas>
         <video id="webrtc-video" autoplay playsinline muted></video>
+        <!-- 键盘承接层：远程会话期间把焦点放在可编辑元素上。Circle 阅读助手/
+             Vimium 这类插件只在 activeElement 不是 input/textarea/contenteditable
+             时才处理字母快捷键（如 Circle 的 "st"），焦点在这里它们会自动跳过，
+             按键仍由下面的 keydown/keyup 统一转发给远端。 -->
+        <textarea id="kbd-sink" tabindex="-1" autocomplete="off"
+            autocorrect="off" autocapitalize="off" spellcheck="false"
+            style="position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;
+            padding:0;border:0;resize:none;overflow:hidden;pointer-events:none;z-index:-1;"></textarea>
     </div>
 
     <img id="remote-cursor"
@@ -976,6 +984,7 @@
             decoder: null,
             canvas: document.getElementById('screen'),
             ctx: document.getElementById('screen').getContext('2d', { alpha: false }),
+            kbdSink: document.getElementById('kbd-sink'),
             connected: false,
             screenWidth: 0,
             screenHeight: 0,
@@ -1049,6 +1058,15 @@
         function initWebRTC() {
             console.log('RD-INIT initWebRTC called, active=', webrtcState.active, 'pc=', !!webrtcState.pc);
             if (webrtcState.active || webrtcState.pc) return;
+            // 用户已切到图片/ffmpeg 模式后，此前排的 400/500ms 延迟 initWebRTC 仍会
+            // 触发。服务端收到 signal_start 会切回视频模式并把该客户端移出 WS 广播，
+            // 而前端在等 JPEG → 永久黑屏，直到手动再切一次模式。延迟回调必须重新
+            // 校验当前模式。
+            const vm = state.currentConfig.videomode;
+            if (vm !== 'webrtc' && vm !== 'auto') {
+                webrtcState.intending = false;
+                return;
+            }
             // [H26] 浏览器不支持 RTCPeerConnection：intending 已被 applyStreamMode
             // 置真，但下面没有任何超时定时器会兜底清理 → WS 帧（handleBinary 按
             // intending 丢弃）被永久忽略 → 黑屏。与 15s 超时路径行为对齐：清
@@ -1627,7 +1645,6 @@
                 // MSE 必须以关键帧起步（SPS/PPS+IDR），此前帧丢弃
                 if (!this.started) {
                     if (!isKeyframe) return;
-                    this.started = true;
                     console.log('MSE got first keyframe, size=' + data.length);
                     // 扫描 annexb NAL 类型分布：67=SPS 68=PPS 65=IDR 6=SEI 9=AUD
                     const nalCount = {};
@@ -1646,12 +1663,17 @@
                     // 之后每帧封装为 moof+mdat fragment，否则 MP4 demuxer 解析失败黑屏。
                     this.fmp4Seq = 0; this.fmp4Dts = 0; this._durMs = 33;
                     const spsPps = extractSpsPps(data);
-                    if (spsPps) {
-                        console.log('MSE building fMP4 init segment, sps=' + spsPps.sps.length + ' pps=' + spsPps.pps.length + ' screen=' + state.screenWidth + 'x' + state.screenHeight);
-                        this._queue(buildFmp4Init(spsPps.sps, spsPps.pps, state.screenWidth, state.screenHeight));
-                    } else {
-                        console.warn('MSE first keyframe has no SPS/PPS, cannot build init segment');
+                    if (!spsPps) {
+                        // 没有 SPS/PPS 就建不出 fMP4 init segment。此时若置 started，
+                        // 后续 P 帧会直接进缺少 avcC 的 demuxer（黑屏）且不再重试；
+                        // 保持未启动并重新索要关键帧，等带 SPS/PPS 的 IDR 再开始。
+                        console.warn('MSE first keyframe has no SPS/PPS, requesting another keyframe');
+                        send({ type: 'request_keyframe' });
+                        return;
                     }
+                    console.log('MSE building fMP4 init segment, sps=' + spsPps.sps.length + ' pps=' + spsPps.pps.length + ' screen=' + state.screenWidth + 'x' + state.screenHeight);
+                    this.started = true;
+                    this._queue(buildFmp4Init(spsPps.sps, spsPps.pps, state.screenWidth, state.screenHeight));
                     // 首帧（关键帧）作为合批起点；不再每帧单独封装分片
                     this.fmp4Dts = 0;
                     this._batch = [];
@@ -1904,6 +1926,7 @@
                 this.configured = false;
                 this.lastKeyframeReqMs = 0;   // 关键帧请求节流
                 this.recoverCount = 0;
+                this.firstRecoverMs = 0;      // 本轮连续失败的起点（10s 窗口）
                 this.init();
             }
 
@@ -1953,6 +1976,12 @@
                 const now = Date.now();
                 if (now - this.lastKeyframeReqMs < 250) return;
                 this.lastKeyframeReqMs = now;
+                // 只统计 10s 窗口内的连续失败。终身计数时，长时间运行累计 20 次
+                // 偶发解码错误就会永久降级到图片模式，且再无恢复机会。
+                if (now - this.firstRecoverMs > 10000) {
+                    this.firstRecoverMs = now;
+                    this.recoverCount = 0;
+                }
                 if (++this.recoverCount > 20) {
                     // 频繁解码失败说明当前编码/参数不可用，降级到图片模式兜底
                     console.warn('WebCodecs keeps failing, falling back to image mode');
@@ -2119,6 +2148,13 @@
                 if (state.showFps) updateStatus('🟢 已连接');
                 else updateStatus('');
                 overlay.classList.remove('active');
+
+                // 连接建立时若焦点还在页面本身，先交给键盘承接层，
+                // 让 Circle 阅读助手这类插件的字母快捷键从第一下按键起就不生效
+                // （本地输入框正在编辑时不抢焦点）。
+                if (document.activeElement === document.body ||
+                    document.activeElement === document.documentElement)
+                    focusKbdSink();
 
                 // 初始化解码器（按持久化的编码协议）
                 replaceDecoder(state.currentConfig.codec || 'h264');
@@ -2816,6 +2852,22 @@
             }
         }
 
+        // 键盘焦点载体：桌面端把焦点放到隐藏 textarea。Circle 阅读助手等插件
+        // 只在 activeElement 可编辑时才放行字母快捷键，焦点在这里它们就不会把
+        // "st" 之类的序列当成自己的快捷键。触屏设备不做（否则点画面就弹软键盘）。
+        const kbdSinkFocusable = !(window.matchMedia &&
+            window.matchMedia('(pointer: coarse)').matches);
+        function focusKbdSink(x, y) {
+            if (!kbdSinkFocusable || !state.kbdSink) return;
+            // 输入法候选窗跟随插入符：把 1px 的承接层挪到点击处，
+            // 否则候选框会固定弹在左上角
+            if (typeof x === 'number' && typeof y === 'number') {
+                state.kbdSink.style.left = Math.max(0, Math.min(window.innerWidth - 2, x)) + 'px';
+                state.kbdSink.style.top = Math.max(0, Math.min(window.innerHeight - 2, y)) + 'px';
+            }
+            try { state.kbdSink.focus({ preventScroll: true }); } catch (err) {}
+        }
+
         function send(data) {
             if (state.ws?.readyState === WebSocket.OPEN) {
                 state.ws.send(JSON.stringify(data));
@@ -2954,18 +3006,26 @@
                 flushMouseMove();
             });
 
+            // 点击任意非可编辑区域后把焦点交给键盘承接层（focusKbdSink）
+            document.addEventListener('mousedown', (e) => {
+                const t = e.target;
+                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+                          t.tagName === 'SELECT' || t.isContentEditable)) return;
+                focusKbdSink(e.clientX, e.clientY);
+            }, true);
             // 鼠标按钮
             // [B14] pressedButtons 追踪画布上按下的键：拖出画布再松开时 canvas
             // 收不到 mouseup，远端按钮永久卡住。窗口级监听只对画布上按下的键
             // 补发 mouseup，避免把工具栏等本地点击误转发给远端。
-            const pressedButtons = new Set();
+            // Map 记录按下时坐标：窗口失焦时没有鼠标位置可用，必须按原按下点补发。
+            const pressedButtons = new Map();
             canvas.addEventListener('mousedown', (e) => {
-                // 点击画面时让画布获得焦点，作为远程键盘输入的焦点载体，
-                // 避免与本地输入框（文件路径框等）混淆
-                try { state.canvas.focus({ preventScroll: true }); } catch (err) {}
+                // 点击画面时把焦点交给键盘承接层（canvas 没有 tabindex，
+                // 旧写法 canvas.focus() 是空操作，焦点留在 body）
+                focusKbdSink(e.clientX, e.clientY);
                 e.preventDefault();
                 const pos = getCanvasPos(e);
-                pressedButtons.add(e.button);
+                pressedButtons.set(e.button, { x: Math.round(pos.x), y: Math.round(pos.y) });
                 send({
                     type: 'mousedown',
                     x: Math.round(pos.x),
@@ -3026,15 +3086,35 @@
                 if (e.data) {
                     for (const ch of e.data) {
                         send({ type: 'keydown', keycode: ch.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
-                        send({ type: 'keyup', keycode: ch.codePointAt(0), code: '' });
+                        // keyup 必须同样带 isChar：服务端按键跟踪按
+                        // "char:<码点>" 记账，缺 isChar 的 keyup 删不掉条目，
+                        // 每个上屏字符都会残留到断线时被批量补发。
+                        send({ type: 'keyup', keycode: ch.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
                     }
                 }
             });
+            // 承接层是隐藏 textarea：普通按键已被 keydown 的 preventDefault 挡住，
+            // 但输入法上屏/粘贴仍可能写入内容，及时清空避免在不可见区域堆积。
+            if (state.kbdSink) {
+                let sinkComposing = false;
+                state.kbdSink.addEventListener('compositionstart', () => { sinkComposing = true; });
+                state.kbdSink.addEventListener('compositionend', () => {
+                    sinkComposing = false;
+                    state.kbdSink.value = '';
+                });
+                state.kbdSink.addEventListener('input', () => {
+                    if (!sinkComposing) state.kbdSink.value = '';
+                });
+            }
             function isLockInputFocused() {
                 const overlay = document.getElementById('lock-overlay');
                 return overlay && overlay.classList.contains('active') &&
                     document.activeElement === document.getElementById('lock-password');
             }
+            // 捕获阶段处理并 stopPropagation：远程会话期间按键不应再被页面里的
+            // 其它监听器（Chrome 插件的字母快捷键、统计脚本等）看到。用捕获阶段
+            // 是因为 window 捕获先于 document/目标的任何监听器，不依赖注册顺序；
+            // 焦点在本地输入框/锁屏密码/输入法组合中时不拦截，保持原生行为。
             window.addEventListener('keydown', (e) => {
                 if (e.isComposing) return;
                 // 锁屏密码输入框获取焦点时，不拦截键盘事件（允许 Backspace 等原生行为）
@@ -3042,7 +3122,8 @@
                 // 焦点在本地可编辑元素（文件路径框/Shell 输入框等）时不拦截、不转发，
                 // 让浏览器原生输入正常工作；否则 preventDefault 会让输入框像“失去焦点”
                 const ft = e.target;
-                if (ft && (ft.tagName === 'INPUT' || ft.tagName === 'TEXTAREA' || ft.isContentEditable)) return;
+                if (ft && (ft.tagName === 'INPUT' || ft.tagName === 'TEXTAREA' || ft.isContentEditable)
+                    && ft !== state.kbdSink) return;
 
                 // ---- 工具栏快捷键（仅使用不冲突的键） ----
                 // F11: 全屏切换（浏览器标准快捷键）
@@ -3050,11 +3131,13 @@
                 if (e.code === 'F11') {
                     toggleFullscreen();
                     e.preventDefault();
+                    e.stopPropagation();
                     return;
                 }
                 if (e.ctrlKey && e.shiftKey && e.code === 'KeyQ') {
                     toggleConfigDropdown();
                     e.preventDefault();
+                    e.stopPropagation();
                     return;
                 }
                 // Ctrl+Alt+I: 切换远端 ibus 输入法。不能转发给远端（远端会真的收到
@@ -3063,16 +3146,23 @@
                 if (e.ctrlKey && e.altKey && e.code === 'KeyI') {
                     cycleIme();
                     e.preventDefault();
+                    e.stopPropagation();
                     return;
                 }
 
                 // 剪贴板粘贴（Ctrl+V）：不 preventDefault，让浏览器触发 paste 事件，
                 // 由下方剪贴板处理器读取本地剪贴板并同步到远端（远端由服务端注入 Ctrl+V）。
                 // 若这里 preventDefault，浏览器会取消整个粘贴动作，paste 事件不会触发。
-                if (e.ctrlKey && e.code === 'KeyV' && !e.altKey && !e.shiftKey && !e.metaKey) return;
+                // 仍要 stopPropagation：paste 是独立事件，插件不该再看到这次按键。
+                if (e.ctrlKey && e.code === 'KeyV' && !e.altKey && !e.shiftKey && !e.metaKey) {
+                    e.stopPropagation();
+                    return;
+                }
 
                 // 防止远程输入重复
                 e.preventDefault();
+                // 非 repeat 的重复 keydown 只去重本地记账，但也不能再传播给页面
+                e.stopPropagation();
                 // [B18] 长按按键浏览器会发 repeat=true 的连续 keydown：这些必须继续
                 // 转发，远端才有自动重复语义（否则长按只出一个字符）。
                 // keysPressed 去重只拦截非 repeat 的重复事件。
@@ -3088,7 +3178,7 @@
                     shift: e.shiftKey,
                     meta: e.metaKey
                 });
-            });
+            }, true);
 
             window.addEventListener('keyup', (e) => {
                 if (isLockInputFocused()) return;
@@ -3099,6 +3189,7 @@
                     return;
                 }
                 state.keysPressed.delete(e.code);
+                e.stopPropagation();
                 send({
                     type: 'keyup',
                     keycode: e.keyCode,
@@ -3112,10 +3203,16 @@
                     shift: e.shiftKey,
                     meta: e.metaKey
                 });
-            });
+            }, true);
 
             // 窗口失焦时释放所有按下的键，避免按键卡死
             window.addEventListener('blur', () => {
+                // 鼠标按钮同样要释放：按住左键切到别的窗口后，远端收不到 mouseup，
+                // 按钮会永久保持按下（表现为无法再点击/拖拽）。按原按下点补发。
+                pressedButtons.forEach((pos, button) => {
+                    send({ type: 'mouseup', x: pos.x, y: pos.y, button: button });
+                });
+                pressedButtons.clear();
                 state.keysPressed.forEach((keycode, code) => {
                     // [B13] 发送 keyup 释放所有卡住的按键：必须用按下时记录的
                     // 原始 keycode（keycode=0 在 Windows 注入路径是无效事件，
@@ -3142,9 +3239,11 @@
             //    没能写进本机。此时真正该粘贴的是远端那份 —— 见 shouldUseRemoteClip。
             window.addEventListener('paste', async (e) => {
                 if (state.clip.disabled) return;
-                // 原生输入框（文件路径、锁屏密码等）→ 交给浏览器原生粘贴
+                // 原生输入框（文件路径、锁屏密码等）→ 交给浏览器原生粘贴；
+                // 键盘承接层虽然也是 textarea，但它是远程会话的按键通道，仍按远端粘贴处理
                 const t = e.target;
-                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
+                    && t !== state.kbdSink) return;
                 if (!state.connected || !state.ws) return;
                 e.preventDefault();
 

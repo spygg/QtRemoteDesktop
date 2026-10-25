@@ -219,5 +219,6 @@ void InputManager::sendModifierEvent(int, bool)
 
 QPoint InputManager::cursorPosition() const
 {
-    return QCursor::pos();
+    // 与 X11/Windows 统一：返回捕获区相对坐标（原点由调用方 setScreenOffset 同步）。
+    return QCursor::pos() - QPoint(screenOffsetX_, screenOffsetY_);
 }

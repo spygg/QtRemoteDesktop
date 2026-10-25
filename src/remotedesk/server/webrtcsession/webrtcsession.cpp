@@ -150,6 +150,13 @@ void WebRtcSession::handleIce(const QString& candidate, const QString& mid)
     // answer 未生效（remoteDescription 未设置）时 metaRTC 无法接受远端候选，
     // 前端 ICE 候选通常早于 answer 到达，先排队等 answer 后统一补发。
     if (!remoteSet_) {
+        // 上界保护：answer 迟迟不到（或客户端异常刷候选）时不能无限堆积。
+        // 正常浏览器候选约 10~30 条，64 足够；超出直接丢弃并告警。
+        static const int kMaxPendingIce = 64;
+        if (pendingIce_.size() >= kMaxPendingIce) {
+            qWarning() << "WebRtcSession: pending ICE overflow, dropping" << candidate.left(60);
+            return;
+        }
         pendingIce_.append({ candidate, mid });
         qInfo() << "WebRtcSession: remote ICE queued (pre-answer)" << candidate.left(60);
         return;

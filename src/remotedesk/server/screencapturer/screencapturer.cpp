@@ -51,6 +51,11 @@ ScreenCapturer::~ScreenCapturer()
 void ScreenCapturer::stop()
 {
     captureTimer_->stop();
+#ifdef Q_OS_LINUX
+    // PipeWire 的帧生产在独立线程里，停 timer 只是不再取帧，拷贝仍在继续。
+    if (waylandCapturer_)
+        waylandCapturer_->setPaused(true);
+#endif
     cleanupPlatform();
 }
 
@@ -58,12 +63,21 @@ void ScreenCapturer::suspend()
 {
     qInfo() << "ScreenCapturer: suspend (timer active=" << captureTimer_->isActive() << ")";
     captureTimer_->stop();
+#ifdef Q_OS_LINUX
+    // 无人观看时把 Wayland 的整帧拷贝降到 1fps（详见 WaylandCapturer::streamProcess）。
+    if (waylandCapturer_)
+        waylandCapturer_->setPaused(true);
+#endif
 }
 
 void ScreenCapturer::resume()
 {
     qInfo() << "ScreenCapturer: resume (timer active=" << captureTimer_->isActive()
             << "interval=" << captureTimer_->interval() << ")";
+#ifdef Q_OS_LINUX
+    if (waylandCapturer_)
+        waylandCapturer_->setPaused(false);
+#endif
     // 无论 timer 是否已激活都恢复目标帧率：idle 降频后 resume 若不重置，
     // 会一直以 4fps 周期空转，客户端连接后画面响应极慢（远程桌面延迟主因之一）。
     leaveIdleThrottle();

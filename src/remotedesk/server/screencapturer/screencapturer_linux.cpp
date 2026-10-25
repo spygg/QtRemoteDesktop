@@ -8,9 +8,11 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QPixmap>
+#include <QScopedValueRollback>
 #include <QSet>
 #include <QRegularExpression>
 #include <chrono>
+#include <cstring>
 
 #include <QDBusArgument>
 #include <QDBusConnection>
@@ -212,7 +214,6 @@ class X11Capturer : public PlatformCapturer {
     Damage damage_;
     XserverRegion region_;
     bool damageSupported_ = false;
-    int emptyDamageCount_ = 0; // 连续空 damage 计数，用于 xrdp 等驱动无 damage 时回退全量捕获
     QImage fullFrame_;         // 全屏持久缓冲（RGB32），区域抓取时在其上原地更新
     bool regionDirty_ = false; // 本次捕获走了区域抓取（已知有变化），无需再做全帧校验和
     bool forceFull_ = false;   // 切换输出后强制下一帧全量抓取（陈旧 damage 区域不适用新输出）
@@ -322,7 +323,12 @@ public:
         // 画面只能靠低频全屏试探更新 → 操作反应极慢。NonEmpty 由 X server 合并
         // 损伤区域，可靠性更高，抓取区域仍远小于全屏。
         damage_ = XDamageCreate(display_, rootWindow_, XDamageReportNonEmpty);
-            damageSupported_ = true;
+            // XDamageCreate 失败时返回 None。若仍置 damageSupported_，之后每帧都是
+            // "空 region + 无效 damage"，只能靠 2s 一次的全量探测更新，帧率掉到
+            // 0.5fps 且无任何日志。
+            damageSupported_ = (damage_ != None);
+            if (!damageSupported_)
+                qWarning() << "X11Capturer: XDamageCreate failed, using full-frame capture";
         }
 
         // 初始化 Xcomposite
@@ -448,7 +454,10 @@ public:
                             const uchar* s = src + yy * srcStride;
                             QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(dstY + yy)) + dstX;
                             for (int xx = 0; xx < cw; ++xx) {
-                                d[xx] = qRgb(s[xx * 3], s[xx * 3 + 1], s[xx * 3 + 2]);
+                                // ZPixmap 24bpp 在 little-endian 下是 B,G,R；qRgb 要 R,G,B，
+                                // 与全量路径（Format_RGB888 + rgbSwapped）保持一致，否则
+                                // damage 局部更新区相对全量区红蓝互换。
+                                d[xx] = qRgb(s[xx * 3 + 2], s[xx * 3 + 1], s[xx * 3]);
                             }
                         }
                     } else {
@@ -478,7 +487,6 @@ public:
                     // fullFrame_，QImage 自动在写侧 detach，成本不高于旧显式拷贝，
                     // 而静态场景（缓冲不再被写、直接被下一帧替换）完全省掉。
                     outImage = fullFrame_;
-                    emptyDamageCount_ = 0;
                     regionDirty_ = true;
                     return true;
                 }
@@ -499,9 +507,6 @@ public:
                     return true;
                 }
                 lastProbe_ = now;
-                emptyDamageCount_ = 0;
-            } else {
-                emptyDamageCount_ = 0;
             }
         }
 
@@ -525,7 +530,11 @@ public:
                 refreshOutputs();
             }
             if (updated) *updated = false;
-            return true;
+            // 必须回报失败：上层 ScreenCapturer 只在返回 false 时才累加
+            // captureFailCount_ 并触发锁屏判定/自愈。旧代码返回 true 只把
+            // updated 置 false，等价于"画面无变化"——X server 无响应或热插拔
+            // 时客户端永久停在最后一帧，且上层完全不知情。
+            return false;
         }
         grabFailCount_ = 0;
         grabFailUntil_ = std::chrono::steady_clock::time_point(); // 成功，解除限流
@@ -649,7 +658,6 @@ public:
         fullFrame_.fill(0);
         forceFull_ = true;
         regionDirty_ = false;
-        emptyDamageCount_ = 0;
         lastProbe_ = std::chrono::steady_clock::now();
 #ifdef HAVE_XSHM
         // 捕获区域尺寸变化 → 重建匹配尺寸的 shm 图像
@@ -897,6 +905,15 @@ bool ScreenCapturer::start(int fps)
 
 void ScreenCapturer::captureFrame()
 {
+    // 防重入：WaylandCapturer::captureFrame 在流 ERROR 时会在本槽内同步调用
+    // initialize()，其等待 PipeWireStreamAdded 的嵌套事件循环会让同一个采集
+    // timer 再次派发进来。此时平台捕获器正处于 teardown 半状态，重入会污染
+    // 故障计数/锁屏判定。重入的这一轮直接跳过，下一 tick 正常执行。
+    if (inCaptureFrame_) {
+        qWarning() << "ScreenCapturer::captureFrame re-entered (nested event loop), skip";
+        return;
+    }
+    QScopedValueRollback<bool> captureGuard(inCaptureFrame_, true);
     QImage frame;
     if (useX11_ && x11Capturer_) {
         bool updated = true;
@@ -1195,4 +1212,97 @@ int ScreenCapturer::currentOutputIndex() const
     if (useX11_ && x11Capturer_)
         return static_cast<X11Capturer*>(x11Capturer_)->currentOutput();
     return -1;
+}
+
+// 量一次"合成器把窗口重绘誊到根缓冲区要多久"（ms），-1 = 测不了。
+// 做法：在屏幕角落映射一个 4x4 override-redirect 小方块（背景色 = 当前根像素取异或，
+// 保证与周围不同），每 10ms 读一次那个根像素，直到方块出现在根缓冲区里。
+// 根缓冲区就是采集端读的那块像素 —— 没有合成器时应用直接画它（十几毫秒），
+// 合成器正常时按刷新率誊（也十几毫秒）；xfwm4 在没有垂直同步/RandR 刷新时序的
+// 屏幕（Xvfb/Xvnc/无 EDID）上退化成 ~1Hz 定时器，这里会量出 500~1000ms，
+// 此时采集到的画面本身就是旧的，帧率天花板只剩 1~3fps（.9 实测 3.1fps）。
+// 调用方据此决定要不要关合成，避免在正常桌面上白动用户的显示设置。
+// 必须在 fork 出去的子进程里调：最坏要等满超时（~1.5s），不能卡服务事件循环。
+int measureCompositorRepaintLagMs(const char* display)
+{
+    const int kProbeTimeoutMs = 1500;
+    const int kProbeTickMs = 10;
+
+    Display* dpy = XOpenDisplay(display && display[0] ? display : nullptr);
+    if (!dpy)
+        return -1;
+    int (*oldHandler)(Display*, XErrorEvent*) = XSetErrorHandler(x11ErrorHandler);
+    const int scr = DefaultScreen(dpy);
+    const Window root = RootWindow(dpy, scr);
+    const int screenW = DisplayWidth(dpy, scr);
+    const int screenH = DisplayHeight(dpy, scr);
+
+    auto cleanup = [&]() {
+        XSetErrorHandler(oldHandler);
+        XCloseDisplay(dpy);
+    };
+    if (screenW < 64 || screenH < 64) {
+        cleanup();
+        return -1;
+    }
+    const int px = screenW - 12;
+    const int py = screenH - 12;
+
+    unsigned long corner = 0;
+    bool readable = false;
+    {
+        XImage* img = XGetImage(dpy, root, px, py, 1, 1, AllPlanes, ZPixmap);
+        if (img) {
+            corner = XGetPixel(img, 0, 0);
+            XDestroyImage(img);
+            readable = true;
+        }
+    }
+    if (!readable) {
+        // 根窗口读不出来（WSLg 的 rootless XWayland 恒 BadMatch）→ 无从判断
+        cleanup();
+        return -1;
+    }
+    const unsigned long probeColor = corner ^ 0x0055AA55UL;
+
+    XSetWindowAttributes attrs;
+    memset(&attrs, 0, sizeof(attrs));
+    attrs.background_pixel = probeColor;
+    attrs.border_pixel = probeColor;
+    attrs.override_redirect = True;   // 不进 WM：不被装饰、不被动画/焦点抢时间
+    attrs.colormap = DefaultColormap(dpy, scr);
+    const Window dot = XCreateWindow(dpy, root, px, py, 4, 4, 0,
+                                     DefaultDepth(dpy, scr), InputOutput,
+                                     DefaultVisual(dpy, scr),
+                                     CWBackPixel | CWBorderPixel | CWOverrideRedirect | CWColormap,
+                                     &attrs);
+    XMapWindow(dpy, dot);
+    XFlush(dpy);
+
+    const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    int exactMs = -1;    // 根像素 == 我们要求的颜色
+    int changedMs = -1;  // 根像素变了（某些 16bpp 视觉会做色值转换，仍算"画上了"）
+    for (int elapsed = 0; elapsed < kProbeTimeoutMs; elapsed += kProbeTickMs) {
+        XImage* img = XGetImage(dpy, root, px, py, 1, 1, AllPlanes, ZPixmap);
+        if (img) {
+            const unsigned long cur = XGetPixel(img, 0, 0);
+            XDestroyImage(img);
+            if (cur == probeColor) {
+                exactMs = elapsed;
+                break;
+            }
+            if (cur != corner && changedMs < 0)
+                changedMs = elapsed;
+        }
+        usleep(kProbeTickMs * 1000);
+    }
+    XDestroyWindow(dpy, dot);
+    XSync(dpy, False);   // 确保方块真的从屏幕上消失再退出子进程
+    cleanup();
+
+    if (exactMs >= 0)
+        return exactMs;
+    if (changedMs >= 0)
+        return changedMs;
+    return kProbeTimeoutMs;  // 超时都没进根缓冲区：比 1Hz 还狠，按限流处理
 }

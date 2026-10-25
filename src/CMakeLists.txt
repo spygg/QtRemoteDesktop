@@ -64,7 +64,7 @@ option(BUILD_THIRDPARTY "Build third-party libs from source (metaRTC/srtp/usrsct
 # 的 1.0.x ABI。build_linux.sh 会在检测到 Qt<5.10 时自动置 ON；手动构建可 -DVENDOR_OPENSSL_102=ON。
 option(VENDOR_OPENSSL_102 "Use vendored OpenSSL 1.0.2u (openssl102_install) for Qt5.9 ABI alignment" OFF)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/../cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 find_package(FFmpeg QUIET)
 

@@ -141,8 +141,22 @@ esac
     $unixShimDir = ConvertTo-UnixPath $pkgCfgDir
     & $gitBash -lc "chmod +x $unixShimDir/pkg-config 2>/dev/null; true"
 
+    # ---- x86asm 自动判定（与 build_linux.sh 对齐）----
+    # --disable-x86asm 会把 libavcodec 的 nasm 汇编（h264/mpeg4/mjpeg 解码等
+    # .asm 实现）全部关掉，退化为纯 C（此前无条件硬编码，h264 软解偏慢）。
+    # 这里检测 nasm/yasm：有则启用 x86asm，无则退纯 C 并提示。
+    # 注意：inline asm（swscale 的 MMX 转换）不受此开关影响，保持启用。
+    $ffX86AsmFlag = '--disable-x86asm'
+    $asmCheck = (& $gitBash -lc 'command -v nasm >/dev/null 2>&1 && echo nasm || { command -v yasm >/dev/null 2>&1 && echo yasm || echo none; }').Trim()
+    if ($asmCheck -eq 'none') {
+        Write-Host "[ffmpeg][warn] 未找到 nasm/yasm，x86asm 将退化为纯 C（h264 软解等变慢）" -ForegroundColor Yellow
+    } else {
+        $ffX86AsmFlag = ''
+        Write-Host "[ffmpeg] 检测到汇编器 $asmCheck，启用 x86asm 汇编优化"
+    }
+
     Write-Host "Configuring & building FFmpeg via git-bash (this takes a while)..."
-    & $gitBash -lc "cd $unixBuild && QTRD_OPENH264_INC=${openh264Fwd}/include QTRD_OPENH264_LIB=${openh264Fwd}/lib PATH=${unixShimDir}:${msysPath}:`$PATH && $unixSrc/configure --cc=gcc --ld=gcc --target-os=mingw32 --arch=x86 --disable-debug --disable-doc --disable-programs --disable-network --disable-avformat --disable-avfilter --disable-avdevice --disable-swresample --disable-postproc --disable-avresample --disable-everything --enable-swscale --enable-libopenh264 --enable-encoder=libopenh264 --enable-decoder=h264 --enable-decoder=mjpeg --enable-decoder=mpeg4 --disable-x86asm --enable-static --disable-shared --extra-cflags=$cflags --extra-ldflags=$ldflags --extra-libs=-lopenh264 --prefix=$unixInst"
+    & $gitBash -lc "cd $unixBuild && QTRD_OPENH264_INC=${openh264Fwd}/include QTRD_OPENH264_LIB=${openh264Fwd}/lib PATH=${unixShimDir}:${msysPath}:`$PATH && $unixSrc/configure --cc=gcc --ld=gcc --target-os=mingw32 --arch=x86 --disable-debug --disable-doc --disable-programs --disable-network --disable-avformat --disable-avfilter --disable-avdevice --disable-swresample --disable-postproc --disable-avresample --disable-everything --enable-swscale --enable-libopenh264 --enable-encoder=libopenh264 --enable-decoder=h264 --enable-decoder=mjpeg --enable-decoder=mpeg4 $ffX86AsmFlag --enable-static --disable-shared --extra-cflags=$cflags --extra-ldflags=$ldflags --extra-libs=-lopenh264 --prefix=$unixInst"
     $cfgExit = $LASTEXITCODE
     if ($cfgExit -ne 0 -or -not (Test-Path "$ffmpegBuild\ffbuild\config.mak")) {
         throw "FFmpeg configure failed (exit $cfgExit). Check the output above."

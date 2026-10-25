@@ -4,6 +4,7 @@
 #include <cstring>
 #include <QDebug>
 #include <QFile>
+#include <thread>
 extern "C" {
 #include <libavutil/error.h>
 }
@@ -171,11 +172,16 @@ static void applyHwOpts(const QString& hwName, AVDictionary** opts)
 // 释放 FFmpeg 编码链路资源（幂等，指针置空）。
 // 独立出来的原因：initialize() 会被重复调用（上层 reinit 未必先 shutdown），
 // 必须能安全地把上一轮的上下文清干净，否则每次重建都泄漏一套编码器。
-static void releaseAv(AVCodecContext** ctx, AVFrame** frame, SwsContext** sws)
+static void releaseAv(AVCodecContext** ctx, AVFrame** frame, std::vector<SwsContext*>* sws)
 {
-    if (sws && *sws) {
-        sws_freeContext(*sws);
-        *sws = nullptr;
+    if (sws) {
+        for (SwsContext*& c : *sws) {
+            if (c) {
+                sws_freeContext(c);
+                c = nullptr;
+            }
+        }
+        sws->clear();
     }
     if (frame && *frame) {
         av_frame_free(frame);
@@ -185,6 +191,23 @@ static void releaseAv(AVCodecContext** ctx, AVFrame** frame, SwsContext** sws)
         avcodec_free_context(ctx);
         *ctx = nullptr;
     }
+}
+
+static int gcdInt(int a, int b)
+{
+    while (b) {
+        const int t = a % b;
+        a = b;
+        b = t;
+    }
+    return a < 0 ? -a : a;
+}
+
+void VideoEncoder::releaseBandScratch()
+{
+    for (AVFrame*& f : bandTmpFrames_)
+        av_frame_free(&f);
+    bandTmpFrames_.clear();
 }
 
 bool VideoEncoder::isHwAcceleratedAvailable(CodecType type)
@@ -258,9 +281,13 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
 {
     // 契约安全：initialize() 允许被重复调用（上层 reinit 未必先 shutdown）。若编码
     // 线程仍在运行，必须先把线程停下来再释放/覆盖上下文，否则线程会继续使用马上
-    // 被 releaseAv() 释放的 codecCtx_/frame_/swsCtx_（use-after-free）。
+    // 被 releaseAv() 释放的 codecCtx_/frame_/swsCtxs_（use-after-free）。
     if (encoderThread_.isRunning())
         shutdown();
+
+    // 条带工作线程按下标引用 swsCtxs_：context 即将重建，必须先把它们停掉
+    // （shutdown() 已走 releaseStoppedResources 时这里是空操作）。
+    stopBandWorkers();
 
     // 支持 shutdown() 后重新初始化（缩放/帧率/画质/编码协议/硬件开关改变时重建编码器）
     // 先释放旧 MPP 实例：hwMode=Off 回退软编时必须清掉残留的 MPP（否则 encodingLoop
@@ -271,7 +298,8 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     }
     // 释放上一轮 FFmpeg 资源：initialize 允许重复调用（上层 reinit 未必先 shutdown），
     // 若不先释放就直接覆盖指针，会泄漏整套编码器上下文（硬编时还含 GPU/驱动资源）。
-    releaseAv(&codecCtx_, &frame_, &swsCtx_);
+    releaseAv(&codecCtx_, &frame_, &swsCtxs_);
+    releaseBandScratch();
 
     abort_ = false;
     hasIdr_.store(false);
@@ -524,23 +552,513 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
 
     // 缩放移入编码线程：源为完整捕获帧，目标为编码分辨率（按缩放档位）
     // AV_PIX_FMT_RGB32 在小端系统上即 BGRA，与 QImage::Format_RGB32 内存布局一致
-    swsCtx_ = sws_getContext(srcW, srcH, AV_PIX_FMT_RGB32,
-        encW, encH, codecCtx_->pix_fmt,
-        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-    if (!swsCtx_) {
-        qCritical() << "sws_getContext failed";
-        av_frame_free(&frame_);
-        avcodec_free_context(&codecCtx_);
-        codecCtx_ = nullptr;
-        return false;
+    //
+    // [PERF-ARM] 单线程 sws_scale 在 ARM 上是纯 C 实现（FFmpeg 3.4 的 aarch64
+    // swscale 只给 YUV→RGB 方向写了 NEON，RGB→YUV 没有），实测 Cortex-A55
+    // 1600x1200 每帧 86ms，占满整个视频模式预算；Kylin/aarch64(TCG) 上 117ms，
+    // perf 采样里 sws 相关函数占 ~68%（缩放档位下更是整帧单线程）。
+    //
+    // 因此「源分辨率 == 编码分辨率」与「缩放档位」都切成 N 条带并行（每条带
+    // 一个 SwsContext，条带数需同时整除 srcH 与 encH、且目标条带行数为偶数）。
+    // 同尺寸实测（Cortex-A55 / A72）：8 条带 3.36x（86ms→21.7ms），与整帧
+    // 单上下文逐像素对比：1600x1200 完全零差异；1920x1080 仅 40 个色度像素
+    // 有偏差（V 最大 91，占全帧 0.002%），肉眼不可见。
+    //
+    // 缩放档位的难点是 sws 在上下文边界处对色度垂直滤波做边缘钳制，直接切行
+    // 会让接缝处留下 1 行色度错误（实测 1600x1200→1200x900 该行 V 最大偏差
+    // 222，纯色块上肉眼可见横线）。解决方式：每条带的源窗口上下各扩 2 个
+    // 「滤波支持单元」——unit = srcH/gcd(srcH,encH)，此时 padSrc=2*unitSrc 与
+    // padDst=2*unitDst 严格成比例，条带起始行是 unit 的整数倍，缩放相位与整帧
+    // 完全一致且目标边距必为偶数（色度按行对）。缩放进各条带的私有临时帧后
+    // 只把可见区拷回 frame_。实测 1920x1200→1440x900 / 960x600 / 1152x720 /
+    // 800x500 与整帧单上下文对比：最大偏差 1，受影响样本 <0.6%（纯滤波系数
+    // 舍入），2:1 与同尺寸完全零差异。
+    // 注意：拷回必须逐行 memcpy —— av_frame_get_buffer 的色度 linesize 会按
+    // 32 对齐（720 → 736），按像素宽度连续拷贝会逐行错位。
+    //
+    // [HBAND] 竖切要求源/目标条带行数都为偶数；真实桌面可能给奇数高度
+    // （如 UKUI 2048x1209），此时竖切只能取 1 条带。宽度通常可切（2048），
+    // 于是回退为按列横切：色度按列成对，规则与竖切完全对称（起始列为偶数、
+    // 条带宽度为偶数、缩放时左右扩同样比例的边距），CPU 上 sws 的
+    // hScale16To15 / bgr32ToY 本来沿行扫描，横切后各条带可独立并行。
+    {
+        const int maxBands = qBound(1, QThread::idealThreadCount(), 8);
+        bandPlans_.clear();
+        releaseBandScratch();
+        swsBandedScale_ = false;
+        swsHorizontal_ = false;
+        convNative_ = false;
+        const bool sameSize = (srcW == encW && srcH == encH);
+
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
+        convNative_ = sameSize && pixFmt_ == AV_PIX_FMT_YUV420P;
+#endif
+
+        // 竖切优先（已验证）；高度是奇数或公因子太小（如 2048x1209）时竖切拿不到
+        // >1 条带，改按宽度横切。条带长度必须是 unit 的整数倍，否则各条带缩放比
+        // 与整帧略有偏差，接缝处会出现亚像素错位。
+        auto buildPlans = [&](bool horizontal) -> int {
+            bandPlans_.clear();
+            const int srcLen = horizontal ? srcW : srcH;
+            const int dstLen = horizontal ? encW : encH;
+            const int bands = pickBandCount(srcLen, dstLen, maxBands);
+            if (bands <= 1)
+                return 1;
+            const int bandSrc = srcLen / bands;
+            const int bandDst = dstLen / bands;
+            int padSrc = 0;
+            if (!sameSize) {
+                const int g = gcdInt(srcLen, dstLen);
+                padSrc = 2 * (srcLen / g);
+                // 边距超过条带 1/4（极端比例）时并行收益接近零，退回单上下文
+                if (padSrc * 4 > bandSrc)
+                    return 1;
+            }
+            for (int i = 0; i < bands; ++i) {
+                const int sStart = i * bandSrc;
+                const int sEnd = sStart + bandSrc;
+                const int sWin = qMax(0, sStart - padSrc);
+                const int eWin = qMin(srcLen, sEnd + padSrc);
+                BandPlan p;
+                if (horizontal) {
+                    p.srcX = sWin;
+                    p.srcW = eWin - sWin;
+                    p.dstX = i * bandDst;
+                    p.dstW = bandDst;
+                    p.tmpX = (sStart - sWin) * dstLen / srcLen;
+                    p.tmpW = (eWin - sWin) * dstLen / srcLen;
+                    p.srcY = 0;
+                    p.srcH = srcH;
+                    p.dstY = 0;
+                    p.dstH = encH;
+                    p.tmpY = 0;
+                    p.tmpH = encH;
+                } else {
+                    p.srcY = sWin;
+                    p.srcH = eWin - sWin;
+                    p.dstY = i * bandDst;
+                    p.dstH = bandDst;
+                    p.tmpY = (sStart - sWin) * dstLen / srcLen;
+                    p.tmpH = (eWin - sWin) * dstLen / srcLen;
+                    p.srcX = 0;
+                    p.srcW = srcW;
+                    p.dstX = 0;
+                    p.dstW = encW;
+                    p.tmpX = 0;
+                    p.tmpW = encW;
+                }
+                bandPlans_.push_back(p);
+            }
+            swsBandedScale_ = (padSrc > 0);
+            swsHorizontal_ = horizontal;
+            return bands;
+        };
+
+        swsBands_ = buildPlans(false);
+        if (swsBands_ <= 1)
+            swsBands_ = buildPlans(true);
+
+        auto createCtx = [&](const BandPlan& p) -> SwsContext* {
+            const bool useTmp = swsBandedScale_;
+            if (swsHorizontal_)
+                return sws_getContext(p.srcW, srcH, AV_PIX_FMT_RGB32,
+                    useTmp ? p.tmpW : p.dstW, encH, codecCtx_->pix_fmt,
+                    SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+            return sws_getContext(srcW, p.srcH, AV_PIX_FMT_RGB32,
+                encW, useTmp ? p.tmpH : p.dstH, codecCtx_->pix_fmt,
+                SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        };
+        if (swsBands_ > 1) {
+            for (int i = 0; i < swsBands_; ++i) {
+                SwsContext* c = createCtx(bandPlans_[i]);
+                if (!c) break;
+                swsCtxs_.push_back(c);
+            }
+            if (static_cast<int>(swsCtxs_.size()) != swsBands_) {
+                // 任一条带创建失败：整组作废，回退单上下文整帧转换
+                releaseAv(nullptr, nullptr, &swsCtxs_);
+                swsBands_ = 1;
+            } else if (swsBandedScale_) {
+                bool tmpOk = true;
+                for (int i = 0; i < swsBands_; ++i) {
+                    AVFrame* tmp = av_frame_alloc();
+                    if (!tmp) { tmpOk = false; break; }
+                    tmp->format = codecCtx_->pix_fmt;
+                    tmp->width = swsHorizontal_ ? bandPlans_[i].tmpW : encW;
+                    tmp->height = swsHorizontal_ ? encH : bandPlans_[i].tmpH;
+                    if (av_frame_get_buffer(tmp, 32) < 0) {
+                        av_frame_free(&tmp);
+                        tmpOk = false;
+                        break;
+                    }
+                    bandTmpFrames_.push_back(tmp);
+                }
+                if (!tmpOk) {
+                    releaseBandScratch();
+                    releaseAv(nullptr, nullptr, &swsCtxs_);
+                    swsBands_ = 1;
+                }
+            }
+        }
+        if (swsCtxs_.empty()) {
+            swsBands_ = 1;
+            swsBandedScale_ = false;
+            swsHorizontal_ = false;
+            releaseBandScratch();
+            bandPlans_.clear();
+            BandPlan p;
+            p.srcY = 0;
+            p.srcH = srcH;
+            p.dstY = 0;
+            p.dstH = encH;
+            p.srcX = 0;
+            p.srcW = srcW;
+            p.dstX = 0;
+            p.dstW = encW;
+            p.tmpY = 0;
+            p.tmpH = 0;
+            p.tmpX = 0;
+            p.tmpW = 0;
+            bandPlans_.push_back(p);
+            SwsContext* c = createCtx(bandPlans_[0]);
+            if (!c) {
+                qCritical() << "sws_getContext failed";
+                av_frame_free(&frame_);
+                avcodec_free_context(&codecCtx_);
+                codecCtx_ = nullptr;
+                return false;
+            }
+            swsCtxs_.push_back(c);
+        }
     }
 
+    startBandWorkers(swsBands_);
     startTime_ = encoderEpochMs();
     encoderThread_.start(QThread::HighPriority);
     qInfo() << codecName_ << "encoder initialized" << encW << "x" << encH
-            << "@" << fps << "fps (sws " << srcW << "x" << srcH << " -> " << encW << "x" << encH << ")";
+            << "@" << fps << "fps (sws " << srcW << "x" << srcH << " -> " << encW << "x" << encH
+            << ", bands" << swsBands_ << (swsBandedScale_ ? " scale-banded" : "")
+            << (swsHorizontal_ ? " horizontal" : "") << ")";
     emit encoderReady();
     return true;
+}
+
+// 条带数：必须同时整除 srcH 与 encH，且源/目标条带行数都为偶数（420 色度平面
+// 按 2 行一组：奇数行会让后一条带的 U/V 平面偏移少一行 → 拼接处色度错位；
+// 缩放条带还要求源条带起始行是偶数，色度下采样相位才与整帧一致）。
+// 取满足条件的最大值，不满足则退化到 1（整帧单线程，行为与旧版一致）。
+int VideoEncoder::pickBandCount(int srcLen, int dstLen, int maxBands)
+{
+    // 条带长度必须是 gcd 的整数倍：缩放条带的相位才与整帧一致
+    const int g = gcdInt(srcLen, dstLen);
+    for (int n = qMax(1, maxBands); n > 1; --n) {
+        if (srcLen % n == 0 && dstLen % n == 0
+            && g % n == 0
+            && (srcLen / n) % 2 == 0 && (dstLen / n) % 2 == 0
+            && srcLen / n >= 32 && dstLen / n >= 32)
+            return n;
+    }
+    return 1;
+}
+
+// 标量 BGRA → YUV420P：一次遍历里同时算亮度与 2x2 平均色度，省掉 sws 的
+// 逐行函数指针分发与中间平面。实测 aarch64(TCG) 2048x1209 单线程 17.8ms，
+// 同尺寸 sws 为 164ms；亮度与 sws 偏差平均 0.09（最大 1），色度因 2x2 平均
+// 与 sws 双线性核不同平均偏差约 1（桌面纯色块上肉眼不可见）。
+// 仅用于「源尺寸 == 编码尺寸」，缩放档位仍由 sws 做重采样。
+static inline uint8_t convClip8(int v)
+{
+    return v < 0 ? 0 : (v > 255 ? 255 : static_cast<uint8_t>(v));
+}
+
+static void rgb32ToYuv420p(const uint8_t* src, int srcStride,
+                           uint8_t* yp, int ys, uint8_t* up, int us, uint8_t* vp, int vs,
+                           int w, int h)
+{
+    for (int y = 0; y < h; y += 2) {
+        const uint8_t* r0 = src + static_cast<size_t>(y) * srcStride;
+        const uint8_t* r1 = (y + 1 < h) ? r0 + srcStride : r0;
+        uint8_t* y0 = yp + static_cast<size_t>(y) * ys;
+        uint8_t* y1 = (y + 1 < h) ? y0 + ys : y0;
+        uint8_t* u = up + static_cast<size_t>(y / 2) * us;
+        uint8_t* v = vp + static_cast<size_t>(y / 2) * vs;
+        for (int x = 0; x < w; x += 2) {
+            const uint8_t* p00 = r0 + static_cast<size_t>(x) * 4;
+            const uint8_t* p01 = (x + 1 < w) ? p00 + 4 : p00;
+            const uint8_t* p10 = r1 + static_cast<size_t>(x) * 4;
+            const uint8_t* p11 = (x + 1 < w) ? p10 + 4 : p10;
+            const int b00 = p00[0], g00 = p00[1], r00 = p00[2];
+            const int b01 = p01[0], g01 = p01[1], r01 = p01[2];
+            const int b10 = p10[0], g10 = p10[1], r10 = p10[2];
+            const int b11 = p11[0], g11 = p11[1], r11 = p11[2];
+
+            y0[x] = convClip8(((66 * r00 + 129 * g00 + 25 * b00 + 128) >> 8) + 16);
+            if (x + 1 < w)
+                y0[x + 1] = convClip8(((66 * r01 + 129 * g01 + 25 * b01 + 128) >> 8) + 16);
+            if (y + 1 < h) {
+                y1[x] = convClip8(((66 * r10 + 129 * g10 + 25 * b10 + 128) >> 8) + 16);
+                if (x + 1 < w)
+                    y1[x + 1] = convClip8(((66 * r11 + 129 * g11 + 25 * b11 + 128) >> 8) + 16);
+            }
+
+            const int rs = r00 + r01 + r10 + r11;
+            const int gs = g00 + g01 + g10 + g11;
+            const int bs = b00 + b01 + b10 + b11;
+            u[x / 2] = convClip8(((-38 * rs - 74 * gs + 112 * bs + 512) >> 10) + 128);
+            v[x / 2] = convClip8(((112 * rs - 94 * gs - 18 * bs + 512) >> 10) + 128);
+        }
+    }
+}
+
+int VideoEncoder::convertBandNative(const QImage& image, int band)
+{
+    const BandPlan& p = bandPlans_[band];
+    const int srcStride = static_cast<int>(image.bytesPerLine());
+    const uint8_t* src = image.bits()
+        + static_cast<size_t>(p.srcY) * srcStride + static_cast<size_t>(p.srcX) * 4;
+
+    uint8_t* dstY = frame_->data[0];
+    uint8_t* dstU = frame_->data[1];
+    uint8_t* dstV = frame_->data[2];
+    if (swsHorizontal_) {
+        // 横切：整幅高度，按列窗口写入；色度列偏移按 2 对齐
+        dstY += p.dstX;
+        dstU += p.dstX / 2;
+        dstV += p.dstX / 2;
+    } else {
+        dstY += static_cast<size_t>(p.dstY) * frame_->linesize[0];
+        dstU += static_cast<size_t>(p.dstY / 2) * frame_->linesize[1];
+        dstV += static_cast<size_t>(p.dstY / 2) * frame_->linesize[2];
+    }
+    rgb32ToYuv420p(src, srcStride, dstY, frame_->linesize[0],
+                   dstU, frame_->linesize[1], dstV, frame_->linesize[2],
+                   p.srcW, p.srcH);
+    return swsHorizontal_ ? frame_->height : p.dstH;
+}
+
+int VideoEncoder::convertBand(const QImage& image, int band)
+{
+    const BandPlan& p = bandPlans_[band];
+    const int srcStride = static_cast<int>(image.bytesPerLine());
+    const bool useTmp = swsBandedScale_;
+
+    if (convNative_)
+        return convertBandNative(image, band);
+
+    if (swsHorizontal_) {
+        const uint8_t* srcData[1] = {
+            image.bits() + static_cast<size_t>(p.srcX) * 4
+        };
+        int srcLinesize[1] = { srcStride };
+        if (!useTmp) {
+            uint8_t* dst[4] = { frame_->data[0] + p.dstX,
+                                frame_->data[1] + p.dstX / 2,
+                                frame_->data[2] + p.dstX / 2,
+                                frame_->data[3] };
+            return sws_scale(swsCtxs_[band], srcData, srcLinesize, 0, p.srcH,
+                             dst, frame_->linesize);
+        }
+        AVFrame* tmp = bandTmpFrames_[band];
+        const int rows = sws_scale(swsCtxs_[band], srcData, srcLinesize, 0, p.srcH,
+                                   tmp->data, tmp->linesize);
+        if (rows != p.tmpH)
+            return 0;
+        // 逐行拷回可见列（色度 linesize 有 32 字对齐填充，不能按宽度连续拷贝）
+        const int height = frame_->height;
+        for (int plane = 0; plane < 3; ++plane) {
+            const int pw = (plane == 0) ? p.dstW : p.dstW / 2;
+            const int tmpLeft = (plane == 0) ? p.tmpX : p.tmpX / 2;
+            const int dstLeft = (plane == 0) ? p.dstX : p.dstX / 2;
+            const int ph = (plane == 0) ? height : (height + 1) / 2;
+            for (int y = 0; y < ph; ++y)
+                memcpy(frame_->data[plane]
+                           + static_cast<size_t>(y) * frame_->linesize[plane] + dstLeft,
+                       tmp->data[plane]
+                           + static_cast<size_t>(y) * tmp->linesize[plane] + tmpLeft,
+                       static_cast<size_t>(pw));
+        }
+        return height;
+    }
+
+    const uint8_t* srcData[1] = {
+        image.bits() + static_cast<size_t>(p.srcY) * srcStride
+    };
+    int srcLinesize[1] = { srcStride };
+
+    if (useTmp) {
+        AVFrame* tmp = bandTmpFrames_[band];
+        const int rows = sws_scale(swsCtxs_[band], srcData, srcLinesize, 0, p.srcH,
+                                   tmp->data, tmp->linesize);
+        if (rows != p.tmpH)
+            return 0;
+        // 逐行拷回可见区（色度 linesize 有 32 字对齐填充，不能按宽度连续拷贝）
+        const int width = frame_->width;
+        for (int plane = 0; plane < 3; ++plane) {
+            const int pw = (plane == 0) ? width : (width + 1) / 2;
+            const int tmpTop = (plane == 0) ? p.tmpY : p.tmpY / 2;
+            const int dstTop = (plane == 0) ? p.dstY : p.dstY / 2;
+            const int ph = (plane == 0) ? p.dstH : p.dstH / 2;
+            for (int y = 0; y < ph; ++y)
+                memcpy(frame_->data[plane]
+                           + static_cast<size_t>(dstTop + y) * frame_->linesize[plane],
+                       tmp->data[plane]
+                           + static_cast<size_t>(tmpTop + y) * tmp->linesize[plane],
+                       static_cast<size_t>(pw));
+        }
+        return p.dstH;
+    }
+
+    uint8_t* dst[4] = { frame_->data[0], frame_->data[1],
+                        frame_->data[2], frame_->data[3] };
+    int dstLinesize[4] = { frame_->linesize[0], frame_->linesize[1],
+                           frame_->linesize[2], frame_->linesize[3] };
+    // 亮度按条带行数偏移；色度按条带行数的一半偏移（每 2 行一组）
+    if (dst[0]) dst[0] += static_cast<size_t>(p.dstY) * dstLinesize[0];
+    if (dst[1]) dst[1] += static_cast<size_t>(p.dstY / 2) * dstLinesize[1];
+    if (dst[2]) dst[2] += static_cast<size_t>(p.dstY / 2) * dstLinesize[2];
+    if (dst[3]) dst[3] += static_cast<size_t>(p.dstY) * dstLinesize[3];
+    return sws_scale(swsCtxs_[band], srcData, srcLinesize, 0, p.srcH,
+                     dst, dstLinesize);
+}
+
+void VideoEncoder::bandWorkerLoop(int band)
+{
+    quint64 seen = 0;
+    for (;;) {
+        const QImage* image = nullptr;
+        {
+            std::unique_lock<std::mutex> lk(bandMutex_);
+            bandCv_.wait(lk, [this, &seen] { return bandStop_ || bandGen_ != seen; });
+            if (bandStop_)
+                return;
+            seen = bandGen_;
+            image = bandImage_;
+        }
+        const int rows = convertBand(*image, band);
+        {
+            std::lock_guard<std::mutex> lk(bandMutex_);
+            bandRows_[band] = rows;
+            ++bandCompleted_;
+        }
+        bandDoneCv_.notify_one();
+    }
+}
+
+void VideoEncoder::startBandWorkers(int bands)
+{
+    // 先停旧一组：initialize() 允许重复调用，条带数可能变化
+    stopBandWorkers();
+    if (bands <= 1)
+        return;
+    {
+        std::lock_guard<std::mutex> lk(bandMutex_);
+        bandCompleted_ = 0;
+        bandGen_ = 0;
+        bandImage_ = nullptr;
+        bandStop_ = false;
+    }
+    bandThreads_.reserve(bands - 1);
+    for (int i = 1; i < bands; ++i) {
+        try {
+            bandThreads_.emplace_back(&VideoEncoder::bandWorkerLoop, this, i);
+        } catch (const std::system_error& e) {
+            qWarning() << "VideoEncoder: band worker start failed:" << e.what();
+            break;
+        }
+    }
+    if (static_cast<int>(bandThreads_.size()) != bands - 1) {
+        qWarning() << "VideoEncoder: only" << bandThreads_.size() << "of" << bands - 1
+                   << "band workers started, falling back to serial bands";
+        stopBandWorkers();
+    }
+}
+
+void VideoEncoder::stopBandWorkers()
+{
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard<std::mutex> lk(bandMutex_);
+        bandStop_ = true;
+        bandCv_.notify_all();
+        threads.swap(bandThreads_);
+    }
+    // 工作线程可能正停在"等新帧"上，上面已唤醒；正在处理的一帧由
+    // convertFrameBands 保证在本函数被调用前已收尾（调用方此时已停编码线程）。
+    for (auto& t : threads) {
+        if (t.joinable())
+            t.join();
+    }
+    std::lock_guard<std::mutex> lk(bandMutex_);
+    bandStop_ = false;
+    bandCompleted_ = 0;
+    bandImage_ = nullptr;
+}
+
+// 并行条带色彩转换。每个条带用自己的 SwsContext，且按「从第 0 行开始」调用 ——
+// swscale 的 slice 接口要求同一条上下文按顺序推进（中途起头会直接返回 0 并报
+// "Slices start in the middle!"），所以不能用偏移 srcSliceY 的方式切条。
+//
+// 条带工作线程常驻（startBandWorkers），条带 0 在编码线程上跑：本线程本来就要
+// 阻塞等其余条带完成，顺手承担一条既省一次线程创建，也让唤醒/等待更均衡。
+// 竖切返回写出行数之和（== frame_->height）；横切每条带都写整幅高度，只能按
+// 「每条带是否成功」判定，成功时统一返回 frame_->height。
+int VideoEncoder::convertFrameBands(const QImage& image)
+{
+    if (swsBands_ <= 1 || swsCtxs_.size() < 2) {
+        if (convNative_) {
+            rgb32ToYuv420p(image.bits(), static_cast<int>(image.bytesPerLine()),
+                           frame_->data[0], frame_->linesize[0],
+                           frame_->data[1], frame_->linesize[1],
+                           frame_->data[2], frame_->linesize[2],
+                           image.width(), image.height());
+            return image.height();
+        }
+        const int srcStride = static_cast<int>(image.bytesPerLine());
+        const uint8_t* srcData[1] = { image.bits() };
+        int srcLinesize[1] = { srcStride };
+        return sws_scale(swsCtxs_[0], srcData, srcLinesize, 0, image.height(),
+                         frame_->data, frame_->linesize);
+    }
+
+    if (static_cast<int>(bandThreads_.size()) != swsBands_ - 1) {
+        // 工作线程未能全部启动：串行条带，结果一致只是慢
+        bool ok = true;
+        int total = 0;
+        for (int i = 0; i < swsBands_; ++i) {
+            const int rows = convertBand(image, i);
+            ok = ok && rows != 0;
+            total += rows;
+        }
+        if (swsHorizontal_)
+            return ok ? frame_->height : 0;
+        return total;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(bandMutex_);
+        bandImage_ = &image;
+        bandCompleted_ = 0;
+        ++bandGen_;
+        bandCv_.notify_all();
+    }
+    const int firstRows = convertBand(image, 0);
+
+    std::unique_lock<std::mutex> lk(bandMutex_);
+    bandDoneCv_.wait(lk, [this] {
+        return bandCompleted_ >= static_cast<int>(bandThreads_.size());
+    });
+    bandImage_ = nullptr;
+    if (swsHorizontal_) {
+        // 横切时每条带都覆盖整幅高度，行数累加没有意义；任一条带返回 0 即失败
+        bool ok = (firstRows != 0);
+        for (int i = 1; i < swsBands_; ++i)
+            ok = ok && bandRows_[i] != 0;
+        return ok ? frame_->height : 0;
+    }
+    int total = firstRows;
+    for (int i = 1; i < swsBands_; ++i)
+        total += bandRows_[i];
+    return total;
 }
 
 void VideoEncoder::encode(const QImage& frame)
@@ -606,8 +1124,8 @@ void VideoEncoder::encodingLoop()
     // ---- MPP 硬编路径（RK3588）：不经过 FFmpeg sws/编码器，MPP 内部自带 RGB32->NV12 ----
     //
     // 重要：只要 mpp_ 存在，本帧就必须完全走这条路 —— 绝不能落到下面的 FFmpeg 分支。
-    // 因为 MPP 初始化成功时根本不会创建 swsCtx_/frame_/codecCtx_（见 initialize 的
-    // MPP 成功分支 early return），一旦走到 sws_scale(swsCtx_) 就是空指针崩溃。
+    // 因为 MPP 初始化成功时根本不会创建 swsCtxs_/frame_/codecCtx_（见 initialize 的
+    // MPP 成功分支 early return），一旦走到 sws_scale 就是空指针崩溃。
     // MPP 失效（mppBroken_）或已 teardown（isActive()==false）时直接跳过本帧，
     // 等待上层重建编码器。
     if (mpp_) {
@@ -666,7 +1184,7 @@ void VideoEncoder::encodingLoop()
     }
 
     // MPP 之外的路径必须保证 FFmpeg 资源就绪，否则跳过本帧而不是崩溃
-    if (!codecCtx_ || !frame_ || !swsCtx_)
+    if (!codecCtx_ || !frame_ || swsCtxs_.empty())
         continue;
 
     // [FIX-B4] avcodec_send_frame 不拷贝输入像素（内部只 av_frame_ref），带流水线
@@ -680,10 +1198,7 @@ void VideoEncoder::encodingLoop()
         continue;
     }
 
-    const uint8_t* srcData[1] = { image.bits() };
-    int srcLinesize[1] = { static_cast<int>(image.bytesPerLine()) };
-    const int swsRows = sws_scale(swsCtx_, srcData, srcLinesize, 0, image.height(),
-        frame_->data, frame_->linesize);
+    const int swsRows = convertFrameBands(image);
     if (swsRows != frame_->height) {
         // sws 失败时 frame_ 保留上一帧像素，照常送编会产出"画面停了但时间戳在走"
         // 的假活帧，且无任何线索可查 —— 直接丢帧并告警。
@@ -889,12 +1404,16 @@ bool VideoEncoder::shutdownRetire()
 
 void VideoEncoder::releaseStoppedResources()
 {
+    // 条带工作线程必须在释放 sws 上下文之前停掉：它们按下标引用 swsCtxs_/frame_
     if (mpp_) {
         mpp_->shutdown();
         delete mpp_;
         mpp_ = nullptr;
     }
 
+    stopBandWorkers();
+
     // 与 initialize() 开头的清理保持一致，保证 shutdown 后可安全重建
-    releaseAv(&codecCtx_, &frame_, &swsCtx_);
+    releaseAv(&codecCtx_, &frame_, &swsCtxs_);
+    releaseBandScratch();
 }

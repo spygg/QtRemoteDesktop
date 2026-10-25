@@ -134,6 +134,11 @@ private:
     // 否则 captureSource_ 句柄与 helper 进程常驻，且 isCaptureSourceConnected() 恒真。
     qint64 captureLastDataMs_ = 0;
     QWebSocket* secureInputSource_ = nullptr;
+    // /secure-input 是单向通道（只有服务端→helper），不能用"静默时长"判活：
+    // 对端掉电/崩溃无 FIN 时 socket 会常驻，isSecureInputConnected() 恒真，
+    // 锁屏时服务端就不再重启 helper，密码永远注入不进去。改为周期性 ping +
+    // 记录最近一次 pong 时间，超时即丢弃该连接。
+    qint64 secureInputLastPongMs_ = 0;
 };
 
 #endif // WEBSOCKETSERVER_H

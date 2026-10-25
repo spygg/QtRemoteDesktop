@@ -10,6 +10,10 @@
 #include <QThread>
 #include <QWaitCondition>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -109,7 +113,62 @@ private:
 
     AVCodecContext* codecCtx_ = nullptr;
     AVFrame* frame_ = nullptr;
-    SwsContext* swsCtx_ = nullptr;
+    // 色彩转换上下文：按 CPU 核数切成 N 条（每条独立 SwsContext），
+    // 把单线程 sws_scale（ARM 上 RGB32→YUV 无 NEON 实现，实测 1600x1200 达 86ms）
+    // 拆成并行条带。N=1 时退化为原来的单上下文路径。
+    std::vector<SwsContext*> swsCtxs_;
+    int swsBands_ = 1;
+    // 每条带的行列参数。缩放档位下每条带除可见区域外还带重叠边距
+    // （见 initialize 中的说明），先缩放进私有临时帧再逐行拷回 frame_。
+    // 条带方向：默认按高度竖切；高度是奇数或因公因子太小切不动时，改按宽度横切
+    // （此时只有 X 字段有值，Y 字段表示整幅）。
+    struct BandPlan {
+        int srcY = 0;   // 源帧起始行（含边距）
+        int srcH = 0;   // 送入 sws 的源行数（含边距）
+        int dstY = 0;   // frame_ 中的起始行
+        int dstH = 0;   // frame_ 中的行数
+        int tmpY = 0;   // 可见区域在临时帧中的起始行
+        int tmpH = 0;   // 临时帧行数
+        int srcX = 0;   // 源帧起始列（含边距）
+        int srcW = 0;   // 送入 sws 的源列数（含边距）
+        int dstX = 0;   // frame_ 中的起始列
+        int dstW = 0;   // frame_ 中的列数
+        int tmpX = 0;   // 可见区域在临时帧中的起始列
+        int tmpW = 0;   // 临时帧列数
+    };
+    std::vector<BandPlan> bandPlans_;
+    std::vector<AVFrame*> bandTmpFrames_;  // 仅缩放条带：每条带私有临时目标帧
+    bool swsBandedScale_ = false;
+    bool swsHorizontal_ = false;
+    // 同尺寸（缩放 100%）且目标为 YUV420P 时改用内置标量转换，绕过 sws。
+    // 仅 ARM 开启：FFmpeg 3.4 的 aarch64 swscale 没有 RGB→YUV 的 NEON 实现，
+    // 其通用 C 路径在同一帧上比融合标量循环慢约 9 倍；x86 有 SSE 汇编，保留 sws。
+    bool convNative_ = false;
+    int convertBandNative(const QImage& image, int band);
+    void releaseBandScratch();
+    // 并行条带色彩转换；返回实际写出的目标行数（失败时 != frame_->height）
+    int convertFrameBands(const QImage& image);
+    // 单条带的转换：写 frame_ 对应条带区域，返回该条带写出的行数
+    int convertBand(const QImage& image, int band);
+    // 条带工作线程常驻复用：原先每帧 spawn N 个 std::thread（30fps × N 次
+    // 创建/销毁），在弱设备（Cortex-A55 等）上这部分开销与调度抖动直接吃编码预算。
+    // 初始化时按条带数建一次，跨帧复用；条带 0 由编码线程自己做。
+    void startBandWorkers(int bands);
+    void stopBandWorkers();
+    void bandWorkerLoop(int band);
+    std::vector<std::thread> bandThreads_;   // 承担条带 1..N-1
+    std::mutex bandMutex_;
+    std::condition_variable bandCv_;         // 新帧可用
+    std::condition_variable bandDoneCv_;     // 本帧全部条带完成
+    const QImage* bandImage_ = nullptr;      // 仅在一帧转换期间有效
+    quint64 bandGen_ = 0;
+    int bandCompleted_ = 0;
+    int bandRows_[8] = { 0 };
+    bool bandStop_ = false;
+    // 按 srcLen/dstLen 都能整除的最大因子选条带数（保证每条带缩放相位一致、
+    // 色度平面按偶数行/列对齐，拼接处不会出现 1 行错位）。
+    // 竖切（高度）优先，竖切不可行时由调用方改用横切（宽度）。
+    static int pickBandCount(int srcLen, int dstLen, int maxBands);
     AVPixelFormat pixFmt_ = AV_PIX_FMT_YUV420P;
     // sws 上下文建立时的源尺寸：必须与后续投入的帧尺寸一致，
     // 否则 sws_scale 会按旧宽度解释新帧（行距用新 bytesPerLine）→ 堆越界读。
@@ -145,7 +204,7 @@ private:
     bool overloaded_ = false;
     int mppFailCount_ = 0;   // MPP 编码连续失败计数（超出则回退软编）
     // MPP 编码器已判定损坏：上层重新初始化前不再向它投帧，
-    // 也不能落到下面"未创建 swsCtx_/frame_"的 FFmpeg 路径（否则空指针崩溃）。
+    // 也不能落到下面"未创建 swsCtxs_/frame_"的 FFmpeg 路径（否则空指针崩溃）。
     std::atomic<bool> mppBroken_{ false };
 };
 

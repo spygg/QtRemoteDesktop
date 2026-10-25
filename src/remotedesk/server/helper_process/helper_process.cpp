@@ -109,14 +109,34 @@ static QString helperCodecToString(CodecType c)
 static void helperSaveConfigField(const QString& key, const QJsonValue& value)
 {
     const QString cfgPath = QGuiApplication::applicationDirPath() + "/server_config.json";
+    // QSaveFile 只接受 WriteOnly：open(ReadWrite) 带 ReadOnly 位会被 Qt 直接拒绝
+    // （返回 false），旧实现因此从未真正写入过任何字段。旧内容必须先用 QFile 读。
+    QJsonObject root;
+    {
+        QFile in(cfgPath);
+        if (in.open(QIODevice::ReadOnly)) {
+            const QByteArray raw = in.readAll();
+            in.close();
+            if (!raw.isEmpty()) {
+                QJsonParseError err {};
+                const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
+                // 损坏的 JSON 不能当空对象写回，否则 users 等字段会被整体抹掉
+                if (err.error != QJsonParseError::NoError) {
+                    qWarning() << "Helper: config is not valid JSON, refusing to rewrite:"
+                               << cfgPath << err.errorString();
+                    return;
+                }
+                root = doc.object();
+            }
+        }
+    }
+
     QSaveFile save(cfgPath);
-    if (!save.open(QIODevice::ReadWrite)) {
+    if (!save.open(QIODevice::WriteOnly)) {
         qWarning() << "Helper: cannot open config for update:" << cfgPath << save.errorString();
         return;
     }
-    QJsonObject root = QJsonDocument::fromJson(save.readAll()).object();
     root[key] = value;
-    save.resize(0);
     save.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
     if (!save.commit())
         qWarning() << "Helper: failed to commit config:" << cfgPath << save.errorString();
@@ -176,6 +196,14 @@ int HelperProcess::run(int argc, char* argv[])
     // 视频缩放档位与码率档位（非 FFmpeg 构建下仅作转发/记录用，无副作用）
     int videoScale = 100;
     int videoQualityLevel = 60;  // 视频码率档位（80/60/35/15，与服务端 configQuality_ 一致）
+
+    // WS 写缓冲积压估算：Qt 5.7/5.9 的 QWebSocket 未公开 bytesToWrite()（5.12 才有），
+    // 用「sendBinaryMessage 返回值累加 − bytesWritten 扣减」估算，与服务端
+    // pendingBytes_ 同一套路。断线后缓冲被丢弃，重连时清零。
+    // 必须声明在 USE_FFMPEG 之外：JPEG 上报路径（非 FFmpeg 构建）同样要用它做背压。
+    qint64 wsBacklogBytes = 0;
+    QObject::connect(&ws, &QWebSocket::bytesWritten, &app,
+        [&](qint64 n) { wsBacklogBytes = qMax<qint64>(0, wsBacklogBytes - n); });
 
 #ifdef USE_FFMPEG
     // ---- 服务模式 helper 侧视频编码 ----
@@ -331,12 +359,6 @@ int HelperProcess::run(int argc, char* argv[])
 
     // 编码帧 → 服务端：[1字节类型(0x01=IDR/0x02=P)][u32 长度][i64 时间戳][数据]
     // （与服务端→浏览器 13 字节头一致，服务端可直接复用 onEncodedFrame 分发）
-    // 背压计数：Qt 5.7/5.9 的 QWebSocket 未公开 bytesToWrite()（5.12 才有），
-    // 用「sendBinaryMessage 返回值累加 − bytesWritten 扣减」估算写缓冲积压，
-    // 与服务端 pendingBytes_ 同一套路。断线后缓冲被丢弃，重连时清零。
-    qint64 wsBacklogBytes = 0;
-    QObject::connect(&ws, &QWebSocket::bytesWritten, &app,
-        [&](qint64 n) { wsBacklogBytes = qMax<qint64>(0, wsBacklogBytes - n); });
     qint64 droppedVideoFrames = 0;
     QObject::connect(encoder.get(), &VideoEncoder::encodedFrame, &app,
         [&](const QByteArray& data, bool keyframe, qint64 ts) {
@@ -409,6 +431,9 @@ int HelperProcess::run(int argc, char* argv[])
     });
 #endif // USE_FFMPEG
 
+    // 在 connected 处理器之前声明：重连时需要补发当前锁屏状态
+    bool locked = false;
+
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
         wsBacklogBytes = 0; // 断线期间写缓冲被丢弃，重连后从零开始记账
@@ -424,6 +449,17 @@ int HelperProcess::run(int argc, char* argv[])
         // 上报视频能力：服务端据此决定前端能否切视频模式
         sendCaptureCaps(QString());
 #endif
+        // 服务端重启或 helper 重连后，服务端内存中的 screenLocked_ 已被重置，
+        // 而 desktopCheckTimer 只在状态"变化"时上报。若重连时本就处于锁屏状态，
+        // locked 仍是 true → 永远不会再发 → 服务端不拉起 secure-input，
+        // Windows 远程永远输不进登录密码。每次连接补发一次当前状态。
+        {
+            QJsonObject lockMsg;
+            lockMsg["type"] = "screen_locked";
+            lockMsg["locked"] = locked;
+            lockMsg["hint"] = locked ? QString::fromUtf8("锁屏界面可直接输入密码") : QString();
+            ws.sendTextMessage(QString::fromUtf8(QJsonDocument(lockMsg).toJson(QJsonDocument::Compact)));
+        }
         // [B-5] 重连后重读当前剪贴板：断线窗口内复制的内容此前因未发送成功
         // 不记账（回声抑制只在发送成功后记录），此时补传。
         if (clipTimer)
@@ -523,7 +559,6 @@ int HelperProcess::run(int argc, char* argv[])
             wsBacklogBytes += qMax<qint64>(0, ws.sendBinaryMessage(packet));
         }, Qt::QueuedConnection);
 
-    bool locked = false;
     bool isWin7 = false, isWinXP = false;
     { struct { ULONG s; ULONG maj; ULONG min; ULONG bld; ULONG pid; WCHAR csd[128]; } osv = { sizeof(osv) };
       typedef LONG (WINAPI *R)(PVOID);
@@ -673,14 +708,23 @@ int HelperProcess::run(int argc, char* argv[])
                 if (ScreenCapturer::changeDisplayResolution(w, h)) {
                     capturer.stop();
                     // [B-6] 用客户端配置的帧率重启（原硬编码 30 会让 fps 配置静默
-                    // 回退），start 失败必须告警——否则画面永久冻结且无任何线索。
-                    if (!capturer.start(captureFps))
+                    // 回退）。重启失败必须显式回错：分辨率已在系统层生效，但采集
+                    // 起不来（驱动/权限/设备占用），前端只会看到画面永久冻结。
+                    const bool captureRestarted = capturer.start(captureFps);
+                    if (!captureRestarted) {
                         qWarning() << "Helper: capturer restart after resolution change FAILED";
+                        QJsonObject err;
+                        err["type"] = "error";
+                        err["message"] = QString("分辨率已切换为 %1x%2，但屏幕采集重启失败，"
+                                                 "画面将停止刷新").arg(w).arg(h);
+                        ws.sendTextMessage(QString::fromUtf8(QJsonDocument(err).toJson(QJsonDocument::Compact)));
+                    }
                     // [H9] 输入归一化基准必须同步更新：仅在启动时 setScreenSize 一次，
                     // 切分辨率后仍是旧尺寸 → 服务模式鼠标系统性偏移
                     inputMgr.setScreenSize(w, h);
                     // 更新配置文件中的当前分辨率（QSaveFile 原子写，见 helperSaveConfigField）
                     helperSaveConfigField("currentResolution", QString("%1x%2").arg(w).arg(h));
+                    // 系统分辨率确实已变，仍需下发真实尺寸供前端调整 canvas/坐标映射
                     QJsonObject info;
                     info["type"] = "screen_info";
                     info["width"] = w;
@@ -689,9 +733,12 @@ int HelperProcess::run(int argc, char* argv[])
 #ifdef USE_FFMPEG
                     // 分辨率变化 → 编码器/sws 上下文尺寸失效，必须重建（否则 sws 越界读）。
                     // 同时重新上报能力（宽高变了），服务端据此更新坐标映射基准。
-                    if (videoActive)
+                    if (videoActive && captureRestarted)
                         reinitVideoEncoder();
-                    sendCaptureCaps(QString());
+                    // 采集未重启成功时不能上报"视频可用"：服务端会据此继续等 H.264，
+                    // 而 helper 已无帧可产 → 永久黑屏。
+                    if (captureRestarted)
+                        sendCaptureCaps(QString());
 #endif
                 } else {
                     QJsonObject err;
