@@ -1,5 +1,5 @@
 set(RDP_SERVER Rdpserver)
-set(HEADERS rdpserver.h)
+set(HEADERS rdpserver.h idrfallbackpolicy.h)
 set(SOURCES rdpserver.cpp)
 if(WIN32)
     list(APPEND SOURCES rdpserver_win.cpp)

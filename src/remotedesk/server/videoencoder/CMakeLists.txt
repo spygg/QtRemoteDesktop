@@ -1,5 +1,5 @@
 set(VIDEO_ENCODER VideoEncoder)
-set(HEADERS videoencoder.h mppencoder.h)
+set(HEADERS videoencoder.h mppencoder.h rgb2yuv.h)
 set(SOURCES videoencoder.cpp mppencoder.cpp)
 add_library(${VIDEO_ENCODER} STATIC ${HEADERS} ${SOURCES})
 target_include_directories(${VIDEO_ENCODER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -60,6 +60,29 @@ public:
     // 帧尺寸与编码器/sws 上下文不匹配，需要上层重建编码器（防止 sws_scale 越界读）
     bool sizeMismatch() const { return sizeMismatch_.load(); }
 
+    // 编码线程是否正在处理某一帧：>0 表示已持续处理该帧的毫秒数，0 表示空闲。
+    // 上层（IDR 兜底重建）据此避免在慢机器上打断正在进行的编码：单帧可能耗时
+    // 数秒（QEMU/弱 ARM/4K），固定超时重建会把每帧都掐断，形成"重建→丢弃→重建"
+    // 活锁（实测 TCG 1080p：30s 只输出 1 帧、每 1.2~4s 重建一次）。
+    // 内部用单调时钟（steady_clock）：NTP 校时/改系统时间不会让该值跳变。
+    qint64 busyForMs() const;
+    // 最近一帧的完整处理耗时（转换 + 编码 + 发送，毫秒）；0 表示尚无样本。
+    qint64 lastFrameCostMs() const { return lastFrameCostMs_.load(); }
+    // 距最近一次 initialize() 的毫秒数（单调时钟）。上层判定"是否真的一直没产 IDR"
+    // 时必须先排除"编码器刚建好、还没机会处理任何帧"的情况：用 initAgeMs() 判断。
+    // 注意不要自己取墙钟再与内部时刻相减——两者时钟源不同，NTP 跳变会误判重建。
+    qint64 initAgeMs() const;
+
+    // 重建前的退役判定（供 IDR 兜底用）：把"当前是否空闲"与"置 abort_"放进同一把
+    // 锁，避免先 busyForMs()==0 再 shutdownRetire() 之间编码线程恰好开始新帧，
+    // 让主线程白等一整帧（慢机可达数秒）。
+    enum class RetireState {
+        Retired, // 线程已停、资源已释放，可以重新 initialize()
+        Busy,    // 有在飞帧：未做任何改动，调用方应稍后重试
+        Wedged,  // 线程卡死在驱动调用里：资源未释放，调用方必须退役本对象
+    };
+    RetireState retireIfIdle();
+
     // 本进程中 MPP 是否被证明不可用（初始化成功但 encode 恒 null）。
     // 上层据此在前端展示"硬件编码实际未生效"，避免用户以为开着硬编。
     static bool isMppDisabled();
@@ -90,6 +113,9 @@ private:
     void updateOverloadState(qint64 encodeStartMs);
     // 线程确认停止后的资源释放（mpp 实例 + ffmpeg 上下文），shutdown/shutdownRetire 共用
     void releaseStoppedResources();
+    // 置 abort_ 后限时等线程退出；成功则释放资源。超时返回 false 且不释放
+    // （线程仍在触碰 codecCtx_/mpp_），由调用方决定退役。
+    bool stopEncoderThread(int timeoutMs);
 
     QThread encoderThread_;
     QMutex mutex_;
@@ -129,9 +155,10 @@ private:
     std::vector<AVFrame*> bandTmpFrames_;  // 仅缩放条带：每条带私有临时目标帧
     bool swsBandedScale_ = false;
     bool swsHorizontal_ = false;
-    // 同尺寸（缩放 100%）且目标为 YUV420P 时改用内置标量转换，绕过 sws。
-    // 仅 ARM 开启：FFmpeg 3.4 的 aarch64 swscale 没有 RGB→YUV 的 NEON 实现，
-    // 其通用 C 路径在同一帧上比融合标量循环慢约 9 倍；x86 有 SSE 汇编，保留 sws。
+    // 同尺寸（缩放 100%）且目标为 YUV420P 时改用内置转换，绕过 sws：
+    // ARM（FFmpeg 3.4 的 aarch64 swscale 无 RGB→YUV 的 NEON 实现，通用 C 路径
+    // 比融合标量循环慢约 9 倍）与 x86+AVX2（实测 1080p 单帧 0.65ms vs sws 3.11ms，
+    // 约 4.8 倍）开启。
     bool convNative_ = false;
     int convertBandNative(const QImage& image, int band);
     void releaseBandScratch();
@@ -184,6 +211,10 @@ private:
     std::atomic<int> pendingBitrate_{ 0 };
     // 编码线程已应用的码率，供主线程无锁读取（避免直读 codecCtx_->bit_rate 造成数据竞争）
     std::atomic<int> appliedBitrate_{ 0 };
+    // 编码线程当前帧的起始时刻与上一帧总耗时（单调时钟毫秒，见 busyForMs()/lastFrameCostMs()）
+    std::atomic<qint64> inFlightStartMs_{ 0 };
+    std::atomic<qint64> lastFrameCostMs_{ 0 };
+    std::atomic<qint64> initAtMs_{ 0 };  // initialize() 成功时刻（单调时钟毫秒，见 initAgeMs()）
     // RK3588 MPP 硬件编码器（USE_MPP 时启用；MPP 路径不经过 FFmpeg sws/编码器）
     MppEncoder* mpp_ = nullptr;
 

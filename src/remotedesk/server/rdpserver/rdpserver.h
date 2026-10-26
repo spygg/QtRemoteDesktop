@@ -227,7 +227,7 @@ private:
     // （静态桌面抓取去重不会主动出帧，否则新客户端永远等不到关键帧而黑屏）。
     QByteArray lastKeyframeData_;
     qint64 lastKeyframeTs_ = 0;
-    // 编码器尺寸不匹配触发的重建节流时间戳（避免每帧都尝试重建阻塞主线程）
+    // 编码器尺寸不匹配触发的重建节流时间戳（单调时钟毫秒，避免每帧都尝试重建阻塞主线程）
     qint64 lastSizeReinitMs_ = 0;
     // [PLI-REUSE] 静止桌面下的关键帧请求（PLI）优化状态。
     // 背景：浏览器在"长时间收不到可解码帧"时会周期性发 PLI 索要一帧 IDR。旧实现用
@@ -250,9 +250,9 @@ private:
     //   重建编码器逼 IDR 时必然多吐 1 个 P 帧（同画面），该判据永不成立（实测 =1）。
     quint64 staticIdrEpoch_ = 0;
     bool staticIdrEpochValid_ = false;
-    // 上次 PLI 复用的时刻（冷却，防止 PLI 风暴下重复重发）。
+    // 上次 PLI 复用的时刻（单调时钟毫秒，见 rdpserver.cpp monoNowMs()；冷却防止 PLI 风暴下重复重发）。
     qint64 lastPliReuseMs_ = 0;
-    // IDR 请求待命时刻（0=无请求）。requestKeyframe() 只设标志，部分软编（openh264）
+    // IDR 请求待命时刻（单调时钟毫秒，0=无请求）。requestKeyframe() 只设标志，部分软编（openh264）
     // 不认 flush + pict_type=I 仍输出 P 帧，需要超时兜底重建编码器才能真的产出 IDR。
     qint64 idrRequestMs_ = 0;
     QTimer* idrFallbackTimer_ = nullptr;
@@ -357,6 +357,10 @@ private:
     void switchToImageMode();
     bool switchToVideoMode();
     void reinitVideoEncoderForScale();
+    // 退役当前编码器并重建（reinitVideoEncoderForScale 的通用实现）。
+    // onlyIfIdle=true 时先做原子空闲判定：有在飞帧则不做任何改动、返回 false，
+    // 由调用方稍后重试（IDR 兜底定时器用，避免主线程白等一整帧）。
+    bool rebuildVideoEncoder(bool onlyIfIdle);
     bool hwEncodeAvailable() const;
     // 服务端能否进入视频模式（H.264 编码）：
     //  ① 本地原始帧源可用（直连 / Linux 服务模式进程内捕获）→ 支持；
@@ -435,7 +439,8 @@ private:
     // 定时器必须**无条件编译**：ffmpeg/MSE 客户端不在 webrtcSessions_ 里，
     // 若随 USE_WEBRTC 一起被裁掉，纯 WS 视频模式就再没有任何补关键帧机制。
     QTimer* webrtcKfTimer_ = nullptr;
-    // 编码器重建冷却时间戳：pumpKeyframe 检测到无 IDR 时重建编码器，
+    // 编码器重建冷却时间戳（单调时钟毫秒，见 rdpserver.cpp monoNowMs()）：
+    // pumpKeyframe 检测到无 IDR 时重建编码器，
     // 重建本身有线程开销且部分平台 MPP 库重复 init 会崩，需冷却后再重建。
     qint64 lastReinitMs_ = 0;
 

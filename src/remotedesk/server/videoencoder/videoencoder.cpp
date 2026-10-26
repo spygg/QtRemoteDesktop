@@ -1,6 +1,8 @@
 #include "videoencoder.h"
 #include "mppencoder.h"
+#include "rgb2yuv.h"
 #include <QDateTime>
+#include <chrono>
 #include <cstring>
 #include <QDebug>
 #include <QFile>
@@ -21,6 +23,19 @@ static qint64 encoderEpochMs()
 {
     static const qint64 epoch = QDateTime::currentMSecsSinceEpoch();
     return epoch;
+}
+
+// [CLOCK] 时长测量必须用单调时钟（steady_clock）：
+// busyForMs()/initAgeMs() 的读数直接决定"是否重建编码器"。若用墙钟，NTP 校时或
+// 用户改时间会让差值瞬间变大/变小——向前跳会误判"编码线程卡了 30s"而强杀重建，
+// 向后跳则会让"从未产 IDR"永远不成立，客户端长期黑屏。
+// 只用于内部时长；码流时间戳仍由 encoderEpochMs()（墙钟）提供，两者互不影响。
+// +1 保证返回值恒 > 0（0 是"无在飞帧"的哨兵值）。
+static qint64 monotonicMs()
+{
+    static const auto origin = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - origin).count() + 1;
 }
 
 VideoEncoder::VideoEncoder(QObject*)
@@ -316,6 +331,13 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     encodeEmaMs_ = 0;
     lastOverloadLogMs_ = 0;
     overloaded_ = false;
+    // 在飞标记必须随初始化归零：旧线程若因重建被掐断，残留的时间戳会让上层
+    // 误判"编码线程仍在处理上一帧"，从而永远推迟 IDR 兜底重建。
+    inFlightStartMs_.store(0);
+    lastFrameCostMs_.store(0);
+    // 记录本轮初始化时刻：上层"长时间没产 IDR 就重建"的判据必须扣除初始化的这段时间，
+    // 否则新编码器还没收到任何帧就被判为"不产 IDR"而立刻重建（每次客户端接入多建一次）。
+    initAtMs_.store(monotonicMs());
     {
         QMutexLocker locker(&mutex_);
         frameQueue_.clear();
@@ -591,7 +613,12 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         const bool sameSize = (srcW == encW && srcH == encH);
 
 #if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
+        // ARM：标量版即可（Cortex-A 上 sws 的整体管线明显更慢）
         convNative_ = sameSize && pixFmt_ == AV_PIX_FMT_YUV420P;
+#elif defined(RGB2YUV_X86_SIMD)
+        // x86：仅在 CPU 支持 AVX2 且同尺寸时启用向量化版本；无 AVX2 的机器
+        // 继续走 sws（实测无 AVX2 时标量版并不比 sws 快，不值得切换）
+        convNative_ = sameSize && pixFmt_ == AV_PIX_FMT_YUV420P && rgb2yuvAvx2Available();
 #endif
 
         // 竖切优先（已验证）；高度是奇数或公因子太小（如 2048x1209）时竖切拿不到
@@ -668,7 +695,11 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
                 encW, useTmp ? p.tmpH : p.dstH, codecCtx_->pix_fmt,
                 SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
         };
-        if (swsBands_ > 1) {
+        // 原生转换（ARM 标量 / x86 AVX2）不经过 sws：不要为条带创建 SwsContext
+        // （每个上下文都有独立的缩放系数表与行缓冲，8 条带白占内存），
+        // 条带划分本身仍保留 —— convertBandNative 直接按 bandPlans_ 的偏移写目标平面。
+        const bool nativeConv = convNative_;
+        if (!nativeConv && swsBands_ > 1) {
             for (int i = 0; i < swsBands_; ++i) {
                 SwsContext* c = createCtx(bandPlans_[i]);
                 if (!c) break;
@@ -700,7 +731,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
                 }
             }
         }
-        if (swsCtxs_.empty()) {
+        if (!nativeConv && swsCtxs_.empty()) {
             swsBands_ = 1;
             swsBandedScale_ = false;
             swsHorizontal_ = false;
@@ -766,48 +797,12 @@ int VideoEncoder::pickBandCount(int srcLen, int dstLen, int maxBands)
 // 同尺寸 sws 为 164ms；亮度与 sws 偏差平均 0.09（最大 1），色度因 2x2 平均
 // 与 sws 双线性核不同平均偏差约 1（桌面纯色块上肉眼不可见）。
 // 仅用于「源尺寸 == 编码尺寸」，缩放档位仍由 sws 做重采样。
-static inline uint8_t convClip8(int v)
-{
-    return v < 0 ? 0 : (v > 255 ? 255 : static_cast<uint8_t>(v));
-}
-
+// 实现见 rgb2yuv.h（C 标量 / x86 AVX2 两条路径，输出逐位一致）。
 static void rgb32ToYuv420p(const uint8_t* src, int srcStride,
                            uint8_t* yp, int ys, uint8_t* up, int us, uint8_t* vp, int vs,
                            int w, int h)
 {
-    for (int y = 0; y < h; y += 2) {
-        const uint8_t* r0 = src + static_cast<size_t>(y) * srcStride;
-        const uint8_t* r1 = (y + 1 < h) ? r0 + srcStride : r0;
-        uint8_t* y0 = yp + static_cast<size_t>(y) * ys;
-        uint8_t* y1 = (y + 1 < h) ? y0 + ys : y0;
-        uint8_t* u = up + static_cast<size_t>(y / 2) * us;
-        uint8_t* v = vp + static_cast<size_t>(y / 2) * vs;
-        for (int x = 0; x < w; x += 2) {
-            const uint8_t* p00 = r0 + static_cast<size_t>(x) * 4;
-            const uint8_t* p01 = (x + 1 < w) ? p00 + 4 : p00;
-            const uint8_t* p10 = r1 + static_cast<size_t>(x) * 4;
-            const uint8_t* p11 = (x + 1 < w) ? p10 + 4 : p10;
-            const int b00 = p00[0], g00 = p00[1], r00 = p00[2];
-            const int b01 = p01[0], g01 = p01[1], r01 = p01[2];
-            const int b10 = p10[0], g10 = p10[1], r10 = p10[2];
-            const int b11 = p11[0], g11 = p11[1], r11 = p11[2];
-
-            y0[x] = convClip8(((66 * r00 + 129 * g00 + 25 * b00 + 128) >> 8) + 16);
-            if (x + 1 < w)
-                y0[x + 1] = convClip8(((66 * r01 + 129 * g01 + 25 * b01 + 128) >> 8) + 16);
-            if (y + 1 < h) {
-                y1[x] = convClip8(((66 * r10 + 129 * g10 + 25 * b10 + 128) >> 8) + 16);
-                if (x + 1 < w)
-                    y1[x + 1] = convClip8(((66 * r11 + 129 * g11 + 25 * b11 + 128) >> 8) + 16);
-            }
-
-            const int rs = r00 + r01 + r10 + r11;
-            const int gs = g00 + g01 + g10 + g11;
-            const int bs = b00 + b01 + b10 + b11;
-            u[x / 2] = convClip8(((-38 * rs - 74 * gs + 112 * bs + 512) >> 10) + 128);
-            v[x / 2] = convClip8(((112 * rs - 94 * gs - 18 * bs + 512) >> 10) + 128);
-        }
-    }
+    rgb32ToYuv420pBest(src, srcStride, yp, ys, up, us, vp, vs, w, h);
 }
 
 int VideoEncoder::convertBandNative(const QImage& image, int band)
@@ -1004,7 +999,8 @@ void VideoEncoder::stopBandWorkers()
 // 「每条带是否成功」判定，成功时统一返回 frame_->height。
 int VideoEncoder::convertFrameBands(const QImage& image)
 {
-    if (swsBands_ <= 1 || swsCtxs_.size() < 2) {
+    // 原生转换不需要 sws 上下文也能分条带（convertBandNative 按 bandPlans_ 写入）
+    if (swsBands_ <= 1 || (!convNative_ && swsCtxs_.size() < 2)) {
         if (convNative_) {
             rgb32ToYuv420p(image.bits(), static_cast<int>(image.bytesPerLine()),
                            frame_->data[0], frame_->linesize[0],
@@ -1068,6 +1064,9 @@ void VideoEncoder::encode(const QImage& frame)
     // （如 JpegCompressor 输出）则零拷贝直接入队。
     QImage copy = frame.isDetached() ? frame : frame.copy();
     QMutexLocker locker(&mutex_);
+    // 已退役/停止：直接丢弃（否则帧会积在队列里，只能等下一次 initialize 清空）
+    if (abort_)
+        return;
     // [V-1] 队列过载时清到 ≤2（含本帧）：原实现丢最老 1 帧后剩余 9 帧仍按序
     // 全编，编码偶发超时后延迟常驻 ~333ms 且白编过期帧。图片模式同场景已用
     // kMaxQueueSize=1。积压意味着编码跟不上，丢弃过期帧换来低延迟。
@@ -1084,12 +1083,33 @@ void VideoEncoder::encode(const QImage& frame)
 
 void VideoEncoder::encodingLoop()
 {
+    // 一帧的"在飞"标记：析构时清零并记录本帧总耗时。用 RAII 是为了覆盖本函数
+    // 里所有 continue / break 路径（丢帧、编码失败、排队等），漏掉一条就会让上层
+    // 误判"编码线程空闲"从而在编码中途重建编码器。
+    // 起始时刻由调用方在 mutex_ 内登记（见下方出队处），这样 retireIfIdle() 的
+    // "空闲判定 + 置 abort_" 与"开始下一帧"是互斥的。
+    struct InFlightGuard {
+        std::atomic<qint64>& slot;
+        std::atomic<qint64>& cost;
+        qint64 start;
+        InFlightGuard(std::atomic<qint64>& s, std::atomic<qint64>& c, qint64 startMs)
+            : slot(s), cost(c), start(startMs)
+        {
+        }
+        ~InFlightGuard()
+        {
+            cost.store(monotonicMs() - start, std::memory_order_relaxed);
+            slot.store(0, std::memory_order_relaxed);
+        }
+    };
+
     // [P2] AVPacket 跨帧复用：旧代码每帧 av_packet_alloc/av_packet_free 各一次
     //（30fps = 每秒 60 次堆操作），packet 生命周期只在 receive 循环内，复用安全。
     AVPacket* packet = av_packet_alloc();
     while (!abort_) {
     QImage image;
     qint64 enqueueMs = 0;
+    qint64 frameStartMs = 0;
     {
         QMutexLocker locker(&mutex_);
         while (frameQueue_.isEmpty() && !abort_)
@@ -1098,7 +1118,13 @@ void VideoEncoder::encodingLoop()
             break;
         image = frameQueue_.dequeue();
         enqueueMs = lastEnqueueMs_; // [DIAG] 入队时刻（近似=采集发射时刻）
+        // 在锁内登记"在飞"：retireIfIdle() 用同一把锁做空闲判定，
+        // 保证它看到 0 时线程不会再出队新帧（否则重建要白等一整帧）。
+        // 时刻必须在出队后取：取在 wait 之前会把排队等待算进单帧耗时。
+        frameStartMs = monotonicMs();
+        inFlightStartMs_.store(frameStartMs, std::memory_order_relaxed);
     }
+    const InFlightGuard inFlight(inFlightStartMs_, lastFrameCostMs_, frameStartMs);
     // [DIAG] ENC-LAT：排队等待（入队→出队）+ 本帧编码完成总延迟，每 60 帧打一条
     const qint64 dequeueMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 queueWaitMs = dequeueMs - enqueueMs;
@@ -1183,8 +1209,10 @@ void VideoEncoder::encodingLoop()
         continue;
     }
 
-    // MPP 之外的路径必须保证 FFmpeg 资源就绪，否则跳过本帧而不是崩溃
-    if (!codecCtx_ || !frame_ || swsCtxs_.empty())
+    // MPP 之外的路径必须保证 FFmpeg 资源就绪，否则跳过本帧而不是崩溃。
+    // 原生转换（convNative_）不需要 sws 上下文，此时 swsCtxs_ 为空是正常的；
+    // 若这里仍要求非空，原生路径会每帧都被丢弃（hasIdr 永假 → 反复重建）。
+    if (!codecCtx_ || !frame_ || (!convNative_ && swsCtxs_.empty()))
         continue;
 
     // [FIX-B4] avcodec_send_frame 不拷贝输入像素（内部只 av_frame_ref），带流水线
@@ -1357,6 +1385,18 @@ int VideoEncoder::currentBitrate() const
     return appliedBitrate_.load();
 }
 
+qint64 VideoEncoder::busyForMs() const
+{
+    const qint64 start = inFlightStartMs_.load(std::memory_order_relaxed);
+    return start > 0 ? monotonicMs() - start : 0;
+}
+
+qint64 VideoEncoder::initAgeMs() const
+{
+    const qint64 init = initAtMs_.load(std::memory_order_relaxed);
+    return init > 0 ? monotonicMs() - init : 0;
+}
+
 void VideoEncoder::shutdown()
 {
     if (shutdownRetire())
@@ -1380,7 +1420,25 @@ bool VideoEncoder::shutdownRetire()
         abort_ = true;
         condition_.wakeAll();
     }
+    return stopEncoderThread(8000);
+}
 
+VideoEncoder::RetireState VideoEncoder::retireIfIdle()
+{
+    {
+        QMutexLocker locker(&mutex_);
+        // 与 encodingLoop 的出队共用 mutex_：这里看到 0 就说明线程此刻没有在飞帧，
+        // 且它在本次 abort_ 置位后不会再出队新帧（循环顶部/等待处都会看到 abort_）。
+        if (inFlightStartMs_.load(std::memory_order_relaxed) != 0)
+            return RetireState::Busy;
+        abort_ = true;
+        condition_.wakeAll();
+    }
+    return stopEncoderThread(8000) ? RetireState::Retired : RetireState::Wedged;
+}
+
+bool VideoEncoder::stopEncoderThread(int timeoutMs)
+{
     // 绝不能用 terminate() 强杀编码线程：
     // 1) 线程正持有 mutex_（encode()/encodingLoop 的 QMutexLocker）时被杀，
     //    mutex_ 永久锁死，下一次 initialize() 的 QMutexLocker 立即死锁；
@@ -1390,7 +1448,7 @@ bool VideoEncoder::shutdownRetire()
     if (encoderThread_.isRunning()) {
         encoderThread_.requestInterruption();
         encoderThread_.quit();          // 线程无事件循环时无效，仅作兜底
-        if (!encoderThread_.wait(8000)) {
+        if (!encoderThread_.wait(timeoutMs)) {
             // 线程仍卡在驱动调用里：不释放任何资源（codecCtx_/mpp_ 还在被它触碰），
             // 返回 false 由上层把本对象断开信号后故意泄漏退役，新建编码器继续服务。
             qCritical() << "VideoEncoder: encode thread wedged in driver call; caller must retire this encoder";
