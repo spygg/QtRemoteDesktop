@@ -37,6 +37,22 @@ static bool isInputEventLogged(const QString& type)
         && type != "wheel" && type != "keydown" && type != "keyup";
 }
 
+// 观看模式（只读）下必须丢弃的消息类型：所有会作用到被控端的操作。
+//   · 鼠标/键盘/滚轮：直接输入注入；
+//   · clipboard：服务端会把内容写进远端剪贴板并注入一次 Ctrl+V，等同一次粘贴操作；
+//   · system_action：锁屏/注销/重启/关机；
+//   · ime_cycle：切换远端输入法。
+// 不在此列的都是纯显示设置（config/set_output/set_resolution/request_keyframe）
+// 与 WebRTC 信令，观看模式下仍可正常使用。
+static bool isRemoteControlType(const QString& type)
+{
+    return type == QLatin1String("mousemove") || type == QLatin1String("mousedown")
+        || type == QLatin1String("mouseup") || type == QLatin1String("wheel")
+        || type == QLatin1String("keydown") || type == QLatin1String("keyup")
+        || type == QLatin1String("clipboard")
+        || type == QLatin1String("system_action") || type == QLatin1String("ime_cycle");
+}
+
 // 剪贴板内容 → WS 消息。文本沿用 {text} 字段（兼容旧前端），
 // 图片用 {mime:"image/png", data:base64}。
 static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
@@ -3889,6 +3905,55 @@ void RDPServer::onClientConnected(const QString& clientId)
     }
 }
 
+// 释放某客户端所有已按下的键：断线、以及进入观看模式时立即调用。
+// 回放 keyup 带全 false 修饰键顺带复位修饰键状态；保留原 keycode 供 Windows VK 注入。
+void RDPServer::releasePressedKeys(const QString& clientId)
+{
+    const QHash<QString, QJsonObject> pressed = pressedKeysByClient_.take(clientId);
+    if (pressed.isEmpty())
+        return;
+    qInfo() << "Releasing" << pressed.size() << "stuck key(s) for client" << clientId;
+    for (auto it = pressed.constBegin(); it != pressed.constEnd(); ++it) {
+        QJsonObject up = it.value();
+        up["type"] = "keyup";
+        up["ctrl"] = false;
+        up["alt"] = false;
+        up["shift"] = false;
+        up["meta"] = false;
+        if (serviceMode_ && wsServer_->isCaptureSourceConnected())
+            wsServer_->sendToCaptureSource(up); // helper 消息为扁平结构，与转发路径一致
+        // 锁屏时输入只走 secure-input：helper 的 locked 门会丢弃转发来的 keyup，
+        // 若回放不补发 secure-input，winlogon 桌面会被残留的 Shift/Ctrl 卡住。
+        if (screenLocked_ && secureInputRunning_)
+            wsServer_->sendToSecureInput(up);
+        // 服务模式下本进程在 Session0，本地注入打到无人可见的桌面且会污染
+        // 本侧修饰键状态，故仅在非服务模式（桌面实例）直接注入。
+        if (inputManager_ && !serviceMode_)
+            inputManager_->injectKeyboard(up["keycode"].toInt(), up["code"].toString(), false,
+                                          false, false, false, false,
+                                          up["isChar"].toBool(), false);
+    }
+}
+
+void RDPServer::setClientViewOnly(const QString& clientId, bool enabled)
+{
+    if (enabled) {
+        viewOnlyClients_.insert(clientId);
+        // 开启瞬间必须释放已按下的键：此后该连接的 keyup 会被入口拦掉，
+        // 残留按键会在远端无限自动重复 / 修饰键卡死全部组合键。
+        releasePressedKeys(clientId);
+        qInfo() << "Client switched to view-only:" << clientId;
+    } else {
+        viewOnlyClients_.remove(clientId);
+        qInfo() << "Client left view-only:" << clientId;
+    }
+    // 回执：前端以服务端状态为准，重连/异常时静默对齐。
+    wsServer_->sendJson(clientId, QJsonObject {
+        { "type", "view_only_state" },
+        { "enabled", enabled },
+    });
+}
+
 void RDPServer::onClientDisconnected(const QString& clientId)
 {
     qInfo() << "Client disconnected:" << clientId;
@@ -3910,30 +3975,10 @@ void RDPServer::onClientDisconnected(const QString& clientId)
     // [B-1] 释放该客户端按下的所有键：断网/关标签页时前端 blur 兜底收不到，
     // 远端按键会永久卡死（无限自动重复 / 修饰键卡住）。回放 keyup 带全 false
     // 修饰键顺带复位修饰键状态；保留原 keycode 供 Windows VK 注入。
-    const QHash<QString, QJsonObject> pressed = pressedKeysByClient_.take(clientId);
-    if (!pressed.isEmpty()) {
-        qInfo() << "Releasing" << pressed.size() << "stuck key(s) for disconnected client";
-        for (auto it = pressed.constBegin(); it != pressed.constEnd(); ++it) {
-            QJsonObject up = it.value();
-            up["type"] = "keyup";
-            up["ctrl"] = false;
-            up["alt"] = false;
-            up["shift"] = false;
-            up["meta"] = false;
-            if (serviceMode_ && wsServer_->isCaptureSourceConnected())
-                wsServer_->sendToCaptureSource(up); // helper 消息为扁平结构，与转发路径一致
-            // 锁屏时输入只走 secure-input：helper 的 locked 门会丢弃转发来的 keyup，
-            // 若回放不补发 secure-input，winlogon 桌面会被残留的 Shift/Ctrl 卡住。
-            if (screenLocked_ && secureInputRunning_)
-                wsServer_->sendToSecureInput(up);
-            // 服务模式下本进程在 Session0，本地注入打到无人可见的桌面且会污染
-            // 本侧修饰键状态，故仅在非服务模式（桌面实例）直接注入。
-            if (inputManager_ && !serviceMode_)
-                inputManager_->injectKeyboard(up["keycode"].toInt(), up["code"].toString(), false,
-                                              false, false, false, false,
-                                              up["isChar"].toBool(), false);
-        }
-    }
+    releasePressedKeys(clientId);
+
+    // 观看模式按连接记录，断线即清理（clientId 可能被复用）。
+    viewOnlyClients_.remove(clientId);
 
 
 #ifdef USE_WEBRTC
@@ -3960,6 +4005,27 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 {
     // config 和 set_resolution 需要在 service mode 转发前先本地处理
     QString type = input["type"].toString();
+
+    // ---- 观看模式（只读） ----
+    // 开关本身不能受拦截影响，必须放在最前面。
+    if (type == QLatin1String("set_view_only")) {
+        setClientViewOnly(clientId, input["enabled"].toBool());
+        return;
+    }
+    // 权威兜底：观看模式下丢弃一切"能操作被控端"的消息（前端 send() 出口已拦一层，
+    // 这里按 clientId 再判一次，防止改过的客户端/其它注入路径绕过）。
+    // 纯显示设置（config/set_output/set_resolution/request_keyframe、WebRTC 信令）不拦。
+    if (viewOnlyClients_.contains(clientId) && isRemoteControlType(type)) {
+        // 静默丢弃会让"按键没反应"无从排查；mousemove 是 120Hz，必须限流。
+        static qint64 lastDropLogMs = 0;
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (nowMs - lastDropLogMs >= 5000) {
+            lastDropLogMs = nowMs;
+            qInfo() << "View-only: dropping remote-control input, type =" << type
+                    << "client =" << clientId;
+        }
+        return;
+    }
 
     // [B-1] 记录本客户端按下的键（code 为唯一标识，存最近 keydown 完整载荷，
     // Windows 端 keyup 需要原 keycode 作 VK）。isChar 的 Unicode 注入键也可能

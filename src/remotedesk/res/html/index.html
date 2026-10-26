@@ -68,6 +68,50 @@
             transition: opacity 0.3s;
         }
 
+        /* 观看模式（只读）：整屏琥珀色描边 + 右下角常驻标牌。
+           工具栏可能自动隐藏、配置菜单也会关闭，只靠菜单里的高亮用户会误以为
+           "键盘/鼠标坏了"，所以必须有一个不依赖交互的常驻提示。 */
+        #viewonly-border {
+            position: fixed;
+            inset: 0;
+            border: 2px solid rgba(255, 170, 0, 0.8);
+            pointer-events: none;
+            z-index: 3500;
+            display: none;
+        }
+
+        #viewonly-badge {
+            position: fixed;
+            right: 10px;
+            bottom: 10px;
+            z-index: 4500;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-radius: 6px;
+            background: rgba(255, 170, 0, 0.92);
+            color: #1a1a1a;
+            font-size: 12px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+        }
+
+        #viewonly-badge:hover {
+            background: #ffc233;
+        }
+
+        body.viewonly #viewonly-border {
+            display: block;
+        }
+
+        body.viewonly #viewonly-badge {
+            display: flex;
+        }
+
         /* 工具栏：顶部居中，默认显示 */
         #toolbar {
             position: fixed;
@@ -254,6 +298,10 @@
             gap: 12px;
             flex-direction: column;
             min-width: 320px;
+            /* 配置项较多，矮屏（768 高）下加块会溢出视口顶部之上/底部之外，
+               菜单自身滚动比让最后几项看不见更好用。 */
+            max-height: calc(100vh - 60px);
+            overflow-y: auto;
         }
 
         #config-dropdown.open {
@@ -753,6 +801,11 @@
 <body>
 
     <div id="status" style="display:none"></div>
+    <!-- 观看模式常驻提示：边框标示只读，右下角标牌可点击直接退出观看模式 -->
+    <div id="viewonly-border"></div>
+    <div id="viewonly-badge" onclick="setViewOnly(false)" title="观看模式已开启：只能看画面，点击退出">
+        👁 观看模式（只读）
+    </div>
 
     <div id="toolbar-trigger"></div>
     <div id="toolbar">
@@ -798,6 +851,15 @@
     <div id="config-overlay" class="dropdown-overlay" onclick="toggleConfigDropdown()"></div>
     <!-- 配置下拉菜单 -->
     <div id="config-dropdown">
+        <!-- 观看模式（只读）：放在第一块，开启后所有输入被拦，"按键没反应"必须一眼能看到原因 -->
+        <div class="dropdown-section">
+            <div class="dropdown-title">观看模式</div>
+            <div class="dropdown-note">开启后只能观看画面：鼠标、键盘、系统操作、输入法切换与剪贴板写入全部禁用；画质/帧率/分辨率等显示设置仍可用</div>
+            <div class="dropdown-options" data-key="viewonly">
+                <button data-value="off">关闭</button>
+                <button data-value="on">开启</button>
+            </div>
+        </div>
         <div class="dropdown-section">
             <div class="dropdown-title">画质</div>
             <div class="dropdown-options" data-key="quality">
@@ -1018,6 +1080,10 @@
             // 旧实现用 Set<code> 只能发 keycode=0，Windows SendInput 对 wVk=0
             // 的 keyup 直接无效 → 失焦后按键在远端永久卡住。
             keysPressed: new Map(),
+            // 观看模式（只读）：true 时在 send() 唯一出口拦掉所有"能操作被控端"的
+            // 消息（见 VIEW_ONLY_BLOCKED_TYPES），服务端还有一层按 clientId 的权威丢弃。
+            // 持久化：刷新/重连后保持只读，由常驻徽标+整屏描边提示原因。
+            viewOnly: (localStorage.getItem('rd_viewonly') === '1'),
             // 共享剪贴板状态。核心难点：**本机剪贴板往往非空但内容陈旧**（上一次 Ctrl+C
             // 的残留），远端刚复制的内容又常常因为非安全上下文而写不进本机剪贴板。
             // 因此除内容本身外还要记录“谁更新得晚”，粘贴时据此仲裁优先级。
@@ -2216,6 +2282,10 @@
                 // 发送认证
                 send({ type: 'auth', version: '1.0' });
 
+                // 观看模式是**每连接**状态（服务端按 clientId 记录）：重连/刷新后必须
+                // 重新声明，否则服务端会把这个新连接当成可操作连接。
+                if (state.viewOnly) send({ type: 'set_view_only', enabled: true });
+
                 // 连接后立即加载远端文件列表（同时获取服务端下发的桌面路径 desktopPath，
                 // 作为本机拖入文件的默认落点）。
                 refreshFileList();
@@ -2558,6 +2628,19 @@
                         showTransferStatus('输入法: ' + msg.engine, 1800);
                     }
                     break;
+                case 'view_only_state': {
+                    // 服务端权威回执：以服务端为准，但**不**回显请求，避免 ping-pong。
+                    // 正常流程下与本地状态一致（前端先本地生效再发 set_view_only），
+                    // 仅服务端重启/会话重建等异常时静默对齐。
+                    const want = !!msg.enabled;
+                    if (want !== state.viewOnly) {
+                        state.viewOnly = want;
+                        try { localStorage.setItem('rd_viewonly', want ? '1' : '0'); } catch (e) {}
+                        updateViewOnlyUI();
+                        updateDropdownActive();
+                    }
+                    break;
+                }
                 case 'file_list':
                     // [B15] 乱序防护：快速连续导航时旧目录的响应可能后到，
                     // 若与本机最近一次请求的目录都对不上则丢弃，避免旧列表覆盖新列表。
@@ -2921,15 +3004,71 @@
             try { state.kbdSink.focus({ preventScroll: true }); } catch (err) {}
         }
 
+        // ---- 观看模式（只读） ----
+        // 只列"会作用到被控端"的消息类型。其余消息（config/set_output/
+        // set_resolution/request_keyframe、WebRTC 信令、auth 等）照常发送，
+        // 保证观看模式下画质/帧率/分辨率仍可调、画面仍能重建关键帧。
+        const VIEW_ONLY_BLOCKED_TYPES = new Set([
+            'mousemove', 'mousedown', 'mouseup', 'wheel', 'keydown', 'keyup',
+            'clipboard',     // 服务端会写远端剪贴板并注入一次 Ctrl+V，等同粘贴操作
+            'system_action', // 锁屏/注销/重启/关机
+            'ime_cycle',     // 切换远端输入法
+        ]);
+
         function send(data) {
+            // 观看模式的唯一出口拦截：任何输入路径（鼠标/键盘/输入法上屏/剪贴板/
+            // 系统菜单/锁屏密码）最终都走这里，集中拦一次即可覆盖全部入口。
+            if (data && state.viewOnly && VIEW_ONLY_BLOCKED_TYPES.has(data.type)) return;
             if (state.ws?.readyState === WebSocket.OPEN) {
                 state.ws.send(JSON.stringify(data));
             }
         }
 
+        // 观看模式下被拦下的动作给一次明确反馈：否则点"重启"只弹确认框、
+        // 锁屏密码框一直"发送中…"，用户根本不知道是被只读模式拦掉了。
+        function notifyViewOnlyBlocked() {
+            showTransferStatus('观看模式下只能查看，不能操作被控端', 2500);
+        }
+
+        function updateViewOnlyUI() {
+            const on = !!state.viewOnly;
+            document.body.classList.toggle('viewonly', on);
+        }
+
+        // opts.toast=false 用于徽标点击等不需要额外提示的场景
+        function setViewOnly(enabled, opts) {
+            enabled = !!enabled;
+            if (state.viewOnly !== enabled) {
+                if (enabled) {
+                    // 必须在翻转标志**之前**补发释放：翻转后 send() 会把补发的
+                    // keyup/mouseup 一起拦掉，远端按键/鼠标按钮就永久卡住
+                    // （自动重复、拖拽不松手、修饰键污染后续所有组合键）。
+                    if (typeof state.releaseHeldRemoteInput === 'function')
+                        state.releaseHeldRemoteInput();
+                } else {
+                    // 回到可操作状态时把焦点交回键盘承接层，用户可立刻继续操作远端
+                    try {
+                        if (document.activeElement !== state.kbdSink) focusKbdSink();
+                    } catch (e) {}
+                }
+                state.viewOnly = enabled;
+                try { localStorage.setItem('rd_viewonly', enabled ? '1' : '0'); } catch (e) {}
+                updateViewOnlyUI();
+                if (!opts || opts.toast !== false) {
+                    showTransferStatus(enabled ? '已进入观看模式（只读）'
+                                               : '已退出观看模式（可操作）', 2000);
+                }
+            }
+            // 每次都同步给服务端：服务端按 clientId 记录，重连后是新连接需要重新声明。
+            // set_view_only 本身不在拦截列表里，这里不会被自己拦掉。
+            send({ type: 'set_view_only', enabled: state.viewOnly });
+            updateDropdownActive();
+        }
+
         // ---- 输入法切换：发 ime_cycle，服务端直接切 ibus engine ----
         function cycleIme() {
             if (!state.connected || !state.ws) return;
+            if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
             send({ type: 'ime_cycle' });
         }
 
@@ -2957,6 +3096,7 @@
             }
         }
         function systemAction(action) {
+            if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
             const names = { lock: '锁屏', unlock_screen: '解锁屏幕', show_desktop: '显示桌面',
                 task_manager: '任务管理器', logout: '注销', reboot: '重启', poweroff: '关机' };
             const destructive = ['reboot', 'poweroff', 'logout'];
@@ -2976,6 +3116,7 @@
         // 用于被控端锁屏后网页只看到黑屏（lightdm greeter 型锁屏会另起 VT 并把
         // X 画面置黑）的场景。
         function requestRemoteUnlock() {
+            if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
             send({ type: 'system_action', action: 'unlock_screen' });
         }
 
@@ -2986,6 +3127,7 @@
             send({ type: isDown ? 'keydown' : 'keyup', keycode: char.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
         }
         function unlockScreen() {
+            if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
             const input = document.getElementById('lock-password');
             const btn = document.getElementById('lock-unlock-btn');
             const pwd = input.value;
@@ -3055,6 +3197,8 @@
                 lastMove = 0;
             };
             canvas.addEventListener('mousemove', (e) => {
+                // 观看模式：不移动远端光标（也不更新节流状态，避免留下待补发坐标）
+                if (state.viewOnly) return;
                 const pos = getCanvasPos(e);
                 movePending = pos;
                 const now = performance.now();
@@ -3081,6 +3225,9 @@
             // Map 记录按下时坐标：窗口失焦时没有鼠标位置可用，必须按原按下点补发。
             const pressedButtons = new Map();
             canvas.addEventListener('mousedown', (e) => {
+                // 观看模式：不向远端按下鼠标按钮，也不记账（否则离开观看模式后
+                // 会补发一次没有对应 mousedown 的 mouseup）
+                if (state.viewOnly) return;
                 // 点击画面时把焦点交给键盘承接层（canvas 没有 tabindex，
                 // 旧写法 canvas.focus() 是空操作，焦点留在 body）
                 focusKbdSink(e.clientX, e.clientY);
@@ -3097,6 +3244,7 @@
             });
 
             canvas.addEventListener('mouseup', (e) => {
+                if (state.viewOnly) return;
                 cancelPendingMove();
                 pressedButtons.delete(e.button);
                 const pos = getCanvasPos(e);
@@ -3111,6 +3259,7 @@
             // [B14] 画布外松键补发：canvas mouseup 只在自己的命中区域触发，
             // 拖拽出画布（或落在叠加元素上）后松开，远端按钮会一直保持按下。
             window.addEventListener('mouseup', (e) => {
+                if (state.viewOnly) return;
                 if (e.target === state.canvas) return; // canvas 监听器已处理
                 if (!pressedButtons.has(e.button)) return; // 画布上没按下的键不转发
                 cancelPendingMove();
@@ -3129,6 +3278,8 @@
             // 滚轮
             let wheelAccum = 0; // [I-2] 累积 deltaY，保留滚动幅度（100px≈1 格）
             canvas.addEventListener('wheel', (e) => {
+                // 观看模式：不滚远端，也不阻止默认行为（本机页面正常滚动）
+                if (state.viewOnly) return;
                 e.preventDefault();
                 // deltaMode 感知：0=像素（Chrome 类，一格≈100px），1=行（Firefox
                 // 默认，一格=1 行），2=页。旧实现恒按 /100 折算，行模式下 deltaY=1
@@ -3147,6 +3298,8 @@
 
             // 键盘
             window.addEventListener('compositionend', (e) => {
+                // 观看模式：输入法上屏的文字同样不能发往远端
+                if (state.viewOnly) return;
                 if (e.data) {
                     for (const ch of e.data) {
                         send({ type: 'keydown', keycode: ch.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
@@ -3204,6 +3357,10 @@
                     e.stopPropagation();
                     return;
                 }
+                // 观看模式：不转发任何键盘输入，也**不** preventDefault/stopPropagation，
+                // 让浏览器原生快捷键（F5/Ctrl+R 刷新、Ctrl+W 关标签页等）正常工作。
+                // 必须放在下面的远端输入法切换/粘贴/按键转发之前。
+                if (state.viewOnly) return;
                 // Ctrl+Alt+I: 切换远端 ibus 输入法。不能转发给远端（远端会真的收到
                 // 该组合键），由服务端直接切 ibus engine —— ibus 的 hotkey grab
                 // （Super+space）对 XTEST 注入的合成事件不响应，注入永远无法触发。
@@ -3245,6 +3402,8 @@
             }, true);
 
             window.addEventListener('keyup', (e) => {
+                // 观看模式：没有转发过 keydown，也不应补发 keyup
+                if (state.viewOnly) return;
                 if (isLockInputFocused()) return;
                 // [B13] IME 组合期间的 keyup 不下发：keydown 已过滤 isComposing，
                 // 若 keyup 放行会造出"孤立 keyup"，中文输入时远端键位错乱/卡键
@@ -3269,10 +3428,11 @@
                 });
             }, true);
 
-            // 窗口失焦时释放所有按下的键，避免按键卡死
-            window.addEventListener('blur', () => {
-                // 鼠标按钮同样要释放：按住左键切到别的窗口后，远端收不到 mouseup，
-                // 按钮会永久保持按下（表现为无法再点击/拖拽）。按原按下点补发。
+            // 立即把本机记录的"按下中"状态补发释放并清空：窗口失焦、以及切换到
+            // 观看模式（之后 send() 会拦掉 keyup/mouseup，必须先补发）都走这里。
+            // 鼠标按钮按原按下点补发：窗口失焦时没有鼠标位置可用。
+            state.releaseHeldRemoteInput = () => {
+                cancelPendingMove();
                 pressedButtons.forEach((pos, button) => {
                     send({ type: 'mouseup', x: pos.x, y: pos.y, button: button });
                 });
@@ -3288,6 +3448,13 @@
                     });
                 });
                 state.keysPressed.clear();
+            };
+
+            // 窗口失焦时释放所有按下的键，避免按键卡死
+            window.addEventListener('blur', () => {
+                // 鼠标按钮同样要释放：按住左键切到别的窗口后，远端收不到 mouseup，
+                // 按钮会永久保持按下（表现为无法再点击/拖拽）。
+                state.releaseHeldRemoteInput();
             });
 
             // 防止右键菜单
@@ -3303,6 +3470,9 @@
             //    没能写进本机。此时真正该粘贴的是远端那份 —— 见 shouldUseRemoteClip。
             window.addEventListener('paste', async (e) => {
                 if (state.clip.disabled) return;
+                // 观看模式：本机剪贴板不往远端写（服务端也会丢弃 clipboard 消息）。
+                // 放在 preventDefault 之前，不干扰浏览器原生粘贴。
+                if (state.viewOnly) return;
                 // 原生输入框（文件路径、锁屏密码等）→ 交给浏览器原生粘贴；
                 // 键盘承接层虽然也是 textarea，但它是远程会话的按键通道，仍按远端粘贴处理
                 const t = e.target;
@@ -3414,6 +3584,8 @@
         // 把远端同步来的那份内容重新发往远端（服务端写进远端剪贴板并注入 Ctrl+V）。
         // 用于"本机剪贴板是旧内容"的场景：远端剪贴板里本来就是这份，再发一次即可完成粘贴。
         function sendClipboardToRemote(kind) {
+            // 观看模式：剪贴板写入会在远端注入 Ctrl+V，属操作行为
+            if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
             if (kind === 'image' && state.clip.remoteData) {
                 state.clip.lastLocalSent = imgFp(state.clip.remoteData);
                 send({ type: 'clipboard', mime: 'image/png', data: state.clip.remoteData });
@@ -3545,7 +3717,10 @@
                         // 剪贴板同步是纯前端设置（localStorage），不在服务端 config 里
                         : (key === 'clip')
                             ? getClipAutoSync()
-                            : String(cfg[key]);
+                            // 观看模式也是纯前端状态（服务端只记只读标记）
+                            : (key === 'viewonly')
+                                ? (state.viewOnly ? 'on' : 'off')
+                                : String(cfg[key]);
                 group.querySelectorAll('button').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.value === val);
                 });
@@ -3586,6 +3761,11 @@
                 // WebSocket 协议由 CONFIG.wsUrl 按 location.protocol 自动适配 wss://
                 switchToHttps();
                 return;
+            }
+            if (key === 'viewonly') {
+                // 观看模式：纯前端开关 + 服务端权威记录（见 setViewOnly）
+                setViewOnly(val === 'on');
+                return; // setViewOnly 内部已刷新高亮，不需要再走下面的配置分支
             }
             if (key === 'quality') {
                 const fps = state.currentConfig.fps;
@@ -4918,6 +5098,7 @@
             connect();
             updateQualityLabel();
             updateDropdownActive(); // 初始化"编码协议"区显隐（hw=off 时隐藏）
+            updateViewOnlyUI();     // 恢复持久化的观看模式提示（只读描边 + 徽标）
 
             // 窗口大小改变时更新缩放
             window.addEventListener('resize', updateScale);

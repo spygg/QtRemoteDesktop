@@ -332,6 +332,9 @@ private:
     // Windows VK 回放）。断开时逐个补发 keyup，否则按键永久卡死（无限自动
     // 重复 / 修饰键卡住全部变组合键）。
     QMap<QString, QHash<QString, QJsonObject>> pressedKeysByClient_;
+    // 观看模式（只读）客户端：只推送画面，任何"能操作被控端"的消息在
+    // onInputReceived 入口丢弃。按连接记录，断线时清理（clientId 可能被复用）。
+    QSet<QString> viewOnlyClients_;
 
     // 每个 HTTP 连接的请求解析状态（跨 readyRead 累积，避免主线程阻塞）
     QHash<QTcpSocket*, HttpParseState> httpParseState_;
@@ -405,6 +408,14 @@ private:
     // 远程桌面里无法用注入快捷键触发切换；改为服务端直接调用 `ibus engine <next>`
     // 循环切换 preload-engines 列表（ibus CLI 走自身 socket 地址文件，不依赖 X grab）。
     void handleImeCycle(const QString& clientId);
+
+    // ---- 观看模式（只读） ----
+    // 切换某连接的观看模式：开启后该连接只能看画面，鼠标/键盘/剪贴板写入/
+    // 系统操作/输入法切换一律丢弃，画质/帧率/分辨率等纯显示设置不受影响。
+    // 判定放在服务端（而非只靠前端 send()）是为了防止改过的客户端或其它注入路径绕过。
+    void setClientViewOnly(const QString& clientId, bool enabled);
+    // 释放某客户端已按下的所有键：断线，以及进入观看模式（此后的 keyup 会被拦掉）。
+    void releasePressedKeys(const QString& clientId);
 
     bool sleepSignalsConnected_ = false;
     bool sleepInhibitActive_ = false;
