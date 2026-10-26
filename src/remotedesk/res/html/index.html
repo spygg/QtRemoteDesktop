@@ -990,6 +990,7 @@
             screenHeight: 0,
             scaleX: 1,
             scaleY: 1,
+            canvasRect: null, // getCanvasPos 用的视口矩形缓存（mousemove 120Hz）
             resolutions: [],
             outputs: [],
             currentConfig: {
@@ -1235,8 +1236,14 @@
             const pc = webrtcState.pc;
             if (!pc) return;
             pc.setRemoteDescription({ type: 'offer', sdp }).then(async () => {
+                // 异步期间会话可能已被 webrtcClose()/新的 initWebRTC 替换：
+                // 旧 pc 的 answer 绝不能发出去，否则服务端会把旧 SDP 应用到
+                // 新会话（刚建立即被拆掉/黑屏）。每个 await 之后都要复核。
+                if (webrtcState.pc !== pc) return;
                 const answer = await pc.createAnswer();
+                if (webrtcState.pc !== pc) return;
                 await pc.setLocalDescription(answer);
+                if (webrtcState.pc !== pc) return;
                 send({ type: 'signal_answer', sdp: pc.localDescription.sdp });
                 // 已获得远端描述，补发排队中的 ICE
                 for (const ic of webrtcState.pendingIce) {
@@ -1245,7 +1252,8 @@
                 webrtcState.pendingIce = [];
             }).catch((e) => {
                 console.error('WebRTC answer failed:', e);
-                webrtcClose();
+                // 旧会话的失败不能误关当前新会话
+                if (webrtcState.pc === pc) webrtcClose();
             });
         }
 
@@ -1583,12 +1591,7 @@
                         for (const d of pend) this._queue(d);
                         this.sb.addEventListener('updateend', () => {
                             if (gen !== this._gen) return;
-                            if (this.ms && this.ms.readyState === 'open' && this.pending.length && !this.sb.updating) {
-                                const d = this.pending.shift();
-                                try { this.sb.appendBuffer(d); } catch (e) {
-                                    console.error('MSE updateend appendBuffer error:', e.name, e.message);
-                                }
-                            }
+                            this._appendNext();
                             // 低延迟追边（LL-MSE）：缓冲领先播放位置超过 0.15s 即跳到前沿，
                             // 留 0.06s 余量防止贴边反复 waiting。把 MSE 固有缓冲从 ~1-2s
                             // 压到 ~0.15s，让 http 部署下 FFmpeg 模式刷新频率贴近 WebRTC/图片模式。
@@ -1598,6 +1601,15 @@
                                 const b = el && el.buffered;
                                 if (el && b && b.length && b.end(b.length - 1) - el.currentTime > 0.15)
                                     el.currentTime = b.end(b.length - 1) - 0.06;
+                                // 回收已播放的历史缓冲：SourceBuffer 只增不减，久挂
+                                // （数十分钟）后必然触发 QuotaExceededError；旧代码
+                                // 在 catch 里仅打日志，之后 append 全部失败、画面冻结。
+                                // 保留播放头附近 2s，避免删掉正在播放的内容。
+                                if (el && this.sb && !this.sb.updating && b && b.length) {
+                                    const evictEnd = el.currentTime - 2;
+                                    if (evictEnd > 0.5 && evictEnd > b.start(0) + 0.5)
+                                        this.sb.remove(0, evictEnd);
+                                }
                             } catch (e) {}
                         });
                     } catch (e) {
@@ -1612,13 +1624,43 @@
                 return true;
             },
             _queue(avcc) {
-                if (this.pending.length >= 400) this.pending.shift(); // 丢最旧，防内存膨胀
+                if (this.pending.length >= 400) {
+                    // 溢出时不能简单 shift 最旧：积压里第一项可能是 init segment
+                    // 或关键帧，丢掉后所有 P 帧都会进已损坏的 demuxer（花屏/冻结
+                    // 且不再自愈）。清空积压并重新索要关键帧；fMP4 分片自带 dts，
+                    // 可从任意位置续接。
+                    console.warn('MSE pending overflow (' + this.pending.length + '), resync from keyframe');
+                    this.pending.length = 0;
+                    send({ type: 'request_keyframe' });
+                }
                 this.pending.push(avcc);
-                if (this.sb && this.ms && this.ms.readyState === 'open' && !this.sb.updating && this.pending.length) {
-                    const d = this.pending.shift();
-                    try { this.sb.appendBuffer(d); } catch (e) {
-                        console.error('MSE appendBuffer error:', e.name, e.message);
-                        if (e.name === 'InvalidStateError') this._lastRestart = 0; // 允许立即自愈
+                this._appendNext();
+            },
+            // 从积压队列取一个分片 append。配额/状态异常统一在这里处理，
+            // updateend / _queue / sourceopen 三处共用同一套逻辑。
+            _appendNext() {
+                if (!this.sb || !this.ms || this.ms.readyState !== 'open'
+                    || this.sb.updating || !this.pending.length)
+                    return;
+                const d = this.pending.shift();
+                try {
+                    this.sb.appendBuffer(d);
+                } catch (e) {
+                    console.error('MSE appendBuffer error:', e.name, e.message);
+                    if (e.name === 'QuotaExceededError') {
+                        // 配额满：重试同一块只会死循环（remove 后配额未必立刻归还）。
+                        // 丢弃积压、删掉播放头之前的历史，并重新索要关键帧续接。
+                        this.pending.length = 0;
+                        try {
+                            const el = this.videoEl;
+                            const cur = el ? el.currentTime : 0;
+                            const evictEnd = cur - 0.5;
+                            if (this.sb && !this.sb.updating && evictEnd > 0.2)
+                                this.sb.remove(0, evictEnd);
+                        } catch (e2) { console.error('MSE quota eviction failed:', e2); }
+                        send({ type: 'request_keyframe' });
+                    } else if (e.name === 'InvalidStateError') {
+                        this._lastRestart = 0; // 允许立即自愈
                     }
                 }
             },
@@ -1815,6 +1857,11 @@
 
         function fallbackToImage(tip) {
             console.log('RD-FALLBACK to image:', tip, 'active=', webrtcState.active, 'pc=', !!webrtcState.pc);
+            // 释放 WebCodecs 解码器：降级后不会再有视频帧，留着会持续占用硬件
+            // 解码器/显存。旧实现不 close，反复 auto 切换会叠加多个解码器实例。
+            if (state.decoder && typeof state.decoder.close === 'function') {
+                try { state.decoder.close(); } catch (e) {}
+            }
             // 先停 MSE 再 webrtcClose：webrtcClose 仅在 !msePlayer.using 时才清理 video 元素，
             // 残留的全屏 <video> 会盖住 canvas 导致图片模式画面冻结
             msePlayer.stop('fallbackToImage');
@@ -2046,6 +2093,12 @@
                 }
 
                 if (!this.configured) return;
+
+                // 背压：解码队列持续增长说明解码跟不上出帧，继续无脑 decode 只会
+                // 让延迟/内存单调上升（远程桌面场景宁可丢 P 帧看最新的画面）。
+                // 关键帧不能丢，否则后续 P 帧全部依赖它、解码直接花屏。
+                if (this.decoder.decodeQueueSize > 8 && !isKeyframe)
+                    return;
 
                 const chunk = new EncodedVideoChunk({
                     type: isKeyframe ? 'key' : 'delta',
@@ -2993,6 +3046,14 @@
                 updateRemoteCursor(p.x, p.y);
                 send({ type: 'mousemove', x: Math.round(p.x), y: Math.round(p.y) });
             };
+            // 取消尚未补发的 trailing mousemove：按键事件必须严格晚于它之前的
+            // 移动到达服务端。旧实现点击后定时器仍会补发一次旧坐标，远端表现为
+            // “按下/抬起后光标又跳走”，拖拽/双击时尤其明显。
+            const cancelPendingMove = () => {
+                if (moveTimer) { clearTimeout(moveTimer); moveTimer = 0; }
+                movePending = null;
+                lastMove = 0;
+            };
             canvas.addEventListener('mousemove', (e) => {
                 const pos = getCanvasPos(e);
                 movePending = pos;
@@ -3024,6 +3085,7 @@
                 // 旧写法 canvas.focus() 是空操作，焦点留在 body）
                 focusKbdSink(e.clientX, e.clientY);
                 e.preventDefault();
+                cancelPendingMove();
                 const pos = getCanvasPos(e);
                 pressedButtons.set(e.button, { x: Math.round(pos.x), y: Math.round(pos.y) });
                 send({
@@ -3035,6 +3097,7 @@
             });
 
             canvas.addEventListener('mouseup', (e) => {
+                cancelPendingMove();
                 pressedButtons.delete(e.button);
                 const pos = getCanvasPos(e);
                 send({
@@ -3050,6 +3113,7 @@
             window.addEventListener('mouseup', (e) => {
                 if (e.target === state.canvas) return; // canvas 监听器已处理
                 if (!pressedButtons.has(e.button)) return; // 画布上没按下的键不转发
+                cancelPendingMove();
                 pressedButtons.delete(e.button);
                 const pos = getCanvasPos(e);
                 // 坐标钳到画布范围：远处松键时换算坐标可能远超屏幕，
@@ -3361,7 +3425,15 @@
         }
 
         function getCanvasPos(e) {
-            const rect = state.canvas.getBoundingClientRect();
+            // 缓存矩形：mousemove 最高 120Hz，每次都 getBoundingClientRect() 在
+            // 有 DOM 变更/布局失效时会强制同步布局，拖慢主线程。canvas 尺寸由
+            // 100vw/100vh 容器决定，只在 resize/fullscreen 时变化，由 updateScale
+            // 刷新缓存，滚动时置空回退到实时测量。
+            let rect = state.canvasRect;
+            if (!rect) {
+                rect = state.canvas.getBoundingClientRect();
+                state.canvasRect = rect;
+            }
             return {
                 x: (e.clientX - rect.left) * state.scaleX,
                 y: (e.clientY - rect.top) * state.scaleY
@@ -3371,6 +3443,7 @@
         // ==================== UI 功能 ====================
         function updateScale() {
             const rect = state.canvas.getBoundingClientRect();
+            state.canvasRect = rect;
             state.scaleX = state.canvas.width / rect.width;
             state.scaleY = state.canvas.height / rect.height;
             // WebRTC 视频元素与 canvas 保持同尺寸，叠加显示
@@ -4289,9 +4362,15 @@
         function fetchRemoteFileViaWs(path) {
             if (fileFetchCache[path]) return Promise.resolve(fileFetchCache[path]);
             if (fileFetchInflight[path]) return fileFetchInflight[path];
+            // waiter 提到 Promise 外层：旧实现把清理放在 p.then 里再按 path 去
+            // fetchWaiters 查，但所有终止路径（end/error/incomplete/abort）都会
+            // 先 delete fetchWaiters[path]，于是 clearInterval 永远命中不了 →
+            // 每次 WS 下载都留下一个永不停止的 10s 定时器 + 闭包。
+            const w = { resolve: null, reject: null, name: path.split('/').pop(),
+                        lastRx: Date.now(), timer: 0 };
             const p = new Promise((resolve, reject) => {
-                const w = { resolve: resolve, reject: reject, name: path.split('/').pop(),
-                            lastRx: Date.now(), timer: 0 };
+                w.resolve = resolve;
+                w.reject = reject;
                 fetchWaiters[path] = w;
                 send({ type: 'file_download', path: path, name: path.split('/').pop() });
                 w.timer = setInterval(() => {
@@ -4314,8 +4393,7 @@
             });
             fileFetchInflight[path] = p;
             p.catch(() => { }).then(() => {
-                const w = fetchWaiters[path];
-                if (w && w.timer) clearInterval(w.timer);
+                if (w.timer) { clearInterval(w.timer); w.timer = 0; }
                 delete fetchWaiters[path];
                 delete fileFetchInflight[path];
             });
@@ -4843,6 +4921,12 @@
 
             // 窗口大小改变时更新缩放
             window.addEventListener('resize', updateScale);
+            // 全屏切换必定伴随 resize，但部分浏览器全屏动画期间 resize 会晚到；
+            // 再挂一次 fullscreenchange 保证矩形/缩放缓存及时刷新。
+            document.addEventListener('fullscreenchange', updateScale);
+            // 页面若发生滚动（正常布局下 body overflow:hidden，不会触发），
+            // 矩形相对视口的位置会变，直接失效缓存由 getCanvasPos 重新测量。
+            window.addEventListener('scroll', () => { state.canvasRect = null; }, true);
 
             // 兜底：未捕获的脚本异常与 Promise 拒绝也打印一份到控制台。
             // 主流程各站点已就地 reportError；这里捕获的是漏网之鱼，

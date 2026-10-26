@@ -4,6 +4,7 @@
 #include <QHostAddress>
 #include <QMap>
 #include <QJsonObject>
+#include <QMutex>
 #include <QObject>
 #include <QSet>
 #include <QTimer>
@@ -52,6 +53,11 @@ public:
     // 低于阈值才继续——否则 GB 级目录会把信号队列 + 套接字写队列撑爆（OOM）。
     void addDownloadBacklog(const QString& clientId, qint64 delta);
     qint64 downloadBacklog() const { return downloadBacklog_.load(std::memory_order_relaxed); }
+
+    // 跨线程存活性查询：clients_ 只在主线程读写，而文件传输工作线程需要判断
+    // 下载客户端是否还活着（否则断线后仍会把整个目录打包完再"发"给死连接）。
+    // 维护一份只含在线 clientId 的集合（最多 kMaxClients 条，天然有界）。
+    bool isClientAlive(const QString& clientId) const;
 
     void broadcastCodecConfig(const QByteArray& extra);
     void broadcastJson(const QJsonObject& data);
@@ -120,12 +126,22 @@ private:
     std::atomic<qint64> downloadBacklog_{0};
     // 分客户端下载未写出份额（仅主线程读写）：断线时只扣当事人，见 releaseDownloadBacklog
     QMap<QString, qint64> downloadBacklogByClient_;
+    // 在线客户端快照（互斥量保护，工作线程可读）：仅用于跨线程判断下载客户端是否断线
+    mutable QMutex aliveMutex_;
+    QSet<QString> aliveClients_;
     // 每客户端最近一次上行消息时间（毫秒时钟）：半开连接（对端掉电/断网无 FIN）
     // 永远不会触发 disconnected，会一直占着 clients_ 且让 hasVideoClients() 恒真
     // → 服务端为不存在的观众持续编码推流。idleTimer_ 定期清理。
     QMap<QString, qint64> lastActivityMs_;
     QTimer idleTimer_;
     QMap<QWebSocket*, QString> socketToId_;
+    // 在途交互式 shell 连接（/api/shell/ws）：每条会 spawn 一个 PTY/bash，
+    // 独立于 clients_ 限流。
+    QSet<QWebSocket*> shellSockets_;
+    // shell 连接最近一次 pong 时间（毫秒时钟）：shell socket 不进 clients_，
+    // 不受上面的 idle 清理覆盖。对端掉电/断网（无 FIN）时 disconnected 永不触发，
+    // bash + PTY + 一个并发配额会永久泄漏，只能靠 ping/pong 判活。
+    QMap<QWebSocket*, qint64> shellLastPongMs_;
     QMap<QString, QString> clientTokens_;
     QSslConfiguration sslConfig_;
     QWebSocket* captureSource_ = nullptr;

@@ -24,6 +24,12 @@ public:
     // 工作线程产出目录 tar/单文件分块前轮询，超过阈值就暂停，避免 OOM。
     void setBackpressureQuery(std::function<qint64()> q) { backpressureQuery_ = std::move(q); }
 
+    // 跨线程存活性查询（由 RDPServer 提供：WS 客户端是否仍在线）。断线后下载
+    // 必须尽快中止：否则工作线程会把整个目录/文件打包完、逐块 emit 给一个
+    // 已不存在的 clientId（全被静默丢弃），单线程传输队列被空转占满，
+    // 其他客户端的下载全部排队等它跑完。
+    void setClientAliveQuery(std::function<bool(const QString&)> q) { clientAliveQuery_ = std::move(q); }
+
     // 进程关闭时置位：下载线程在背压轮询/分块循环里立即返回。
     // 否则主线程析构时 wait() 阻塞事件循环 → WS 未写出字节永不下降 →
     // 工作线程永远停在 waitBackpressure 的 msleep 循环里，双方互等死锁。
@@ -100,6 +106,7 @@ private:
     static QString s_rootPath;
     static bool s_enforceRoot;
     std::function<qint64()> backpressureQuery_; // [C5-①] 下游 WS 积压查询（可空）
+    std::function<bool(const QString&)> clientAliveQuery_; // 下载客户端是否仍在线（可空）
     std::atomic<bool> backpressureAbort_{false}; // 关闭时置位，解除背压等待
     static void writeTarHeader(QByteArray& data, const QString& name, qint64 size, char type);
 

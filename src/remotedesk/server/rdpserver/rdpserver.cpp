@@ -304,7 +304,9 @@ RDPServer::~RDPServer()
     // 其余定时器 lambda 都捕获 this 并触碰 wsServer_/videoEncoder_：显式先停，
     // 不依赖"析构期间不跑事件循环"这一隐式前提（对象销毁顺序调整后即变隐患）。
     if (configSaveTimer_) configSaveTimer_->stop();
+#ifdef USE_FFMPEG
     if (idrFallbackTimer_) idrFallbackTimer_->stop();
+#endif
     if (webrtcKfTimer_) webrtcKfTimer_->stop();
     if (cursorTimer_) cursorTimer_->stop();
     if (screenCapturer_)
@@ -918,6 +920,11 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     fileTransferService_->setBackpressureQuery([this]() {
         return wsServer_ ? wsServer_->downloadBacklog() : qint64(0);
     });
+    // 断线感知：积压查询无法区分"客户端已断线"（包被丢弃 → 积压恒 0），
+    // 必须额外注入存活性查询，否则整树打包会为一个不存在的对端空转。
+    fileTransferService_->setClientAliveQuery([this](const QString& clientId) {
+        return wsServer_ ? wsServer_->isClientAlive(clientId) : false;
+    });
 
     transferThread_->start();
 
@@ -1415,6 +1422,11 @@ void RDPServer::handleApiFileDownload(QTcpSocket* socket, const QString& path, c
         // 寻址），浏览器对无 Range 响应整体下载即可。
         qint64 tarTotal = 0;
         st->tarQueue = FileTransferService::collectTarEntries(safePath, &tarTotal);
+        if (tarTotal < 0) {
+            delete st;
+            fail(500, "Internal Server Error", "directory has too many entries for tar download");
+            return;
+        }
         st->tarStream = true;
         st->totalSize = tarTotal;
         displayName = fi.fileName() + ".tar";
@@ -1461,13 +1473,27 @@ void RDPServer::handleApiFileDownload(QTcpSocket* socket, const QString& path, c
     connect(socket, &QTcpSocket::bytesWritten, this, [this, socket]() {
         pumpFileDownload(socket);
     });
-    const int rangeIdx = headerText.indexOf("Range:", 0, Qt::CaseInsensitive);
-    if (rangeIdx >= 0) {
-        int lineEnd = headerText.indexOf('\n', rangeIdx);
-        if (lineEnd < 0)
-            lineEnd = headerText.length();
-        QString rangeLine = headerText.mid(rangeIdx, lineEnd - rangeIdx).trimmed();
-        QString spec = rangeLine.mid(6).trimmed(); // skip "Range:"
+    // 按行精确匹配请求头名：不能直接用 headerText.indexOf("Range:")，否则
+    // "If-Range:"（合法的条件请求头，浏览器缓存重验证会自动带上）也会命中，
+    // 随后把 If-Range 里的 ETag/日期当区间解析，产生错误的 206/416 或整段偏移。
+    auto headerValue = [headerText](const char* name) -> QString {
+        const QString key = QString::fromLatin1(name);
+        int pos = 0;
+        while (pos < headerText.size()) {
+            int nl = headerText.indexOf('\n', pos);
+            if (nl < 0)
+                nl = headerText.size();
+            const QString line = headerText.mid(pos, nl - pos).trimmed();
+            if (line.size() > key.size() && line.at(key.size()) == ':'
+                && line.startsWith(key, Qt::CaseInsensitive))
+                return line.mid(key.size() + 1).trimmed();
+            pos = nl + 1;
+        }
+        return QString();
+    };
+    const QString rangeValue = headerValue("Range");
+    if (!rangeValue.isEmpty()) {
+        QString spec = rangeValue;
         if (spec.startsWith("bytes=", Qt::CaseInsensitive)) {
             QString ranged = spec.mid(6).trimmed();
             const int dash = ranged.indexOf('-');
@@ -1603,8 +1629,22 @@ void RDPServer::pumpFileDownload(QTcpSocket* socket)
                            << "at offset" << st->offset << "/" << st->totalSize;
             break;
         }
-        socket->write(buf);
-        st->offset += buf.size();
+        // 写失败必须立即终止：旧实现忽略 write() 返回值、无条件推进 offset，
+        // 客户端断开后 QTcpSocket::write() 恒返回 -1，循环仍会把整个文件从磁盘
+        // 读完（GB 级文件 = 磁盘空转 + 主线程长时间占用），且浏览器只收到截断内容。
+        const qint64 written = socket->write(buf);
+        if (written != buf.size()) {
+            if (written < 0)
+                qWarning() << "File download write failed:" << socket->errorString()
+                           << "at offset" << st->offset << "/" << st->totalSize;
+            else
+                qWarning() << "File download short write:" << written << "/" << buf.size()
+                           << "at offset" << st->offset << "/" << st->totalSize;
+            cleanupHttpDownload(socket);
+            socket->disconnectFromHost();
+            return;
+        }
+        st->offset += written;
     }
 
     cleanupHttpDownload(socket);
@@ -1616,7 +1656,12 @@ void RDPServer::pumpFileDownload(QTcpSocket* socket)
 // 用零补齐，绝不短于 Content-Length（否则浏览器会一直挂起等待）。
 QByteArray RDPServer::generateTarChunk(HttpDownloadState* st, int maxBytes)
 {
-    static const char kZeros[512] = { 0 };
+    // 结束块一次就要写 1024 字节（两个 512B 全零块），所以缓冲必须 ≥1024：
+    // 旧实现是 char[512]，而 append(kZeros, tarPadRemaining=1024) 会越过数组
+    // 读相邻 .rodata —— tar 尾部混入 512 字节只读数据（信息泄漏），归档也
+    // 只剩一个合法结束块（tar 报 "lone zero block"）。take 再夹一层 sizeof
+    // 兜底，防止日后调大 pad 时重新越界。
+    static const char kZeros[1024] = { 0 };
     QByteArray out;
     out.reserve(maxBytes);
 
@@ -1628,7 +1673,8 @@ QByteArray RDPServer::generateTarChunk(HttpDownloadState* st, int maxBytes)
             continue;
         }
         if (st->tarPadRemaining > 0) {
-            const int take = qMin(st->tarPadRemaining, maxBytes - out.size());
+            const int take = qMin(st->tarPadRemaining,
+                                  qMin(maxBytes - out.size(), int(sizeof(kZeros))));
             out.append(kZeros, take);
             st->tarPadRemaining -= take;
             continue;
@@ -1830,7 +1876,16 @@ void RDPServer::onHttpRequest()
         st.headerDone = true;
     }
 
-    // 等待完整 POST body 到齐（不阻塞主线程，靠后续 readyRead 再次触发本函数）
+    // 已派发过的重复 readyRead 直接返回（见下方说明），且必须在任何大块拷贝
+    // 之前判断：旧代码先 mid() 复制一遍 body 才检查 dispatched，异常客户端
+    // 触发 N 次 readyRead 就白做 N 次整段拷贝。
+    if (st.dispatched)
+        return;
+
+    // 等待完整 POST body 到齐（不阻塞主线程，靠后续 readyRead 再次触发本函数）。
+    // 只比较剩余字节数，不再每次 readyRead 用 mid() 复制已累积的 body：
+    // body 分 N 段到达时旧写法共复制 O(n²) 字节（1MB 上限下可达数百 MB 拷贝，
+    // 全部发生在主线程）。
     int headerEnd = st.buffer.indexOf("\r\n\r\n");
     int sepLen = 4;
     if (headerEnd < 0) {
@@ -1838,17 +1893,14 @@ void RDPServer::onHttpRequest()
         sepLen = 2;
     }
     int bodyOffset = headerEnd + sepLen;
-    QByteArray bodySoFar = st.buffer.mid(bodyOffset);
-    if (bodySoFar.size() < st.contentLength)
+    if (st.buffer.size() - bodyOffset < st.contentLength)
         return;
-    QByteArray body = bodySoFar.left(st.contentLength);
+    QByteArray body = st.buffer.mid(bodyOffset, st.contentLength);
 
     // 一个请求只派发一次：响应头固定 Connection: close，但客户端若在 socket
     // 关闭前继续发数据（流水线/异常客户端），readyRead 会再次触发本函数，
     // 而 buffer 从未消费 → 同一请求被重复处理（下载状态被覆盖泄漏、登录/POST
     // 重复执行）。
-    if (st.dispatched)
-        return;
     st.dispatched = true;
 
     // 请求已完整到达：撤掉空闲兜底。下载/上传后续字节由各自状态机驱动，
@@ -1860,8 +1912,9 @@ void RDPServer::onHttpRequest()
 
     QString requestStr = st.headerText;
 
-    // request 供 extractSessionToken 与 GET 路径使用（包含完整请求头，token 在其中）
-    QByteArray request = st.buffer;
+    // request 供 extractSessionToken 与 GET 路径使用（只含请求头，token 在其中）。
+    // 不再整份复制 st.buffer（含 body，最大 1MB）：token/path 解析只需要头部。
+    QByteArray request = st.buffer.left(bodyOffset);
 
     // 请求头与 body 均已到齐：readPostBody 直接返回已累积的 body，不再同步阻塞
     auto readPostBody = [&](int& bodyLen) -> QByteArray {
@@ -2426,8 +2479,56 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body, cons
 
     // 异步执行：避免在主线程用 waitForStarted/waitForFinished 同步阻塞（最长 5 分钟），
     // 否则会冻结整个服务（屏幕捕获、WebSocket、所有客户端全部卡死）。
+    //
+    // 并发上限：每个请求会常驻一个 QProcess + 一个 HTTP 连接（最长 5 分钟）。
+    // 无上限时脚本/误操作可同时拉起任意多进程，吃光句柄与内存。
+    static const int kMaxShellExec = 8;
+    if (shellExecActive_ >= kMaxShellExec) {
+        QJsonObject err;
+        err["success"] = false;
+        err["error"] = "并发命令数已达上限，请稍后重试";
+        QByteArray jsonResp = QJsonDocument(err).toJson(QJsonDocument::Compact);
+        QByteArray resp = buildHttpResponse(429, "Too Many Requests", "application/json; charset=utf-8", jsonResp);
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+        return;
+    }
+    ++shellExecActive_;
+
     QProcess* proc = new QProcess(this);
     proc->setWorkingDirectory(shellCwdFor(sessionToken));
+
+    // 增量抽取输出：旧实现直到 finished 才 readAllStandardOutput/Error，进程
+    // 持续输出（`cat /dev/zero`、误执行 `type big.log`、循环脚本）会把
+    // QProcess 内部缓冲撑到 OOM。这里边到边取并各自封顶，超出部分丢弃并标记。
+    static const int kMaxShellOutputBytes = 1024 * 1024;
+    struct ShellOutput {
+        QByteArray out;
+        QByteArray err;
+        bool truncated = false;
+    };
+    auto output = std::make_shared<ShellOutput>();
+    auto drain = [output](QProcess* p) {
+        const QByteArray o = p->readAllStandardOutput();
+        if (!o.isEmpty()) {
+            const int room = kMaxShellOutputBytes - output->out.size();
+            if (room > 0)
+                output->out.append(o.constData(), qMin<int>(room, o.size()));
+            if (o.size() > room)
+                output->truncated = true;
+        }
+        const QByteArray e = p->readAllStandardError();
+        if (!e.isEmpty()) {
+            const int room = kMaxShellOutputBytes - output->err.size();
+            if (room > 0)
+                output->err.append(e.constData(), qMin<int>(room, e.size()));
+            if (e.size() > room)
+                output->truncated = true;
+        }
+    };
+    connect(proc, &QProcess::readyReadStandardOutput, this, [proc, drain]() { drain(proc); });
+    connect(proc, &QProcess::readyReadStandardError, this, [proc, drain]() { drain(proc); });
 
     // 跟踪 socket 生命周期，防止重复响应/悬空写入
     QPointer<QTcpSocket> sockGuard(socket);
@@ -2447,27 +2548,31 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body, cons
             sockGuard->disconnectFromHost();
         }
     };
-    // 仅清理一次：删除 QProcess（定时器是其子对象，一并销毁）
-    auto cleanup = [proc, cleaned]() {
+    // 仅清理一次：删除 QProcess（定时器是其子对象，一并销毁），并归还并发配额
+    auto cleanup = [this, proc, cleaned]() {
         if (*cleaned)
             return;
         *cleaned = true;
+        --shellExecActive_;
         proc->deleteLater();
     };
 
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, proc, responded, respond, cleanup, sessionToken](int exitCode, QProcess::ExitStatus status) {
+            this, [this, proc, respond, cleanup, drain, output, sessionToken](int exitCode, QProcess::ExitStatus status) {
         Q_UNUSED(status);
+        drain(proc); // 收尾：finished 前最后一批未读输出
         QJsonObject result;
         result["success"] = true;
-        result["stdout"] = QString::fromLocal8Bit(proc->readAllStandardOutput());
-        result["stderr"] = QString::fromLocal8Bit(proc->readAllStandardError());
+        result["stdout"] = QString::fromLocal8Bit(output->out);
+        result["stderr"] = QString::fromLocal8Bit(output->err);
         result["exitCode"] = exitCode;
+        if (output->truncated)
+            result["outputTruncated"] = true;
         result["cwd"] = shellCwdFor(sessionToken);
         respond(result);
         cleanup();
     });
-    connect(proc, &QProcess::errorOccurred, this, [this, proc, responded, respond, cleanup, sessionToken](QProcess::ProcessError) {
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, respond, cleanup, sessionToken](QProcess::ProcessError) {
         QJsonObject result;
         result["success"] = false;
         result["error"] = "启动命令失败: " + proc->errorString();
@@ -2479,12 +2584,15 @@ void RDPServer::handleShellExec(QTcpSocket* socket, const QByteArray& body, cons
     // 超时 5 分钟：交互式命令（su/ssh）长时间无输出不应卡死服务，超时则杀掉并返回
     QTimer* killTimer = new QTimer(proc);
     killTimer->setSingleShot(true);
-    connect(killTimer, &QTimer::timeout, proc, [this, proc, responded, respond, cleanup, sessionToken]() {
+    connect(killTimer, &QTimer::timeout, proc, [this, proc, respond, cleanup, drain, output, sessionToken]() {
+        drain(proc);
         QJsonObject result;
         result["success"] = false;
         result["error"] = "命令执行超时（5分钟）—— 注意：交互式命令（如 su/ssh）需要输入，当前 Web Shell 不支持";
-        result["stdout"] = QString::fromLocal8Bit(proc->readAllStandardOutput());
-        result["stderr"] = QString::fromLocal8Bit(proc->readAllStandardError());
+        result["stdout"] = QString::fromLocal8Bit(output->out);
+        result["stderr"] = QString::fromLocal8Bit(output->err);
+        if (output->truncated)
+            result["outputTruncated"] = true;
         result["cwd"] = shellCwdFor(sessionToken);
         respond(result);
         proc->kill();
@@ -2530,6 +2638,13 @@ void RDPServer::start()
     if (!screenCapturer_->start(configFps_)) {
         qCritical() << "Failed to start screen capture";
         captureAvailable_ = false;
+        // 采集起不来就没有任何原始帧：若保持默认的 Video 模式，客户端连上后
+        // 第一条 mode_changed 会声称"视频模式"，前端随即请求关键帧，服务端在
+        // 无捕获源的情况下重建编码器必然失败再切回图片（日志刷 "no IDR"/
+        // "Encoder not found"，画面还会黑一下）。启动失败就直接落图片模式，
+        // 与 startCapture() 的失败路径保持一致；后续 restartCapture() 成功时
+        // 会按采集尺寸重建编码器并恢复视频。
+        currentMode_ = ServerMode::Image;
         return;
     }
 
@@ -2719,7 +2834,7 @@ bool RDPServer::startCapture()
         mode["type"] = "mode_changed";
         mode["mode"] = (currentMode_ == ServerMode::Video) ? "video" : "image";
         mode["hwEncode"] = hwEncodeAvailable();
-        mode["videoSupported"] = true; // 本地采集已可用，视频模式必然可用
+        mode["videoSupported"] = videoModeSupported();
         mode["codec"] = codecToString(configCodec_);
 #if defined(USE_WEBRTC) && defined(USE_FFMPEG)
         mode["webrtc"] = true;
@@ -4957,9 +5072,16 @@ void RDPServer::sendVideoParamsToCaptureSource(const QString& action)
 
 bool RDPServer::videoModeSupported() const
 {
+#ifdef USE_FFMPEG
     // ① 本地原始帧源可用（直连模式 / Linux 服务模式进程内捕获）→ 直接可编码
     if (screenCapturer_ && screenCapturer_->width() > 0 && screenCapturer_->height() > 0)
         return true;
+#else
+    // 无 FFmpeg 构建里没有本地编码器：switchToVideoMode() 本地分支恒返回 false，
+    // 本机采集只能走 JPEG。只有 helper 自带编码器（服务模式上报 video=true）时
+    // 才可能进入视频模式；否则必须如实告诉前端 videoSupported=false，避免前端
+    // 反复尝试视频模式（每次都在 MSE/WebCodecs 上黑屏等待）。
+#endif
     // ② 服务模式：画面在 helper 进程，helper 具备视频能力即可（编码在 helper 侧完成）
     return remoteVideoSourceAvailable();
 }

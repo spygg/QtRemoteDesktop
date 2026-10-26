@@ -271,6 +271,8 @@
             let ws = null;
             let term = null;
             let interactiveStarted = false;
+            let reconnectTimer = null;
+            let reconnectDelay = 1000;
 
             const termHost = document.getElementById('term-host');
             const output = document.getElementById('output');
@@ -522,12 +524,26 @@
 
                 ws = new WebSocket(url);
                 ws.binaryType = 'arraybuffer';
+                const myWs = ws;
+                let opened = false;
+                let fallbackTimer = null;
 
                 ws.onopen = function() {
+                    opened = true;
+                    reconnectDelay = 1000;
+                    // 连上了就撤掉 8s 降级定时器，避免它把正常会话降成 one-shot
+                    if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
                     state.ws = ws;
                     setMode('interactive');
                     interactiveStarted = true;
-                    if (createTerminal()) syncTerminalSize();
+                    // 重连时复用已有终端（createTerminal 会 dispose 并清空
+                    // scrollback），只重新校准尺寸。
+                    if (!term) {
+                        if (createTerminal()) syncTerminalSize();
+                    } else {
+                        term.focus();
+                        syncTerminalSize();
+                    }
                 };
 
                 ws.onmessage = function(e) {
@@ -551,28 +567,57 @@
                     }
                 };
 
-                ws.onclose = function() {
-                    if (state.ws === ws) state.ws = null;
-                    ws = null;
-                    if (interactiveStarted && term) {
-                        term.writeln('\r\n\x1b[31m--- 连接已关闭 ---\x1b[0m');
+                ws.onclose = function(ev) {
+                    if (state.ws === myWs) state.ws = null;
+                    if (ws === myWs) ws = null;
+                    // 1008 = 服务端策略性拒绝：交互式 Shell 超过 8 条、非回环访问等。
+                    // 这类拒绝重连多少次都一样，继续退避重试只会让用户以为在恢复。
+                    // 直接提示原因并落到 one-shot 模式（只读命令行仍可用）。
+                    if (ev && ev.code === 1008) {
+                        if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+                        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                        const raw = (ev.reason || '').trim();
+                        const msg = /too many interactive shells/i.test(raw)
+                            ? '交互式 Shell 会话已达上限（8 条）。请关闭其他已打开的远程窗口后刷新页面重试。'
+                            : (raw || '服务端拒绝了交互式 Shell 连接');
+                        if (term) term.writeln('\r\n\x1b[33m--- ' + msg + ' ---\x1b[0m');
+                        appendOutput(msg, 'info');
+                        setMode('oneshot');
+                        if (document.getElementById('cmd-input')) document.getElementById('cmd-input').focus();
+                        return;
+                    }
+                    if (opened && term) {
+                        term.writeln('\r\n\x1b[31m--- 连接已关闭，正在自动重连 ---\x1b[0m');
+                    }
+                    // 自动重连：页面长期挂着时 NAT/防火墙会静默掐断空闲连接
+                    //（服务端 180s 空闲清理亦同），旧实现直接变成死终端只能刷新。
+                    // 指数退避 1s→15s，避免服务端未就绪时打满重连。
+                    if (mode === 'interactive' && !reconnectTimer) {
+                        reconnectTimer = setTimeout(function() {
+                            reconnectTimer = null;
+                            if (!ws) tryConnectWS();
+                        }, reconnectDelay);
+                        reconnectDelay = Math.min(reconnectDelay * 2, 15000);
                     }
                 };
                 ws.onerror = function() {
-                    if (state.ws === ws) state.ws = null;
-                    ws = null;
+                    // 不在这里把 ws 置空：onerror 之后浏览器仍会触发 onclose，
+                    // 由 onclose 统一清理并重连。旧实现在此清空状态，而 socket
+                    // 可能仍处于 OPEN，后续输入被静默丢弃且永不重连。
+                    try { myWs.close(); } catch(_) {}
                 };
 
-                // 8 秒未建立交互式连接 → 降级为 one-shot 模式
-                setTimeout(function() {
-                    if (!interactiveStarted && ws) {
-                        try { if (ws.onclose) ws.onclose = null; ws.close(); } catch(_) {}
+                // 8 秒未建立交互式连接 → 降级为 one-shot 模式（仅首次连接；
+                // 重连期间 interactiveStarted 已为 true，不降级）。
+                fallbackTimer = setTimeout(function() {
+                    fallbackTimer = null;
+                    if (!interactiveStarted && ws === myWs) {
+                        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                        try { myWs.onclose = null; myWs.close(); } catch(_) {}
                         ws = null;
-                        if (!interactiveStarted) {
-                            setMode('oneshot');
-                            appendOutput('交互式 Shell 不可用，使用 one-shot 模式（不支持 vim/ssh/top 等交互命令）', 'info');
-                            if (document.getElementById('cmd-input')) document.getElementById('cmd-input').focus();
-                        }
+                        setMode('oneshot');
+                        appendOutput('交互式 Shell 不可用，使用 one-shot 模式（不支持 vim/ssh/top 等交互命令）', 'info');
+                        if (document.getElementById('cmd-input')) document.getElementById('cmd-input').focus();
                     }
                 }, 8000);
             }

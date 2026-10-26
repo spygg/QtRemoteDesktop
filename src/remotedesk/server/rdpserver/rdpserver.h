@@ -23,7 +23,7 @@
 #include <memory>
 #include <thread>
 #include <vector>
-#include "videoencoder.h"
+#include "codecdefs.h" // CodecType / HwEncodeMode（不依赖 FFmpeg，JPEG 回退构建可用）
 
 #include "shell.h"
 #include "filetransferservice.h" // TarEntry（目录 tar 流式下载）
@@ -325,6 +325,9 @@ private:
     bool captureStarting_ = false;
     QString shellCurrentDir_;
     QMap<QString, QString> shellCwdByToken_; // [B9] 会话令牌 → shell CWD
+    // 在途 shell exec 进程数上限：每个请求常驻一个 QProcess + 一个 HTTP socket
+    // （最长 5 分钟）。无上限时脚本/误操作可同时拉起任意多进程吃光句柄与内存。
+    int shellExecActive_ = 0;
     // [B-1] 客户端 → 按下的键集合（code → 最近 keydown 载荷，保留 keycode 供
     // Windows VK 回放）。断开时逐个补发 keyup，否则按键永久卡死（无限自动
     // 重复 / 修饰键卡住全部变组合键）。
@@ -368,7 +371,9 @@ private:
     // 创建 VideoEncoder 并接好全部信号（此前两处创建点接线不一致，
     // 前台模式那处漏了 encoderReady/encoderOverload/reinitRequired）
     void createVideoEncoder();
+#ifdef USE_FFMPEG
     VideoEncoder* ensureVideoEncoder();
+#endif
 
     void loadServerConfig(const QString& configPath);
     void saveServerConfig(const QString& configPath);

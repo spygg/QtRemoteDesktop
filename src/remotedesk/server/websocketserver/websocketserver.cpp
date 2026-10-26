@@ -91,6 +91,28 @@ WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent
                 s->ping();
             }
         }
+        // /api/shell/ws 半开清理：浏览器会自动回 pong。三个扫描周期（90s）
+        // 无 pong 说明对端已失联，主动关闭让 RDPServer 走 disconnected
+        // 清理（kill bash / 释放 PTY / 归还并发配额）。
+        const QList<QWebSocket*> shells = shellSockets_.values();
+        for (QWebSocket* s : shells) {
+            if (!s)
+                continue;
+            if (s->state() != QAbstractSocket::ConnectedState) {
+                qWarning() << "Shell WS not connected, dropping";
+                s->close();
+                s->deleteLater();
+                continue;
+            }
+            const qint64 lastPong = shellLastPongMs_.value(s, now);
+            if (now - lastPong > 3 * kIdleSweepIntervalMs) {
+                qWarning() << "Shell WS ping timeout, dropping";
+                s->close();
+                s->deleteLater();
+            } else {
+                s->ping();
+            }
+        }
     });
     idleTimer_.start();
 }
@@ -119,6 +141,10 @@ WebSocketServer::~WebSocketServer()
     server_->close();
     qDeleteAll(clients_);
     clients_.clear();
+    {
+        QMutexLocker lk(&aliveMutex_);
+        aliveClients_.clear();
+    }
     socketToId_.clear();
 }
 
@@ -218,13 +244,27 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             stream >> frameType >> dataLen;
             if (frameType == 0x03) {
                 // JPEG：[0x03][u32 len][jpeg]
-                emit captureFrameReceived(msg.mid(5));
+                // 校验声明长度：旧实现完全忽略 dataLen 直接 mid(5)，畸形/错误
+                // 长度会把后续内容一起当 JPEG 广播。
+                if (dataLen == 0 || quint32(msg.size() - 5) < dataLen)
+                    return;
+                // fromRawData 零拷贝视图（msg 在本同步 emit 期间有效）：
+                // mid() 每帧都整帧深拷贝，1080p 截图数百 KB~数 MB、30fps，
+                // 全发生在主线程。
+                emit captureFrameReceived(
+                    QByteArray::fromRawData(msg.constData() + 5, int(dataLen)));
             } else if (frameType == 0x01 || frameType == 0x02) {
                 // H.264：[0x01|0x02][u32 len][i64 ts][data]（13 字节头，与服务端→浏览器一致）
                 if (msg.size() < 13) return;
                 qint64 ts = 0;
                 stream >> ts;
-                emit captureVideoFrameReceived(msg.mid(13), frameType == 0x01, ts);
+                if (dataLen == 0 || quint32(msg.size() - 13) < dataLen)
+                    return;
+                // 这里必须复制（mid）而不能用 fromRawData 视图：onEncodedFrame 在
+                // 关键帧时会 `lastKeyframeData_ = data` 长期缓存（新客户端接入时
+                // 回放），裸视图在 msg 析构后会悬空 → 发送时读已释放内存。
+                emit captureVideoFrameReceived(msg.mid(13, int(dataLen)),
+                    frameType == 0x01, ts);
             }
         });
         connect(socket, &QWebSocket::textMessageReceived, this, [this, socket](const QString& text) {
@@ -239,6 +279,28 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
     }
 
     if (url.path() == "/api/shell/ws") {
+        // shell 通道不进入 clients_（不参与媒体广播/背压），但每条连接都会在
+        // RDPServer 侧创建 PTY + bash 子进程。必须单独限流，否则一个已登录
+        // 用户反复开连接即可无限制 spawn 进程、耗尽句柄。
+        // 用 destroyed 而非 disconnected 归还配额：认证失败、异常销毁等所有
+        // 路径最终都会删除 socket 对象，不会漏计。
+        static const int kMaxShellClients = 8;
+        if (shellSockets_.size() >= kMaxShellClients) {
+            qWarning() << "Shell WS rejected: too many interactive shells (" << shellSockets_.size() << ")";
+            socket->close(QWebSocketProtocol::CloseCodePolicyViolated,
+                          QStringLiteral("too many interactive shells"));
+            socket->deleteLater();
+            return;
+        }
+        shellSockets_.insert(socket);
+        shellLastPongMs_[socket] = QDateTime::currentMSecsSinceEpoch();
+        connect(socket, &QWebSocket::pong, this, [this, socket](quint64, const QByteArray&) {
+            shellLastPongMs_[socket] = QDateTime::currentMSecsSinceEpoch();
+        });
+        connect(socket, &QObject::destroyed, this, [this, socket]() {
+            shellSockets_.remove(socket);
+            shellLastPongMs_.remove(socket);
+        });
         qInfo() << "Interactive shell connected via WS";
         emit shellConnected(socket);
         return;
@@ -319,6 +381,10 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
 
     clients_[clientId] = socket;
     socketToId_[socket] = clientId;
+    {
+        QMutexLocker lk(&aliveMutex_);
+        aliveClients_.insert(clientId);
+    }
     lastActivityMs_[clientId] = QDateTime::currentMSecsSinceEpoch();
     if (!token.isEmpty())
         clientTokens_[clientId] = token;
@@ -381,6 +447,14 @@ void WebSocketServer::releaseDownloadBacklog(const QString& clientId)
     }
 }
 
+bool WebSocketServer::isClientAlive(const QString& clientId) const
+{
+    if (clientId.isEmpty())
+        return false;
+    QMutexLocker lk(&aliveMutex_);
+    return aliveClients_.contains(clientId);
+}
+
 void WebSocketServer::touchClient(const QString& clientId)
 {
     if (!clientId.isEmpty())
@@ -395,6 +469,10 @@ void WebSocketServer::onSocketDisconnected()
 
     QString clientId = socketToId_.take(socket);
     clients_.remove(clientId);
+    {
+        QMutexLocker lk(&aliveMutex_);
+        aliveClients_.remove(clientId);
+    }
     videoStarted_.remove(clientId);
     pendingBytes_.remove(clientId);
     lastActivityMs_.remove(clientId);
@@ -421,25 +499,30 @@ void WebSocketServer::onTextMessageReceived(const QString& message)
         return;
     touchClient(clientId);
 
-    if (message.size() > kMaxInboundTextBytes) {
-        qWarning() << "Oversized text message from client, dropped:" << message.size();
+    // 先用 UTF-8 字节数判上限再解析：QString::size() 是 UTF-16 码元数，
+    // 中文/emoji 一个字符占 3~4 字节，按字符判会让实际入站量超上限数倍
+    //（32M 字符的 CJK ≈ 96MB UTF-8）。toUtf8() 本来就要为 JSON 解析做一次，
+    // 提前到这里只转换一次，不增加拷贝。
+    const QByteArray utf8 = message.toUtf8();
+    if (utf8.size() > kMaxInboundTextBytes) {
+        qWarning() << "Oversized text message from client, dropped:" << utf8.size();
         // 不能静默丢弃：前端剪贴板写入后若无任何回应，会一直显示"已粘贴成功"，
         // 远端剪贴板却停在旧内容（大截图粘贴失败尤其明显且无从排查）。
         QJsonObject err;
         err.insert(QStringLiteral("type"), QStringLiteral("error"));
         err.insert(QStringLiteral("context"), QStringLiteral("inbound_too_large"));
-        err.insert(QStringLiteral("size"), message.size());
+        err.insert(QStringLiteral("size"), utf8.size());
         err.insert(QStringLiteral("limit"), kMaxInboundTextBytes);
         err.insert(QStringLiteral("message"),
                    QStringLiteral("消息过大：%1 字节（上限 %2）")
-                       .arg(message.size())
+                       .arg(utf8.size())
                        .arg(kMaxInboundTextBytes));
         sendJson(clientId, err);
         return;
     }
 
     QJsonParseError error;
-    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
+    QJsonDocument doc = QJsonDocument::fromJson(utf8, &error);
     if (error.error != QJsonParseError::NoError) {
         qWarning() << "Invalid JSON from client:" << error.errorString();
         return;
@@ -515,6 +598,10 @@ void WebSocketServer::dropClient(const QString& clientId)
 {
     QWebSocket* socket = clients_.take(clientId);
     if (!socket) return;
+    {
+        QMutexLocker lk(&aliveMutex_);
+        aliveClients_.remove(clientId);
+    }
     // 断开信号连接，避免 close() 触发的 disconnected 再次走 onSocketDisconnected 造成重复处理
     disconnect(socket, nullptr, this, nullptr);
     socketToId_.remove(socket);

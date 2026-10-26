@@ -72,17 +72,34 @@ QString AuthManager::generateSalt()
     return randomBytes(16).toHex();
 }
 
+// 常量时间比较：密码哈希校验不能用 QString::operator==（发现不同字符即返回），
+// 网络侧的计时差异理论上可被用来逐字节猜哈希。多花几十次固定循环，代价可忽略。
+static bool constantTimeEquals(const QByteArray& a, const QByteArray& b)
+{
+    if (a.size() != b.size())
+        return false;
+    unsigned char diff = 0;
+    for (int i = 0; i < a.size(); ++i)
+        diff |= static_cast<unsigned char>(a.at(i)) ^ static_cast<unsigned char>(b.at(i));
+    return diff == 0;
+}
+
 void AuthManager::loadConfig()
 {
     users_.clear();
     QFile file(configPath_);
+    const bool fileExists = file.exists();
+    bool parsedObject = false;   // 文件是合法 JSON 对象
+    bool hadUsersField = false;  // 且其中确实有 users 段
 
-    if (file.exists() && file.open(QIODevice::ReadOnly)) {
+    if (fileExists && file.open(QIODevice::ReadOnly)) {
         QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
         file.close();
 
         if (doc.isObject()) {
+            parsedObject = true;
             QJsonObject root = doc.object();
+            hadUsersField = root.contains("users");
             QJsonObject users = root["users"].toObject();
             for (auto it = users.begin(); it != users.end(); ++it) {
                 UserEntry entry;
@@ -94,6 +111,19 @@ void AuthManager::loadConfig()
 
     // If no users configured, create default
     if (users_.isEmpty()) {
+        // 本文件是 RDPServer 与 AuthManager 共用的 server_config.json：RDPServer
+        // 在 AuthManager 之前就会写一份只含端口/画质等字段、**没有 users** 的配置。
+        // 这种情况是正常首次启动，必须建默认 admin，否则全新安装会永远登录不了。
+        //
+        // 但如果文件里有 users 段却一个用户都解析不出（被清空/条目损坏），或者
+        // 文件根本不是合法 JSON（截断/写坏/权限不足），则绝不能静默回退成
+        // admin/admin 并覆盖原文件——那等于把"破坏配置文件"变成"把管理员口令
+        // 重置为公开默认值"。此时保持空用户表（登录一律失败），保留原文件待修。
+        if (fileExists && (!parsedObject || hadUsersField)) {
+            qCritical() << "Auth config exists but contains no valid users, refusing to reset to default admin:"
+                        << configPath_;
+            return;
+        }
         qInfo() << "No users configured, creating default admin user";
         UserEntry entry;
         QString salt = generateSalt();
@@ -151,14 +181,14 @@ bool AuthManager::validateUser(const QString& username, const QString& password)
     if (colonIdx > 0) {
         QString salt = stored.left(colonIdx);
         QString expected = stored.mid(colonIdx + 1);
-        return expected == hashPassword(password, salt);
+        return constantTimeEquals(expected.toLatin1(), hashPassword(password, salt).toLatin1());
     }
 
     // 旧格式（MD5 兼容迁移）
     if (stored.length() == 32) {
         QString oldMd5 = QString(QCryptographicHash::hash(
             password.toUtf8(), QCryptographicHash::Md5).toHex());
-        if (stored == oldMd5) {
+        if (constantTimeEquals(stored.toLatin1(), oldMd5.toLatin1())) {
             // 自动升级到新格式
             QString salt = generateSalt();
             it.value().passwordHash = salt + ":" + hashPassword(password, salt);
@@ -240,6 +270,14 @@ bool AuthManager::removeUser(const QString& username)
     if (!saveConfig()) {
         users_[username] = removed;   // 回滚内存态，与磁盘保持一致
         return false;
+    }
+    // 立即吊销该用户的全部会话：否则被删掉的账号仍能用旧 token 继续操作
+    //（浏览文件、下载、执行 shell），直到会话 24h 自然过期 —— 删号不生效。
+    for (auto it = sessions_.begin(); it != sessions_.end();) {
+        if (it.value().username == username)
+            it = sessions_.erase(it);
+        else
+            ++it;
     }
     return true;
 }

@@ -3,7 +3,13 @@
 #include "inputmanager.h"
 #include "rdpserver.h"
 #include "screencapturer.h"
+// CodecType / HwEncodeMode 定义在独立小头里（不依赖 FFmpeg）；无 FFmpeg 的
+// JPEG 回退构建也必须能编译 helper（否则 BUILD 在缺少 libavcodec 时直接失败，
+// 与 CMake 宣称的 "FFmpeg not found (optional) — JPEG fallback mode" 矛盾）。
+#include "codecdefs.h"
+#ifdef USE_FFMPEG
 #include "videoencoder.h"
+#endif
 
 #include <QApplication>
 #include <QBuffer>

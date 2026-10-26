@@ -225,7 +225,11 @@ QString FileTransferService::defaultUploadDir()
             }
         }
     }
-    computed = true;   // Linux 推导一次即定版（loginctl 每次请求都要 spawn 成本高）
+    // 只有真正推导出 home 才定版：推导失败（无图形会话、容器里 /home 为空、
+    // HOME 无效）时若无条件置 computed，后续所有请求都会永远返回缓存的空值，
+    // 前端一直回落到当前目录，与下面"下次请求再试"的约定矛盾。
+    if (!homeDir.isEmpty())
+        computed = true;
 #endif
 #ifdef Q_OS_WIN
     // Windows 服务模式跑在 SYSTEM（session 0），QDir::homePath() 指向
@@ -549,6 +553,12 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
 {
     QList<TarEntry> out;
     qint64 total = 0;
+    // 条目清单是在发包前一次性收集的（每个条目两个 QString），超大目录树
+    //（node_modules / 构建产物 / /usr/lib 等，动辄百万级）会把这份索引撑到
+    // 数百 MB。内容本身已流式读盘，这里给索引设一个上限并快速失败，
+    // 避免"看起来卡住"的无界内存增长。
+    static const int kMaxTarEntries = 200000;
+    bool tooMany = false;
 
     QDir root(dirPath);
     const QString rootName = root.dirName();
@@ -564,9 +574,15 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
     // 深度优先先序遍历，条目顺序与 addToTar 的写入顺序一致
     std::function<void(const QDir&, const QString&)> walk =
             [&](const QDir& dir, const QString& prefix) {
+        if (tooMany)
+            return;
         const QFileInfoList entries = dir.entryInfoList(
             QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
         for (const QFileInfo& fi : entries) {
+            if (out.size() >= kMaxTarEntries) {
+                tooMany = true;
+                return;
+            }
             // 与 addToTar 一致：跳过符号链接（防越权读 + 链接环无限递归）
             if (fi.isSymLink())
                 continue;
@@ -589,6 +605,14 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
         }
     };
     walk(root, rootName);
+
+    // 约定：totalSize < 0 表示条目超限、未生成列表（空目录仍会返回根条目，
+    // 不会与正常结果混淆）。调用方据此返回明确错误，而不是发一个残缺 tar。
+    if (tooMany) {
+        if (totalSize)
+            *totalSize = -1;
+        return QList<TarEntry>();
+    }
 
     total += 1024; // tar 结束块
     if (totalSize)
@@ -741,8 +765,14 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     auto abortedNow = [this]() {
         return backpressureAbort_.load(std::memory_order_relaxed);
     };
-    auto haltedNow = [&abortedNow, &stalled]() {
-        return abortedNow() || stalled;
+    // 客户端已断线：立即停止产出。旧实现只查"下游积压"，断线后包被静默丢弃、
+    // 积压恒为 0 → 工作线程仍会把整个目录/文件完整打包一遍，占满唯一的传输
+    // 线程，其他客户端下载全部被迫排队。
+    auto clientGone = [this, &clientId]() {
+        return clientAliveQuery_ && !clientAliveQuery_(clientId);
+    };
+    auto haltedNow = [&abortedNow, &stalled, &clientGone]() {
+        return abortedNow() || stalled || clientGone();
     };
     auto reportStall = [&, this]() {
         if (!stalled || stallReported)
@@ -780,6 +810,10 @@ void FileTransferService::processDownload(const QString& clientId, const QString
     }
     QFileInfo fi(safePath);
 
+    // 请求入队/排到时客户端可能已经断线：先判一次，避免为死连接白跑整树扫描。
+    if (clientGone())
+        return;
+
     // 磁盘根目录（Windows "C:/"、Linux "/"）不允许整包下载：tar 会把整个盘打包，
     // 既无意义又极易触发 GB 级传输甚至卡死。Windows 的驱动器列表里每一行都是盘根，
     // 必须拦在打包之前（前端也已去掉盘符行的下载按钮，这里是服务端兜底）。
@@ -800,6 +834,14 @@ void FileTransferService::processDownload(const QString& clientId, const QString
         QString tarName = fi.fileName() + ".tar";
         qint64 totalSize = 0;
         const QList<TarEntry> entries = collectTarEntries(safePath, &totalSize);
+        if (totalSize < 0) {
+            emit jsonResponse(clientId, QJsonObject{
+                {"type", "file_download"},
+                {"path", path},
+                {"error", "目录条目过多（上限 200000），请进入子目录分批下载"}
+            });
+            return;
+        }
 
         // [N8] 协议键必须用**原始请求路径**（与单文件下载一致）：tarName 只是
         // 保存文件名，不同目录同名（/a/tmp 与 /b/tmp → 同为 "tmp.tar"）时两个

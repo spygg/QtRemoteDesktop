@@ -15,6 +15,8 @@
 #include <thread>
 #include <vector>
 
+#include "codecdefs.h" // CodecType / HwEncodeMode（无 FFmpeg 的模块也要用）
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
@@ -22,19 +24,6 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
-
-enum class CodecType {
-    H264,
-    HEVC,   // H.265
-    VP8,
-    VP9,
-    AV1,
-    MPEG4,
-    MJPEG
-};
-
-// 硬件编码开关：Auto=优先硬编、open 失败自动回退软编；On=强制硬编（不可用则告警回退软编，保证画面）；Off=禁用硬编
-enum class HwEncodeMode { Auto, On, Off };
 
 class MppEncoder; // RK3588 MPP 硬件编码器（USE_MPP 时启用，前向声明保持头文件跨平台）
 
