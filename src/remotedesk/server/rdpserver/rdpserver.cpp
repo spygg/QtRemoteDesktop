@@ -41,16 +41,19 @@ static bool isInputEventLogged(const QString& type)
 //   · 鼠标/键盘/滚轮：直接输入注入；
 //   · clipboard：服务端会把内容写进远端剪贴板并注入一次 Ctrl+V，等同一次粘贴操作；
 //   · system_action：锁屏/注销/重启/关机；
-//   · ime_cycle：切换远端输入法。
-// 不在此列的都是纯显示设置（config/set_output/set_resolution/request_keyframe）
-// 与 WebRTC 信令，观看模式下仍可正常使用。
+//   · ime_cycle：切换远端输入法；
+//   · file_upload_*/file_download：写入或读取远端文件，属于对被控端的操作。
+// 不在此列的都是纯显示设置（config/set_output/set_resolution/request_keyframe、
+// file_list）与 WebRTC 信令，观看模式下仍可正常使用。
 static bool isRemoteControlType(const QString& type)
 {
     return type == QLatin1String("mousemove") || type == QLatin1String("mousedown")
         || type == QLatin1String("mouseup") || type == QLatin1String("wheel")
         || type == QLatin1String("keydown") || type == QLatin1String("keyup")
         || type == QLatin1String("clipboard")
-        || type == QLatin1String("system_action") || type == QLatin1String("ime_cycle");
+        || type == QLatin1String("system_action") || type == QLatin1String("ime_cycle")
+        || type == QLatin1String("file_upload_start") || type == QLatin1String("file_upload_done")
+        || type == QLatin1String("file_download");
 }
 
 // 剪贴板内容 → WS 消息。文本沿用 {text} 字段（兼容旧前端），
@@ -921,8 +924,16 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     connect(this, &RDPServer::requestUploadDone,
         fileTransferService_, &FileTransferService::processUploadDone);
 
-    // Upload chunk signal directly from WebSocket to service
+    // Upload chunk signal：先按 clientId 过滤观看模式，再转投文件服务线程。
+    // file_upload_start 被拦后通常不会有块，但"上传中途切只读"或改过的客户端
+    // 仍可能继续投喂，这里兜底丢弃。
     connect(wsServer_.get(), &WebSocketServer::fileChunkReceived,
+        this, [this](const QString& clientId, const QString& path, const QByteArray& data) {
+            if (viewOnlyClients_.contains(clientId))
+                return;
+            emit fileChunkFromClient(clientId, path, data);
+        });
+    connect(this, &RDPServer::fileChunkFromClient,
         fileTransferService_, &FileTransferService::processUploadChunk);
 
 #ifdef Q_OS_LINUX
@@ -4921,6 +4932,7 @@ void RDPServer::switchToImageMode()
     if (videoEncoder_ && !videoEncoder_->shutdownRetire()) {
         qWarning() << "Encoder thread wedged on image-mode switch; retiring encoder";
         QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
+        reapRetiredEncoders();
         retiredEncoders_.push_back(std::move(videoEncoder_));
     } else {
         videoEncoder_.reset(); // unique_ptr 释放对象
@@ -5043,6 +5055,7 @@ bool RDPServer::switchToVideoMode()
             // [N6] 线程卡死则断信号退役（故意泄漏），不 qFatal 连坐服务。
             if (!videoEncoder_->shutdownRetire()) {
                 QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
+                reapRetiredEncoders();
                 retiredEncoders_.push_back(std::move(videoEncoder_));
             }
             return false;
@@ -5126,6 +5139,18 @@ void RDPServer::reinitVideoEncoderForScale()
     rebuildVideoEncoder(/*onlyIfIdle=*/false);
 }
 
+// 退役对象只能在线程真正退出后释放：卡死时线程仍在触碰 codecCtx_/mpp_，删除
+// 对象是 UB。每次新退役前清扫一次，卡死恢复后墓地不会无限累积历史编码器；
+// 仍卡死的对象继续留在墓地里（无安全手段强杀，见 stopEncoderThread 注释）。
+void RDPServer::reapRetiredEncoders()
+{
+    const auto it = std::remove_if(retiredEncoders_.begin(), retiredEncoders_.end(),
+        [](const std::unique_ptr<VideoEncoder>& enc) {
+            return !enc || enc->threadStopped();
+        });
+    retiredEncoders_.erase(it, retiredEncoders_.end());
+}
+
 // 返回 Deferred 表示"因有在飞帧而推迟"，未对编码器做任何改动；NotApplicable 表示
 // 当前没有可重建的编码器/捕获源（重试也不会成功）；其余情况（含初始化失败回退
 // 图片模式）都算已处理，返回 Done。
@@ -5157,6 +5182,7 @@ RDPServer::RebuildResult RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
     if (wedged) {
         qWarning() << "Encoder thread wedged during reinit; retiring old encoder and rebuilding a fresh one";
         QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
+        reapRetiredEncoders();
         retiredEncoders_.push_back(std::move(videoEncoder_));
         createVideoEncoder();
         // 旧编码器已经退役（不可回滚），这里不能报 Deferred 让调用方重试；

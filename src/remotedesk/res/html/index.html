@@ -3013,6 +3013,7 @@
             'clipboard',     // 服务端会写远端剪贴板并注入一次 Ctrl+V，等同粘贴操作
             'system_action', // 锁屏/注销/重启/关机
             'ime_cycle',     // 切换远端输入法
+            'file_upload_start', 'file_upload_done', 'file_download', // 读写远端文件
         ]);
 
         function send(data) {
@@ -4588,6 +4589,9 @@
         }
 
         async function downloadFile(fileName, fullPath, isDir) {
+            // 直链下载与 WS 兜底都不发 file_download 之外的信号，观看模式在入口
+            // 统一拦下（服务端也会丢弃 file_download，但直链是 HTTP 会话，靠前端）。
+            if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
             const filePath = fullPath || joinPath(currentRemotePath, fileName);
             // 同源直链下载优先：由浏览器负责落盘与续传，文件大小不再受 JS 内存限制，
             // 页面也不必先把整份数据拉回来（旧 WS 分块路径保留为兜底）。
@@ -4875,6 +4879,14 @@
         }
 
         function handleFileUpload(fileList, targetDir) {
+            // 上传数据块走 state.ws.send() 的二进制通道，不经过 send() 过滤，
+            // 必须在入口拦下（并清空 input，否则同名文件再选不会触发 change）。
+            if (state.viewOnly) {
+                notifyViewOnlyBlocked();
+                document.getElementById('file-upload-input').value = '';
+                document.getElementById('folder-upload-input').value = '';
+                return;
+            }
             // 本机拖入/选择文件的默认落点：拖到目录项上 → 该目录；否则落到桌面用户桌面
             // （state.remoteDesktopPath 由服务端下发，避免 root 服务把文件写进 /root）。
             // lastListRealPath 兜底：currentRemotePath 未同步时（初始 '/'）不能把文件

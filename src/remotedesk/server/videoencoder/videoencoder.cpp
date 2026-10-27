@@ -1397,6 +1397,11 @@ qint64 VideoEncoder::initAgeMs() const
     return init > 0 ? monotonicMs() - init : 0;
 }
 
+bool VideoEncoder::threadStopped() const
+{
+    return !encoderThread_.isRunning();
+}
+
 void VideoEncoder::shutdown()
 {
     if (shutdownRetire())

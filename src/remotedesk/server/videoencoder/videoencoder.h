@@ -83,6 +83,11 @@ public:
     };
     RetireState retireIfIdle();
 
+    // 退役对象（retireIfIdle/shutdownRetire 返回过 false）的线程是否已自行退出。
+    // 卡死时线程仍可能触碰 codecCtx_/mpp_，此时析构是 UB；线程退出后才能安全回收，
+    // 析构会走 shutdown()（isRunning()==false，直接释放资源，不再等待）。
+    bool threadStopped() const;
+
     // 本进程中 MPP 是否被证明不可用（初始化成功但 encode 恒 null）。
     // 上层据此在前端展示"硬件编码实际未生效"，避免用户以为开着硬编。
     static bool isMppDisabled();
@@ -214,7 +219,7 @@ private:
     // 编码线程当前帧的起始时刻与上一帧总耗时（单调时钟毫秒，见 busyForMs()/lastFrameCostMs()）
     std::atomic<qint64> inFlightStartMs_{ 0 };
     std::atomic<qint64> lastFrameCostMs_{ 0 };
-    std::atomic<qint64> initAtMs_{ 0 };  // initialize() 成功时刻（单调时钟毫秒，见 initAgeMs()）
+    std::atomic<qint64> initAtMs_{ 0 };  // initialize() 进入时刻（单调时钟毫秒，见 initAgeMs()）
     // RK3588 MPP 硬件编码器（USE_MPP 时启用；MPP 路径不经过 FFmpeg sws/编码器）
     MppEncoder* mpp_ = nullptr;
 

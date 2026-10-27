@@ -157,6 +157,8 @@ signals:
     void requestDownload(const QString& clientId, const QString& path);
     void requestUploadStart(const QString& clientId, const QString& path, qint64 size);
     void requestUploadDone(const QString& clientId, const QString& path);
+    // 观看模式过滤后的上传数据块中继（WS 二进制块 → 文件服务，跨线程 queued）
+    void fileChunkFromClient(const QString& clientId, const QString& path, const QByteArray& data);
     // IME 工作线程 → 主线程结果回传（auto=跨线程 queued 投递）
     void imeResultReady(const QString& clientId, const QJsonObject& state);
     // IME 工作线程退出通知（所有返回路径都发，主线程据此 join + 复位）
@@ -221,7 +223,7 @@ private:
     std::unique_ptr<VideoEncoder> videoEncoder_;
     // [N6] 退役编码器墓地：编码线程卡死在驱动调用（shutdownRetire 失败）时，
     // 对象断开全部信号后**故意泄漏**于此，绝不析构（析构路径 qFatal 会连坐服务）。
-    // 只在驱动真卡死时发生，实践中 0~2 个；每个约一份编码上下文 + 一个线程栈。
+    // 线程真正退出后由 reapRetiredEncoders() 安全回收，避免反复卡死无限累积。
     std::vector<std::unique_ptr<VideoEncoder>> retiredEncoders_;
     // 缓存最近一帧关键帧，用于新客户端接入时立即回放以引导出图
     // （静态桌面抓取去重不会主动出帧，否则新客户端永远等不到关键帧而黑屏）。
@@ -385,6 +387,8 @@ private:
     void createVideoEncoder();
 #ifdef USE_FFMPEG
     VideoEncoder* ensureVideoEncoder();
+    // 回收墓地中线程已退出的退役编码器（见 retiredEncoders_）
+    void reapRetiredEncoders();
 #endif
 
     void loadServerConfig(const QString& configPath);
