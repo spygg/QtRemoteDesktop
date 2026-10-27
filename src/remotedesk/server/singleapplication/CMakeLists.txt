@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.5)
 
 find_package(QT NAMES Qt5 Qt6 REQUIRED COMPONENTS  Core Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS  Core Network)

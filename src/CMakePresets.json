@@ -1,0 +1,76 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-mingw",
+      "displayName": "Windows / MinGW + Qt5 (E:/programes/Qt)",
+      "description": "本机 MinGW GCC 5.3 工具链；Qt 交给自动探测（按 GCC 版本挑 mingw 套件）。工具链不在该位置时改下面三个编译器路径。",
+      "generator": "MinGW Makefiles",
+      "binaryDir": "${sourceDir}/../build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MAKE_PROGRAM": "E:/programes/Qt/QtLegacy/Tools/mingw530_32/bin/mingw32-make.exe",
+        "CMAKE_C_COMPILER": "E:/programes/Qt/QtLegacy/Tools/mingw530_32/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "E:/programes/Qt/QtLegacy/Tools/mingw530_32/bin/g++.exe"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "msvc",
+      "displayName": "Windows / MSVC (CMake 默认生成器，通常是 Visual Studio)",
+      "description": "Qt 自动探测 msvc 套件；三方源码（metaRTC/srtp/openh264/FFmpeg）只支持 GNU make，故无 WebRTC/FFmpeg，走图片模式。输出目录与 MinGW 构建分开，互不覆盖。",
+      "binaryDir": "${sourceDir}/../build_msvc",
+      "cacheVariables": {
+        "BUILD_OUTPUT_DIR": "${sourceDir}/../build_output_msvc",
+        "BIN_OUTPUT_DIR": "${sourceDir}/../bin_msvc"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux / 系统或 /opt/Qt 中的 Qt5",
+      "description": "Qt 未在标准位置时，改 CMAKE_PREFIX_PATH 或直接 -DCMAKE_PREFIX_PATH=...",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/../build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-mingw",
+      "configurePreset": "windows-mingw",
+      "jobs": 8
+    },
+    {
+      "name": "msvc",
+      "configurePreset": "msvc",
+      "configuration": "Release",
+      "jobs": 8
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux",
+      "jobs": 8
+    }
+  ]
+}

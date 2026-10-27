@@ -24,17 +24,67 @@ target_link_libraries(${WEBRTC_SESSION} PUBLIC
 )
 
 if(WIN32)
-    # ---- Windows: OpenSSL 1.0.2 静态库（Qt mingw530 opt）+ zlib + Windows 系统库 ----
-    set(OPENSSL_ROOT "E:/programes/Qt/QtLegacy/Tools/mingw530_32/opt")
-    set(_MINGW_LIB "E:/programes/Qt/QtLegacy/Tools/mingw530_32/i686-w64-mingw32/lib")
+    # ---- Windows: OpenSSL 1.0.2 静态库 + zlib + Windows 系统库 ----
+    # 旧实现把 Qt 自带的 mingw530_32 路径写死；改为从当前编译器推导工具链根目录
+    # （<qt>/Tools/mingw530_32/bin/g++.exe → <qt>/Tools/mingw530_32），
+    # 任意 Qt/MinGW 安装位置、MinGW-w64 x86_64 均可用。
+    get_filename_component(_tc_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(_tc_root "${_tc_bin}" DIRECTORY)
+
+    # 显式优先 libssl.a/libcrypto.a：MinGW 下 find_library 的默认后缀顺序是
+    # .dll.a 在前，会先命中导入库从而引入运行期 DLL 依赖。
+    foreach(_ossl ssl crypto)
+        set(_ossl_choices "${_tc_root}/opt/lib/lib${_ossl}.a" "${_tc_root}/lib/lib${_ossl}.a")
+        set(_ossl_found "")
+        foreach(_p IN LISTS _ossl_choices)
+            if(EXISTS "${_p}")
+                set(_ossl_found "${_p}")
+                break()
+            endif()
+        endforeach()
+        if(NOT _ossl_found)
+            find_library(_ossl_found NAMES ${_ossl}
+                HINTS "${_tc_root}/opt/lib" "${_tc_root}/lib")
+        endif()
+        if(NOT _ossl_found)
+            message(FATAL_ERROR
+                "WebRtcSession: 未找到 OpenSSL 静态库 lib${_ossl}.a（已查找 ${_tc_root}/opt/lib、${_tc_root}/lib）。\n"
+                "可用 -DOPENSSL_ROOT_DIR=<prefix> 或安装 OpenSSL 1.0.2 到工具链 opt/lib。")
+        endif()
+        string(TOUPPER "${_ossl}" _ossl_upper)
+        set(OPENSSL102_${_ossl_upper}_LIB "${_ossl_found}")
+    endforeach()
+
+    # zlib 静态库：MinGW-w64 运行时目录（i686/x86_64 两种 triplet 都探测）
+    file(GLOB _mingw_triplets "${_tc_root}/*-w64-mingw32")
+    set(_zlib_choices "${_tc_root}/lib/libz.a" "${_tc_root}/opt/lib/libz.a")
+    foreach(_t IN LISTS _mingw_triplets)
+        list(APPEND _zlib_choices "${_t}/lib/libz.a")
+    endforeach()
+    set(ZLIB_STATIC_LIB "")
+    foreach(_p IN LISTS _zlib_choices)
+        if(EXISTS "${_p}")
+            set(ZLIB_STATIC_LIB "${_p}")
+            break()
+        endif()
+    endforeach()
+    if(NOT ZLIB_STATIC_LIB)
+        message(FATAL_ERROR "WebRtcSession: 未找到 zlib 静态库 libz.a（已查找 ${_zlib_choices}）")
+    endif()
+
     target_link_libraries(${WEBRTC_SESSION} PUBLIC
-        ${OPENSSL_ROOT}/lib/libssl.a
-        ${OPENSSL_ROOT}/lib/libcrypto.a
-        ${_MINGW_LIB}/libz.a
-        ws2_32 winmm ole32 gdi32 uuid iphlpapi m
+        "${OPENSSL102_SSL_LIB}"
+        "${OPENSSL102_CRYPTO_LIB}"
+        "${ZLIB_STATIC_LIB}"
+        ws2_32 winmm ole32 gdi32 uuid iphlpapi
     )
     # 编译每个源文件时前置 include windows.h，解决 OpenSSL 1.0.2 X509_NAME 宏冲突
-    target_compile_options(${WEBRTC_SESSION} PRIVATE -include windows.h)
+    if(MSVC)
+        target_compile_options(${WEBRTC_SESSION} PRIVATE /FIwindows.h)
+    else()
+        target_compile_options(${WEBRTC_SESSION} PRIVATE -include windows.h)
+        target_link_libraries(${WEBRTC_SESSION} PUBLIC m)
+    endif()
 else()
     # ---- Linux/macOS: OpenSSL 链接 ----
     # 方案2（VENDOR_OPENSSL_102=ON，仅 Qt5.9/243 场景）：统一进程内 OpenSSL 为 vendored

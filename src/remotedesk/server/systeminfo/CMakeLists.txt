@@ -1,0 +1,7 @@
+set(TARGET SystemInfo)
+set(HEADERS systeminfo.h)
+set(SOURCES systeminfo.cpp)
+add_library(${TARGET} STATIC ${HEADERS} ${SOURCES})
+target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core)
+target_link_libraries(${TARGET} PUBLIC Qt${QT_VERSION_MAJOR}::Core)

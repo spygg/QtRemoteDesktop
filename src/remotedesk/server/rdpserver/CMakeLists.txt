@@ -19,6 +19,7 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
     target_link_libraries(${RDP_SERVER} PUBLIC Qt${QT_VERSION_MAJOR}::DBus)
 endif()
 target_link_libraries(${RDP_SERVER} PUBLIC
+    SystemInfo
     WebsocketServer
     AuthManager
     InputManager
@@ -29,7 +30,7 @@ target_link_libraries(${RDP_SERVER} PUBLIC
     XdndMonitor
 )
 
-if(FFMPEG_FOUND)
-    target_link_libraries(${RDP_SERVER} PUBLIC WebRtcSession VideoEncoder)
+if(ENABLE_WEBRTC)
+    target_link_libraries(${RDP_SERVER} PUBLIC WebRtcSession)
     target_compile_definitions(${RDP_SERVER} PUBLIC USE_WEBRTC)
 endif()

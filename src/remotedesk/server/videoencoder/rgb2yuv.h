@@ -75,9 +75,22 @@ static void rgb32ToYuv420pC(const uint8_t* src, int srcStride,
 // 运行期探测 AVX2（只探测一次；无 AVX2 时上层继续走 sws，不改变既有行为）。
 // 用函数内静态量而非"裸 int 缓存"：条带工作线程会并发调用本函数，C++11 保证
 // 局部静态量的初始化是线程安全的，而手写 `if (cached < 0) cached = ...` 是数据竞争。
+//
+// Windows 额外要求系统真正使能 AVX2（见 rgb2yuv_win.cpp）：__builtin_cpu_supports
+// 只看 CPUID，XP/无 SP1 的 Win7 这类"CPU 有 AVX2 但 OS 不保存 YMM 状态"的机器会
+// 在这里被判成可用，随后 VEX 指令直接 #UD（实测 XP 主机 helper 崩溃循环）。
+#ifdef _WIN32
+extern bool rgb2yuvWindowsAvx2OsEnabled();
+#endif
+
 static bool rgb2yuvAvx2Available()
 {
+#ifdef _WIN32
+    static const bool available =
+        rgb2yuvWindowsAvx2OsEnabled() && __builtin_cpu_supports("avx2") != 0;
+#else
     static const bool available = __builtin_cpu_supports("avx2") != 0;
+#endif
     return available;
 }
 

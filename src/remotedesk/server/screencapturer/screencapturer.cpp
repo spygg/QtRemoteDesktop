@@ -90,6 +90,8 @@ void ScreenCapturer::resume()
         lastFrameChecksum_ = 0;
         idleCount_ = 0;
         captureTimer_->start(1000 / fps_);
+        // 尊重慢读回节流：保留上次测得的 paceIntervalMs_，避免刚连上时又满速空转。
+        applyCaptureInterval();
     }
 }
 
@@ -133,6 +135,7 @@ void ScreenCapturer::setFps(int fps)
     // 客户端可发任意 fps 触发定时器忙转 + 编码器重建风暴（可控 DoS）
     if (fps > 60) fps = 60;
     fps_ = fps;
+    // 走统一入口：保留慢读回节流（pace）与静止降频（idle）状态。
     if (captureTimer_->isActive())
-        captureTimer_->setInterval(1000 / fps_);
+        applyCaptureInterval();
 }

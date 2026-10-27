@@ -86,6 +86,13 @@ public:
     // 回 updated=false，强制帧被吃掉，静止桌面下最长要等 ~2s 才有画面。
     // 无增量检测的平台天然每帧全量，默认 no-op。
     virtual void requestFullCapture() {}
+    // 请求下一次 captureFrame 复用最近一帧（强制帧/新客户端接入用）。
+    // 与 requestFullCapture（只要求跳过增量检测、仍抓取真实画面）语义不同：
+    // DXGI 在静止桌面下 AcquireNextFrame 只会超时，只能拿缓存帧顶上。
+    virtual void requestForceFrame() {}
+    // 帧纹理格式不受支持（如 HDR 桌面的 R16G16B16A16_FLOAT）：平台捕获器
+    // 无法按 BGRA 直通时置位，ScreenCapturer 立即切到 GDI。
+    virtual bool frameFormatUnsupported() const { return false; }
     // 无客户端观看时暂停采集。Wayland/PipeWire 的帧生产在独立线程里持续
     // 运行（光标闪烁/面板刷新会不断出帧），暂停可把整帧拷贝降到 1fps。
     // 仅有后台生产线程的平台需要实现；默认 no-op。
@@ -231,6 +238,10 @@ private:
     int forceFrameCount_ = 0;         // 强制连续推送帧数（resume 后预热、切屏后重置校验）
     bool screenLocked_ = false;
     int dxgiRetryCount_ = 0;
+    // DXGI 成功取帧但内容全黑时的兜底（详见 captureFrame）：连续黑帧计数 +
+    // 交叉验证后的冷却，避免在本来就黑的桌面上反复创建 GDI 探测实例。
+    int dxgiBlackCount_ = 0;
+    int dxgiBlackProbeCooldown_ = 0;
 
 #ifdef Q_OS_WIN
     PlatformCapturer* gdiCapturer_ = nullptr;
@@ -240,6 +251,8 @@ private:
     QList<WinOutput> winOutputs_;
     int winCurrentIndex_ = -1;
     bool winApplyOutput(int index);   // 应用到指定输出（GDI 区域 / DXGI 输出号）并重建捕获器
+    // 运行期补建 GDI 捕获器（DXGI 失败/黑帧时用），区域取当前选中输出。
+    bool switchToGdiCapture();
 #endif
 
 // [ODR] 不能用 _WIN32_WINNT 作守卫：rdpserver 等包含本头的 TU 与 ScreenCapturer
@@ -257,15 +270,24 @@ private:
     // 该条件恒假、再也无法重新设置；而恢复分支同样被这层守卫挡住，使静止后
     // 即使画面变化也长期停在 4fps。改为显式 enter/leave 两个方法消除该歧义。
     static constexpr int kIdleIntervalMs = 250;
-    void enterIdleThrottle() {
-        if (captureTimer_->interval() != kIdleIntervalMs)
-            captureTimer_->setInterval(kIdleIntervalMs);
-    }
-    void leaveIdleThrottle() {
-        const int target = (fps_ > 0) ? (1000 / fps_) : 33;
+    // [SLOW-READBACK-PACE] 慢读回自适应节流：VMware SVGA 等无加速 VM 上，单帧
+    // GDI 读屏（BitBlt 从帧缓冲读回）实测可达 300~400ms。固定 33ms 定时器会让
+    // 采集回调背靠背连跑，单核被占满（XP 单核实测 50%~95%）。paceIntervalMs_
+    // 由实测单帧耗时推导（≈2×capAvg，duty≈33%），与静止降频一起取最大值。
+    qint64 paceIntervalMs_ = 0;
+    bool idleThrottled_ = false;
+    void applyCaptureInterval() {
+        int target = idleThrottled_ ? kIdleIntervalMs : ((fps_ > 0) ? (1000 / fps_) : 33);
+        if (paceIntervalMs_ > target)
+            target = static_cast<int>(paceIntervalMs_);
         if (captureTimer_->interval() != target)
             captureTimer_->setInterval(target);
     }
+    void enterIdleThrottle() { idleThrottled_ = true; applyCaptureInterval(); }
+    void leaveIdleThrottle() { idleThrottled_ = false; applyCaptureInterval(); }
+    // 静止判定阈值（连续多少帧校验和不变即降频）。原 fps_*2 在慢读回（单帧数百
+    // ms）时要几十秒才触发；这里收敛到 10~15 帧，静止时能及时降频。
+    int idleThresholdFrames() const { return qMax(10, (fps_ > 0 ? fps_ / 2 : 15)); }
 
 public:
     // [FLUSH-PUMP] 视频模式下启用：孤立的单次画面变化（弹窗关闭、单击、caret 闪烁）

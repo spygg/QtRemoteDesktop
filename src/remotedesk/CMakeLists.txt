@@ -4,6 +4,11 @@ set(CMAKE_AUTORCC ON)
 if(POLICY CMP0079)
     cmake_policy(SET CMP0079 NEW)
 endif()
+# qrc_resources.cpp 是 qt5_add_resources 生成的源文件；显式声明 AUTOMOC/AUTOUIC
+# 可以处理生成文件，消除 CMake 的 CMP0071 dev 警告。
+if(POLICY CMP0071)
+    cmake_policy(SET CMP0071 NEW)
+endif()
 
 if(FFMPEG_FOUND)
     include_directories(${FFMPEG_INCLUDE_DIRS})
@@ -33,6 +38,8 @@ else()
 endif()
 
 # ---- Sub-module static libraries ----
+# 真实 OS 版本判定（service / helper / secure-input 共用，见 systeminfo.h）
+add_subdirectory(server/systeminfo)
 add_subdirectory(server/authmanager)
 add_subdirectory(server/clipboardservice)
 add_subdirectory(server/filetransferservice)
@@ -64,7 +71,7 @@ if(BUILD_THIRDPARTY)
     set(CMAKE_AUTORCC ON)
 endif()
 
-if(FFMPEG_FOUND)
+if(ENABLE_WEBRTC)
     add_subdirectory(server/webrtcsession)
 endif()
 
@@ -131,30 +138,78 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 if(FFMPEG_FOUND)
     target_compile_definitions(${PROJECT_NAME} PRIVATE USE_FFMPEG)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_WEBRTC)
     # USE_FFMPEG 需传播到使用 FFmpeg API 的静态库（静态库编译定义不自动传播）
     target_compile_definitions(Rdpserver PUBLIC USE_FFMPEG)
     target_compile_definitions(VideoEncoder PUBLIC USE_FFMPEG)
     target_link_libraries(Rdpserver PUBLIC VideoEncoder)
-    target_link_libraries(${PROJECT_NAME} PRIVATE WebRtcSession)
     target_link_libraries(${PROJECT_NAME} PRIVATE VideoEncoder)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES} ${FFMPEG_EXTRA_LIBS})
+endif()
+
+if(ENABLE_WEBRTC)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_WEBRTC)
+    target_link_libraries(${PROJECT_NAME} PRIVATE WebRtcSession)
 endif()
 
 # ---- Platform libraries for modules ----
 if(WIN32)
     target_link_libraries(InputManager PUBLIC user32)
-    target_link_libraries(ScreenCapturer PUBLIC d3d11 dxgi gdi32)
-    if(MSVC)
-        # DXGI 桌面复制（screencapturer_win.cpp 的 DXGICapturer 整段）依赖 MSVC 专有
-        # 的 __uuidof(IDXGIOutput1)，且 requestForceFrame 只在具体类上声明——MinGW
-        # 下编译不过（已实测）。故 _WIN32_WINNT=0x0A00 只对 MSVC 提版；MinGW 构建
-        # 走 Q_OS_WIN 分支但保持 GDI 软捕获（DXGI 被 _WIN32_WINNT>=WIN8 门控编译掉）。
-        # 类布局由 screencapturer.h 的 Q_OS_WIN 守卫决定（见 [ODR] 注释），不随本宏变。
-        target_compile_definitions(ScreenCapturer PRIVATE _WIN32_WINNT=0x0A00)
-        set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "/DELAYLOAD:d3d11.dll /DELAYLOAD:dxgi.dll")
-        target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
+    # 故意不链接 d3d11/dxgi：D3D11CreateDevice 由 screencapturer_win.cpp 运行时
+    # 从 d3d11.dll 动态取，其余都是 COM 虚表调用。静态导入 d3d11.dll 会让 XP
+    # 在加载 exe 阶段失败（XP 无该 DLL，且本来就只能走 GDI）。
+    target_link_libraries(ScreenCapturer PUBLIC gdi32)
+
+    # DXGI 桌面复制需要 dxgi1_2.h 里的 IDXGIOutput1 / IDXGIOutputDuplication。
+    # 分两级探测：
+    #   1) 原生头文件齐全（MSVC、MinGW-w64 5+，如 Qt 5.15 的 mingw810）→ 直接用；
+    #   2) 老 mingw-w64 3.x（Qt 5.7 的 mingw530）缺这两个接口，但基础 DXGI 1.1
+    #      接口齐全 → 用仓库内 dxgi1_2_compat.h 补齐声明（QTRD_DXGI_COMPAT）。
+    # 运行期仍由 IsWindows8OrGreater() 面向 Win7/XP 回退、初始化/连续 15 帧失败
+    # 回退 GDI（screencapturer_win.cpp）。
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_DEFINITIONS "-D_WIN32_WINNT=0x0A00")
+    check_cxx_source_compiles("
+#include <windows.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+int main() {
+    IDXGIOutput1* output1 = 0;
+    IDXGIOutputDuplication* dupl = 0;
+    DXGI_OUTDUPL_FRAME_INFO info;
+    const IID& iid = __uuidof(IDXGIOutput1);
+    (void)info;
+    (void)iid;
+    if (output1) output1->DuplicateOutput(0, &dupl);
+    return 0;
+}" QTRD_DXGI_DESKTOP_DUP)
+
+    if(QTRD_DXGI_DESKTOP_DUP)
+        target_compile_definitions(ScreenCapturer PRIVATE
+            QTRD_HAVE_DXGI_DUP=1 _WIN32_WINNT=0x0A00)
+        message(STATUS "ScreenCapturer: DXGI Desktop Duplication enabled (${CMAKE_CXX_COMPILER_ID}, native headers)")
+    else()
+        check_cxx_source_compiles("
+#include <windows.h>
+#include <d3d11.h>
+#include <dxgi.h>
+int main() {
+    IDXGIDevice* dxgiDevice = 0;
+    ID3D11Texture2D* texture = 0;
+    const IID& iid = __uuidof(IDXGIDevice);
+    (void)dxgiDevice;
+    (void)texture;
+    (void)iid;
+    return 0;
+}" QTRD_DXGI_BASE_OK)
+        if(QTRD_DXGI_BASE_OK)
+            target_compile_definitions(ScreenCapturer PRIVATE
+                QTRD_HAVE_DXGI_DUP=1 QTRD_DXGI_COMPAT=1 _WIN32_WINNT=0x0A00)
+            message(STATUS "ScreenCapturer: DXGI enabled via built-in compat declarations (old DXGI headers)")
+        else()
+            message(STATUS "ScreenCapturer: DXGI unavailable — GDI capture only")
+        endif()
     endif()
+    unset(CMAKE_REQUIRED_DEFINITIONS)
 elseif(APPLE)
     find_library(COREGRAPHICS CoreGraphics)
     target_link_libraries(InputManager PUBLIC ${COREGRAPHICS})

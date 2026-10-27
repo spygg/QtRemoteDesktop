@@ -245,9 +245,12 @@ QtRemoteDesktop 是一款可自托管的开源远程桌面软件：**控制端�
 ## 🚀 快速开始
 
 ```bash
-# 构建（Linux）
+# 构建（Linux / Windows，纯 CMake；三方库与 FFmpeg 全自动从源码构建）
+cd src && cmake --preset linux && cmake --build --preset linux        # Linux
+cd src && cmake --preset windows-mingw && cmake --build --preset windows-mingw   # Windows
+
+# 也可以用一键脚本（等价流程）
 ./src/linux_build_script/build_linux.sh          # 零参数自动探测 Qt
-# 构建（Windows）
 src\windows_build_script\build.bat
 
 # 运行
@@ -261,6 +264,72 @@ bin\QtRemoteDesktop.exe                            # Windows
 4. 完成，浏览器即开始控制远端桌面。🎉
 
 > 默认端口：HTTP `8080`，WebSocket `8081`（= HTTP 端口 + 1）。常用参数：`--no-ssl`、`--log-level debug|info|warning|critical`、`--install/--uninstall/--service`、`--helper`。
+
+### 直接用 CMake 构建（不用一键脚本）
+
+Qt 会自动探测（Windows 扫 `QT_ROOT`、`E:/programes/Qt`、`C:/Qt`、`%ProgramFiles%/Qt`、`~/Qt`；
+Linux/macOS 扫 `/opt/Qt`、`~/Qt`），按编译器家族（MinGW/MSVC）、目标位宽、
+MinGW 版本号（`mingw53_32` 对应 GCC 5.3）挑最匹配的套件。探测不准时再显式给 `CMAKE_PREFIX_PATH`。
+
+preset 文件在 `src/CMakePresets.json`，`cmake --preset` 只读**当前目录**下的 preset，
+所以要么在仓库根目录用 `-S src` 指过去，要么 `cd src`：
+
+```bash
+# 仓库根目录执行（推荐）
+cmake -S src --preset windows-mingw        # Windows：MinGW + Qt 5.7 mingw53_32
+cmake --build build --parallel 8           # 产物在 <repo>/build，可执行文件在 <repo>/bin
+# Linux
+cmake -S src --preset linux
+cmake --build build --parallel 8
+
+# 或者进到 src/ 用 build preset
+cd src
+cmake --preset windows-mingw && cmake --build --preset windows-mingw
+```
+
+或者不用 preset，直接给参数：
+
+```bash
+# Linux / macOS（Qt 不在常见位置时补 -DCMAKE_PREFIX_PATH=<Qt 前缀>）
+cmake -S src -B build
+cmake --build build --parallel 8
+
+# Windows（MinGW + Qt5；工具链不在 PATH 时显式指定编译器，Qt 可交给自动探测）
+cmake -S src -B build -G "MinGW Makefiles" ^
+      -DCMAKE_MAKE_PROGRAM=E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\mingw32-make.exe ^
+      -DCMAKE_C_COMPILER=E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\gcc.exe ^
+      -DCMAKE_CXX_COMPILER=E:\programes\Qt\QtLegacy\Tools\mingw530_32\bin\g++.exe
+cmake --build build --parallel 8
+```
+
+产物仍输出到 `bin/`（可执行文件）与 `build_output/`（静态库/三方库），与一键脚本一致。
+`build_output/` 里的 openh264、FFmpeg 等都会由 `cmake --build` 自动从源码构建，无需先跑脚本。
+
+| 选项 | 说明 |
+|---|---|
+| `BUILD_THIRDPARTY` | 非 MSVC 平台默认 ON：从源码构建 metaRTC / srtp / usrsctp / openh264（需 GNU make；MSVC 下强制 OFF） |
+| `BUILD_FFMPEG` | `build_output/ffmpeg_install` 缺失时默认 ON：由 CMake 构建自带 FFmpeg 3.4.8（含 libopenh264 编码器）。有预编译产物时自动跳过 |
+| `USE_FFMPEG` | OFF=自动探测（预编译产物放在 `build_output/ffmpeg_install`），ON=找不到即报错 |
+| `USE_WEBRTC` | OFF=自动（有 FFmpeg 且 `BUILD_THIRDPARTY=ON` 时启用），ON=条件不满足即报错 |
+| `BUILD_OUTPUT_DIR` / `BIN_OUTPUT_DIR` | 覆盖共享输出目录，便于多个构建目录并存 |
+
+> MSVC 也能直接 `cmake -S src -B build`（自动挑 msvc 套件），但 metaRTC/srtp/openh264/FFmpeg
+> 这些三方源码只支持 GNU make，会自动降级为「无 WebRTC、图片模式」编译。
+
+> Windows 桌面捕获由 CMake 编译探测决定：工具链的 `dxgi1_2.h` 含 `IDXGIOutput1`
+> 时启用 DXGI 桌面复制（MSVC、MinGW-w64 5+，如 Qt 5.15 自带的 mingw810）；
+> 缺该接口的老头文件（Qt 5.7 的 mingw530）改用仓库内置的
+> `dxgi1_2_compat.h` 补齐声明，同样启用 DXGI（日志打印 `DXGI enabled via
+> built-in compat declarations`）。运行期 Win7/XP、初始化失败、连续失败、帧纹理
+> 非 BGRA8（HDR 桌面上个别驱动给 R16G16B16A16_FLOAT）或复制通道恒出黑帧时
+> 自动回退 GDI。`D3D11CreateDevice` 从 `d3d11.dll` 动态取（其余都是 COM 虚表
+> 调用），exe 不静态导入 d3d11/dxgi——否则没有这两个 DLL 的 Windows XP 会在
+> 加载 exe 时就失败。
+
+> FFmpeg 现编时会自动探测 `nasm`/`yasm`（含 Git 的 `usr/bin`），并打印
+> `FFmpeg: x86asm enabled via ...`；缺失时退纯 C 实现（swscale RGB→YUV 明显变慢）。
+
+> `build_output/` 与 `bin/` 默认被所有构建目录共用：同时保留多套配置（如开关 WebRTC）时，请显式指定不同的 `BUILD_OUTPUT_DIR`/`BIN_OUTPUT_DIR`，否则后一次构建会覆盖前一次的同名产物。
 
 ---
 

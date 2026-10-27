@@ -3,6 +3,7 @@
 #include "inputmanager.h"
 #include "rdpserver.h"
 #include "screencapturer.h"
+#include "systeminfo.h"
 // CodecType / HwEncodeMode 定义在独立小头里（不依赖 FFmpeg）；无 FFmpeg 的
 // JPEG 回退构建也必须能编译 helper（否则 BUILD 在缺少 libavcodec 时直接失败，
 // 与 CMake 宣称的 "FFmpeg not found (optional) — JPEG fallback mode" 矛盾）。
@@ -439,6 +440,14 @@ int HelperProcess::run(int argc, char* argv[])
 
     // 在 connected 处理器之前声明：重连时需要补发当前锁屏状态
     bool locked = false;
+    // 输入桌面轮询（OpenInputDesktop + 桌面名）的结论。Windows 上它才是"锁没锁"的权威
+    // 依据，抓屏侧的"全黑帧"只是启发式 —— 见下面 screenLocked 处理器的注释。
+    bool desktopPollLocked = false;
+    // 最近一次轮询看到的输入桌面名（原样大小写，锁屏时如 "Winlogon"/"Welcome"）。
+    // 服务进程在 Session 0/私有窗口站内 OpenInputDesktop 会失败（实测 XP 返回错误 1），
+    // 它自己无从得知登录 UI 在哪个桌面；锁屏事件里把这个名字带给服务端，
+    // secure-input 进程才能投到正确的桌面上（投错 = 注入的按键石沉大海）。
+    QString inputDesktopName;
 
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
@@ -463,7 +472,9 @@ int HelperProcess::run(int argc, char* argv[])
             QJsonObject lockMsg;
             lockMsg["type"] = "screen_locked";
             lockMsg["locked"] = locked;
-            lockMsg["hint"] = locked ? QString::fromUtf8("锁屏界面可直接输入密码") : QString();
+            lockMsg["hint"] = locked ? QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码") : QString();
+            if (locked && !inputDesktopName.isEmpty())
+                lockMsg["desktop"] = inputDesktopName;
             ws.sendTextMessage(QString::fromUtf8(QJsonDocument(lockMsg).toJson(QJsonDocument::Compact)));
         }
         // [B-5] 重连后重读当前剪贴板：断线窗口内复制的内容此前因未发送成功
@@ -565,16 +576,14 @@ int HelperProcess::run(int argc, char* argv[])
             wsBacklogBytes += qMax<qint64>(0, ws.sendBinaryMessage(packet));
         }, Qt::QueuedConnection);
 
-    bool isWin7 = false, isWinXP = false;
-    { struct { ULONG s; ULONG maj; ULONG min; ULONG bld; ULONG pid; WCHAR csd[128]; } osv = { sizeof(osv) };
-      typedef LONG (WINAPI *R)(PVOID);
-      HMODULE hNt = GetModuleHandleW(L"ntdll.dll");
-      if (hNt) { R r = (R)GetProcAddress(hNt, "RtlGetVersion");
-        if (r && r(&osv) == 0) {
-          if (osv.maj == 6 && osv.min == 1) isWin7 = true;
-          if (osv.maj == 5 && (osv.min == 1 || osv.min == 2)) isWinXP = true;
-        } } }
-    qInfo() << "Helper: starting desktop polling, isWin7 =" << isWin7 << "isWinXP =" << isWinXP;
+    // OS 判定统一走 SystemInfo：Vista+ 用 kernel32 导出探测，不受"以兼容模式
+    // 运行 Windows XP"标记伪造（那台 Win7 上 RtlGetVersion 谎报 5.1.2600）。
+    const WinOsInfo& osInfo = winOsInfo();
+    const bool isWinXP = !osInfo.vistaPlus;                                  // 5.x：XP / 2003
+    const bool isWin7 = osInfo.vistaPlus && osInfo.major == 6 && osInfo.minor == 1;
+    qInfo() << "Helper: starting desktop polling, isWin7 =" << isWin7 << "isWinXP =" << isWinXP
+            << "os" << QStringLiteral("%1.%2.%3").arg(osInfo.major).arg(osInfo.minor).arg(osInfo.build)
+            << QStringLiteral("src=%1").arg(QLatin1String(osInfo.source));
 
     InputManager inputMgr;
     // 输入坐标归一化基准与上报前端的 screen_info 一致（高 DPI 缩放）
@@ -804,8 +813,14 @@ int HelperProcess::run(int argc, char* argv[])
                 qInfo() << "Helper: system action requested:" << action;
 #ifdef _WIN32
                 if (action == "lock") {
-                    QProcess::startDetached(QStringLiteral("rundll32.exe"),
-                        { QStringLiteral("user32.dll,LockWorkStation") });
+                    // 直接在 helper 进程里调 LockWorkStation：它本来就跑在
+                    // winsta0\Default 交互桌面上，起 `rundll32.exe user32.dll,LockWorkStation`
+                    // 子进程只是把失败变成无声（实测 XP 主机：日志显示动作已到达 helper，
+                    // 屏幕却从未锁上，且拿不到任何错误码）。
+                    if (LockWorkStation())
+                        qInfo() << "Helper: LockWorkStation ok";
+                    else
+                        qWarning() << "Helper: LockWorkStation failed, error =" << GetLastError();
                 } else if (action == "show_desktop") {
                     // Win7+ 用 PowerShell；WinXP 无 powershell → cscript 同款 COM 调用
                     QString ps = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
@@ -1017,108 +1032,140 @@ int HelperProcess::run(int argc, char* argv[])
 
     QObject::connect(&capturer, &ScreenCapturer::screenLocked, &app,
         [&](bool val) {
-            locked = val;
-            qInfo() << "Helper: screenLocked signal =" << locked;
-            QJsonObject msg;
-            msg["type"] = "screen_locked";
-            msg["locked"] = locked;
-            msg["isXP"] = isWinXP;
-            msg["hint"] = locked ? QString::fromUtf8("锁屏界面可直接输入密码") : QString();
-            ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
+            // 抓屏侧的"黑帧=锁屏"在 Windows 上只是猜测，且经常猜错：DPMS 关屏、XP 的
+            // 空白屏保（blank.scr）、纯黑壁纸、会话切换瞬间都会全黑而桌面并未锁。
+            // 实测 XP 主机：输入桌面轮询说 default（未锁），黑帧启发式说锁 → 两个来源
+            // 各广播各的，前端 locked 每 2 秒 true↔false 抖动，用户已解锁却一直看到
+            // "屏幕已锁定"遮罩。锁屏/登录界面在 Windows 上必然切走输入桌面（XP 的
+            // Welcome/Security、Win7+ 的 Winlogon 安全桌面），轮询那条通道足够可靠，
+            // 所以这里只记录、不再驱动状态。
+            if (val == locked)
+                return;
+            qInfo() << "Helper: capturer reports screen" << (val ? "black(locked)" : "unlocked")
+                    << "but desktop poll says locked =" << desktopPollLocked << "- ignored";
         });
 
     QTimer* desktopCheckTimer = new QTimer(&app);
+    // MinGW 5.3 的 winuser.h 没有这个符号（值取自 Vista/MinGW 较新头文件）。
+    // 它读的是 HKCU\Control Panel\Desktop\ScreenSaveSecure，即"在恢复时显示登录屏幕"。
+    const UINT kSpiGetScreenSaverSecure = 0x0072;
     QObject::connect(desktopCheckTimer, &QTimer::timeout, &app, [&]() {
+        // 桌面名在锁屏期间也会变（XP：屏保退出→登录 UI 落在另一个桌面），而服务端的
+        // secure-input 进程是按桌面名投放的 —— 名字变了必须重报，否则键鼠继续打进
+        // 已经没人看的旧桌面。
+        static QString lastReportedDesk;
+        static int openInputFailures = 0;
         HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_READ);
         if (!hDesk) {
+            // OpenInputDesktop 在桌面切换的瞬间（屏保退出→登录桌面、会话切换）会偶发失败。
+            // 单次失败就广播 locked=true 会让前端闪出 2 秒"屏幕已锁定"遮罩，而用户那边
+            // 桌面其实正常 —— 实测 XP 主机上这正是"没锁却提示已锁"的来源之一。
+            // 连续两次（≈4 秒）失败才认定为锁屏。
+            if (++openInputFailures < 2) {
+                qInfo() << "Helper: OpenInputDesktop failed, waiting for confirmation";
+                return;
+            }
+            desktopPollLocked = true;
             if (!locked) {
                 locked = true;
+                lastReportedDesk.clear();   // 这次连桌面名都拿不到，别拿旧值糊弄服务端
+                inputDesktopName.clear();
                 qInfo() << "Helper: desktop locked (OpenInputDesktop failed)";
                 QJsonObject msg;
                 msg["type"] = "screen_locked";
                 msg["locked"] = true;
-                msg["hint"] = QString::fromUtf8("锁屏界面可直接输入密码");
+                msg["hint"] = QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码");
                 ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
             }
             return;
         }
+        openInputFailures = 0;
         wchar_t name[256] = {};
         DWORD len = 0;
         bool isLocked = false;
+        bool onScreensaverDesk = false;
+        QString deskName;
         if (GetUserObjectInformationW(hDesk, UOI_NAME, name, sizeof(name), &len)) {
-            QString deskName = QString::fromWCharArray(name);
-            isLocked = (deskName.toLower() != QStringLiteral("default"));
-        }
-        CloseDesktop(hDesk);
-#ifdef _WIN32
-        // XP 屏保：分级尝试退出，最后再枚举进程杀
-        if (isWinXP) {
-            BOOL ssRunning = FALSE;
-            SystemParametersInfo(0x0072, 0, &ssRunning, 0);
-            static int xpSsStage = 0;
-            if (ssRunning) {
-                if (xpSsStage == 0) {
-                    xpSsStage = 1;
-                    qInfo() << "XP screen saver: stage 1 - LockWorkStation";
-                    LockWorkStation();
-                    return;
-                }
-                if (xpSsStage == 1) {
-                    xpSsStage = 2;
-                    qInfo() << "XP screen saver: stage 2 - SendInput mouse + ESC";
-                    POINT pt; GetCursorPos(&pt);
-                    INPUT mi = {};
-                    mi.type = INPUT_MOUSE;
-                    // GetSystemMetrics 在无头/RDP 边缘会话下可能返回 0，裸除会直接
-                    // 触发整数除零崩溃（helper 被看门狗反复拉起）。
-                    const int w = GetSystemMetrics(SM_CXSCREEN);
-                    const int h = GetSystemMetrics(SM_CYSCREEN);
-                    mi.mi.dx = w > 0 ? (pt.x * 65535) / w : 0;
-                    mi.mi.dy = h > 0 ? (pt.y * 65535) / h : 0;
-                    mi.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-                    SendInput(1, &mi, sizeof(INPUT));
-                    INPUT esc[2] = {};
-                    esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
-                    esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
-                    SendInput(2, esc, sizeof(INPUT));
-                    return;
-                }
-                if (xpSsStage >= 2) {
-                    qInfo() << "XP screen saver: stage 3 - killing .scr processes";
-                    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-                    if (hSnap != INVALID_HANDLE_VALUE) {
-                        PROCESSENTRY32W pe = { sizeof(pe) };
-                        if (Process32FirstW(hSnap, &pe)) {
-                            do {
-                                QString name = QString::fromWCharArray(pe.szExeFile);
-                                if (name.endsWith(".scr", Qt::CaseInsensitive)) {
-                                    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
-                                    if (hProc) {
-                                        TerminateProcess(hProc, 0);
-                                        CloseHandle(hProc);
-                                        qInfo() << "Terminated:" << name;
-                                    }
-                                }
-                            } while (Process32NextW(hSnap, &pe));
-                        }
-                        CloseHandle(hSnap);
-                    }
-                    LockWorkStation();
-                    xpSsStage = 3;
-                    return;
-                }
+            deskName = QString::fromWCharArray(name);
+            const QString lower = deskName.toLower();
+            // XP 的屏保不在 Default 桌面上跑，系统给它单独建了一个名为
+            // "Screen-saver" 的输入桌面（实测该主机：deskprobe 输出
+            // `INPUT desktop = Screen-saver`，同时 Welcome/Security 还没创建、
+            // Winlogon 桌面存在但没在显示）。
+            //
+            // 屏保桌面算不算"锁屏"取决于**恢复时是否要密码**（控制面板"屏幕保护
+            // 程序设置 → 在恢复时显示登录屏幕"，即 SPI_GETSCREENSAVESEC）：
+            // * 勾了：这台机器上"屏保"就是锁 —— 想回到桌面必须输密码。按锁屏处理，
+            //   前端给出"屏幕已锁定 + 一键解锁"，用户点一下就能进。
+            // * 没勾：动一下鼠标就回桌面，不需要密码。按未锁处理，并由下面的
+            //   "非安全屏保才杀 .scr"分支把画面放回来。
+            // 一刀切地"屏保 != Default 就是锁屏"会把每次闲置屏保都报成锁屏；
+            // 一刀切地"屏保永远不算锁"又会让 XP 的 LockWorkStation（实测它就是把
+            // 输入桌面切到 Screen-saver）显示成"没锁的黑屏"，两个方向都不对。
+            onScreensaverDesk = (lower == QStringLiteral("screen-saver"));
+            if (onScreensaverDesk) {
+                BOOL secure = FALSE;
+                SystemParametersInfo(kSpiGetScreenSaverSecure, 0, &secure, 0);
+                isLocked = (secure != FALSE);
             } else {
-                xpSsStage = 0;
+                isLocked = (lower != QStringLiteral("default"));
             }
         }
+        CloseDesktop(hDesk);
+        inputDesktopName = isLocked ? deskName : QString();
+        desktopPollLocked = isLocked;
+#ifdef _WIN32
+        // 不安全的 XP 屏保（恢复时不要密码）：杀一次 .scr 把远端画面放回来。
+        //
+        // 为什么只在"不要密码"时杀（实测 XP 主机日志得出）：
+        // * helper 被服务用 lpDesktop=winsta0\\default 拉起，它的 SendInput 只会落在
+        //   Default 桌面；屏保在 "Screen-saver" 桌面上，根本收不到 —— 旧 stage 1 白做。
+        // * 旧实现无条件杀 .scr，而这台机器的屏保是**安全屏保**：杀掉它等于"用户动了
+        //   鼠标"，XP 于是切到登录桌面。登录桌面 helper 打不开 → OpenInputDesktop
+        //   连续失败 → 我们报 locked=true，一直挂到系统 ~60 秒后把屏保重新拉起来才
+        //   复位。这就是"已经解锁了还是显示屏幕已锁定"里那 1 分钟的假锁。
+        // * 旧 stage 3 的 LockWorkStation 更糟：锁屏后屏保状态位依旧为真，于是每 2 秒
+        //   锁一次，用户刚输完密码又被锁回去 —— "反复横跳"的直接制造者，已彻底删除。
+        static int xpSsKills = 0;
+        if (isWinXP && onScreensaverDesk && !isLocked) {
+            if (xpSsKills++ == 0) {
+                qInfo() << "XP screen saver (no password on resume): killing .scr once";
+                HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if (hSnap != INVALID_HANDLE_VALUE) {
+                    PROCESSENTRY32W pe = { sizeof(pe) };
+                    if (Process32FirstW(hSnap, &pe)) {
+                        do {
+                            QString exe = QString::fromWCharArray(pe.szExeFile);
+                            if (exe.endsWith(".scr", Qt::CaseInsensitive)) {
+                                HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                                if (hProc) {
+                                    TerminateProcess(hProc, 0);
+                                    CloseHandle(hProc);
+                                    qInfo() << "Terminated:" << exe;
+                                }
+                            }
+                        } while (Process32NextW(hSnap, &pe));
+                    }
+                    CloseHandle(hSnap);
+                }
+            }
+        } else {
+            xpSsKills = 0;
+        }
 #endif
-        if (isLocked != locked) {
+        // 桌面名在锁屏期间也会变（XP：屏保退出→登录 UI 落在另一个桌面），而服务端的
+        // secure-input 进程是按桌面名投放的 —— 名字变了必须重报，否则键鼠继续打进
+        // 已经没人看的旧桌面。
+        if (isLocked != locked || (isLocked && deskName != lastReportedDesk)) {
             locked = isLocked;
-            qInfo() << "Helper: screen locked =" << locked;
+            lastReportedDesk = isLocked ? deskName : QString();
+            qInfo() << "Helper: screen locked =" << locked << "input desktop =" << deskName;
             QJsonObject msg;
             msg["type"] = "screen_locked";
             msg["locked"] = locked;
-            msg["hint"] = locked ? QString::fromUtf8("锁屏界面可直接输入密码") : QString();
+            msg["hint"] = locked ? QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码") : QString();
+            if (locked && !deskName.isEmpty())
+                msg["desktop"] = deskName;
             ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
         }
     });

@@ -616,7 +616,12 @@
             align-items: center;
             justify-content: center;
             flex-direction: column;
-            z-index: 3000;
+            /* 只压住远端画面（canvas/video z-index:1），不能盖本地 UI：
+               旧值 3000 把「画质」下拉（1001）、文件面板（1500）都埋在了
+               遮罩下面 —— 锁屏时想开菜单改画质/解锁，菜单看不见点不到。
+               900 仍在 canvas 之上，且低于所有面板（dropdown-overlay 1000、
+               config-dropdown 1001、file-panel 1500、toolbar 4000）。 */
+            z-index: 900;
             backdrop-filter: blur(4px);
         }
 
@@ -1074,6 +1079,9 @@
             // 待服务端恢复视频能力（videoSupported 变回 true，如 helper 重连就绪）自动回到该模式。
             pendingVideoRetry: null,
             showFps: false,
+            // 被控端平台（screen_locked.platform）：决定锁屏密码怎么送。
+            // windows → 交服务端注入安全桌面；其他 → 逐字 XTEST 注入。
+            lockPlatform: '',
             mouseX: 0,
             mouseY: 0,
             // [B13] code → keycode：blur 补发 keyup 时必须带原始 keycode。
@@ -2790,22 +2798,22 @@
                     updateRemoteDragState(msg);
                     break;
                 case 'screen_locked':
+                    // platform 由服务端随消息下发（windows/linux/android/macos）。
+                    // 它决定锁屏密码怎么送：Windows 锁屏 UI 在 winlogon 安全桌面上，
+                    // 浏览器逐字发的 keydown 只会落到用户桌面（没人看得到），必须
+                    // 交给服务端的 secure-input 在安全桌面上写登录框。
+                    if (msg.platform) state.lockPlatform = msg.platform;
                     document.getElementById('lock-overlay').classList.toggle('active', msg.locked);
                     if (msg.locked) {
-                        document.getElementById('lock-password').focus();
                         const hintEl = document.getElementById('lock-hint');
-                        const isXP = msg.isXP;
-                        // XP 分支是本页自带的固定文案（含内联 SVG 图标），用 innerHTML
-                        // 渲染图标；msg.hint 来自服务端，必须走 textContent，
-                        // 避免远端内容被当作标记注入。
-                        if (isXP) {
-                            hintEl.innerHTML = 'XP 锁屏：请点击上图锁中 <svg viewBox="0 0 16 16" width="14" height="14" style="vertical-align:middle;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><circle cx="7" cy="7" r="3"/><path d="M9.5 9.5l5 5"/><line x1="12" y1="12" x2="13" y2="13"/></svg> 部分或者本行的"锁定"然后多试几次';
-                        } else {
-                            hintEl.textContent = msg.hint || '';
-                        }
+                        hintEl.textContent = msg.hint || (state.lockPlatform === 'windows'
+                            ? 'Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码' : '');
+                        resetLockButtons();
+                        document.getElementById('lock-password').focus();
                     } else {
                         document.getElementById('lock-password').value = '';
                         document.getElementById('lock-hint').textContent = '';
+                        resetLockButtons();
                     }
                     break;
                 case 'unlock_result':
@@ -2814,11 +2822,13 @@
                         // 不会自动再广播 screen_locked=false）
                         document.getElementById('lock-overlay').classList.remove('active');
                         document.getElementById('lock-password').value = '';
+                        resetLockButtons();
                     } else if (!msg.ok) {
+                        resetLockButtons();
                         alert('解锁失败：' + (msg.message || '未知原因'));
                     } else {
                         // pending：密码正在注入（Windows secure-input），遮罩保持，
-                        // 真正解锁后 helper 的 screen_locked=false 会自动收起
+                        // 真正解锁后 screen_locked=false 会自动收起
                         showTransferStatus(msg.message || '正在解锁…', 3000);
                     }
                     break;
@@ -3113,12 +3123,22 @@
             if (wrap && m && !wrap.contains(ev.target) && !m.contains(ev.target)) m.classList.remove('open');
         });
 
-        // 一键免密解锁：让被控端从锁屏界面切回桌面（无需输入密码）。
-        // 用于被控端锁屏后网页只看到黑屏（lightdm greeter 型锁屏会另起 VT 并把
-        // X 画面置黑）的场景。
+        // 一键免密解锁：不填密码，由服务端用 server_config.json 里的 unlockPassword
+        // （Windows）或 VT 切回（Linux）解开。
         function requestRemoteUnlock() {
             if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
+            const btn = document.getElementById('lock-onekey-btn');
+            if (btn) { btn.disabled = true; btn.textContent = '解锁中…'; }
             send({ type: 'system_action', action: 'unlock_screen' });
+            setTimeout(resetLockButtons, 25000);
+        }
+
+        // 恢复锁屏按钮的常态文案/可用性（解锁成功、失败、解锁状态变化都调用）
+        function resetLockButtons() {
+            const b = document.getElementById('lock-unlock-btn');
+            if (b) { b.disabled = false; b.textContent = '解锁'; }
+            const o = document.getElementById('lock-onekey-btn');
+            if (o) { o.disabled = false; o.textContent = '一键解锁'; }
         }
 
         // 锁定密码输入
@@ -3132,7 +3152,22 @@
             const input = document.getElementById('lock-password');
             const btn = document.getElementById('lock-unlock-btn');
             const pwd = input.value;
-            if (!pwd) return;
+            if (!pwd) { input.focus(); return; }
+
+            // Windows：锁屏 UI 在 winlogon 安全桌面，helper 的 SendInput 只落在
+            // 用户会话的 Default 桌面（那边没人看），所以逐字发 keydown 永远解不开锁
+            // —— 旧实现就是这样，用户看到"输入密码无法解锁"。改成交给服务端：
+            // secure-input 进程本来就跑在安全桌面上，先 SAS 把桌面切到 Winlogon，
+            // 再直接 WM_SETTEXT 写登录框 + 提交，实测 ~1.2s。
+            if (state.lockPlatform === 'windows') {
+                btn.disabled = true;
+                btn.textContent = '解锁中…';
+                send({ type: 'system_action', action: 'unlock_screen', password: pwd });
+                // 结果由 unlock_result / screen_locked 驱动，超时兜底恢复按钮
+                setTimeout(resetLockButtons, 25000);
+                return;
+            }
+
             btn.disabled = true;
             btn.textContent = '发送中…';
             // Array.from 按码点拆分：pwd.length 会把代理对计成 2，按索引切会拆坏 emoji。
@@ -3151,8 +3186,7 @@
                     send({ type: 'keydown', keycode: 13, code: 'Enter', ctrl: false, alt: false, shift: false });
                     setTimeout(() => {
                         send({ type: 'keyup', keycode: 13, code: 'Enter' });
-                        btn.disabled = false;
-                        btn.textContent = '解锁';
+                        resetLockButtons();
                         input.value = '';
                         input.focus();
                     }, 10);

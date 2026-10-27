@@ -1,6 +1,10 @@
 set(VIDEO_ENCODER VideoEncoder)
 set(HEADERS videoencoder.h mppencoder.h rgb2yuv.h)
 set(SOURCES videoencoder.cpp mppencoder.cpp)
+if(WIN32)
+    # AVX2 的系统使能探测（rgb2yuv_win.cpp 需要 windows.h），见该文件头部注释
+    list(APPEND SOURCES rgb2yuv_win.cpp)
+endif()
 add_library(${VIDEO_ENCODER} STATIC ${HEADERS} ${SOURCES})
 target_include_directories(${VIDEO_ENCODER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui)

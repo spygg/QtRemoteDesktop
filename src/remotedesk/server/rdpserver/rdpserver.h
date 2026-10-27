@@ -313,6 +313,10 @@ private:
     HwEncodeMode configHwEncodeMode_ = HwEncodeMode::Auto; // 硬件编码开关（auto/on/off）
     int userScale_ = 75;
     bool screenLocked_ = false;
+    // helper 上报的锁屏输入桌面名（screen_locked 的 desktop 字段，如 "Winlogon"、
+    // "Welcome"）。服务进程自己 OpenInputDesktop 会失败，只能靠它把 secure-input
+    // 投到登录 UI 真正所在的桌面。空 = 不知道，回退 winsta0\Winlogon。
+    QString lockedDesktop_;
     // [Win-解锁] 一键免密解锁用的明文密码（server_config.json 的 unlockPassword，
     // 局域网自用场景）。锁屏 UI 在 winlogon 安全桌面，只能经 secure-input 注入。
     QString unlockPassword_;
@@ -320,6 +324,15 @@ private:
     // "办公室-242"）。空则回退主机名。多台被控机靠它区分标签页。
     QString systemName_;
     bool secureInputRunning_ = false;
+    // secure-input 进程实际投放到的桌面名（不含 "winsta0\" 前缀）。锁屏期间桌面会变
+    // （XP：屏保桌面 → 登录桌面），名字与当前锁屏桌面不符就要重投进程。
+    QString secureInputDesktop_;
+    // 解锁序列的有效期（epoch ms）。序列里 SAS 会把输入桌面从 Screen-saver 切到
+    // Winlogon —— 这是流程自己造成的正常切换，此时"桌面不符"不能算进程不健康。
+    // 不加这个门禁的实测后果：helper 在 SAS 后 0.9s 补报 screen_locked=true，
+    // 健康判定据此杀掉正在写密码的进程，第一次尝试全废，XP 解锁从 ~2s 拖到 ~9s。
+    // 用到期时间而非 bool：终判定时器若因 helper 掉线没跑，也不会把门禁永久留着。
+    qint64 secureInputUnlockUntilMs_ = 0;
     bool captureAvailable_ = true;
     // 采集启动重入保护：startCapture() 全程置位（Wayland 初始化/切换视频模式
     // 都在其中），期间巡检定时器与 set_resolution 必须跳过，否则会释放/重启
@@ -410,7 +423,8 @@ private:
 
     // ---- 系统操作（快捷键面板） ----
     // 执行被控端系统动作：lock/show_desktop/task_manager/logout/reboot/poweroff
-    void handleSystemAction(const QString& action, const QString& clientId);
+    void handleSystemAction(const QString& action, const QString& clientId,
+                            const QString& password = QString());
 
     // ---- 输入法切换 ----
     // ibus panel 的 hotkey grab（如 Super+space）对 XTEST 注入的合成按键不响应，

@@ -14,9 +14,22 @@ set(HOME_BASE "${PROJECT_SOURCE_DIR}/..")
 
 if(WIN32)
     # 解决 OpenSSL 1.0.2 头 X509_NAME 宏冲突：前置 include windows.h
-    add_compile_options(-include windows.h)
-    # 系统 OpenSSL 1.0.2 头（Qt 自带），不是 metaRTC 自带的 1.1.1
-    set(OPENSSL_102_INCLUDE "E:/programes/Qt/QtLegacy/Tools/mingw530_32/opt/include")
+    if(MSVC)
+        add_compile_options(/FIwindows.h)
+    else()
+        add_compile_options(-include windows.h)
+    endif()
+    # 系统 OpenSSL 1.0.2 头（Qt 自带），不是 metaRTC 自带的 1.1.1。
+    # 由当前 C 编译器推导工具链根目录，避免写死安装路径。
+    get_filename_component(_MTC_BIN "${CMAKE_C_COMPILER}" DIRECTORY)
+    get_filename_component(_MTC_ROOT "${_MTC_BIN}" DIRECTORY)
+    find_path(OPENSSL_102_INCLUDE NAMES openssl/ssl.h
+        HINTS "${_MTC_ROOT}/opt/include" "${_MTC_ROOT}/include")
+    if(NOT OPENSSL_102_INCLUDE)
+        message(FATAL_ERROR
+            "metaRTC: 未找到 OpenSSL 1.0.2 头（已查找 ${_MTC_ROOT}/opt/include、${_MTC_ROOT}/include）。\n"
+            "可用 -DOPENSSL_102_INCLUDE=<dir> 显式指定。")
+    endif()
     add_definitions(-D_WIN32_WINNT=0x0601)
     add_definitions(-D_TIMESPEC_DEFINED)
     set(_WIN_INCLUDE "${HOME_BASE}/thirdparty/include/win/include")

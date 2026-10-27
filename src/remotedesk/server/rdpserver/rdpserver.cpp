@@ -92,6 +92,8 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #include <QSslCertificate>
 #include <string>
 
+#include "systeminfo.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #include <wtsapi32.h>
@@ -118,6 +120,23 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #ifdef Q_OS_MACOS
 #include <QProcess>
 #endif
+
+// 被控端平台标识：随 screen_locked 下发给前端。前端据此决定「锁屏密码怎么送」——
+// Windows 的锁屏 UI 在 winlogon 安全桌面，浏览器逐字发 keydown 到不了那里，
+// 必须走 system_action(unlock_screen) 让 secure-input 在安全桌面上写登录框；
+// Linux 同一 X 会话，逐字 XTEST 注入即可。前端原先两种都试不出来，就是这个差别。
+static QString platformTag()
+{
+#if defined(Q_OS_WIN)
+    return QStringLiteral("windows");
+#elif defined(Q_OS_ANDROID)
+    return QStringLiteral("android");
+#elif defined(Q_OS_MACOS)
+    return QStringLiteral("macos");
+#else
+    return QStringLiteral("linux");
+#endif
+}
 
 // ==================== JpegCompressor ====================
 JpegCompressor::JpegCompressor(QObject* parent)
@@ -1032,16 +1051,9 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
             this, [this](bool locked) {
 #ifdef _WIN32
-                static bool isWinXP = false;
-                static bool xpChecked = false;
-                if (!xpChecked) {
-                    struct { ULONG s; ULONG maj; ULONG min; ULONG bld; ULONG pid; WCHAR csd[128]; } osv = { sizeof(osv) };
-                    typedef LONG (WINAPI *R)(PVOID);
-                    HMODULE hNt = GetModuleHandleW(L"ntdll.dll");
-                    if (hNt) { R r = (R)GetProcAddress(hNt, "RtlGetVersion");
-                        if (r && r(&osv) == 0 && osv.maj == 5 && (osv.min == 1 || osv.min == 2)) isWinXP = true; }
-                    xpChecked = true;
-                }
+                // XP 分支 = 非 Vista+（判定见 systeminfo.h：kernel32 导出探测，
+                // 不受"以兼容模式运行 Windows XP"标记伪造）
+                static const bool isWinXP = !isVistaPlusOs();
 #endif
                 screenLocked_ = locked;
                 // [B16] 与 startCapture 的处理器保持一致：坐标归一化基准 + 锁屏
@@ -1058,12 +1070,13 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 wsServer_->broadcastJson(QJsonObject {
                     { "type", "screen_locked" },
                     { "locked", locked },
+                    { "platform", platformTag() },
 #ifdef _WIN32
                     { "isXP", isWinXP },
 #endif
                     { "hint", locked ? QString::fromUtf8(
 #ifdef Q_OS_WIN
-                                           "锁屏界面可直接输入密码"
+                                           "Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码"
 #elif defined(Q_OS_ANDROID)
                         "Android 锁屏输入暂不支持"
 #elif defined(Q_OS_LINUX)
@@ -1144,10 +1157,22 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     lastScreenInfo_ = msg;
                 } else if (t == "screen_locked") {
                     screenLocked_ = msg["locked"].toBool();
+                    // helper 在用户会话里能看到真实输入桌面，服务进程看不到（Session 0 的
+                    // OpenInputDesktop 直接失败）；锁屏 UI 在哪个桌面只有它知道。
+                    lockedDesktop_ = screenLocked_ ? msg["desktop"].toString() : QString();
                     if (screenLocked_)
                         startSecureInputProcess();
                     else
                         stopSecureInputProcess();
+                    // 补平台标识后自行广播（随后统一 broadcastJson 会再发一次，
+                    // 这里带 return 避免前端收到两条同内容消息）。
+                    QJsonObject out = msg;
+                    out["platform"] = platformTag();
+#ifdef _WIN32
+                    out["isXP"] = !isVistaPlusOs();
+#endif
+                    wsServer_->broadcastJson(out);
+                    return;
                 } else if (t == "capture_caps") {
                     // helper 视频能力上报：仅服务端内部决策用，绝不能泄漏给浏览器
                     captureVideoCapable_ = msg["video"].toBool();
@@ -2823,9 +2848,13 @@ bool RDPServer::startCapture()
                 wsServer_->broadcastJson(QJsonObject {
                     { "type", "screen_locked" },
                     { "locked", locked },
+                    { "platform", platformTag() },
+#ifdef _WIN32
+                    { "isXP", !isVistaPlusOs() },
+#endif
                     { "hint", locked ? QString::fromUtf8(
 #ifdef Q_OS_WIN
-                                           "锁屏界面可直接输入密码"
+                                           "Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码"
 #elif defined(Q_OS_ANDROID)
                         "Android 锁屏输入暂不支持"
 #elif defined(Q_OS_LINUX)
@@ -3382,7 +3411,8 @@ static void x11ShowDesktopOnce(bool show)
 }
 #endif
 
-void RDPServer::handleSystemAction(const QString& action, const QString& clientId)
+void RDPServer::handleSystemAction(const QString& action, const QString& clientId,
+                                   const QString& password)
 {
     qInfo() << "System action requested:" << action << "from" << clientId.left(8);
 
@@ -3391,9 +3421,9 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         // Windows 免密解锁：锁屏 UI 运行在 winlogon 安全桌面，普通进程（含
         // helper，同在用户会话）的 SendInput 到不了那里，唯一通路是
         // secure-input 进程（服务端在收到 screen_locked=true 时自动拉起）。
-        // 因此本动作不转发 helper，由服务端把配置的 unlockPassword 逐字合成
-        // keydown/keyup 经 secure-input 注入，末尾补回车。
-        const QString pwd = unlockPassword_;
+        // 密码优先用前端这次输入的（前端「输入密码解锁」走的就是这条路），
+        // 没给才回退到配置里的 unlockPassword（「一键解锁」按钮）。
+        const QString pwd = password.isEmpty() ? unlockPassword_ : password;
         if (!screenLocked_) {
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", true },
@@ -3401,8 +3431,7 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         } else if (pwd.isEmpty()) {
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", false },
-                { "message", "未配置解锁密码：在 server_config.json 中设置 unlockPassword（明文，局域网自用）" } });
-        } else {
+                { "message", "未配置解锁密码：在 server_config.json 中设置 unlockPassword（明文，局域网自用）" } });        } else {
             bool justStarted = false;
             if (!wsServer_->isSecureInputConnected()) {
                 startSecureInputProcess();
@@ -3414,41 +3443,36 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
                     { "message", "安全输入通道未就绪，请稍后重试" } });
                 return;
             }
-            auto sendKey = [this](int keycode, bool isDown, const QString& code = QString(), bool isChar = false) {
-                QJsonObject k {
-                    { "type", isDown ? QLatin1String("keydown") : QLatin1String("keyup") },
-                    { "keycode", keycode }, { "code", code },
-                    { "ctrl", false }, { "alt", false }, { "shift", false } };
-                if (isChar) k["isChar"] = true;
-                wsServer_->sendToSecureInput(k);
-            };
-            // 与前端 unlockScreen 同节奏：按下 10ms、字符间隔 20ms，太密会被
-            // LogonUI 吞字。
-            const int base = justStarted ? 1500 : 0;
-            const int n = pwd.size();
-            for (int i = 0; i < n; ++i) {
-                const int cp = pwd.at(i).unicode();
-                QTimer::singleShot(base + 30 * i, this, [this, sendKey, cp]() {
-                    sendKey(cp, true, QString(), true);
-                    QTimer::singleShot(10, this, [this, sendKey, cp]() {
-                        sendKey(cp, false, QString(), true);
-                    });
-                });
-            }
-            QTimer::singleShot(base + 30 * n + 40, this, [this, sendKey]() {
-                sendKey(13, true, QStringLiteral("Enter"));
-                QTimer::singleShot(10, this, [this, sendKey]() {
-                    sendKey(13, false, QStringLiteral("Enter"));
-                });
-            });
-            // 注入完毕后验证：helper 解锁成功会广播 screen_locked=false
             const QString cid = clientId;
-            QTimer::singleShot(base + 30 * n + 5000, this, [this, cid]() {
-                if (screenLocked_) {
-                    wsServer_->sendJson(cid, QJsonObject {
-                        { "type", "unlock_result" }, { "ok", false },
-                        { "message", "密码未通过验证（unlockPassword 与 Windows 登录密码不一致？）" } });
-                }
+            auto sendUnlock = [this, pwd]() {
+                wsServer_->sendToSecureInput(QJsonObject {
+                    { "type", "unlock" }, { "password", pwd } });
+            };
+            // 解锁序列期间禁止按"桌面不符"重投 secure-input（SAS 一定会换桌面）；
+            // 30s = 本函数下面两轮重试 + 终判的最长链路，到期自动失效，不留永久门禁。
+            secureInputUnlockUntilMs_ = QDateTime::currentMSecsSinceEpoch() + 30000;
+            const int base = justStarted ? 1500 : 0;
+            // 把密码交给 secure-input 进程，由它在安全桌面上判断界面形态后自己处理：
+            //   有登录对话框 → 直接写控件 + 提交（不碰键盘，安全桌面上 SendInput 无效）；
+            //   屏保桌面 / 欢迎屏幕 → 它自己补发 SAS 再切到传统登录框。
+            // 这里不要再无条件先发 SAS：若对话框已就绪，多按一次 Ctrl+Alt+Del 会把它切走。
+            QTimer::singleShot(base, this, sendUnlock);
+            // 第二轮：极少数机器 SAS 之后还会闪一次屏保，第一轮可能落空。
+            // Win7/Win10 第一轮即成功，此轮自动跳过。
+            // 时限：XP 安全屏保要 SAS→桌面切换(4s)→登录框→写控件，整链实测 8~12s，
+            // 所以重试放到 8s、终判放到再 15s，否则会在真正解锁前一秒误报「密码不对」。
+            QTimer::singleShot(base + 8000, this, [this, cid, sendUnlock]() {
+                if (!screenLocked_)
+                    return;
+                qInfo() << "Unlock: still locked after the first attempt - retrying";
+                sendUnlock();
+                QTimer::singleShot(15000, this, [this, cid]() {
+                    if (screenLocked_) {
+                        wsServer_->sendJson(cid, QJsonObject {
+                            { "type", "unlock_result" }, { "ok", false },
+                            { "message", "密码未通过验证（unlockPassword 与 Windows 登录密码不一致？）" } });
+                    }
+                });
             });
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", true }, { "pending", true },
@@ -3929,6 +3953,14 @@ void RDPServer::onClientConnected(const QString& clientId)
         QJsonObject lock;
         lock["type"] = "screen_locked";
         lock["locked"] = screenLocked_;
+        // 平台标识：前端据此决定锁屏密码是「逐字注入」还是「交给服务端写安全桌面」。
+        // 缺了它前端只能瞎猜（旧实现两种都试不出来，表现为输入密码解不开锁）。
+        lock["platform"] = platformTag();
+#ifdef _WIN32
+        lock["isXP"] = !isVistaPlusOs();
+        if (screenLocked_)
+            lock["hint"] = QStringLiteral("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码");
+#endif
         wsServer_->sendJson(clientId, lock);
     }
 
@@ -4141,8 +4173,11 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     }
 
     if (type == "system_action") {
-        // 系统操作（快捷键面板）：由服务端直接执行，不转发给 helper
-        handleSystemAction(input["action"].toString(), clientId);
+        // 系统操作（快捷键面板）：由服务端直接执行，不转发给 helper。
+        // password 只有「解锁屏幕」用得上：Windows 侧必须交给 secure-input 去写
+        // 安全桌面上的登录框（浏览器逐字发 keydown 到不了 winlogon 桌面）。
+        handleSystemAction(input["action"].toString(), clientId,
+                           input["password"].toString());
         return;
     }
 

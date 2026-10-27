@@ -1,10 +1,50 @@
 #include "rdpserver.h"
 #include "websocketserver.h"
 
+#include <QDateTime>
 #include <QTimer>
 #include <windows.h>
 #include <wtsapi32.h>
 #include <string>
+
+namespace {
+
+// 服务进程默认待在 SCM 给它的窗口站里，那里的 OpenInputDesktop 直接失败
+// （实测 XP/Win7 都返回错误 1），于是永远只能猜 "Winlogon" —— XP 的登录 UI 不在
+// 那个桌面上，注入的密码就石沉大海。先切到 WinSta0 再问一次输入桌面，实测
+// （deskprobe 在同一进程上下文里）能拿到真实名字，如 XP 的 "Screen-saver"/"Welcome"。
+// 失败返回空串。
+QString queryInputDesktopName()
+{
+    static HWINSTA station = NULL;
+    if (!station) {
+        station = OpenWindowStationW(L"winsta0", FALSE,
+            WINSTA_ENUMDESKTOPS | WINSTA_READATTRIBUTES | WINSTA_WRITEATTRIBUTES
+                | DELETE | READ_CONTROL);
+        if (!station) {
+            qWarning() << "OpenWindowStation(winsta0) failed:" << GetLastError();
+            return QString();
+        }
+        if (!SetProcessWindowStation(station)) {
+            qWarning() << "SetProcessWindowStation(winsta0) failed:" << GetLastError();
+            CloseWindowStation(station);
+            station = NULL;
+            return QString();
+        }
+    }
+    HDESK hInput = OpenInputDesktop(0, FALSE, GENERIC_READ);
+    if (!hInput)
+        return QString();
+    wchar_t name[128] = {};
+    DWORD len = 0;
+    QString out;
+    if (GetUserObjectInformationW(hInput, UOI_NAME, name, sizeof(name), &len) && name[0])
+        out = QString::fromWCharArray(name);
+    CloseDesktop(hInput);
+    return out;
+}
+
+} // namespace
 
 void RDPServer::startSecureInputProcess()
 {
@@ -13,16 +53,33 @@ void RDPServer::startSecureInputProcess()
         // 5s 超时会终止它）。所以这里先做一次健康判定：进程活着**且**已连上
         // /secure-input 才算健康；否则复位标志走重新启动流程。不修的话，锁屏
         // 输入（登录密码）会一直失效到服务重启为止。
+        //
+        // 还要求"进程所投的桌面 == 当前输入桌面"：登录 UI 会在锁屏期间换桌面
+        // （XP 屏保退出后落到登录桌面），旧桌面上活得好好的进程只会把键鼠打进
+        // 没人看的地方，必须重投。
+        //
+        // 但解锁序列进行中不能按桌面重投：解锁本身就要发 SAS，SAS 把输入桌面从
+        // Screen-saver 切到 Winlogon，helper 随后（实测 0.9s 内）补报一次
+        // screen_locked=true，于是这里判定"桌面不符"、把正在写密码的进程杀掉 ——
+        // 第一次尝试全废，只能等服务端 8s 后的第二轮，XP 解锁从 ~2s 拖到 ~9s。
+        // 进程自己每轮都重新附着当前输入桌面（attachInputDesktop），所以序列不受伤。
+        const QString wantDesktop = queryInputDesktopName();
+        const bool unlockInFlight
+            = QDateTime::currentMSecsSinceEpoch() < secureInputUnlockUntilMs_;
         bool alive = false;
         HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, secureInputPid_);
         if (hProc) {
             alive = (WaitForSingleObject(hProc, 0) == WAIT_TIMEOUT);
             CloseHandle(hProc);
         }
-        if (alive && wsServer_ && wsServer_->isSecureInputConnected())
+        const bool desktopOk = wantDesktop.isEmpty()
+            || secureInputDesktop_.compare(wantDesktop, Qt::CaseInsensitive) == 0
+            || unlockInFlight;
+        if (alive && wsServer_ && wsServer_->isSecureInputConnected() && desktopOk)
             return;
         qWarning() << "Secure input process unhealthy (alive =" << alive
-                   << ") - restarting";
+                   << "desktop =" << secureInputDesktop_ << "want =" << wantDesktop
+                   << "unlockInFlight =" << unlockInFlight << ") - restarting";
         stopSecureInputProcess();
     }
 
@@ -54,7 +111,34 @@ void RDPServer::startSecureInputProcess()
         + (sslConfiguration_ ? L" --ssl" : L"");
 
     STARTUPINFOW si = { sizeof(si) };
-    si.lpDesktop = const_cast<wchar_t*>(L"winsta0\\winlogon");
+    // 投放到**登录 UI 真正所在的输入桌面**，而不是写死的 winsta0\winlogon。
+    // SendInput 只能到达调用线程所附着的桌面，投错桌面 = 键鼠打进一个没人看的桌面。
+    // 实测 XP 主机：登录界面在 Welcome/Security（该机器上两者甚至不存在），锁屏时
+    // OpenInputDesktop 给的是 "Screen-saver"/"Welcome"，而 "Winlogon" 桌面虽然能打开
+    // 却不是输入桌面 —— 旧代码在这里能成功创建进程、能连上 WS、注入却永远石沉大海，
+    // 表现就是"前端一键解锁点了没反应"。Vista+ 锁屏时输入桌面正是 Winlogon，
+    // 所以按输入桌面取名在两个世代上都自动正确。
+    //
+    // 名字来源按可信度排序：自己切到 WinSta0 问到的输入桌面 > helper 上报的锁屏桌面
+    // （helper 在用户会话里，但桌面切换瞬间它也可能拿不到）> winsta0\Winlogon 兜底。
+    wchar_t desktop[] = L"winsta0\\Winlogon";
+    QString desktopName = queryInputDesktopName();
+    if (desktopName.isEmpty())
+        desktopName = lockedDesktop_;
+    if (desktopName.isEmpty())
+        desktopName = QStringLiteral("Winlogon");
+    {
+        // "winsta0\" 占 8 个 wchar，后面拼桌面名；桌面名是内核对象名，只可能是
+        // 字母/数字/连字符，超长直接截断到缓冲区末尾。
+        const QString full = QStringLiteral("winsta0\\") + desktopName;
+        const std::wstring w = full.toStdWString();
+        const size_t n = qMin<size_t>(w.size(), sizeof(desktop) / sizeof(wchar_t) - 1);
+        w.copy(desktop, n);
+        desktop[n] = L'\0';
+    }
+    secureInputDesktop_ = desktopName;
+    si.lpDesktop = desktop;
+    qInfo() << "Secure input process will attach to desktop" << desktopName;
     PROCESS_INFORMATION pi = {};
 
     // Load dynamically: MinGW 5.3.0 import lib may map to kernel32.dll
@@ -112,6 +196,7 @@ void RDPServer::stopSecureInputProcess()
     // 作废在途的 5s 超时定时器（它只持有 this 与代次，无法单独取消）
     ++secureInputGen_;
     secureInputRunning_ = false;
+    secureInputDesktop_.clear();
 
     if (wsServer_)
         wsServer_->closeSecureInput();

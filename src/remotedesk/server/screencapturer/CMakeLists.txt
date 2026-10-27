@@ -1,5 +1,5 @@
 set(SCREEN_CAPTURER ScreenCapturer)
-set(HEADERS screencapturer.h)
+set(HEADERS screencapturer.h dxgi1_2_compat.h)
 set(SOURCES
     screencapturer.cpp
     $<$<PLATFORM_ID:Windows>:screencapturer_win.cpp>

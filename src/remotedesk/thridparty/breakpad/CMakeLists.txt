@@ -127,14 +127,24 @@ if(UNIX)
     # pri: unix:QMAKE_CXXFLAGS += -g
     # pri: unix:QMAKE_CXXFLAGS += -Wa,--noexecstack
     # pri: unix:QMAKE_CFLAGS += -Wa,--noexecstack
-    target_compile_options(radiometer_breakpad PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:-g>
-        $<$<COMPILE_LANGUAGE:CXX>:-Wa,--noexecstack>
-        $<$<COMPILE_LANGUAGE:C>:-Wa,--noexecstack>
-    )
+    # -Wa,* 是 GCC/Clang 专有汇编器透传参数，MSVC 下无效；-Wl,-z,noexecstack 为
+    # GNU ld/ELF 专有，macOS(ld64) 不认。
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(radiometer_breakpad PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-g>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wa,--noexecstack>
+            $<$<COMPILE_LANGUAGE:C>:-Wa,--noexecstack>
+        )
+    else()
+        target_compile_options(radiometer_breakpad PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-g>
+        )
+    endif()
 
     # pri: unix:QMAKE_LFLAGS += -z noexecstack
     # (静态库本身不链接, 经 INTERFACE 传播到最终可执行文件链接;
     #  CMake 3.6 兼容: 不用 target_link_options/SHELL: 前缀)
-    target_link_libraries(radiometer_breakpad INTERFACE "-Wl,-z,noexecstack")
+    if(NOT APPLE AND NOT MSVC)
+        target_link_libraries(radiometer_breakpad INTERFACE "-Wl,-z,noexecstack")
+    endif()
 endif()

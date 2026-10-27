@@ -767,7 +767,11 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     startTime_ = encoderEpochMs();
     encoderThread_.start(QThread::HighPriority);
     qInfo() << codecName_ << "encoder initialized" << encW << "x" << encH
-            << "@" << fps << "fps (sws " << srcW << "x" << srcH << " -> " << encW << "x" << encH
+            << "@" << fps << "fps"
+            // conv=native 时色彩转换不经过 sws（ARM 标量 / x86 AVX2），日志要说实话，
+            // 否则排查"某台机器为什么慢/崩"时会被 (sws ...) 这一段误导。
+            << (convNative_ ? "conv native" : "sws")
+            << srcW << "x" << srcH << " -> " << encW << "x" << encH
             << ", bands" << swsBands_ << (swsBandedScale_ ? " scale-banded" : "")
             << (swsHorizontal_ ? " horizontal" : "") << ")";
     emit encoderReady();

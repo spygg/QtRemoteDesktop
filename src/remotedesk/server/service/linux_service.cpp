@@ -1146,10 +1146,15 @@ static bool isDesktopComponent(const char* comm)
     if (!comm || !comm[0]) return false;
     for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i) {
         if (strcmp(comm, kNames[i]) == 0) return true;
-        // comm 被内核截断到 15 字符：对长名单名允许按 comm 长度做前缀匹配
-        // （如 matchbox-window-manager 截断为 matchbox-window）
-        if (strlen(kNames[i]) > 8 && strlen(comm) >= 8 &&
-            strncmp(comm, kNames[i], strlen(comm)) == 0) return true;
+        // comm 被内核截断到 15 字符（matchbox-window-manager 截断为
+        // matchbox-window），或反过来进程名比名单项更长（gnome-session-binary
+        // 截断为 "gnome-session-b"，名单里是 "gnome-session"）：两个方向都要
+        // 判前缀，否则真实会话的桌面分会被少算一截。
+        const size_t nlen = strlen(kNames[i]);
+        const size_t clen = strlen(comm);
+        if (nlen >= 8 && clen >= 8 &&
+            (strncmp(comm, kNames[i], clen) == 0 ||
+             strncmp(comm, kNames[i], nlen) == 0)) return true;
     }
     return false;
 }
@@ -1178,6 +1183,103 @@ static int scoreCandidate(const char* display, const char* xauth, int uid)
         if (strstr(xauth, "/run/user/42")) score -= 30;
     }
     return score;
+}
+
+// ── logind：物理显示器上正在显示的是哪块 display ──
+// 读取 systemd-logind 的 KEY=VALUE 状态文件（如 /run/systemd/sessions/3）。
+// 文件头写着"private data, do not parse"，但字段名多年稳定，而且这里没有
+// 更轻的替代：loginctl 每次要 fork 进程，这条探测链每 3 秒跑一遍。
+static bool readLogindValue(const char* path, const char* key, char* out, size_t outSize)
+{
+    if (!path || !key || !out || outSize == 0) return false;
+    out[0] = '\0';
+    FILE* f = fopen(path, "r");
+    if (!f) return false;
+    char line[512];
+    const size_t klen = strlen(key);
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, key, klen) != 0 || line[klen] != '=')
+            continue;
+        char* v = line + klen + 1;
+        size_t n = strlen(v);
+        while (n > 0 && (v[n - 1] == '\n' || v[n - 1] == '\r')) v[--n] = '\0';
+        snprintf(out, outSize, "%s", v);
+        break;
+    }
+    fclose(f);
+    return out[0] != '\0';
+}
+
+// 返回 seat0 上当前活动本地 X11 会话的 DISPLAY（形如 ":0"），以及会话 uid/用户名。
+//
+// 只靠 /proc 扫描选 display 有一个致命歧义：同一台机器上可能还跑着**别的**
+// 桌面。典型是 vncserver 给另一个用户开的 :1（Xvnc）：它的进程环境、uid、
+// 桌面组件数量与物理会话完全一样，得分打平后由 /proc 的枚举顺序（PID 升序）
+// 决定胜负 —— 实测远程画面变成了另一个用户的 VNC 桌面（1024x768），与物理
+// 显示器上的 GNOME 会话（1920x1080）完全对不上。
+// logind 记录了 seat0 的 ACTIVE 会话及其 DISPLAY/TYPE/REMOTE/UID，这是
+// "物理屏现在显示哪块 display"的权威答案，优先级必须高于所有启发式评分。
+// 只处理本地 X11：Wayland 走 PipeWire 采集；远程会话（xrdp/VNC）不是物理屏。
+static bool detectActiveSeatDisplay(char* out, size_t outSize, int* outUid,
+                                    char* outUser, size_t userSize)
+{
+    if (!out || outSize == 0) return false;
+    out[0] = '\0';
+    if (outUid) *outUid = -1;
+    if (outUser && userSize) outUser[0] = '\0';
+
+    char sessionId[64] = {};
+    // seat0 是接本地键盘/显示器的那个；没有 seat0（少见）时再扫一遍所有 seat。
+    if (!readLogindValue("/run/systemd/seats/seat0", "ACTIVE", sessionId, sizeof(sessionId))) {
+        DIR* seats = opendir("/run/systemd/seats");
+        if (!seats) return false;
+        struct dirent* e;
+        while ((e = readdir(seats)) != nullptr && !sessionId[0]) {
+            if (e->d_name[0] == '.') continue;
+            char path[256];
+            // 会话名限长 64：不写截断宽度，-Wformat-truncation 会按 d_name 的
+            // 255 字节上限报"可能溢出"的假告警。
+            snprintf(path, sizeof(path), "/run/systemd/seats/%.64s", e->d_name);
+            readLogindValue(path, "ACTIVE", sessionId, sizeof(sessionId));
+        }
+        closedir(seats);
+    }
+    if (!sessionId[0]) return false;
+
+    char sessPath[320];
+    snprintf(sessPath, sizeof(sessPath), "/run/systemd/sessions/%s", sessionId);
+
+    char type[32] = {};
+    readLogindValue(sessPath, "TYPE", type, sizeof(type));
+    if (strcmp(type, "x11") != 0) return false;
+
+    char remote[8] = {};
+    // 只认明确标为"本地"的写法：不同 systemd 版本可能是 0 / no / false，也可能
+    // 根本不写这个键（读不到 = 不过滤）。把任何非本地值当远程会话排除掉，
+    // 才能让 xrdp/VNC 这类会话永远抢不到物理屏的优先权。
+    if (readLogindValue(sessPath, "REMOTE", remote, sizeof(remote))
+        && strcmp(remote, "0") != 0 && strcmp(remote, "no") != 0
+        && strcmp(remote, "false") != 0)
+        return false;
+
+    char state[32] = {};
+    readLogindValue(sessPath, "STATE", state, sizeof(state));
+    if (state[0] && strcmp(state, "active") != 0) return false;
+
+    char display[64] = {};
+    if (!readLogindValue(sessPath, "DISPLAY", display, sizeof(display))) return false;
+    if (display[0] != ':') return false;   // 只认本地 display
+    if (isBadDisplay(display)) return false;   // 已知"能连但抓不了"（如 WSLg）
+    if (!displayReachable(display)) return false;
+
+    char uidStr[32] = {};
+    if (readLogindValue(sessPath, "UID", uidStr, sizeof(uidStr)) && outUid)
+        *outUid = atoi(uidStr);
+    if (outUser && userSize)
+        readLogindValue(sessPath, "USER", outUser, userSize);
+
+    snprintf(out, outSize, "%s", display);
+    return true;
 }
 
 // Find DISPLAY and XAUTHORITY from any running process.
@@ -1347,6 +1449,68 @@ static bool detectUserX11Env()
         }
     }
 
+    // 物理屏优先：seat0 活动会话的 display 拿到压倒性分值。
+    // 必须在可达性降权之后执行 —— 它自己已经确认过 display 可达。
+    // 没有这一步时，同一台机器上的另一个桌面（vncserver 的 :1）与物理会话
+    // 得分完全相同，胜负取决于 /proc 的 PID 枚举顺序，重启一次就可能换一块屏。
+    {
+        char seatDpy[64] = {};
+        int seatUid = -1;
+        char seatUser[64] = {};
+        if (detectActiveSeatDisplay(seatDpy, sizeof(seatDpy), &seatUid,
+                                    seatUser, sizeof(seatUser))) {
+            int seatIdx = -1;
+            for (int i = 0; i < entryCount; ++i) {
+                if (strcmp(entries[i].display, seatDpy) == 0) { seatIdx = i; break; }
+            }
+            if (seatIdx < 0 && entryCount < 32) {
+                // /proc 里没有进程带这个 DISPLAY（hidepid、pid namespace、会话
+                // 刚起来）—— logind 说它在，就补一个候选。
+                seatIdx = entryCount++;
+                snprintf(entries[seatIdx].display, sizeof(entries[seatIdx].display),
+                         "%s", seatDpy);
+                entries[seatIdx].uid = seatUid;
+                // 新槽位的 score 还是初始化哨兵 -1000000，不归零的话 +10000 后
+                // 仍是 -990000，遇到任何真实候选都会输 —— 这条"补候选"路径
+                // 就只剩"全场没有其它候选"时能生效了。
+                entries[seatIdx].score = 0;
+            }
+            if (seatIdx >= 0) {
+                entries[seatIdx].confirmed = true;
+                entries[seatIdx].reachable = true;
+                entries[seatIdx].score += 10000;   // 高于任何启发式组合
+                if (entries[seatIdx].uid < 0) entries[seatIdx].uid = seatUid;
+                // 会话进程环境里没带 XAUTHORITY（LightDM 只用 -auth 起 Xorg 时
+                // 很常见）时，按 logind 的 uid/user 推导 cookie 文件。
+                if (!xauthHasContent(entries[seatIdx].xauth)) {
+                    char path[512];
+                    if (seatUid >= 1000) {
+                        struct passwd* pw = getpwuid(seatUid);
+                        if (pw && pw->pw_dir && pw->pw_dir[0]) {
+                            snprintf(path, sizeof(path), "%s/.Xauthority", pw->pw_dir);
+                            if (xauthHasContent(path))
+                                snprintf(entries[seatIdx].xauth,
+                                         sizeof(entries[seatIdx].xauth), "%s", path);
+                        }
+                    }
+                    if (!xauthHasContent(entries[seatIdx].xauth) && seatUser[0]) {
+                        snprintf(path, sizeof(path), "/run/lightdm/%s/xauthority", seatUser);
+                        if (xauthHasContent(path))
+                            snprintf(entries[seatIdx].xauth,
+                                     sizeof(entries[seatIdx].xauth), "%s", path);
+                    }
+                }
+                static QByteArray s_lastSeatDpy;
+                if (s_lastSeatDpy != QByteArray(seatDpy)) {
+                    s_lastSeatDpy = seatDpy;
+                    qInfo() << "detectUserX11Env: physical seat0 display =" << seatDpy
+                            << "user =" << (seatUser[0] ? seatUser : "(unknown)")
+                            << "- preferred over other X sessions";
+                }
+            }
+        }
+    }
+
     // Pick the display with the highest score, preferring confirmed (live)
     // sessions over the unconfirmed current-display baseline. This way a
     // baseline whose display has died cannot win by its placeholder score 0.
@@ -1355,12 +1519,21 @@ static bool detectUserX11Env()
     // 不可达的候选**一律不选中**：只降权不够 —— 当它是唯一 confirmed 候选时
     // （xrdp 会话残留的 :10.0、X server 已死的 :0）仍会以 -50 分胜出，然后把
     // 一个能用的 DISPLAY 顶掉，下一次调用再退回来，表现为每 3 秒抖一次。
+    // 完全平分时按 display 号取小者：/proc 的枚举顺序是 PID 升序，把它当兜底
+    // 等于让"选哪块屏"取决于谁的会话先启动（实测 VNC 的 :1 PID 比物理 :0 小）。
+    auto displayNum = [](const char* dpy) -> int {
+        const char* c = (dpy && dpy[0] == ':') ? strchr(dpy, ':') : nullptr;
+        return c ? atoi(c + 1) : (1 << 30);
+    };
     int bestIdx = -1;
     for (int i = 0; i < entryCount; ++i) {
         if (!entries[i].confirmed || !entries[i].reachable) continue;
-        if (bestIdx < 0 ||
-            entries[i].score + entries[i].desktopScore >
-                entries[bestIdx].score + entries[bestIdx].desktopScore)
+        if (bestIdx < 0) { bestIdx = i; continue; }
+        const int curTotal = entries[i].score + entries[i].desktopScore;
+        const int bestTotal = entries[bestIdx].score + entries[bestIdx].desktopScore;
+        if (curTotal > bestTotal ||
+            (curTotal == bestTotal &&
+             displayNum(entries[i].display) < displayNum(entries[bestIdx].display)))
             bestIdx = i;
     }
     // 没有任何活进程使用任何 display（例如纯无头），仍保留当前已选中的 display。

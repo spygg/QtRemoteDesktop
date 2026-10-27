@@ -14,6 +14,34 @@
 
 #include <VersionHelpers.h>
 
+#if defined(QTRD_DXGI_COMPAT)
+// 老 mingw-w64（Qt 5.7 的 mingw530）头文件缺 IDXGIOutput1/IDXGIOutputDuplication，
+// 由本仓库补齐声明（vtable 顺序与 Windows SDK 一致）。
+#include "dxgi1_2_compat.h"
+#endif
+
+// D3D11CreateDevice 动态加载。静态导入 d3d11.dll 会让 Windows XP 在**加载 exe**
+// 阶段就失败（XP 没有 d3d11.dll；DXGI 本身也只从 Win8 起可用，XP 走 GDI），
+// 这曾把「XP 能跑」变成「XP 双击无反应」。其余 D3D/DXGI 调用全是 COM 虚表调用，
+// 不产生导入符号，所以只需动态取这一个入口。
+typedef HRESULT (WINAPI *PfnD3D11CreateDevice)(
+    IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL*,
+    UINT, UINT, ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**);
+
+static PfnD3D11CreateDevice winD3D11CreateDevice()
+{
+    static PfnD3D11CreateDevice fn = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        // 故意不 FreeLibrary：模块随进程存活，重复调用也安全。
+        if (HMODULE mod = LoadLibraryW(L"d3d11.dll"))
+            fn = reinterpret_cast<PfnD3D11CreateDevice>(
+                reinterpret_cast<void*>(GetProcAddress(mod, "D3D11CreateDevice")));
+    }
+    return fn;
+}
+
 // ======================= [WIN-DIAG] 采集循环诊断 =======================
 // 背景（2026-10-10 218 Win7 实测）：视频模式长期只有 ~2.7fps，且**与画面变化
 // 快慢完全无关**——用滚轮连续滚动页面 119 次/4s（客户端哈希证实远端画面确实在
@@ -320,8 +348,12 @@ private:
     int capX_ = 0, capY_ = 0, capW_ = 0, capH_ = 0; // 捕获区域（虚拟屏坐标）
 };
 
-#if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+#ifdef QTRD_HAVE_DXGI_DUP
 // 1. Windows 8+ 使用 DXGI 高性能捕获
+// 启用条件由 CMake 探测（src/remotedesk/CMakeLists.txt）：工具链的 dxgi1_2.h
+// 含 IDXGIOutput1/DuplicateOutput 时才定义 QTRD_HAVE_DXGI_DUP（MSVC、MinGW-w64 5+），
+// 老 mingw-w64 3.x（Qt 5.7 的 mingw530）头文件缺接口，保持 GDI。
+// 运行期仍由 IsWindows8OrGreater() 与初始化/连续失败回退兜底。
 class DXGICapturer : public PlatformCapturer {
     ID3D11Device* device_ = nullptr;
     ID3D11DeviceContext* context_ = nullptr;
@@ -333,17 +365,24 @@ class DXGICapturer : public PlatformCapturer {
     int outputIndex_ = 0; // 捕获的输出序号（EnumOutputs 顺序，通常 0 = 主输出）
 
     UINT64 lastFrameNumber_ = 0; // 添加帧序号追踪
-    LARGE_INTEGER lastTimestamp_ = { 0, 0 };
+    LARGE_INTEGER lastTimestamp_; // 构造函数里清零（C++98 下不能对 LARGE_INTEGER 用 {0,0}）
     ID3D11Texture2D* stagingTexture_ = nullptr;
     QImage lastFrame_;        // 最近一次成功捕获的帧，供强制帧复用
     bool forceNext_ = false;  // 下次 captureFrame 直接返回 lastFrame_
+    bool unsupportedFormat_ = false; // 帧纹理非 BGRA8（HDR FP16 等），需回退 GDI
 
 public:
-    explicit DXGICapturer(int outputIndex = 0) : outputIndex_(outputIndex) {}
+    explicit DXGICapturer(int outputIndex = 0) : outputIndex_(outputIndex)
+    {
+        lastTimestamp_.QuadPart = 0;
+    }
 
     // 请求下一帧强制产出：静止桌面下 AcquireNextFrame 只会超时，上层（新客户端
     // 接入 / 关键帧喂帧泵）要求"立刻给一帧"时用它复用上一帧缓存。
-    void requestForceFrame() { forceNext_ = true; }
+    // 复用基类 requestForceFrame()（dxgiCapturer_ 是 PlatformCapturer*）。
+    void requestForceFrame() override { forceNext_ = true; }
+    // 帧纹理格式不受支持（见 captureFrame）：上层据此立即切 GDI，不等失败计数。
+    bool frameFormatUnsupported() const override { return unsupportedFormat_; }
     // 实时捕获尺寸（外部改分辨率后由 captureFrame 按帧纹理回写），
     // 供 ScreenCapturer::width()/height() 与编码器保持一致
     int width() const override { return width_; }
@@ -351,9 +390,14 @@ public:
     bool initialize() override
     {
 
-        // 创建设备和上下文（与之前相同）
+        // 创建设备和上下文（通过动态取到的入口，避免静态导入 d3d11.dll 卡死 XP）
+        PfnD3D11CreateDevice createDevice = winD3D11CreateDevice();
+        if (!createDevice) {
+            qWarning() << "DXGI: d3d11.dll / D3D11CreateDevice unavailable - GDI capture only";
+            return false;
+        }
         D3D_FEATURE_LEVEL featureLevel;
-        HRESULT hr = D3D11CreateDevice(
+        HRESULT hr = createDevice(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             nullptr, 0, D3D11_SDK_VERSION,
@@ -408,6 +452,19 @@ public:
         // 可选：检查桌面格式
         DXGI_OUTDUPL_DESC duplDesc;
         deskDupl_->GetDesc(&duplDesc);
+        qInfo() << "DXGI duplication:" << duplDesc.ModeDesc.Width << "x" << duplDesc.ModeDesc.Height
+                << "format" << int(duplDesc.ModeDesc.Format) << "rotation" << int(duplDesc.Rotation);
+
+        // 旋转输出未做方向修正，直接交给 GDI（DWM 已转成正常方向）。
+        // 注意：格式不能看 duplDesc.ModeDesc.Format——那是**显示模式**（HDR 屏上
+        // 恒为 R16G16B16A16_FLOAT），而复制纹理实际可能是 BGRA8（本机 Win11 HDR
+        // 实测 ModeDesc=10 / 帧纹理=87）。实际格式在 captureFrame 里按帧纹理判断。
+        if (duplDesc.Rotation != DXGI_MODE_ROTATION_IDENTITY
+            && duplDesc.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED) {
+            qWarning() << "DXGI: rotated output" << int(duplDesc.Rotation)
+                       << "- falling back to GDI";
+            return false;
+        }
 
         // 检查是否支持硬件保护内容（Win11 常见）
         if (duplDesc.DesktopImageInSystemMemory) {
@@ -490,6 +547,20 @@ public:
         // 创建或复用 staging 纹理
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
+
+        // 本实现按 BGRA 直通（QImage::Format_RGB32）。HDR 桌面在部分驱动上直接给
+        // R16G16B16A16_FLOAT 帧（实测该格式下取回的数据全 0），无法按 BGRA 解释；
+        // 由上层切 GDI（DWM 已转成 sRGB）。
+        if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+            && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
+            if (!unsupportedFormat_)
+                qWarning() << "DXGI: frame texture format" << int(desc.Format)
+                           << "is not BGRA8 - falling back to GDI";
+            unsupportedFormat_ = true;
+            texture->Release();
+            deskDupl_->ReleaseFrame();
+            return false;
+        }
 
         if (stagingTexture_) {
             D3D11_TEXTURE2D_DESC existingDesc;
@@ -644,18 +715,37 @@ void ScreenCapturer::cleanupPlatform()
     delete gdiCapturer_;
     gdiCapturer_ = nullptr;
     useGDI_ = false;
-#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+#ifdef QTRD_HAVE_DXGI_DUP
     delete dxgiCapturer_;
     dxgiCapturer_ = nullptr;
     useDXGI_ = false;
 #endif
 }
 
+bool ScreenCapturer::switchToGdiCapture()
+{
+    if (useGDI_ && gdiCapturer_)
+        return true;
+    if (winCurrentIndex_ < 0 || winCurrentIndex_ >= winOutputs_.size())
+        return false;
+    const WinOutput& o = winOutputs_[winCurrentIndex_];
+    gdiCapturer_ = new GdiCapturer(o.x, o.y, o.w, o.h);
+    if (!gdiCapturer_->initialize()) {
+        delete gdiCapturer_;
+        gdiCapturer_ = nullptr;
+        return false;
+    }
+    useGDI_ = true;
+    qInfo() << "GDI capture created at runtime as fallback, region"
+            << o.w << "x" << o.h << "@" << o.x << "," << o.y;
+    return true;
+}
+
 void ScreenCapturer::captureFrame()
 {
     QImage frame;
 
-#if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+#ifdef QTRD_HAVE_DXGI_DUP
     if (useDXGI_ && dxgiCapturer_) {
         bool updated = false;
         // 强制帧（resume 预热 / 新客户端接入 / request_keyframe 喂帧泵）：DXGI 在
@@ -663,13 +753,55 @@ void ScreenCapturer::captureFrame()
         // forceFrameCount_ 在 DXGI 路径上完全失效（新客户端一直黑屏）。
         if (forceFrameCount_ > 0)
             dxgiCapturer_->requestForceFrame();
-        if (dxgiCapturer_->captureFrame(frame, &updated)) {
+        const bool dxgiOk = dxgiCapturer_->captureFrame(frame, &updated);
+        // 帧纹理不是 BGRA8（HDR FP16 等）：本实现无法直通，立即切 GDI。
+        // 不能只靠 dxgiRetryCount_ 累计——那会在切换前发出若干黑帧，且触发误报锁屏。
+        if (dxgiCapturer_->frameFormatUnsupported()) {
+            useDXGI_ = false;
+            delete dxgiCapturer_;
+            dxgiCapturer_ = nullptr;
+            switchToGdiCapture();
+            return;
+        }
+        if (dxgiOk) {
             dxgiRetryCount_ = 0;
             if (screenLocked_) {
                 screenLocked_ = false;
                 emit screenLocked(false);
             }
             if (updated) {
+                // 黑帧兜底：个别驱动 DuplicateOutput 成功、设备无错误，但帧内容恒为 0
+                // （本机 Win11 HDR 上以 FP16 纹理出现过，现已由上方格式检查拦住；
+                // 这里兜其他驱动怪癖）。连续黑帧时用同区域 GDI 交叉验证：GDI 有内容
+                // 说明是复制通道不可用，切 GDI 继续出画面；GDI 也黑说明桌面本来就黑
+                // （锁屏/全屏黑），保持 DXGI 并进入冷却，避免反复创建探测实例。
+                if (isFrameBlack(frame)) {
+                    if (dxgiBlackProbeCooldown_ > 0) {
+                        --dxgiBlackProbeCooldown_;
+                    } else if (++dxgiBlackCount_ >= 10) {
+                        dxgiBlackCount_ = 0;
+                        dxgiBlackProbeCooldown_ = 600;
+                        bool gdiHasContent = false;
+                        if (!useGDI_ && winCurrentIndex_ >= 0
+                            && winCurrentIndex_ < winOutputs_.size()) {
+                            const WinOutput& o = winOutputs_[winCurrentIndex_];
+                            GdiCapturer probe(o.x, o.y, o.w, o.h);
+                            QImage gdiFrame;
+                            if (probe.initialize() && probe.captureFrame(gdiFrame))
+                                gdiHasContent = !isFrameBlack(gdiFrame);
+                        }
+                        if (gdiHasContent && switchToGdiCapture()) {
+                            qWarning() << "DXGI only delivers black frames while GDI has content"
+                                       << "- switching to GDI capture";
+                            useDXGI_ = false;
+                            delete dxgiCapturer_;
+                            dxgiCapturer_ = nullptr;
+                            return;
+                        }
+                    }
+                } else {
+                    dxgiBlackCount_ = 0;
+                }
                 // [H21] 有新帧必须复位 idle 计数并退出降频，否则静止 2s 进入
                 // 4fps 节流后，画面再变化仍恒为 4fps（GDI/X11 路径均正确复位）
                 idleCount_ = 0;
@@ -687,7 +819,7 @@ void ScreenCapturer::captureFrame()
                 // 无新帧（DXGI 无桌面更新）：同样递增 idle 计数并降频，
                 // 避免静止时 capture timer 保持全帧率空转消耗 CPU。
                 idleCount_++;
-                if (idleCount_ > static_cast<int>(fps_ * 2))
+                if (idleCount_ > idleThresholdFrames())
                     enterIdleThrottle(); // idle 静止 4fps（原 1s，交互反馈太慢）
             }
             return;
@@ -702,19 +834,7 @@ void ScreenCapturer::captureFrame()
             // 会落到 screen_->grabWindow(0)（整主屏抓取，区域/缩放与选中输出不一致）。
             delete dxgiCapturer_;
             dxgiCapturer_ = nullptr;
-            if (!useGDI_ && !gdiCapturer_
-                && winCurrentIndex_ >= 0 && winCurrentIndex_ < winOutputs_.size()) {
-                const WinOutput& o = winOutputs_[winCurrentIndex_];
-                gdiCapturer_ = new GdiCapturer(o.x, o.y, o.w, o.h);
-                if (gdiCapturer_->initialize()) {
-                    useGDI_ = true;
-                    qInfo() << "GDI capture created at runtime as DXGI fallback, region"
-                            << o.w << "x" << o.h << "@" << o.x << "," << o.y;
-                } else {
-                    delete gdiCapturer_;
-                    gdiCapturer_ = nullptr;
-                }
-            }
+            switchToGdiCapture();
         }
 
         if (dxgiRetryCount_ >= 5 && !screenLocked_) {
@@ -726,6 +846,7 @@ void ScreenCapturer::captureFrame()
 #endif
 
     // GDI / 回退路径: 捕获安全桌面时可能返回黑帧, 但仍发到前端保持 canvas 尺寸正确
+    const bool gdiAttempted = useGDI_ && gdiCapturer_;
     bool gdiOk = false;
     if (useGDI_ && gdiCapturer_) {
         // [WIN-DIAG] 计时：gap=相邻两次进入本函数的间隔，cap=本次采集调用耗时
@@ -763,6 +884,14 @@ void ScreenCapturer::captureFrame()
             }
             // 自适应判定读屏是否异常慢（VMware SVGA + DWM 合成时单帧 550ms）
             winDwmConsider(capAvg, g_gdiDiag.iters);
+            // [SLOW-READBACK-PACE] 慢读回自适应节流：capAvg 含 BitBlt（VMware SVGA
+            // 无加速时单帧 300~400ms）。固定 33ms 定时器 → 采集背靠背连跑占满单核。
+            // 按实测单帧耗时把间隔拉到 ~2×capAvg（duty≈33%），读回正常时归零恢复全速。
+            // 这是 XP（无 DWM 可关）唯一有效的降 CPU 手段：读回慢时降到 ~1fps，
+            // 换来单核从 ~95% 降到 ~33%，机器恢复可交互。
+            paceIntervalMs_ = (capAvg > kSlowReadbackMs)
+                ? static_cast<qint64>(capAvg * 2.0) : 0;
+            applyCaptureInterval();
             const qint64 doneWindows = g_gdiDiag.windows;
             g_gdiDiag = GdiDiag();
             g_gdiDiag.winStart = entryMs;
@@ -772,8 +901,9 @@ void ScreenCapturer::captureFrame()
     }
     if (gdiOk) {
         if (isFrameBlack(frame)) {
-            idleCount_ = 0;
-            leaveIdleThrottle();
+            // 锁屏/黑屏内容静态：不要全速（33ms）抓屏发黑帧——XP 单核实测锁屏时
+            // ~18fps 黑帧可吃掉约一半 CPU。连续黑帧按 idle 阈值降频到 4fps；解锁后
+            // 下一 tick（≤250ms）即由 checksum 变化发现并恢复全速。
             if (!screenLocked_) {
                 screenLocked_ = true;
                 emit screenLocked(true);
@@ -781,6 +911,8 @@ void ScreenCapturer::captureFrame()
             // 黑帧仍发给前端，确保 canvas 尺寸正确
             g_gdiDiag.emits++;
             emitCapturedFrame(frame);
+            if (++idleCount_ > idleThresholdFrames())
+                enterIdleThrottle();
             return;
         }
         if (screenLocked_) {
@@ -798,7 +930,7 @@ void ScreenCapturer::captureFrame()
         // 在 Windows 上退化（只剩 lastFrameChecksum_=0 的第一次生效，且计数永不回退）。
         if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
             idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2))
+            if (idleCount_ > idleThresholdFrames())
                 enterIdleThrottle();
             return;
         }
@@ -815,18 +947,32 @@ void ScreenCapturer::captureFrame()
         return;
     }
 
+    // GDI 采集器在，但这一帧 BitBlt 失败：桌面已被切走（XP 锁屏/登录 UI 在安全桌面）。
+    // 绝不能退到下面的 screen_->grabWindow(0)：Qt 那条路径底层同样是屏幕 DC 的
+    // BitBlt，拿不到内容却每 tick 多付"全屏抓取 + toImage + convertToFormat"三遍
+    // 整帧搬运（实测 XP 单核：锁屏且有客户端时 helper 恒占 ~14% CPU，无客户端时
+    // 0%；画面却仍然是黑的）。锁屏状态由 helper 每 2s 的输入桌面轮询独立上报，
+    // 不依赖帧内容，所以这里直接不出帧；解锁后下一 tick BitBlt 恢复即继续正常出帧。
+    if (gdiAttempted) {
+        idleCount_++;
+        if (idleCount_ > idleThresholdFrames())
+            enterIdleThrottle();
+        return;
+    }
+
     QPixmap pixmap = screen_->grabWindow(0);
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
     if (isFrameBlack(frame)) {
-        idleCount_ = 0;
-        leaveIdleThrottle();
+        // 同 GDI 黑帧路径：锁屏时降频，避免全速发无意义黑帧。
         if (!screenLocked_) {
             screenLocked_ = true;
             emit screenLocked(true);
         }
         // 黑帧仍发给前端
         emitCapturedFrame(frame);
+        if (++idleCount_ > idleThresholdFrames())
+            enterIdleThrottle();
         return;
     }
     if (screenLocked_) {
@@ -838,7 +984,7 @@ void ScreenCapturer::captureFrame()
     // 兜底抓屏路径同样要尊重强制帧，否则新客户端在静止桌面下拿不到首帧
     if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
         idleCount_++;
-        if (idleCount_ > static_cast<int>(fps_ * 2))
+        if (idleCount_ > idleThresholdFrames())
             enterIdleThrottle();
         return;
     }
@@ -881,7 +1027,7 @@ bool ScreenCapturer::start(int fps)
         capX = o.x; capY = o.y; capW = o.w; capH = o.h;
     }
 
-#if defined(Q_OS_WIN) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+#ifdef QTRD_HAVE_DXGI_DUP
     if (IsWindows8OrGreater()) {
         dxgiCapturer_ = new DXGICapturer(outIdx);
         if (dxgiCapturer_->initialize()) {
