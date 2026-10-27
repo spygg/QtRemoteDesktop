@@ -294,6 +294,19 @@ RDPServer::RDPServer(QObject* parent)
             idrRequestMs_ = 0;
             return;
         }
+        // 没有观众就不必为任何 IDR 请求重建：请求发出后客户端可能立刻断开/切图片，
+        // 无人接收时的重建纯属白费（MPP 反复 init 有固件崩溃史）。与 webrtcKfTimer_
+        // 的判据保持一致；新客户端接入时 onClientConnected 会重新 pumpKeyframe。
+        const bool hasVideoClient =
+#ifdef USE_WEBRTC
+                !webrtcSessions_.isEmpty()
+                ||
+#endif
+                (wsServer_ && wsServer_->hasVideoClients());
+        if (!hasVideoClient) {
+            idrRequestMs_ = 0;
+            return;
+        }
         const qint64 now = monoNowMs();
         const qint64 busy = videoEncoder_->busyForMs();
         // 判定逻辑抽在 idrfallbackpolicy.h（纯函数，便于覆盖冷却重挂/等当前帧/
@@ -311,13 +324,22 @@ RDPServer::RDPServer(QObject* parent)
             qWarning() << "[PLI-REUSE] encoder busy for" << busy
                        << "ms without IDR, forcing rebuild (possible hang)";
         // 空闲时走原子退役（retireIfIdle）：避免"判定空闲"与"线程开始下一帧"之间
-        // 的竞态让主线程白等一整帧。返回 false 表示恰好有帧在飞，重挂定时器下一轮
+        // 的竞态让主线程白等一整帧。Deferred 表示恰好有帧在飞，重挂定时器下一轮
         // 再按 busy 逻辑等待即可。超过硬上限时明知在飞也强制重建（线程可能已卡死）。
-        if (!d.busyOverHardLimit && !rebuildVideoEncoder(/*onlyIfIdle=*/true)) {
-            // 推迟：冷却时间戳不能更新（否则下一轮会白等一个冷却窗口），
-            // idrRequestMs_ 也保持原值，让 busy 等待逻辑继续按请求年龄计时。
-            idrFallbackTimer_->start(200);
-            return;
+        if (!d.busyOverHardLimit) {
+            const RebuildResult r = rebuildVideoEncoder(/*onlyIfIdle=*/true);
+            if (r == RebuildResult::Deferred) {
+                // 推迟：冷却时间戳不能更新（否则下一轮会白等一个冷却窗口），
+                // idrRequestMs_ 也保持原值，让 busy 等待逻辑继续按请求年龄计时。
+                idrFallbackTimer_->start(200);
+                return;
+            }
+            if (r == RebuildResult::NotApplicable) {
+                // 视频模式里却没有可重建的编码器/捕获源：这个 IDR 请求永远无法被
+                // 满足，清掉以避免每 200ms 无限重试空转。
+                idrRequestMs_ = 0;
+                return;
+            }
         }
         idrRequestMs_ = 0;
         lastReinitMs_ = now;
@@ -4836,15 +4858,24 @@ void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
         const qint64 age = videoEncoder_->initAgeMs();
         if (now - lastReinitMs_ > window && age > window) {
             // busy 长时间不归零说明线程卡死在驱动调用里（或单帧耗时已经大到永远
-            // 追不上），无限推迟等于永久黑屏——超过硬上限强制重建；否则等当前帧
-            // 跑完，下一轮 2s 定时器再判。
-            const bool hung = age >= qMax<qint64>(30000, 10 * videoEncoder_->lastFrameCostMs());
-            if (videoEncoder_->busyForMs() > 0 && !hung)
+            // 追不上），无限推迟等于永久黑屏——超过硬上限强制重建；否则走原子退役
+            // （retireIfIdle），恰好有帧在飞就留到下一轮 2s 定时器再判。
+            // 绝不能先 busyForMs() 判空闲再 shutdownRetire()：两次调用之间编码线程
+            // 可以开始下一帧，主线程就要白等一整帧（弱机 1~2s）。
+            const qint64 lastCost = videoEncoder_->lastFrameCostMs();
+            const bool hung = age >= qMax<qint64>(30000, 10 * lastCost);
+            if (hung)
+                qWarning() << "[PLI-REUSE] encoder produced no IDR for" << age
+                           << "ms, forcing rebuild (possible hang)";
+            const RebuildResult r = hung ? rebuildVideoEncoder(/*onlyIfIdle=*/false)
+                                         : rebuildVideoEncoder(/*onlyIfIdle=*/true);
+            // Deferred（有帧在飞）/ NotApplicable：本次没有实际重建，冷却时间戳
+            // 不能推进，否则每次接入新客户端都会白等一整个窗口。
+            if (r != RebuildResult::Done)
                 return;
             lastReinitMs_ = now;
-            qInfo() << "Video encoder produced no IDR yet, rebuilding to force keyframe"
-                    << "(last frame" << videoEncoder_->lastFrameCostMs() << "ms)";
-            reinitVideoEncoderForScale();
+            qInfo() << "Video encoder produced no IDR yet, rebuilt to force keyframe"
+                    << "(last frame" << lastCost << "ms)";
         }
     }
     // 不再调用 requestKeyframe()：90/ARM 软编 flush 不产 IDR 且会打断刚重建的编码器，
@@ -5095,12 +5126,13 @@ void RDPServer::reinitVideoEncoderForScale()
     rebuildVideoEncoder(/*onlyIfIdle=*/false);
 }
 
-// 返回 false 只表示"因有在飞帧而推迟"，未对编码器做任何改动；
-// 其余情况（含初始化失败回退图片模式）都算已处理，返回 true。
-bool RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
+// 返回 Deferred 表示"因有在飞帧而推迟"，未对编码器做任何改动；NotApplicable 表示
+// 当前没有可重建的编码器/捕获源（重试也不会成功）；其余情况（含初始化失败回退
+// 图片模式）都算已处理，返回 Done。
+RDPServer::RebuildResult RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
 {
     if (!videoEncoder_ || !screenCapturer_)
-        return false;
+        return RebuildResult::NotApplicable;
 
     int sw = screenCapturer_->width(), sh = screenCapturer_->height();
     int ew = sw, eh = sh;
@@ -5117,7 +5149,7 @@ bool RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
     if (onlyIfIdle) {
         const VideoEncoder::RetireState st = videoEncoder_->retireIfIdle();
         if (st == VideoEncoder::RetireState::Busy)
-            return false;
+            return RebuildResult::Deferred;
         wedged = (st == VideoEncoder::RetireState::Wedged);
     } else {
         wedged = !videoEncoder_->shutdownRetire();
@@ -5127,8 +5159,10 @@ bool RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
         QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
         retiredEncoders_.push_back(std::move(videoEncoder_));
         createVideoEncoder();
+        // 旧编码器已经退役（不可回滚），这里不能报 Deferred 让调用方重试；
+        // 返回 Done，下一次该路径会被开头的 !videoEncoder_ 判据清掉请求。
         if (!videoEncoder_)
-            return false;
+            return RebuildResult::Done;
     }
     // 重建后旧编码器的比特流上下文作废：缓存 IDR/extradata/静态复用标记必须清空，
     // 否则新客户端补发或 PLI 复用会把旧编码器的关键帧喂给新会话（花屏/黑屏）。
@@ -5159,7 +5193,7 @@ bool RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
             switchToImageMode();
         }
     }
-    return true;
+    return RebuildResult::Done;
 }
 #endif
 

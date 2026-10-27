@@ -361,9 +361,14 @@ private:
     bool switchToVideoMode();
     void reinitVideoEncoderForScale();
     // 退役当前编码器并重建（reinitVideoEncoderForScale 的通用实现）。
-    // onlyIfIdle=true 时先做原子空闲判定：有在飞帧则不做任何改动、返回 false，
+    // onlyIfIdle=true 时先做原子空闲判定：有在飞帧则不做任何改动、返回 Deferred，
     // 由调用方稍后重试（IDR 兜底定时器用，避免主线程白等一整帧）。
-    bool rebuildVideoEncoder(bool onlyIfIdle);
+    // NotApplicable 表示当前没有可重建的编码器/捕获源（如服务模式画面在 helper），
+    // 与 Deferred 必须区分：前者重试永远不会成功，调用方应放弃该请求而不是空转。
+    enum class RebuildResult { Done,
+        Deferred,
+        NotApplicable };
+    RebuildResult rebuildVideoEncoder(bool onlyIfIdle);
     bool hwEncodeAvailable() const;
     // 服务端能否进入视频模式（H.264 编码）：
     //  ① 本地原始帧源可用（直连 / Linux 服务模式进程内捕获）→ 支持；
