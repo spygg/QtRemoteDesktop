@@ -245,19 +245,7 @@ void JpegCompressor::processLoop()
 }
 // ==================== RDPServer ====================
 
-#ifdef USE_FFMPEG
-// [CLOCK] 时长/冷却判据统一用单调时钟（steady_clock）：编码器重建的冷却、
-// IDR 请求超时、PLI 复用间隔都是"经过多久"的语义。用墙钟时 NTP 校时或用户
-// 改时间会让差值突变——向前跳会误判冷却已过而连续重建（MPP 反复 init 有固件
-// 崩溃历史），向后跳则会让兜底永不触发而黑屏。仅用于本文件内部时长判断，
-// 码流时间戳/日志时间仍是墙钟。+1 保证返回值恒 > 0（0 保留给"未设置"）。
-static qint64 monoNowMs()
-{
-    static const auto origin = std::chrono::steady_clock::now();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - origin).count() + 1;
-}
-#endif
+// [CLOCK] 时长/冷却判据统一用 rdpserver.h 的 monoNowMs()（单调时钟）。
 
 RDPServer::RDPServer(QObject* parent)
     : QObject(parent)
@@ -707,6 +695,29 @@ void RDPServer::scheduleSaveConfig()
     configSaveTimer_->start();
 }
 
+QString RDPServer::effectiveSystemName() const
+{
+    // 只有纯空白也算"没配"：用户手滑打个空格不该让标签页变成空白。
+    const QString name = systemName_.trimmed();
+    if (!name.isEmpty())
+        return name;
+    QString host = QSysInfo::machineHostName().trimmed();
+    if (host.isEmpty())
+        host = QStringLiteral("远程桌面");
+    return host;
+}
+
+void RDPServer::broadcastSystemName()
+{
+    if (!wsServer_)
+        return;
+    QJsonObject msg;
+    msg["type"] = "system_name";
+    msg["systemName"] = systemName_;                 // 配置值（可能为空 = 默认）
+    msg["effectiveName"] = effectiveSystemName();    // 实际显示用
+    wsServer_->broadcastJson(msg);
+}
+
 void RDPServer::saveServerConfig(const QString& configPath)
 {
     QString path = configPath.isEmpty()
@@ -738,6 +749,9 @@ void RDPServer::saveServerConfig(const QString& configPath)
     root["codec"] = codecToString(codecOverriddenForWebRtc_ ? codecBeforeWebRtc_ : configCodec_);
     root["hw_encode"] = (configHwEncodeMode_ == HwEncodeMode::On) ? "on"
                       : (configHwEncodeMode_ == HwEncodeMode::Off) ? "off" : "auto";
+    // 页面标题名（前端口子里的「计算机名称」）。空 = 跟随主机名，因此必须照写：
+    // 用户把自定义名清空后要能"恢复默认"，只在非空时写会让旧名字永远留着。
+    root["systemName"] = systemName_;
 
     // 原子替换：旧实现 QFile::remove(path) 后再 rename，两步之间进程被杀/
     // 断电会永久丢失配置文件；Windows 上 remove 失败则 rename 必失败。
@@ -1076,7 +1090,9 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
 #endif
                     { "hint", locked ? QString::fromUtf8(
 #ifdef Q_OS_WIN
-                                           "Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码"
+                        // XP 也走 secure-input：屏保锁屏先结束 .scr，再点用户磁贴展开
+                        // 密码框、键入密码。两代机器的提示可以合并成一句。
+                        "Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码"
 #elif defined(Q_OS_ANDROID)
                         "Android 锁屏输入暂不支持"
 #elif defined(Q_OS_LINUX)
@@ -1160,6 +1176,8 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     // helper 在用户会话里能看到真实输入桌面，服务进程看不到（Session 0 的
                     // OpenInputDesktop 直接失败）；锁屏 UI 在哪个桌面只有它知道。
                     lockedDesktop_ = screenLocked_ ? msg["desktop"].toString() : QString();
+                    lockedKind_ = screenLocked_ ? msg["kind"].toString() : QString();
+                    lockedHint_ = screenLocked_ ? msg["hint"].toString() : QString();
                     if (screenLocked_)
                         startSecureInputProcess();
                     else
@@ -1391,11 +1409,9 @@ void RDPServer::onHttpNewConnection()
 
 QByteArray RDPServer::loadHtmlResource()
 {
-    static QByteArray cachedHtml;
-    static QMutex cacheMutex;
-    QMutexLocker locker(&cacheMutex);
-    if (!cachedHtml.isEmpty())
-        return cachedHtml;
+    QMutexLocker locker(&htmlCacheMutex_);
+    if (!htmlCache_.isEmpty())
+        return htmlCache_;
 
     // 从 Qt 资源系统加载 HTML
     QFile file(":/res/html/index.html");
@@ -1408,16 +1424,11 @@ QByteArray RDPServer::loadHtmlResource()
 
         // 页面标题：优先用配置的 systemName（多台被控机靠它区分标签页），
         // 未配置则回退主机名（如 localhost.localdomain 这类无辨识度输出）。
-        QString hostName = systemName_;
-        if (hostName.isEmpty()) {
-            hostName = QSysInfo::machineHostName();
-            if (hostName.isEmpty())
-                hostName = QStringLiteral("远程桌面");
-        }
-        html = html.replace("__REMOTE_HOSTNAME__", hostName.toHtmlEscaped().toUtf8());
+        html = html.replace("__REMOTE_HOSTNAME__",
+                            effectiveSystemName().toHtmlEscaped().toUtf8());
 
-        cachedHtml = html;
-        return cachedHtml;
+        htmlCache_ = html;
+        return htmlCache_;
     }
 
     qWarning() << "Failed to load HTML from Qt resources";
@@ -2854,7 +2865,7 @@ bool RDPServer::startCapture()
 #endif
                     { "hint", locked ? QString::fromUtf8(
 #ifdef Q_OS_WIN
-                                           "Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码"
+                        "Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码"
 #elif defined(Q_OS_ANDROID)
                         "Android 锁屏输入暂不支持"
 #elif defined(Q_OS_LINUX)
@@ -3424,14 +3435,28 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         // 密码优先用前端这次输入的（前端「输入密码解锁」走的就是这条路），
         // 没给才回退到配置里的 unlockPassword（「一键解锁」按钮）。
         const QString pwd = password.isEmpty() ? unlockPassword_ : password;
-        if (!screenLocked_) {
+        if (serviceMode_ && !screenLocked_ && !wsServer_->isCaptureSourceConnected()) {
+            // 开机锁屏（区别于"屏保恢复锁屏"）：helper 是服务用登录用户令牌拉起来的，
+            // 它没连上 = 会话里根本没人登录。这时屏幕上的是首次登录界面，Windows 不允许
+            // 任何远程首登（不做 GINA 替换的话），报"屏幕未锁定"会把人引到死路上。
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "unlock_result" }, { "ok", false },
+                { "message", "被控机还没有已登录的用户会话（开机锁屏）："
+                             "首次登录无法远程完成，请在机器前登录一次" } });
+        } else if (!screenLocked_) {
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", true },
                 { "message", "屏幕未锁定" } });
         } else if (pwd.isEmpty()) {
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", false },
-                { "message", "未配置解锁密码：在 server_config.json 中设置 unlockPassword（明文，局域网自用）" } });        } else {
+                { "message", "未配置解锁密码：在 server_config.json 中设置 unlockPassword（明文，局域网自用）" } });
+        } else {
+            // XP 与 Vista+ 走同一条通路，差异全在 secure-input 里：
+            //   XP 屏保恢复锁屏 → 先结束 .scr 让 Winlogon 把桌面切回登录桌面，
+            //   再点屏幕中偏右的用户磁贴把密码框展开，最后键入密码回车。
+            // XP 的输入桌面在锁屏期间会变（Screen-saver → Winlogon），所以不要在这里
+            // 提前发 SAS —— SAS 会把欢迎屏幕重排回屏保形态，反而打断已经点开的密码框。
             bool justStarted = false;
             if (!wsServer_->isSecureInputConnected()) {
                 startSecureInputProcess();
@@ -3450,11 +3475,12 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
             };
             // 解锁序列期间禁止按"桌面不符"重投 secure-input（SAS 一定会换桌面）；
             // 30s = 本函数下面两轮重试 + 终判的最长链路，到期自动失效，不留永久门禁。
-            secureInputUnlockUntilMs_ = QDateTime::currentMSecsSinceEpoch() + 30000;
+            secureInputUnlockUntilMs_ = monoNowMs() + 30000;
             const int base = justStarted ? 1500 : 0;
             // 把密码交给 secure-input 进程，由它在安全桌面上判断界面形态后自己处理：
-            //   有登录对话框 → 直接写控件 + 提交（不碰键盘，安全桌面上 SendInput 无效）；
-            //   屏保桌面 / 欢迎屏幕 → 它自己补发 SAS 再切到传统登录框。
+            //   传统登录对话框 → 直接写控件 + 提交；
+            //   XP 屏保桌面   → 先结束 .scr，桌面切回登录桌面后点用户磁贴 + 键入密码；
+            //   欢迎屏幕      → 点用户磁贴把密码框展开 + 键入密码。
             // 这里不要再无条件先发 SAS：若对话框已就绪，多按一次 Ctrl+Alt+Del 会把它切走。
             QTimer::singleShot(base, this, sendUnlock);
             // 第二轮：极少数机器 SAS 之后还会闪一次屏保，第一轮可能落空。
@@ -3485,7 +3511,11 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
     // 服务模式（有 helper，如 Windows）：系统操作必须在用户会话执行。
     // 服务进程运行在 Session 0（Windows）或独立会话，直接执行只会作用于
     // 不可见的服务会话（显示桌面/任务管理器/注销均无效）。转发 helper。
-    if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
+    // unlock_screen 例外：helper 侧没有这个分支（Windows 的解锁在上面已按
+    // secure-input 路径返回），Linux/Android 的解锁靠本进程下面的 xdotool/
+    // dm-tool 分支完成 —— 一律转发等于没人执行，前端点了「解锁」什么也不会发生。
+    if (serviceMode_ && wsServer_->isCaptureSourceConnected()
+        && action != QLatin1String("unlock_screen")) {
         wsServer_->sendToCaptureSource(QJsonObject {
             { "type", "system_action" },
             { "action", action },
@@ -3874,6 +3904,10 @@ void RDPServer::onClientConnected(const QString& clientId)
         cfg["fps"] = configFps_;
         cfg["quality"] = configQuality_;
         cfg["scale"] = configScale_;
+        // 计算机名称：systemName 是原始配置（可能为空 = 跟随主机名），
+        // effectiveName 是实际显示值，前端输入框用前者、<title> 用后者。
+        cfg["systemName"] = systemName_;
+        cfg["effectiveName"] = effectiveSystemName();
 
         // 获取支持的分辨率列表和当前分辨率
         if (screenCapturer_) {
@@ -3958,8 +3992,15 @@ void RDPServer::onClientConnected(const QString& clientId)
         lock["platform"] = platformTag();
 #ifdef _WIN32
         lock["isXP"] = !isVistaPlusOs();
-        if (screenLocked_)
-            lock["hint"] = QStringLiteral("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码");
+        if (screenLocked_) {
+            // 回放 helper 的原始判定（哪种锁屏 + 该给用户哪句话），而不是服务端再猜一次：
+            // helper 在用户会话里看得见真实输入桌面，它报的 kind/hint 才是准的。
+            if (!lockedKind_.isEmpty())
+                lock["kind"] = lockedKind_;
+            lock["hint"] = lockedHint_.isEmpty()
+                ? QStringLiteral("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码")
+                : lockedHint_;
+        }
 #endif
         wsServer_->sendJson(clientId, lock);
     }
@@ -3977,10 +4018,11 @@ void RDPServer::releasePressedKeys(const QString& clientId)
     const QHash<QString, QJsonObject> pressed = pressedKeysByClient_.take(clientId);
     if (pressed.isEmpty())
         return;
-    qInfo() << "Releasing" << pressed.size() << "stuck key(s) for client" << clientId;
+    qInfo() << "Releasing" << pressed.size() << "stuck key/button(s) for client" << clientId;
     for (auto it = pressed.constBegin(); it != pressed.constEnd(); ++it) {
         QJsonObject up = it.value();
-        up["type"] = "keyup";
+        const bool isMouse = up.contains(QLatin1String("button"));
+        up["type"] = isMouse ? QStringLiteral("mouseup") : QStringLiteral("keyup");
         up["ctrl"] = false;
         up["alt"] = false;
         up["shift"] = false;
@@ -3993,10 +4035,15 @@ void RDPServer::releasePressedKeys(const QString& clientId)
             wsServer_->sendToSecureInput(up);
         // 服务模式下本进程在 Session0，本地注入打到无人可见的桌面且会污染
         // 本侧修饰键状态，故仅在非服务模式（桌面实例）直接注入。
-        if (inputManager_ && !serviceMode_)
-            inputManager_->injectKeyboard(up["keycode"].toInt(), up["code"].toString(), false,
-                                          false, false, false, false,
-                                          up["isChar"].toBool(), false);
+        if (inputManager_ && !serviceMode_) {
+            if (isMouse)
+                inputManager_->injectMouseButton(up["x"].toInt(), up["y"].toInt(),
+                                                 up["button"].toInt(), false);
+            else
+                inputManager_->injectKeyboard(up["keycode"].toInt(), up["code"].toString(), false,
+                                              false, false, false, false,
+                                              up["isChar"].toBool(), false);
+        }
     }
 }
 
@@ -4095,18 +4142,28 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     // [B-1] 记录本客户端按下的键（code 为唯一标识，存最近 keydown 完整载荷，
     // Windows 端 keyup 需要原 keycode 作 VK）。isChar 的 Unicode 注入键也可能
     // 卡住，一并跟踪。所有模式（直连/转发 helper）统一在此记录，断开时回放 keyup。
-    if (type == QLatin1String("keydown") || type == QLatin1String("keyup")) {
+    // 鼠标按钮同理由一并跟踪：前端 releaseHeldRemoteInput 只在失焦/切观看模式时补发，
+    // 浏览器崩溃或网络掉线时没人补发，远端会一直保持按下状态（拖拽选中、按住 Ctrl 的
+    // 表现和按键卡死一样让人困惑）。
+    const bool isMouseEvt = type == QLatin1String("mousedown") || type == QLatin1String("mouseup");
+    if (type == QLatin1String("keydown") || type == QLatin1String("keyup") || isMouseEvt) {
         const QString code = input["code"].toString();
         // isChar 事件前端固定发 code:''（index.html 的输入法/锁屏密码路径），
         // 直接用 code 当跟踪键会全部落空，断线时这些真正按下过的键不会被释放。
         // Linux 端 isChar 会映射成真实 keysym 注入，卡住即无限自动重复。
         const int keycode = input["keycode"].toInt();
         const bool isChar = input["isChar"].toBool();
-        const QString trackKey = !code.isEmpty()
+        QString trackKey;
+        if (isMouseEvt)
+            trackKey = QStringLiteral("btn:%1").arg(input["button"].toInt(-1));
+        else
+            trackKey = !code.isEmpty()
                 ? code
                 : (isChar && keycode > 0 ? QStringLiteral("char:%1").arg(keycode) : QString());
-        if (!trackKey.isEmpty()) {
-            if (type == QLatin1String("keydown")) {
+        const bool down = isMouseEvt ? (type == QLatin1String("mousedown"))
+                                     : (type == QLatin1String("keydown"));
+        if (!trackKey.isEmpty() && trackKey != QLatin1String("btn:-1")) {
+            if (down) {
                 pressedKeysByClient_[clientId][trackKey] = input;
             } else {
                 auto it = pressedKeysByClient_.find(clientId);
@@ -4344,6 +4401,22 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         }
     }
     if (type == "config") {
+        // 计算机名称（页面标题）：与画质/帧率互不相干，也不触发编码器重建。
+        // 只在真的变了才落盘 + 广播，避免一条 config 消息里顺带的空字段把
+        // 别人的自定义名字刷掉。
+        if (input.contains("systemName")) {
+            // 去掉首尾空白并截断：名字只用于 <title>，超长没有意义，
+            // 但也不能让一条消息把配置写成几 KB。
+            const QString name = input.value("systemName").toString().trimmed().left(64);
+            if (name != systemName_) {
+                systemName_ = name;
+                scheduleSaveConfig();
+                broadcastSystemName();   // 所有已打开的标签页一起改标题
+                { QMutexLocker locker(&htmlCacheMutex_); htmlCache_.clear(); }  // 标题烤进了 HTML，下次 GET / 重新生成
+                qInfo() << "System name changed to"
+                        << (name.isEmpty() ? QStringLiteral("(default: hostname)") : name);
+            }
+        }
         // 画质/帧率/缩放配置
         // 一条 config 消息常同时带 quality/fps/scale/codec/hw_encode。旧实现每命中一项
         // 就立即重建一次编码器（每次几十到上百毫秒，且要重发 IDR），一次切换画质会重建
@@ -4855,6 +4928,11 @@ void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
     if (remoteVideoSourceAvailable()) {
         QJsonObject rq;
         rq["type"] = "request_keyframe";
+        // [KF-REPLAY] 告诉 helper 这次是"浏览器 PLI"（静止桌面可重发缓存 IDR），
+        // 还是"必须从此刻起可解码"的显式请求（新客户端接入 / 前端自愈）。
+        // 前者若缓存 IDR 的内容版本未变，helper 直接重发、不抓屏不编码——否则
+        // 本机 openh264 每次都退到兜底重建 + 强抓 4 帧，静止桌面 CPU ~35%。
+        rq["reuse_ok"] = allowStaticReuse && !requestNewIdr;
         wsServer_->sendToCaptureSource(rq);
         Q_UNUSED(requestNewIdr);
         return;
@@ -4883,6 +4961,15 @@ void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
             if (idrFallbackTimer_)
                 idrFallbackTimer_->start();
             qInfo() << "pumpKeyframe: new IDR requested";
+        } else if (idrFallbackTimer_) {
+            // 落在 1s 冷却内不等于请求可以作废：这条 request_keyframe 来自"我已经没有
+            // 可用 IDR 了"的客户端（接入、重连、PLI），直接 return 会让它永远等不到
+            // IDR —— hasIdr_ 已为真时周期兜底也不会介入（实测前端只重试 4 次就放弃，
+            // 表现是永久黑屏）。这里改为把请求挂起来，冷却一到由兜底定时器补做
+            // （它的 Retry 分支就是为"冷却未到/线程在飞"设计的）。
+            idrRequestMs_ = now;
+            idrFallbackTimer_->start(qint64(1000) - (now - lastReinitMs_));
+            qInfo() << "pumpKeyframe: in cooldown, IDR request deferred to fallback timer";
         }
         return;
     }

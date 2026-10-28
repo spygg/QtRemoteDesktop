@@ -275,6 +275,30 @@ int HelperProcess::run(int argc, char* argv[])
         ws.sendTextMessage(QString::fromUtf8(QJsonDocument(caps).toJson(QJsonDocument::Compact)));
     };
 
+    // [KF-REPLAY] 静止桌面下的关键帧请求：缓存最近 IDR 及其"桌面内容版本"，
+    // 再次被索要时若画面逐像素未变则直接重发缓存码流（不抓屏、不编码）。
+    // 背景（2026-10-28 XP 实测）：服务模式下服务端把浏览器每个 PLI（静止桌面
+    // ~6.3s 一次）转发成 request_keyframe，而本机 openh264 不认 flush+pict_type=I，
+    // 800ms 兜底必然重建编码器并强抓 4 帧（XP 全屏 ~350ms/帧）→ 静止桌面 CPU 35%。
+    // 复用判据与服务端 rdpserver.cpp 的 PLI-REUSE 一致：contentChangeCount() 不变
+    // ⇔ 自该 IDR 起桌面未变 ⇔ 重发等价于重新编码。
+    // 版本号只能记在"我们自己发起"的 IDR 上（pendingKfEpoch）：编码有 1 帧延迟，
+    // 自然 GOP 出的 IDR 对应更早的输入帧，用出帧时刻的计数会把旧画面标成新版本。
+    // 编码器每次（重）建都必须清缓存：旧实例的 IDR 带着旧 SPS/PPS 与旧分辨率。
+    QByteArray lastIdrData;
+    qint64 lastVideoTs = 0;
+    quint64 lastIdrEpoch = 0;
+    bool lastIdrEpochValid = false;
+    quint64 pendingKfEpoch = 0;
+    bool pendingKfEpochValid = false;
+    qint64 lastIdrReplayMs = 0;
+    quint64 idrReplayCount = 0;
+    auto dropCachedIdr = [&]() {
+        lastIdrData.clear();
+        lastIdrEpochValid = false;
+        pendingKfEpochValid = false;
+    };
+
     // 按当前 codec/hw/fps/scale/画质重建编码器（视频模式中参数变化时调用）
     auto reinitVideoEncoder = [&]() {
         if (!videoActive || !encoder)
@@ -289,6 +313,7 @@ int HelperProcess::run(int argc, char* argv[])
         }
         videoBaseBitrate = VideoEncoder::estimateBitrate(videoCodec, ew, eh, captureFps, videoQualityLevel);
         encoder->shutdown();
+        dropCachedIdr();
         if (!encoder->initialize(videoCodec, sw, sh, ew, eh, captureFps, videoBaseBitrate, videoHwMode))
             qWarning() << "Helper: video encoder re-init failed (config change)";
     };
@@ -304,11 +329,23 @@ int HelperProcess::run(int argc, char* argv[])
     QObject::connect(kfFallbackTimer, &QTimer::timeout, &app, [&]() {
         if (!kfRequestPending)
             return;
+        // 4 帧强制抓取是 80ms 一拍的定时泵，慢机（XP 全屏实测 ~207ms/帧）跑完
+        // 要 800ms+，此时兜底先到点会把"还在喂帧"误判成"没出 IDR"，白重建一次
+        // 编码器（新 IDR 与旧码流交错，纯粹烧 CPU）。泵没跑完就再等一轮，等泵
+        // 结束仍无 IDR 才走重建。
+        if (capturePumpLeft > 0) {
+            kfFallbackTimer->start(400);
+            return;
+        }
         kfRequestPending = false;
         if (quitting || !videoActive || !encoder)
             return;
         qWarning() << "Helper: request_keyframe 未产出 IDR，重建编码器强制关键帧";
         reinitVideoEncoder();
+        // 重建后的首帧 IDR 也要记录内容版本，否则 KF-REPLAY 缓存永远不生效
+        // （reinitVideoEncoder 里已清空缓存）。
+        pendingKfEpoch = capturer.contentChangeCount();
+        pendingKfEpochValid = true;
         pumpCaptureFrames(4);
     });
 
@@ -328,6 +365,7 @@ int HelperProcess::run(int argc, char* argv[])
         }
         videoBaseBitrate = VideoEncoder::estimateBitrate(videoCodec, ew, eh, captureFps, videoQualityLevel);
         encoder->shutdown();
+        dropCachedIdr();
         if (!encoder->initialize(videoCodec, sw, sh, ew, eh, captureFps, videoBaseBitrate, videoHwMode)) {
             // 当前 codec 不支持（如软编无 HEVC）→ 回退 H.264 重试，保证视频模式可用
             qWarning() << "Helper: codec init failed, falling back to H.264";
@@ -360,10 +398,12 @@ int HelperProcess::run(int argc, char* argv[])
         kfFallbackTimer->stop();
         if (encoder)
             encoder->shutdown();
+        dropCachedIdr();
         videoActive = false;
         qInfo() << "Helper: video mode OFF, resumed JPEG";
     };
 
+    // [KF-REPLAY] 缓存见上（lastIdrData/lastIdrEpoch*）。
     // 编码帧 → 服务端：[1字节类型(0x01=IDR/0x02=P)][u32 长度][i64 时间戳][数据]
     // （与服务端→浏览器 13 字节头一致，服务端可直接复用 onEncodedFrame 分发）
     qint64 droppedVideoFrames = 0;
@@ -379,6 +419,17 @@ int HelperProcess::run(int argc, char* argv[])
                 return;
             if (ws.state() != QAbstractSocket::ConnectedState)
                 return;
+            if (keyframe) {
+                lastIdrData = data;
+                if (pendingKfEpochValid) {
+                    lastIdrEpoch = pendingKfEpoch;
+                    lastIdrEpochValid = true;
+                    pendingKfEpochValid = false;
+                } else {
+                    lastIdrEpochValid = false; // 自然 GOP 关键帧：来源帧版本不可知
+                }
+            }
+            lastVideoTs = ts;
             // 背压：服务端消费不过来时丢弃**非关键帧**。QWebSocket 写缓冲无上限，
             // 一直塞会让内存暴涨、延迟线性增长（画面越看越滞后）。丢帧是可接受的：
             // 关键帧仍然送，浏览器随时能重新同步。
@@ -448,6 +499,34 @@ int HelperProcess::run(int argc, char* argv[])
     // 它自己无从得知登录 UI 在哪个桌面；锁屏事件里把这个名字带给服务端，
     // secure-input 进程才能投到正确的桌面上（投错 = 注入的按键石沉大海）。
     QString inputDesktopName;
+
+    // 采集闸门：只有"服务端说有客户端"且"输入桌面未锁"才真的抓屏。
+    // 锁屏期间继续抓屏在 XP 上是纯烧 CPU（实测 172.24.52.172 切到 Winlogon 后）：
+    // helper 每个 tick 仍做一次 2310x1398 的 BitBlt，日志里 capAvg=207.88 /
+    // capMax=310.47 而 emits=0 —— 一个帧都发不出去（前端此时只显示锁屏遮罩），
+    // 却把这台弱机的 CPU 占满。解锁时闸门自动打开，不需要额外信令。
+    bool serverWantsCapture = false;
+    // 初值 = true：启动时 capturer.start(30) 已经在跑，闸门必须从"开着"的状态开始记账，
+    // 否则服务端第一条 pause（无客户端）会与状态相同而被跳过，空闲采集永远停不下来。
+    bool captureGateOpen = true;
+    auto applyCaptureGate = [&]() {
+        const bool want = serverWantsCapture && !desktopPollLocked;
+        if (want == captureGateOpen)
+            return;
+        captureGateOpen = want;
+        qInfo() << "Helper: capture gate" << (want ? "open" : "closed")
+                << "serverWants =" << serverWantsCapture << "locked =" << desktopPollLocked;
+        if (want)
+            capturer.resume();
+        else
+            capturer.suspend();
+#ifdef USE_FFMPEG
+        // 闸门从关到开 = 锁屏期间码流断了一阵：必须让编码器下一个 IDR 出来，
+        // 否则前端 MSE 拿锁屏前那个旧 IDR 去解新 P 帧，表现是解锁后画面冻住/花屏。
+        if (want && videoActive && encoder)
+            encoder->requestKeyframe();
+#endif
+    };
 
     QObject::connect(&ws, &QWebSocket::connected, &app, [&]() {
         qInfo() << "Helper: connected to service WS successfully";
@@ -674,10 +753,23 @@ int HelperProcess::run(int argc, char* argv[])
                 QString action = obj["action"].toString();
                 if (action == "pause") {
                     qInfo() << "Helper: capture pause requested";
-                    capturer.suspend();
+                    serverWantsCapture = false;
+                    applyCaptureGate();
                 } else if (action == "resume") {
                     qInfo() << "Helper: capture resume requested";
-                    capturer.resume();
+                    serverWantsCapture = true;
+                    // 锁屏中这条 resume 不会真的打开采集，解锁时闸门自动打开。
+                    // 不打出来的话，日志里只有一条没人应答的 resume，排查时像是丢了。
+                    if (desktopPollLocked)
+                        qInfo() << "Helper: still locked, capture stays paused until unlock";
+                    const bool gateWasOpen = captureGateOpen;
+                    applyCaptureGate();
+                    // [IDLE-WAKE] 已有客户端在观看时，第二个客户端接入不会改变闸门
+                    // 状态（applyCaptureGate 直接返回），但 idle 降频下它要等下一帧
+                    // （最长 ~5s），静止桌面甚至要等到画面变化才出帧 → 新客户端黑屏。
+                    // 这里补一次强制帧：resume 只在客户端接入/唤醒时下发，频率很低。
+                    if (gateWasOpen && captureGateOpen)
+                        capturer.forceNextFrame();
                     // 客户端接入：上报当前剪贴板文本，让新客户端拿到初始状态
                     QString t = QGuiApplication::clipboard()->text();
                     if (!t.isEmpty()) {
@@ -701,12 +793,47 @@ int HelperProcess::run(int argc, char* argv[])
 
 #ifdef USE_FFMPEG
             if (type == "request_keyframe") {
-                // 服务端请求新 IDR（新客户端接入 / 解码器自愈）：强制下一帧为关键帧，
-                // 并强制抓取当前屏幕一次（绕过去重，静态桌面也能产出 IDR）。
-                // 服务端请求新 IDR（新客户端接入 / 解码器自愈）：标记下一帧为关键帧，
-                // 并连喂几帧。注意不能只喂 1 帧：libopenh264 有 1 帧输出延迟，
-                // 单帧输入配不出码流（详见 pumpCaptureFrames 处说明）。
+                // 锁屏中不配合抓帧：这几帧全屏抓取在 XP 上要 200~300ms/tick，而前端
+                // 此刻只显示锁屏遮罩，一个像素都不会被看到（见 applyCaptureGate 注释）。
+                if (desktopPollLocked)
+                    return;
                 if (videoActive && encoder) {
+                    // [KF-REPLAY] 浏览器 PLI（服务端标记 reuse_ok）且自缓存 IDR 起桌面
+                    // 逐像素未变：直接重发缓存码流，不抓屏、不碰编码器。
+                    // 这是静止桌面下 35% CPU 的来源——本机 openh264 不认
+                    // requestKeyframe()，每次都退到 800ms 兜底重建 + 强抓 4 帧。
+                    // 显式请求（新客户端接入/前端自愈，reuse_ok=false）不走这里：
+                    // 它要的是"从此刻起可解码"，缓存 IDR 的时间戳可能早于前端
+                    // 已缓冲位置，重发会被 MSE 当过期帧丢掉。
+                    const bool reuseOk = obj["reuse_ok"].toBool();
+                    if (reuseOk && lastIdrEpochValid && !lastIdrData.isEmpty()
+                            && capturer.contentChangeCount() == lastIdrEpoch) {
+                        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                        // PLI 实测成对到达（同一毫秒两次），冷却内忽略重复请求。
+                        if (now - lastIdrReplayMs < 250)
+                            return;
+                        if (ws.state() != QAbstractSocket::ConnectedState)
+                            return;
+                        QByteArray packet;
+                        QDataStream stream(&packet, QIODevice::WriteOnly);
+                        stream.setByteOrder(QDataStream::BigEndian);
+                        // 时间戳取"下一帧"位置：MSE 要求单调递增，直接复用旧 ts 会倒退。
+                        stream << quint8(0x01);
+                        stream << quint32(lastIdrData.size());
+                        stream << qint64(lastVideoTs + qMax(1, 1000 / qMax(1, captureFps)));
+                        packet.append(lastIdrData);
+                        wsBacklogBytes += qMax<qint64>(0, ws.sendBinaryMessage(packet));
+                        lastIdrReplayMs = now;
+                        if ((++idrReplayCount % 10) == 1)
+                            qInfo() << "Helper: replayed cached IDR (static desktop, no capture/encode)"
+                                    << "reuse=" << idrReplayCount;
+                        return;
+                    }
+                    // 服务端请求新 IDR（新客户端接入 / 解码器自愈）：强制下一帧为关键帧，
+                    // 并连喂几帧。注意不能只喂 1 帧：libopenh264 有 1 帧输出延迟，
+                    // 单帧输入配不出码流（详见 pumpCaptureFrames 处说明）。
+                    pendingKfEpoch = capturer.contentChangeCount();
+                    pendingKfEpochValid = true;
                     encoder->requestKeyframe();
                     pumpCaptureFrames(4);
                     kfRequestPending = true;
@@ -726,7 +853,12 @@ int HelperProcess::run(int argc, char* argv[])
                     // 回退）。重启失败必须显式回错：分辨率已在系统层生效，但采集
                     // 起不来（驱动/权限/设备占用），前端只会看到画面永久冻结。
                     const bool captureRestarted = capturer.start(captureFps);
-                    if (!captureRestarted) {
+                    if (captureRestarted) {
+                        // capturer.start() 把采集重新拉起，闸门记账必须跟上，
+                        // 否则锁屏中切分辨率会留下一条没人关的采集定时器。
+                        captureGateOpen = true;
+                        applyCaptureGate();
+                    } else {
                         qWarning() << "Helper: capturer restart after resolution change FAILED";
                         QJsonObject err;
                         err["type"] = "error";
@@ -737,6 +869,9 @@ int HelperProcess::run(int argc, char* argv[])
                     // [H9] 输入归一化基准必须同步更新：仅在启动时 setScreenSize 一次，
                     // 切分辨率后仍是旧尺寸 → 服务模式鼠标系统性偏移
                     inputMgr.setScreenSize(w, h);
+                    // 改分辨率可能顺带改变了该显示器在虚拟桌面里的原点（副屏被
+                    // 主屏"推开/拉近"），原点必须跟着采集快照一起刷新。
+                    inputMgr.setScreenOffset(capturer.originX(), capturer.originY());
                     // 更新配置文件中的当前分辨率（QSaveFile 原子写，见 helperSaveConfigField）
                     helperSaveConfigField("currentResolution", QString("%1x%2").arg(w).arg(h));
                     // 系统分辨率确实已变，仍需下发真实尺寸供前端调整 canvas/坐标映射
@@ -1013,11 +1148,13 @@ int HelperProcess::run(int argc, char* argv[])
             if (locked && !isWinXP)
                 return;
 
+            bool needFrame = false;
             if (type == "mousemove") {
                 inputMgr.injectMouseMove(obj["x"].toInt(), obj["y"].toInt());
             } else if (type == "mousedown" || type == "mouseup") {
                 inputMgr.injectMouseButton(obj["x"].toInt(), obj["y"].toInt(),
                     obj["button"].toInt(), type == "mousedown");
+                needFrame = true;
             } else if (type == "keydown" || type == "keyup") {
                 inputMgr.injectKeyboard(obj["keycode"].toInt(), obj["code"].toString(),
                     type == "keydown", obj["ctrl"].toBool(),
@@ -1025,9 +1162,16 @@ int HelperProcess::run(int argc, char* argv[])
                     isWin7 && locked,
                     obj["isChar"].toBool(),
                     obj["meta"].toBool()); // [B15] Win/Super 必须透传，否则服务模式 Win 键全失效
+                needFrame = true;
             } else if (type == "wheel") {
                 inputMgr.injectWheel(obj["delta"].toInt());
+                needFrame = true;
             }
+            // [IDLE-WAKE] 静止降频到 ~3s 一帧后，点击/按键必须立刻逼出一帧，
+            // 否则第一次输入的效果要等下一个 idle 周期才看得见。鼠标移动不唤醒：
+            // 光标由客户端本地绘制，且移动是高频事件，唤醒等于把抓屏重新拉满。
+            if (needFrame)
+                capturer.forceNextFrame();
         });
 
     QObject::connect(&capturer, &ScreenCapturer::screenLocked, &app,
@@ -1046,14 +1190,61 @@ int HelperProcess::run(int argc, char* argv[])
         });
 
     QTimer* desktopCheckTimer = new QTimer(&app);
-    // MinGW 5.3 的 winuser.h 没有这个符号（值取自 Vista/MinGW 较新头文件）。
-    // 它读的是 HKCU\Control Panel\Desktop\ScreenSaveSecure，即"在恢复时显示登录屏幕"。
-    const UINT kSpiGetScreenSaverSecure = 0x0072;
+    // 「屏保恢复时是否要密码」。实测（XP 主机 + mingw530 winuser.h:4983/4988）：
+    //   0x0072 = SPI_GETSCREENSAVERRUNNING —— 只表示"屏保进程在跑"，与要不要密码无关；
+    //   0x0076 = SPI_GETSCREENSAVESECURE —— XP 上调用直接失败 err=87（不支持），Vista+ 才有。
+    // 旧代码把 0x0072 当成 0x0076 用，于是"只要屏保在跑就算锁屏"：没勾密码的闲置屏保
+    // 会被永久报成锁屏，而"非安全屏保就杀掉 .scr 把画面放回来"那条分支成了死代码。
+    // 注册表才是各版本都可靠来源；helper 以登录用户身份运行，HKCU 就是那个用户。
+    // 值名实测（XP 主机 172.24.52.172 控制台用户 hive + 本机 Win11）：两处都叫
+    // ScreenSaverIsSecure（REG_SZ "0"/"1"）；先前按 ScreenSaveSecure 读，在任何版本上
+    // 都读不到，于是 Vista+ 靠 SPI 兜底还能对，XP 兜底又失败 → 真锁屏被报成未锁。
+    auto screenSaverRequiresPassword = []() -> bool {
+        wchar_t buf[8] = { 0 };
+        DWORD bytes = sizeof(buf) - sizeof(wchar_t), type = 0;
+        HKEY hk = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", 0,
+                          KEY_QUERY_VALUE, &hk) == ERROR_SUCCESS) {
+            const LONG rc = RegQueryValueExW(hk, L"ScreenSaverIsSecure", nullptr, &type,
+                                             reinterpret_cast<LPBYTE>(buf), &bytes);
+            RegCloseKey(hk);
+            if (rc == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ))
+                return buf[0] == L'1';
+        }
+        BOOL secure = FALSE;   // 注册表读不到才问系统（Vista+ 支持 0x0076）
+        return SystemParametersInfo(0x0076, 0, &secure, 0) != FALSE && secure != FALSE;
+    };
+    // 屏保进程当前是否在跑（0x0072 在 XP/Vista+ 都可用；实测 XP 锁屏欢迎界面下为 0）
+    auto screenSaverProcessRunning = []() -> bool {
+        BOOL running = FALSE;
+        SystemParametersInfo(0x0072, 0, &running, 0);
+        return running != FALSE;
+    };
+    // XP 的"锁屏"其实有两种，判据、可行操作和该给用户的话都不一样（全部实测于
+    // 172.24.52.172）：
+    //   screensaver —— 屏保恢复锁屏：输入桌面是 Screen-saver，logon.scr 还在跑，
+    //     ScreenSaverIsSecure=1。用户会话活着，鼠标注入能把屏保点掉。
+    //   logon —— 登录界面锁屏：输入桌面已是 Winlogon（欢迎屏幕/切换用户），显示的是
+    //     msgina 的 DirectUI 登录面板。
+    // 两者的解锁都由 secure-input 在安全桌面上完成：屏保锁屏先结束 .scr，等桌面切回
+    // 登录桌面后点用户磁贴展开密码框，再键入密码；所以 kind 只用于诊断，提示语一致。
+    auto lockKindOf = [](const QString& desk, bool onScreensaverDesk) -> QString {
+        if (onScreensaverDesk)
+            return QStringLiteral("screensaver");
+        const QString lower = desk.toLower();
+        if (lower == QStringLiteral("winlogon") || lower == QStringLiteral("welcome"))
+            return QStringLiteral("logon");
+        return QStringLiteral("secure");
+    };
+    auto lockHintFor = [](const QString&) -> QString {
+        return QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码");
+    };
     QObject::connect(desktopCheckTimer, &QTimer::timeout, &app, [&]() {
         // 桌面名在锁屏期间也会变（XP：屏保退出→登录 UI 落在另一个桌面），而服务端的
         // secure-input 进程是按桌面名投放的 —— 名字变了必须重报，否则键鼠继续打进
         // 已经没人看的旧桌面。
         static QString lastReportedDesk;
+        static QString lastReportedKind;
         static int openInputFailures = 0;
         HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_READ);
         if (!hDesk) {
@@ -1066,15 +1257,36 @@ int HelperProcess::run(int argc, char* argv[])
                 return;
             }
             desktopPollLocked = true;
-            if (!locked) {
+            applyCaptureGate();
+            // XP 的 helper 是服务用登录用户令牌拉起来的，它打得开 Screen-saver 桌面、
+            // 打不开 Winlogon 桌面（实测同一进程：前者报 deskName=Screen-saver，后者
+            // OpenInputDesktop 直接失败）。所以这里要按屏保进程在不在跑分辨两种锁屏：
+            //   在跑 → 还停在屏保（恢复要密码）桌面；
+            //   没跑 → 屏保已退出、登录 UI 接管了输入桌面，就是欢迎屏幕那种锁。
+            // 不做这个判断的话，从屏保桌面切到登录界面后 locked 一直是 true、失败分支
+            // 又只在 !locked 时广播，前端就永远停在上一条 "screensaver" 的提示上（实测
+            // 已到 Winlogon 仍报"屏保恢复要密码"）。
+            QString kind;
+            QString hint;
+            if (isWinXP) {
+                kind = screenSaverProcessRunning() ? QStringLiteral("screensaver")
+                                                   : QStringLiteral("logon");
+                hint = lockHintFor(kind);
+            } else {
+                kind = QStringLiteral("unknown");
+                hint = QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码");
+            }
+            if (!locked || kind != lastReportedKind) {
                 locked = true;
                 lastReportedDesk.clear();   // 这次连桌面名都拿不到，别拿旧值糊弄服务端
+                lastReportedKind = kind;
                 inputDesktopName.clear();
-                qInfo() << "Helper: desktop locked (OpenInputDesktop failed)";
+                qInfo() << "Helper: desktop locked, kind =" << kind;
                 QJsonObject msg;
                 msg["type"] = "screen_locked";
                 msg["locked"] = true;
-                msg["hint"] = QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码");
+                msg["kind"] = kind;
+                msg["hint"] = hint;
                 ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
             }
             return;
@@ -1104,9 +1316,11 @@ int HelperProcess::run(int argc, char* argv[])
             // 输入桌面切到 Screen-saver）显示成"没锁的黑屏"，两个方向都不对。
             onScreensaverDesk = (lower == QStringLiteral("screen-saver"));
             if (onScreensaverDesk) {
-                BOOL secure = FALSE;
-                SystemParametersInfo(kSpiGetScreenSaverSecure, 0, &secure, 0);
-                isLocked = (secure != FALSE);
+                // 同一个 Screen-saver 桌面有两种完全不同的情况，必须分开判：
+                //   * 屏保进程还在跑 → 只有"恢复时显示登录屏幕"勾了才算锁屏。没勾就是
+                //     普通闲置屏保，报锁屏会把远端永久挡在假锁提示后面（动鼠标就能回去）。
+                //   * 屏保进程不在跑 → 这个桌面被登录 UI 占着（XP 锁屏/切换用户），算锁屏。
+                isLocked = !screenSaverProcessRunning() || screenSaverRequiresPassword();
             } else {
                 isLocked = (lower != QStringLiteral("default"));
             }
@@ -1114,6 +1328,7 @@ int HelperProcess::run(int argc, char* argv[])
         CloseDesktop(hDesk);
         inputDesktopName = isLocked ? deskName : QString();
         desktopPollLocked = isLocked;
+        applyCaptureGate();
 #ifdef _WIN32
         // 不安全的 XP 屏保（恢复时不要密码）：杀一次 .scr 把远端画面放回来。
         //
@@ -1155,19 +1370,47 @@ int HelperProcess::run(int argc, char* argv[])
 #endif
         // 桌面名在锁屏期间也会变（XP：屏保退出→登录 UI 落在另一个桌面），而服务端的
         // secure-input 进程是按桌面名投放的 —— 名字变了必须重报，否则键鼠继续打进
-        // 已经没人看的旧桌面。
-        if (isLocked != locked || (isLocked && deskName != lastReportedDesk)) {
+        // 已经没人看的旧桌面。锁的种类变了同样要重报（前端遮罩文案按 kind 给话术）。
+        const QString kind = isLocked ? lockKindOf(deskName, onScreensaverDesk) : QString();
+        if (isLocked != locked || (isLocked && (deskName != lastReportedDesk || kind != lastReportedKind))) {
             locked = isLocked;
             lastReportedDesk = isLocked ? deskName : QString();
+            lastReportedKind = kind;
             qInfo() << "Helper: screen locked =" << locked << "input desktop =" << deskName;
             QJsonObject msg;
             msg["type"] = "screen_locked";
             msg["locked"] = locked;
-            msg["hint"] = locked ? QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码") : QString();
+            msg["hint"] = locked ? lockHintFor(kind) : QString();
+            if (locked)
+                msg["kind"] = kind;
             if (locked && !deskName.isEmpty())
                 msg["desktop"] = deskName;
             ws.sendTextMessage(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
         }
+#ifdef Q_OS_WIN
+        // 外部改分辨率 / 热插拔：GDI 捕获区是建实例时定死的几何，BitBlt 不会失败，
+        // 只会静默抓到错位/残缺的画面（DXGI 则可能在 ACCESS_LOST 后自己重初始化，
+        // 但 winOutputs_ 快照与鼠标基准仍是旧的）。解锁状态下每 2s 比对一次枚举
+        // 快照，变了就重建采集并整链路上报。
+        if (!desktopPollLocked && capturer.pollOutputGeometry()) {
+            qInfo() << "Helper: capture geometry changed ->" << capturer.width() << "x" << capturer.height()
+                    << "@" << capturer.originX() << "," << capturer.originY();
+            inputMgr.setScreenSize(capturer.width(), capturer.height());
+            inputMgr.setScreenOffset(capturer.originX(), capturer.originY());
+            // 重建在 winApplyOutput 里完成，闸门原本关着时由它自己保持 suspend。
+            QJsonObject info;
+            info["type"] = "screen_info";
+            info["width"] = capturer.width();
+            info["height"] = capturer.height();
+            ws.sendTextMessage(QString::fromUtf8(QJsonDocument(info).toJson(QJsonDocument::Compact)));
+#ifdef USE_FFMPEG
+            // 尺寸变了编码器/sws 上下文失效，重建后前端按新 screen_info 重建 MSE
+            if (videoActive && encoder)
+                reinitVideoEncoder();
+            sendCaptureCaps(QString());
+#endif
+        }
+#endif
     });
     desktopCheckTimer->start(2000);
 
@@ -1177,6 +1420,11 @@ int HelperProcess::run(int argc, char* argv[])
         compressor->shutdown();
         return 1;
     }
+    // 采集启动后才有多屏枚举快照。输入归一化基准必须按捕获区真实几何/原点来算：
+    // 选了副屏时原点不是 (0,0)，否则注入的鼠标整体落在主屏上（前端画面与系统
+    // 光标各走各的）。
+    inputMgr.setScreenSize(capturer.width(), capturer.height());
+    inputMgr.setScreenOffset(capturer.originX(), capturer.originY());
 
     // 枚举支持的分辨率并写入配置文件（QSaveFile 原子写，见 helperSaveConfigField）
     {

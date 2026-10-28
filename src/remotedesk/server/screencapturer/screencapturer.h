@@ -171,14 +171,20 @@ public:
         return screen_ ? screen_->size().height() : 0;
     }
 
-    // 当前捕获区在根窗口/虚拟桌面中的原点（Linux X11 多屏；其他平台为 0）。
-    // 注入端据此把前端坐标换算成屏幕绝对坐标。
+    // 当前捕获区在根窗口/虚拟桌面中的原点（Linux X11 多屏 / Windows 多显示器；
+    // 其余平台为 0）。注入端据此把前端坐标换算成屏幕绝对坐标。
     int originX() const {
 #ifdef Q_OS_LINUX
         if (useX11_ && x11Capturer_)
             return x11Capturer_->originX();
         if (useWayland_ && waylandCapturer_)
             return waylandCapturer_->originX();
+#endif
+#ifdef Q_OS_WIN
+        // 选了副显示器时捕获区原点不是 (0,0)：鼠标注入按「原点+相对坐标」换算，
+        // 否则点击会整体落在主屏上。
+        if (winCurrentIndex_ >= 0 && winCurrentIndex_ < winOutputs_.size())
+            return winOutputs_[winCurrentIndex_].x;
 #endif
         return 0;
     }
@@ -188,6 +194,10 @@ public:
             return x11Capturer_->originY();
         if (useWayland_ && waylandCapturer_)
             return waylandCapturer_->originY();
+#endif
+#ifdef Q_OS_WIN
+        if (winCurrentIndex_ >= 0 && winCurrentIndex_ < winOutputs_.size())
+            return winOutputs_[winCurrentIndex_].y;
 #endif
         return 0;
     }
@@ -199,6 +209,13 @@ public:
     bool refreshOutputs();   // 热插拔感知：重新枚举并保持/回退当前选择
     bool switchOutput(int index);
     int currentOutputIndex() const;
+
+#ifdef Q_OS_WIN
+    // 外部改分辨率/插拔显示器后，捕获区几何是否已与系统不一致（GDI 捕获区是建实例时
+    // 定死的，屏幕变了 BitBlt 不会报错）。变了就按新几何重建并返回 true，调用方负责
+    // 重报 screen_info 与重建编码器。
+    bool pollOutputGeometry();
+#endif
 
 #ifdef Q_OS_WIN
     // Windows 多屏输出描述（screencapturer_win.cpp 维护；public 供文件级枚举函数使用）
@@ -225,6 +242,10 @@ private:
     void emitCapturedFrame(const QImage& frame, quint16 knownChecksum);
 
     QTimer* captureTimer_ = nullptr;
+    // [IDLE-WAKE] 静止降频后的即时唤醒：定时器可能还有 ~3s 才到点，这里插一次
+    // 0ms 抓帧，让"闲置后第一次点击/按键"的反馈不必等满一个 idle 周期。
+    QTimer* wakeTimer_ = nullptr;
+    void requestImmediateCapture();
     QScreen* screen_ = nullptr;
     int fps_ = 30;
 
@@ -246,6 +267,15 @@ private:
 #ifdef Q_OS_WIN
     PlatformCapturer* gdiCapturer_ = nullptr;
     bool useGDI_ = false;
+    // [IDLE-DIFF] 慢读回机器的静止判定基准帧（QImage 隐式共享，赋值不拷贝像素）。
+    // 详见 screencapturer_win.cpp 的 frameChangeIsSmall()。
+    QImage lastFrameDiff_;
+    // GDI 采集器存在但 BitBlt 连续失败的计数与已重建次数（详见 captureFrame 的
+    // gdiAttempted 分支）：桌面切换以外的原因（分辨率变更、驱动重置、DIB 尺寸过期）
+    // 也会让 BitBlt 一直失败，必须重建才能自愈；但锁屏期间失败是常态，所以重建次数
+    // 封顶，取到帧即清零。
+    int gdiFailStreak_ = 0;
+    int gdiRebuilds_ = 0;
 
     // Windows 多屏选择状态（screencapturer_win.cpp 维护）
     QList<WinOutput> winOutputs_;
@@ -273,13 +303,24 @@ private:
     // [SLOW-READBACK-PACE] 慢读回自适应节流：VMware SVGA 等无加速 VM 上，单帧
     // GDI 读屏（BitBlt 从帧缓冲读回）实测可达 300~400ms。固定 33ms 定时器会让
     // 采集回调背靠背连跑，单核被占满（XP 单核实测 50%~95%）。paceIntervalMs_
-    // 由实测单帧耗时推导（≈2×capAvg，duty≈33%），与静止降频一起取最大值。
+    // 由实测单帧耗时推导（≈2×capAvg，duty≈33%）。
     qint64 paceIntervalMs_ = 0;
     bool idleThrottled_ = false;
+    // [IDLE-PACE] 慢读回机器上 pace 本身就有数百 ms，旧的 max(idle 250ms, pace)
+    // 里 idle 分支永远选不上：静止桌面也一直按 duty≈33% 跑（XP 单核实测恒定
+    // 33.5% CPU、0.56fps）。静止时把 pace 再放大 kIdlePaceFactor 倍（≈3s 一帧，
+    // duty≈11%）；交互延迟由 forceNextFrame() 的即时唤醒兜住（输入到达后立刻
+    // 抓一帧并恢复正常 pace），所以不需要为响应速度保留高频空转。
+    static constexpr int kIdlePaceFactor = 4;
+    // 定时器间隔上界：极端读回（capAvg>2s）时 pace*4 会把交互反馈拖到十几秒
+    static constexpr int kMaxIntervalMs = 5000;
     void applyCaptureInterval() {
-        int target = idleThrottled_ ? kIdleIntervalMs : ((fps_ > 0) ? (1000 / fps_) : 33);
-        if (paceIntervalMs_ > target)
-            target = static_cast<int>(paceIntervalMs_);
+        qint64 pace = paceIntervalMs_;
+        if (idleThrottled_)
+            pace = pace > 0 ? pace * kIdlePaceFactor : kIdleIntervalMs;
+        int target = (fps_ > 0) ? (1000 / fps_) : 33;
+        if (pace > target)
+            target = static_cast<int>(qMin<qint64>(pace, kMaxIntervalMs));
         if (captureTimer_->interval() != target)
             captureTimer_->setInterval(target);
     }

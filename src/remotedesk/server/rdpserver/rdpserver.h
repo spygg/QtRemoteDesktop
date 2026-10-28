@@ -20,6 +20,7 @@
 #include <QThread>
 #include <QWaitCondition>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -45,6 +46,18 @@ class WebRtcSession;
 #endif
 
 class InputManager;
+
+// 时长/冷却判据统一用单调时钟（steady_clock）：编码器重建的冷却、IDR 请求超时、
+// PLI 复用间隔、解锁会话的有效期都是"经过多久"的语义。墙钟会被 NTP 校时或用户改
+// 系统时间拉动，差值突变——向前跳会误判冷却已过而连续重建，向后跳则让兜底永不触发。
+// 仅用于内部时长判断，码流时间戳与日志时间仍是墙钟。
+// +1 保证返回值恒 > 0（0 保留给"未设置"）。
+inline qint64 monoNowMs()
+{
+    static const auto origin = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - origin).count() + 1;
+}
 
 // HTTP 请求解析状态：将请求头与 POST body 在多次 readyRead 之间累积，
 // 避免在主线程用 waitForReadyRead 同步阻塞等待 TCP 分片的 body 到齐。
@@ -317,6 +330,15 @@ private:
     // "Welcome"）。服务进程自己 OpenInputDesktop 会失败，只能靠它把 secure-input
     // 投到登录 UI 真正所在的桌面。空 = 不知道，回退 winsta0\Winlogon。
     QString lockedDesktop_;
+    // helper 上报的锁屏种类（screen_locked 的 kind）："screensaver" = 屏保恢复锁屏
+    // （用户会话还活着，输入桌面在 Screen-saver）、"logon" = 登录界面锁屏（欢迎屏幕/
+    // 切换用户，桌面已是 Winlogon）、"unknown" = 连输入桌面都打不开。XP 的这两种能给的
+    // 操作不一样，解锁失败时要用它说清是哪一种，而不是笼统一句"密码不对"。
+    QString lockedKind_;
+    // helper 随锁屏一起上报的提示文案（"屏保恢复锁屏…"/"登录界面锁屏…"）。新客户端在
+    // 已锁状态接入时直接回放它，避免服务端自己再写一句通用文案 —— 实测 XP 上那句
+    // "点「解锁」由服务端注入密码"是错的，两处各写一份就会有一处忘改。
+    QString lockedHint_;
     // [Win-解锁] 一键免密解锁用的明文密码（server_config.json 的 unlockPassword，
     // 局域网自用场景）。锁屏 UI 在 winlogon 安全桌面，只能经 secure-input 注入。
     QString unlockPassword_;
@@ -327,8 +349,9 @@ private:
     // secure-input 进程实际投放到的桌面名（不含 "winsta0\" 前缀）。锁屏期间桌面会变
     // （XP：屏保桌面 → 登录桌面），名字与当前锁屏桌面不符就要重投进程。
     QString secureInputDesktop_;
-    // 解锁序列的有效期（epoch ms）。序列里 SAS 会把输入桌面从 Screen-saver 切到
-    // Winlogon —— 这是流程自己造成的正常切换，此时"桌面不符"不能算进程不健康。
+    // 解锁序列的有效期（单调时钟毫秒，见本文件 monoNowMs()）。序列里 SAS 会把输入
+    // 桌面从 Screen-saver 切到 Winlogon —— 这是流程自己造成的正常切换，此时"桌面不符"
+    // 不能算进程不健康。
     // 不加这个门禁的实测后果：helper 在 SAS 后 0.9s 补报 screen_locked=true，
     // 健康判定据此杀掉正在写密码的进程，第一次尝试全废，XP 解锁从 ~2s 拖到 ~9s。
     // 用到期时间而非 bool：终判定时器若因 helper 掉线没跑，也不会把门禁永久留着。
@@ -406,6 +429,15 @@ private:
 
     void loadServerConfig(const QString& configPath);
     void saveServerConfig(const QString& configPath);
+    // 页面标题实际使用的名字：systemName_ 非空则用它，否则主机名，再退"远程桌面"。
+    // 前端首次加载 / 改完名字后的 ack 都用它，避免"输入框显示 A、标签页显示 B"。
+    QString effectiveSystemName() const;
+    // 把当前 systemName 广播给所有已连接页面（改一台上百个标签页一起变）
+    void broadcastSystemName();
+    // index.html 的烤制缓存（标题/WS 端口都写进去了）。改名后必须失效，
+    // 否则刷新页面还是旧标题 —— 缓存和失效放在同一把锁里，HTTP 线程安全。
+    mutable QMutex htmlCacheMutex_;
+    mutable QByteArray htmlCache_;
     QTimer* configSaveTimer_ = nullptr; // [P2] 去抖落盘定时器
     QTimer* cursorTimer_ = nullptr;     // [流畅度] 光标位置 33Hz 独立广播定时器
     // [P2] 配置去抖落盘：单条 config 消息可同时改 fps/scale/codec/hw_encode，

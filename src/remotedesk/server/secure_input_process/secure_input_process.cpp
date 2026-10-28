@@ -16,6 +16,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <tlhelp32.h>
 #endif
 
 // ---------------------------------------------------------------------------
@@ -88,20 +89,33 @@ FillResult fillLogonDialog(const QString& password, QString* detail)
     // 第 1 个 Edit 是用户名，第 2 个是密码框
     HWND pwdEdit = col.edits[1];
     const std::wstring wpwd = password.toStdWString();
-    const LRESULT setRc = SendMessageW(pwdEdit, WM_SETTEXT, 0,
-                                       reinterpret_cast<LPARAM>(wpwd.c_str()));
-    if (!setRc) {
+    // 必须用 SendMessageTimeout 而不是 SendMessage：这是**跨进程**同步调用，而目标是
+    // winlogon/msgina 的窗口。桌面切换的瞬间（刚发过 SAS、旧对话框还在拆）那个线程
+    // 可能不再取消息，SendMessage 就永远不返回 —— 本进程的工作线程卡死在这里，
+    // BusyGuard 的析构不会执行，g_unlockBusy 永久为 1，之后每次「解锁」都被
+    // :499 的守卫直接丢弃；服务侧健康检查看到进程还活着、连接还在，也不会重启它。
+    // 表现是"解锁按钮从此再也没反应，直到重启服务"。SMTO_ABORTIFHUNG 让卡住的
+    // 目标最多等 2 秒就把控制权还给流程。
+    DWORD_PTR setRes = 0;
+    const BOOL setOk = SendMessageTimeoutW(pwdEdit, WM_SETTEXT, 0,
+                                           reinterpret_cast<LPARAM>(wpwd.c_str()),
+                                           SMTO_ABORTIFHUNG, 2000, &setRes);
+    if (!setOk) {
+        *detail = QStringLiteral("password box did not reply within 2s (logon thread busy?)");
+        return kRejected;
+    }
+    if (!setRes) {
         *detail = QStringLiteral("WM_SETTEXT rejected by password box");
         return kRejected;
     }
     // 提交：msgina 的解锁对话框响应 WM_COMMAND(IDOK)（实测有效，跨进程无 UIPI 限制）
-    SendMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED),
-                 reinterpret_cast<LPARAM>(col.okBtn));
+    SendMessageTimeoutW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED),
+                        reinterpret_cast<LPARAM>(col.okBtn), SMTO_ABORTIFHUNG, 2000, nullptr);
     Sleep(600);
     if (IsWindow(dlg)) {
         // 兜底：直接点按钮
         if (col.okBtn) {
-            SendMessageW(col.okBtn, BM_CLICK, 0, 0);
+            SendMessageTimeoutW(col.okBtn, BM_CLICK, 0, 0, SMTO_ABORTIFHUNG, 2000, nullptr);
             Sleep(400);
         }
     }
@@ -134,13 +148,15 @@ void sendSasKeys()
 // 兜底路径：本线程输入队列已绑定到当前安全桌面，SendInput 才会落到正确的桌面
 void sendPasswordWithSendInput(const QString& password)
 {
-    auto key = [](UINT vk, bool down) {
+    int failed = 0;
+    auto key = [&failed](UINT vk, bool down) {
         INPUT in = { };
         in.type = INPUT_KEYBOARD;
         in.ki.wVk = static_cast<WORD>(vk);
         in.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
         if (!down) in.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, &in, sizeof(INPUT));
+        if (SendInput(1, &in, sizeof(INPUT)) != 1)
+            ++failed;
     };
     for (const QChar& ch : password) {
         SHORT vkScan = VkKeyScanW(static_cast<wchar_t>(ch.unicode()));
@@ -157,15 +173,18 @@ void sendPasswordWithSendInput(const QString& password)
     key(VK_RETURN, true);
     Sleep(30);
     key(VK_RETURN, false);
+    qInfo() << "SecureInput: typed password (" << password.size() << " chars), rejected key events ="
+            << failed;
 }
 
 // 在安全桌面上点一下（绝对坐标，0..65535 归一化）。
-void clickScreen(int x, int y)
+// 返回 false 表示 SendInput 被拒（安全桌面上常见原因：线程桌面不是输入桌面）。
+bool clickScreen(int x, int y)
 {
     const int w = GetSystemMetrics(SM_CXSCREEN);
     const int h = GetSystemMetrics(SM_CYSCREEN);
     if (w <= 1 || h <= 1)
-        return;
+        return false;
     const LONG nx = (x * 65535) / (w - 1);
     const LONG ny = (y * 65535) / (h - 1);
     INPUT mv = { };
@@ -180,9 +199,34 @@ void clickScreen(int x, int y)
     dn.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
     INPUT up = dn;
     up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    SendInput(1, &dn, sizeof(dn));
+    const UINT downSent = SendInput(1, &dn, sizeof(dn));
     Sleep(40);
-    SendInput(1, &up, sizeof(up));
+    const UINT upSent = SendInput(1, &up, sizeof(up));
+    return downSent == 1 && upSent == 1;
+}
+
+// 欢迎屏幕展开后密码框是真正的 Edit 子控件（DirectUIHWND 的兄弟窗口）；
+// 没有它就说明磁贴还没点开。
+struct EditScan { HWND edit; };
+
+BOOL CALLBACK findEditProc(HWND h, LPARAM lp)
+{
+    char cls[64] = { 0 };
+    GetClassNameA(h, cls, sizeof(cls) - 1);
+    if (strcmp(cls, "Edit") != 0)
+        return TRUE;
+    reinterpret_cast<EditScan*>(lp)->edit = h;
+    return FALSE;
+}
+
+HWND findPasswordEdit()
+{
+    HWND host = FindWindowA("NativeHWNDHost", nullptr);
+    if (!host)
+        return nullptr;
+    EditScan scan { nullptr };
+    EnumChildWindows(host, findEditProc, reinterpret_cast<LPARAM>(&scan));
+    return scan.edit;
 }
 
 // 当前键盘焦点是不是一个 Edit（欢迎屏幕点开磁贴后的密码框）。
@@ -203,11 +247,13 @@ bool focusIsEdit(QString* clsOut)
 // XP 的 FUS「欢迎屏幕」：NativeHWNDHost + DirectUIHWND，整页是自绘的，
 // 没有任何 #32770 子控件可以 WM_SETTEXT（实测 Winlogon 桌面上只剩一个隐藏的
 // "GINA Logon" #32770）。它只能像人一样操作：
-//   1) 点用户名磁贴 —— 页面会把密码框展开，且那是真正的 Edit 控件并拿到键盘焦点；
-//   2) 逐字 SendInput 输入密码 + 回车。
-// 磁贴位置：左窗格占屏幕左侧 50%，用户列表从水平中线开始向右排、垂直居中
-// （2310x1398 实测磁贴落在 (1315,690) = 57%W / 49%H）。
-// 点完必须校验焦点真的落进 Edit：没落进去就小幅右移重点，最后才交给上层兜底。
+//   1) 点用户名磁贴 —— 页面展开一行带密码 Edit 的输入区；
+//   2) 点一下那个 Edit 让它拿到键盘焦点（实测磁贴展开后 logonui 经常**不**把焦点
+//      交给 Edit，焦点还停在 DirectUIHWND 上；此时再点磁贴没有任何反应）；
+//   3) 逐字 SendInput 输入密码 + 回车。
+// 实测（2310x1398）：磁贴图标/用户名在 (1190..1340, 660..708)，展开后的密码框在
+// (1254,705)+(155x21)。磁贴的纵向位置在不同锁屏状态下会差十几像素（开屏保锁 vs
+// 直接锁工作站），所以按候选点依次点、每次都看焦点有没有真的落进 Edit。
 bool fillWelcomeScreen(const QString& password, QString* detail)
 {
     const int w = GetSystemMetrics(SM_CXSCREEN);
@@ -216,23 +262,64 @@ bool fillWelcomeScreen(const QString& password, QString* detail)
         *detail = QStringLiteral("no metrics for welcome screen");
         return false;
     }
-    const int xs[] = { w * 57 / 100, w * 61 / 100, w * 53 / 100 };
-    const int y = h * 49 / 100;
-    for (int i = 0; i < 3; ++i) {
-        clickScreen(xs[i], y);
-        // 点完页面要重排（磁贴展开 + 密码框出现），最多等 1.2s
-        for (int k = 0; k < 12; ++k) {
+
+    auto settleAndType = [&](const char* how) -> bool {
+        QString cls;
+        for (int k = 0; k < 15; ++k) {
             Sleep(100);
-            QString cls;
             if (focusIsEdit(&cls)) {
-                *detail = QStringLiteral("user tile clicked at (%1,%2), focus=%3")
-                              .arg(xs[i]).arg(y).arg(cls);
+                *detail = QStringLiteral("welcome screen: %1, focus=%2").arg(how, cls);
+                qInfo() << "SecureInput:" << *detail;
                 sendPasswordWithSendInput(password);
                 return true;
             }
         }
+        return false;
+    };
+
+    HWND edit = findPasswordEdit();
+    qInfo() << "SecureInput: welcome screen" << w << "x" << h
+            << "existing password edit =" << (void*)edit;
+
+    if (!edit) {
+        // 磁贴：点开后 DirectUI 会创建密码 Edit（VM 上实测要 1.8s 左右，给 2.5s）
+        const int tx = w * 53 / 100;
+        const int ty = h * 49 / 100;
+        qInfo() << "SecureInput: welcome tile click at" << tx << ty
+                << "sendInputOk =" << clickScreen(tx, ty);
+        for (int k = 0; k < 25 && !edit; ++k) {
+            Sleep(100);
+            edit = findPasswordEdit();
+        }
     }
-    *detail = QStringLiteral("welcome screen: no password Edit got focus after clicking");
+
+    // 框已经存在：直接点框中心（位置现取，不猜）
+    for (int round = 0; edit && round < 2; ++round) {
+        RECT r;
+        if (!GetWindowRect(edit, &r) || r.right <= r.left || r.bottom <= r.top)
+            break;
+        const int cx = (r.left + r.right) / 2;
+        const int cy = (r.top + r.bottom) / 2;
+        clickScreen(cx, cy);
+        if (settleAndType("password box clicked"))
+            return true;
+        qInfo() << "SecureInput: click into password box at" << cx << cy << "did not take focus";
+        edit = findPasswordEdit();
+    }
+
+    // 兜底：有的状态下框已经画出来、Edit 却还没创建（DirectUI 懒创建），
+    // 按实测的框区域再点几下，能不能拿到焦点仍然只看 GetGUIThreadInfo。
+    const int cand[][2] = {
+        { w * 58 / 100, h * 51 / 100 },   // 密码框中心一带
+        { w * 55 / 100, h * 50 / 100 },   // 密码框上沿一带
+        { w * 57 / 100, h * 49 / 100 },   // 磁贴右侧（用户名文字）
+    };
+    for (int i = 0; i < 3; ++i) {
+        clickScreen(cand[i][0], cand[i][1]);
+        if (settleAndType("password box area clicked"))
+            return true;
+    }
+    *detail = QStringLiteral("welcome screen: password box never got focus");
     return false;
 }
 
@@ -252,6 +339,35 @@ volatile LONG g_unlockBusy = 0;
 bool isScreensaverDesktop(const QString& name)
 {
     return name.compare(QStringLiteral("Screen-saver"), Qt::CaseInsensitive) == 0;
+}
+
+// 结束 XP 的屏保进程（*.scr）。
+// 屏保恢复锁屏时登录界面在另一张桌面上，Screen-saver 这张只有屏保画面：点击、键入
+// 全部落空。杀掉 .scr 后 Winlogon 会把输入桌面切回登录桌面，那边才有用户磁贴。
+// 安全屏保被杀不会绕过密码 —— Winlogon 紧接着弹的是登录界面。
+int killScreenSaverProcesses()
+{
+    int killed = 0;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE)
+        return 0;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    if (Process32FirstW(hSnap, &pe)) {
+        do {
+            const QString exe = QString::fromWCharArray(pe.szExeFile);
+            if (!exe.endsWith(QLatin1String(".scr"), Qt::CaseInsensitive))
+                continue;
+            HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+            if (!hProc)
+                continue;
+            if (TerminateProcess(hProc, 0))
+                ++killed;
+            CloseHandle(hProc);
+            qInfo() << "SecureInput: terminated screen saver" << exe;
+        } while (Process32NextW(hSnap, &pe));
+    }
+    CloseHandle(hSnap);
+    return killed;
 }
 
 // 当前桌面是否停在 XP 的「欢迎屏幕」形态（有背景窗口、没有可见的 #32770 登录框）。
@@ -319,6 +435,36 @@ QString attachInputDesktop(bool afterSas)
     return deskName;
 }
 
+// 读取当前输入桌面名（只读查询，不改变本线程的桌面绑定）。
+QString currentInputDesktopName()
+{
+    HDESK h = OpenInputDesktop(0, FALSE, GENERIC_READ);
+    if (!h)
+        return QString();
+    wchar_t nm[256] = { 0 };
+    DWORD needed = 0;
+    QString out;
+    if (GetUserObjectInformationW(h, UOI_NAME, nm, sizeof(nm) - sizeof(wchar_t), &needed))
+        out = QString::fromWCharArray(nm);
+    CloseDesktop(h);
+    return out;
+}
+
+// 键入密码后确认是否真的解开：登录成功后输入桌面会切回 Default。
+// 返回 true 表示已解锁、或暂时问不到桌面名（别用 SAS 去打断可能正在进行的登录）。
+bool likelyUnlocked(int ms)
+{
+    for (int waited = 0; waited <= ms; waited += 200) {
+        const QString d = currentInputDesktopName();
+        if (d.isEmpty())
+            return true;
+        if (d.compare(QLatin1String("default"), Qt::CaseInsensitive) == 0)
+            return true;
+        Sleep(200);
+    }
+    return false;
+}
+
 // 独立线程：附着当前输入桌面 → 等登录对话框 → 控件写入 + 提交。
 // 必须独立线程 —— 主线程已发过 SAS，其输入队列被固定在旧桌面。
 DWORD WINAPI unlockThreadProc(LPVOID param)
@@ -339,6 +485,13 @@ DWORD WINAPI unlockThreadProc(LPVOID param)
 
     QString detail;
     FillResult res = kNoDialog;
+
+    // 已经解开了（本地有人输了密码 / 上一步就把屏保打掉）：输入桌面回到 Default。
+    // 这时候任何注入都只会落到用户正在用的窗口上，必须直接收工。
+    if (deskName.compare(QLatin1String("default"), Qt::CaseInsensitive) == 0) {
+        qInfo() << "SecureInput: input desktop is Default - already unlocked, nothing to do";
+        return 0;
+    }
 
     // Vista+：LogonUI 是自绘界面，永远不会出现 #32770；但本进程是用
     // lpDesktop=<输入桌面> 拉起的，输入队列一开始就绑在登录桌面上，SendInput
@@ -362,15 +515,63 @@ DWORD WINAPI unlockThreadProc(LPVOID param)
         return 0;
     }
 
+    // XP FUS 欢迎屏幕 / 锁定界面：没有任何 #32770 可写，只能像人一样操作 ——
+    // 点屏幕中偏右的用户磁贴 → 密码框（真 Edit 控件）展开并拿到焦点 → 键入密码回车。
+    // 键入后必须用结果确认（输入桌面切回 Default）；仍锁着就返回 false 交给上层继续
+    // 重试，而不是当作成功收工。
+    auto tryWelcomeScreen = [&]() -> bool {
+        if (!hasWelcomeScreen())
+            return false;
+        qInfo() << "SecureInput: welcome screen detected, clicking user tile";
+        QString wdetail;
+        if (!fillWelcomeScreen(pw, &wdetail)) {
+            detail = wdetail;
+            return false;
+        }
+        if (likelyUnlocked(4000)) {
+            qInfo() << "SecureInput: unlock submitted -" << wdetail;
+            detail = wdetail;
+            return true;
+        }
+        detail = wdetail + QStringLiteral("; still locked after typing");
+        return false;
+    };
+
     if (isScreensaverDesktop(deskName)) {
-        // 屏保桌面：任何登录框都不会在这里出现，立刻发 SAS，不必等
-        detail = QStringLiteral("input desktop is Screen-saver");
+        // XP 屏保恢复锁屏：输入桌面是 Screen-saver，登录界面在另一张桌面上，在这张
+        // 桌面上点磁贴/键入全部落空。先结束屏保进程，Winlogon 随后把输入桌面切回
+        // 登录桌面；线程与桌面的绑定换不掉，所以必须换新线程重新附着。
+        // （每次尝试等待桌面切换 8s 已够；次数上限压到 3，保证整链仍在服务端的
+        //   30s 解锁窗口内。）
+        qInfo() << "SecureInput: XP input desktop is Screen-saver - killing .scr";
+        const int killed = killScreenSaverProcesses();
+        if (ctx->attempt + 1 < 3) {
+            Sleep(300);
+            auto* next = new UnlockCtx { pw, ctx->attempt + 1 };
+            HANDLE th = CreateThread(nullptr, 0, unlockThreadProc, next, 0, nullptr);
+            if (th) {
+                CloseHandle(th);
+                handOff = true;
+                return 0;
+            }
+            delete next;
+            qWarning() << "SecureInput: retry thread failed, err=" << static_cast<int>(GetLastError());
+        }
+        detail = QStringLiteral("input desktop is Screen-saver (killed %1 .scr)").arg(killed);
+    } else if (tryWelcomeScreen()) {
+        return 0;
     } else {
-        // 界面可能还在过渡（SAS 之后桌面切换 + LogonUI 起界面），给对话框 5s 出现时间
+        // 界面可能还在过渡（桌面切换 + 登录 UI 起界面）：先按传统对话框等 5s；
+        // 期间欢迎屏幕可能才起来，每轮都重扫一次，别对着欢迎屏幕空等 #32770。
         for (int i = 0; i < 25; ++i) {
             res = fillLogonDialog(pw, &detail);
             if (res != kNoDialog)
                 break;
+            if (hasWelcomeScreen()) {
+                if (tryWelcomeScreen())
+                    return 0;
+                break;
+            }
             Sleep(200);
         }
     }
@@ -378,20 +579,6 @@ DWORD WINAPI unlockThreadProc(LPVOID param)
     if (res == kSubmitted) {
         qInfo() << "SecureInput: unlock submitted -" << detail;
         return 0;
-    }
-
-    if (res == kNoDialog && hasWelcomeScreen()) {
-        // XP FUS 欢迎屏幕：再发 SAS 只会原地打转（实测 SAS 不会把欢迎屏幕切回
-        // 传统对话框，只会把整个登录界面重排一次），必须点磁贴 + 输入密码。
-        // 放在 SAS 重试之前：否则 3 轮 SAS 全打空，最后退化到盲打 SendInput，
-        // 那正是「输入密码无法解锁」的直接原因。
-        qInfo() << "SecureInput: welcome screen detected (" << detail << "), clicking user tile";
-        QString wdetail;
-        if (fillWelcomeScreen(pw, &wdetail)) {
-            qInfo() << "SecureInput: unlock submitted -" << wdetail;
-            return 0;
-        }
-        detail = wdetail;
     }
 
     if (res == kNoDialog && ctx->attempt + 1 < 4) {
@@ -415,6 +602,13 @@ DWORD WINAPI unlockThreadProc(LPVOID param)
     }
 
     if (ctx->attempt > 0) {
+        // 盲打只在仍然锁着时做：上一步（例如结束屏保）可能已经把机器解开，那时
+        // 输入桌面是 Default，盲打等于往当前焦点窗口里敲一串登录密码。
+        const QString now = currentInputDesktopName();
+        if (now.compare(QLatin1String("default"), Qt::CaseInsensitive) == 0) {
+            qInfo() << "SecureInput: input desktop is Default - already unlocked, skip blind typing";
+            return 0;
+        }
         qWarning() << "SecureInput: control path failed (" << detail << "), falling back to SendInput";
         sendPasswordWithSendInput(pw);
     } else {

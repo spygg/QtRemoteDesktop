@@ -247,6 +247,19 @@ bool InputManager::desktopSessionIsWayland()
 // 加锁。若未来把注入移到独立线程，必须先加同步保护。
 bool InputManager::ensureXDisplay()
 {
+    // 服务端会动态切换 DISPLAY/XAUTHORITY（虚拟屏 :99 ↔ 物理会话 :0、
+    // cookie 修复后换成另一个 auth 文件）。已经打开的 X 连接不会跟着换：
+    // 采集重启到了新屏，注入却还留在旧屏/旧凭据上 —— 这就是"画面正常、
+    // 鼠标键盘全不动"的另一种成因。每次注入前比对环境，变了先关旧连接。
+    const QByteArray curDpy = qgetenv("DISPLAY");
+    const QByteArray curAuth = qgetenv("XAUTHORITY");
+    if (xDisplay_ && (curDpy != openedDisplay_ || curAuth != openedXauth_)) {
+        qInfo() << "InputManager: DISPLAY/XAUTHORITY changed ("
+                << openedDisplay_ << "->" << curDpy << "), reopening X display";
+        XCloseDisplay(xdisp(xDisplay_));
+        xDisplay_ = nullptr;
+        lastXOpenFailMs_ = 0;   // 新环境值立刻重试，不要等 1.5s 限流
+    }
     if (xDisplay_)
         return true;
     // 失败限流：display 不可用时，mousemove 会以 60Hz 调到这里。无节流时每秒
@@ -266,6 +279,8 @@ bool InputManager::ensureXDisplay()
         return false;
     }
     xDisplay_ = d;
+    openedDisplay_ = curDpy;
+    openedXauth_ = curAuth;
     if (waylandMode_ && !desktopSessionIsWayland()) {
         // 真正的 X11 桌面（无 Wayland 合成器 socket）：优先 X11 输入（XTest），
         // 不再尝试 uinput/Wayland portal。

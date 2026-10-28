@@ -10,6 +10,7 @@
 
 #ifdef Q_OS_LINUX
 typedef unsigned long X11KeySym;
+#include <QByteArray>
 #include <QDBusPendingCall>
 #include <QDBusMessage>
 #endif
@@ -67,6 +68,12 @@ private:
 
 #ifdef Q_OS_LINUX
     void* xDisplay_ = nullptr;
+    // 打开 xDisplay_ 时使用的 DISPLAY/XAUTHORITY。服务端会动态切换这两者
+    // （例如从自己拉起的虚拟屏 :99 切到用户物理会话 :0，或者换了一份 cookie），
+    // 已建立的 X 连接不会跟着换 —— 画面走新屏、键鼠还留在旧屏上，表现为
+    // "画面正常、鼠标键盘全不动"。每次注入前比对，变了就关掉重开。
+    QByteArray openedDisplay_;
+    QByteArray openedXauth_;
     // 首次注入时惰性打开 X display：服务常在设置 DISPLAY/XAUTHORITY 之前就构造本对象，
     // 过早 XOpenDisplay 会因鉴权文件未就绪而失败，导致 xDisplay_ 永久为空、输入全死。
     // 改为 env 就绪后（首次注入时）再打开；成功即优先走 X11（XTest）输入。

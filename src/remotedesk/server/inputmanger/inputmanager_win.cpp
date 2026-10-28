@@ -25,25 +25,37 @@ void InputManager::injectMouseMove(int x, int y)
 {
     INPUT input = {};
     input.type = INPUT_MOUSE;
-    // 高 DPI 缩放下 GetSystemMetrics 返回物理像素，前端坐标基于逻辑像素，
-    // 若未设置 screenW_/screenH_（与前端一致），回退物理尺寸。
-    int sw = screenW_ > 0 ? screenW_ : GetSystemMetrics(SM_CXSCREEN);
-    int sh = screenH_ > 0 ? screenH_ : GetSystemMetrics(SM_CYSCREEN);
-    // 无头/RDP 边缘会话下 SM_CXSCREEN 可能为 0，裸除会直接整除零崩溃进程；
-    // 分母兜底为 1（坐标会被系统钳到边界，但至少不崩）。
-    if (sw <= 0 || sh <= 0) {
+    // 前端发来的是「捕获区相对像素」。MOUSEEVENTF_ABSOLUTE 不带 VIRTUALDESK 时按
+    // **主屏**归一化：捕获区是副屏（或主屏不在虚拟桌面原点）时整段坐标偏移，
+    // 点哪都差一个屏幕。这里统一换成虚拟桌面坐标：
+    //     绝对位置 = 捕获区原点(screenOffsetX_/Y_) + 相对坐标
+    // 再用虚拟桌面宽高归一化。单屏时虚拟桌面 ≡ 主屏、原点 ≡ (0,0)，与旧实现
+    // 只差"除数用跨度-1"的亚像素修正（65535 对应最后一个像素）。
+    // 用系统实时尺寸而不是 setScreenSize 的逻辑尺寸：屏幕变了哪一侧没同步上，
+    // 映射都不能跟着错（这也是外部改分辨率后点击错位的一条来源）。
+    const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    // 无头/RDP 边缘会话下虚拟桌面尺寸可能为 0，裸除会直接崩溃进程
+    if (vw <= 0 || vh <= 0) {
         static bool logged = false;
         if (!logged) {
             logged = true;
-            qWarning() << "injectMouseMove: screen size unavailable ("
-                       << sw << sh << "), clamping denominator to 1";
+            qWarning() << "injectMouseMove: virtual desktop size unavailable ("
+                       << vw << vh << "), clamping denominator to 1";
         }
-        sw = qMax(1, sw);
-        sh = qMax(1, sh);
+        vw = qMax(1, vw);
+        vh = qMax(1, vh);
     }
-    input.mi.dx = x * 65535 / sw;
-    input.mi.dy = y * 65535 / sh;
-    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    // 65535 对应虚拟桌面最后一个像素，所以除数是跨度-1，不是跨度
+    const int spanX = qMax(1, vw - 1);
+    const int spanY = qMax(1, vh - 1);
+    const int absX = qBound(0, x + screenOffsetX_ - vx, spanX);
+    const int absY = qBound(0, y + screenOffsetY_ - vy, spanY);
+    input.mi.dx = static_cast<LONG>(absX * 65535 / spanX);
+    input.mi.dy = static_cast<LONG>(absY * 65535 / spanY);
+    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
     sendInputChecked(1, &input, sizeof(INPUT));
 }
 

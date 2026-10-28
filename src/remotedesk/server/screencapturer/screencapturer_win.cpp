@@ -75,8 +75,60 @@ struct GdiDiag {
     double capSum = 0.0;
     double capMax = 0.0;
     double chkSum = 0.0;
+    qint64 smalls = 0;       // 被判为"小面积变化"的帧数（[IDLE-DIFF]）
 };
 GdiDiag g_gdiDiag;
+
+// [IDLE-DIFF] 慢读回机器的"小面积变化"判定：比较两帧的变化像素占比是否 < 1%。
+// 背景（XP 单核实测）：quickFrameChecksum 只采样 1/32 的行，静止桌面上的托盘时钟、
+// caret 闪烁、图标动画仍然每 2~3 帧就命中一次 → idle 计数被不断清零，静止降频
+// 永远进不去（日志 idle 恒 0、CPU 恒 33%）。面积占比能把"小面积持续变化"和
+// "真的在干活（弹窗/滚动/视频）"分开。
+// 逐字比较整帧在这台 VM 上约几毫秒（同一帧 BitBlt 要 400ms），再按 kRowStep
+// 抽行把读带宽降到 1/4；面积是统计量，抽行不改变判定的方向。
+// changed/sampled/bbox 仅用于诊断日志（可为 nullptr）。
+bool frameChangeIsSmall(const QImage& prev, const QImage& cur,
+                        quint64* changedOut = nullptr, quint64* sampledOut = nullptr,
+                        QRect* bboxOut = nullptr)
+{
+    if (changedOut) *changedOut = 0;
+    if (sampledOut) *sampledOut = 0;
+    if (bboxOut) *bboxOut = QRect();
+    if (prev.isNull() || cur.isNull())
+        return false;
+    if (prev.size() != cur.size() || prev.format() != cur.format())
+        return false;
+    const int w = cur.width();
+    const int h = cur.height();
+    const int stride = cur.bytesPerLine();
+    // 只处理 32bpp 紧密打包（GDI 路径恒为 Format_RGB32）；其它布局一律按"大变化"处理
+    if (stride < w * 4 || prev.bytesPerLine() != stride)
+        return false;
+
+    const int kRowStep = 4;
+    quint64 sampled = 0;
+    quint64 changed = 0;
+    int minx = w, miny = h, maxx = -1, maxy = -1;
+    for (int y = 0; y < h; y += kRowStep) {
+        const quint32* pa = reinterpret_cast<const quint32*>(prev.constBits() + y * stride);
+        const quint32* pb = reinterpret_cast<const quint32*>(cur.constBits() + y * stride);
+        for (int x = 0; x < w; x++) {
+            if (pa[x] != pb[x]) {
+                changed++;
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (y < miny) miny = y;
+                if (y > maxy) maxy = y;
+            }
+        }
+        sampled += static_cast<quint64>(w);
+    }
+    if (changedOut) *changedOut = changed;
+    if (sampledOut) *sampledOut = sampled;
+    if (bboxOut && changed > 0)
+        *bboxOut = QRect(minx, miny, maxx - minx + 1, maxy - miny + 1);
+    return sampled > 0 && changed * 100 < sampled;
+}
 
 // ================= [WIN-DWM] DWM 合成导致的读屏 stall 规避 =================
 // 实测（218 = VM: VMware SVGA 3D, Win7 x64, 1920x1080）：
@@ -728,7 +780,23 @@ bool ScreenCapturer::switchToGdiCapture()
         return true;
     if (winCurrentIndex_ < 0 || winCurrentIndex_ >= winOutputs_.size())
         return false;
-    const WinOutput& o = winOutputs_[winCurrentIndex_];
+    WinOutput o = winOutputs_[winCurrentIndex_];
+    // DXGI 分支按帧纹理实时回写 width_/height_（分辨率热切换，见 captureFrame 的
+    // [B24]），而 winOutputs_ 是启动/refreshOutputs 时的枚举快照。直接拿快照去建
+    // GDI 捕获器，DXGI→GDI 之后就是"用旧分辨率抓新桌面"：尺寸与画面错位，鼠标
+    // 归一化基准（helper 按 screen_info 上报的 width()/height() 取）也跟着错。
+    // 以实时尺寸为准修正，并回写快照让后续查询一致。
+    // 注意这里必须走 width()/height()：DXGI 未激活时它就返回 winOutputs_ 快照本身，
+    // 比对结果为相等 → 不改任何东西；只有 DXGI 报告了不同的纹理尺寸才需要修正。
+    const int liveW = width();
+    const int liveH = height();
+    if (liveW > 0 && liveH > 0 && (o.w != liveW || o.h != liveH)) {
+        qInfo() << "GDI fallback: region size from stale enum snapshot" << o.w << "x" << o.h
+                << "-> live" << liveW << "x" << liveH;
+        o.w = liveW;
+        o.h = liveH;
+        winOutputs_[winCurrentIndex_] = o;
+    }
     gdiCapturer_ = new GdiCapturer(o.x, o.y, o.w, o.h);
     if (!gdiCapturer_->initialize()) {
         delete gdiCapturer_;
@@ -880,6 +948,8 @@ void ScreenCapturer::captureFrame()
                         << "capAvg=" << QString::number(capAvg, 'f', 2)
                         << "capMax=" << QString::number(g_gdiDiag.capMax, 'f', 2)
                         << "chkAvg=" << QString::number(g_gdiDiag.chkSum / g_gdiDiag.iters, 'f', 2)
+                        << "small=" << g_gdiDiag.smalls
+                        << "pace=" << paceIntervalMs_
                         << "idle=" << idleCount_;
             }
             // 自适应判定读屏是否异常慢（VMware SVGA + DWM 合成时单帧 550ms）
@@ -900,10 +970,12 @@ void ScreenCapturer::captureFrame()
         }
     }
     if (gdiOk) {
+        gdiFailStreak_ = 0;
+        gdiRebuilds_ = 0;
         if (isFrameBlack(frame)) {
             // 锁屏/黑屏内容静态：不要全速（33ms）抓屏发黑帧——XP 单核实测锁屏时
-            // ~18fps 黑帧可吃掉约一半 CPU。连续黑帧按 idle 阈值降频到 4fps；解锁后
-            // 下一 tick（≤250ms）即由 checksum 变化发现并恢复全速。
+            // ~18fps 黑帧可吃掉约一半 CPU。连续黑帧按 idle 阈值降频（读回快的机器
+            // 到 250ms；慢读回机器由 pace 放大，见 applyCaptureInterval）。
             if (!screenLocked_) {
                 screenLocked_ = true;
                 emit screenLocked(true);
@@ -911,8 +983,14 @@ void ScreenCapturer::captureFrame()
             // 黑帧仍发给前端，确保 canvas 尺寸正确
             g_gdiDiag.emits++;
             emitCapturedFrame(frame);
-            if (++idleCount_ > idleThresholdFrames())
+            // 丢掉比较基准：解锁后的第一帧按"大面积变化"处理，避免拿锁屏前的
+            // 桌面帧把小变化的解锁画面误判成静止。
+            lastFrameDiff_ = QImage();
+            if (++idleCount_ > idleThresholdFrames() && !idleThrottled_) {
                 enterIdleThrottle();
+                qInfo() << "CAP-IDLE enter (black) interval=" << captureTimer_->interval()
+                        << "pace=" << paceIntervalMs_;
+            }
             return;
         }
         if (screenLocked_) {
@@ -923,15 +1001,44 @@ void ScreenCapturer::captureFrame()
         const double chkStartMs = qpcMs();
         quint16 checksum = quickFrameChecksum(frame);
         g_gdiDiag.chkSum += qpcMs() - chkStartMs;
+        const bool sameFrame = (checksum == lastFrameChecksum_);
+        // [IDLE-DIFF] 见 frameChangeIsSmall()：只在慢读回机器（pace>0）上做面积判定，
+        // 读回快的机器保留原校验和语义，不付这遍扫描。
+        bool smallChange = false;
+        quint64 diffChanged = 0, diffSampled = 0;
+        QRect diffBox;
+        if (!sameFrame && forceFrameCount_ <= 0 && paceIntervalMs_ > 0)
+            smallChange = frameChangeIsSmall(lastFrameDiff_, frame,
+                                             &diffChanged, &diffSampled, &diffBox);
+        if (smallChange)
+            g_gdiDiag.smalls++;
+        lastFrameDiff_ = frame;   // QImage 隐式共享，无像素拷贝
+        // 只记录"静止被大面积变化打断"：sameFrame 时 smallChange 同样是 false，
+        // 不排除的话深空闲每个 tick 都会打一条 changed=0 的空日志。
+        if (!sameFrame && !smallChange && idleThrottled_ && paceIntervalMs_ > 0) {
+            qInfo() << "CAP-IDLE break changed=" << diffChanged << "sampled=" << diffSampled
+                    << "bbox=" << diffBox;
+        }
         // [H21-WIN] 与 Linux 路径对齐：forceFrameCount_ > 0 时必须**绕过**校验和去重。
         // 旧 Windows GDI 分支无条件丢「校验和未变」的帧，而 forceNextFrame() 正是靠
         // 这个计数表达「新客户端接入 / request_keyframe 喂帧泵 / 输入注入后强制出帧」。
         // Linux 侧 screencapturer_linux.cpp 有此判断，Windows 侧缺失 ⇒ 强制帧语义
         // 在 Windows 上退化（只剩 lastFrameChecksum_=0 的第一次生效，且计数永不回退）。
-        if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {
+        if (forceFrameCount_ <= 0 && (sameFrame || smallChange)) {
             idleCount_++;
-            if (idleCount_ > idleThresholdFrames())
+            if (idleCount_ > idleThresholdFrames() && !idleThrottled_) {
                 enterIdleThrottle();
+                qInfo() << "CAP-IDLE enter interval=" << captureTimer_->interval()
+                        << "pace=" << paceIntervalMs_ << "small=" << smallChange;
+            }
+            if (sameFrame)
+                return;
+            // 小面积变化仍要出帧（客户端上的 caret/时钟得能看到刷新），但**不**重置
+            // idle：否则托盘时钟/光标闪烁每隔几帧就把降频打回，静止时永远降不下来。
+            forceSendNextFrame_ = false;
+            lastFrameChecksum_ = checksum;
+            g_gdiDiag.emits++;
+            emitCapturedFrame(frame, checksum);
             return;
         }
         forceSendNextFrame_ = false;
@@ -954,6 +1061,21 @@ void ScreenCapturer::captureFrame()
     // 0%；画面却仍然是黑的）。锁屏状态由 helper 每 2s 的输入桌面轮询独立上报，
     // 不依赖帧内容，所以这里直接不出帧；解锁后下一 tick BitBlt 恢复即继续正常出帧。
     if (gdiAttempted) {
+        // 连续失败到阈值说明可能不是"桌面被切走"，而是采集器本身过期（分辨率被外部
+        // 改动、驱动重置、DIB 尺寸与屏幕不符）：不重建就永远不出帧，而服务端还以为
+        // 在出帧（capture_hb 没有帧计数），表现为画面冻在最后那一帧。
+        // 锁屏期间 BitBlt 失败是常态，所以重建次数封顶，取到帧即清零（见 gdiOk 分支）。
+        if (++gdiFailStreak_ >= 20 && gdiRebuilds_ < 3) {
+            gdiFailStreak_ = 0;
+            gdiRebuilds_++;
+            qWarning() << "GDI capture failed" << 20 << "ticks in a row - rebuilding ("
+                       << gdiRebuilds_ << "of 3)";
+            delete gdiCapturer_;
+            gdiCapturer_ = nullptr;
+            useGDI_ = false;
+            refreshOutputs();          // 几何变了会走 winApplyOutput → start() 全量重建
+            switchToGdiCapture();      // 没变也按当前区域重建一套 DC/DIBSection
+        }
         idleCount_++;
         if (idleCount_ > idleThresholdFrames())
             enterIdleThrottle();
@@ -1222,15 +1344,44 @@ bool ScreenCapturer::refreshOutputs()
     return winApplyOutput(idx);
 }
 
+bool ScreenCapturer::pollOutputGeometry()
+{
+    const QList<WinOutput> fresh = winEnumMonitors();
+    if (fresh.isEmpty())
+        return false;
+    // 当前输出消失（拔线/禁用/切到别的显示布局）：交给 refreshOutputs 回退并重建
+    if (winCurrentIndex_ < 0 || winCurrentIndex_ >= winOutputs_.size()
+        || winCurrentIndex_ >= fresh.size())
+        return refreshOutputs();
+
+    const WinOutput& cur = winOutputs_[winCurrentIndex_];
+    const WinOutput& now = fresh[winCurrentIndex_];
+    if (now.x != cur.x || now.y != cur.y || now.w != cur.w || now.h != cur.h) {
+        // 当前捕获区几何变了。GDI 的 BitBlt 区域是建实例时定死的，外部改分辨率
+        // 不会让 BitBlt 失败，只会抓到一块错位的画面，所以必须主动发现并重建。
+        qInfo() << "ScreenCapturer: output geometry changed" << cur.w << "x" << cur.h
+                << "@" << cur.x << "," << cur.y << "->" << now.w << "x" << now.h
+                << "@" << now.x << "," << now.y;
+        return refreshOutputs();
+    }
+    // 别的屏变了而当前屏没变：只更新快照（枚举下拉、其它屏坐标），不重建捕获
+    winOutputs_ = fresh;
+    return false;
+}
+
 bool ScreenCapturer::winApplyOutput(int index)
 {
     if (index < 0 || index >= winOutputs_.size())
         return false;
     winCurrentIndex_ = index;
-    if (captureTimer_->isActive()) {
-        int oldFps = fps_;
-        start(oldFps);   // cleanup + 按新输出重建捕获器（GDI 区域 / DXGI 输出号）
-    }
+    // 必须无条件重建：GDI 捕获区（DXGI 输出号）是按旧输出/旧几何定死的，
+    // 旧实现只在定时器在跑时才重建 —— 暂停期间（无客户端、或锁屏）外部改了
+    // 分辨率，resume 后仍是旧区域：BitBlt 不报错，画面变成"新桌面贴在左上角 +
+    // 其余是一块陈旧像素"，且宽高与 screen_info 对不上。
+    const bool wasRunning = captureTimer_->isActive();
+    start(fps_);   // cleanup + 按新输出重建捕获器（GDI 区域 / DXGI 输出号）
+    if (!wasRunning)
+        suspend(); // 闸门原本关着：重建完保持关闭，等 capture_control resume
     forceSendNextFrame_ = true;
     lastFrameChecksum_ = 0;
     idleCount_ = 0;

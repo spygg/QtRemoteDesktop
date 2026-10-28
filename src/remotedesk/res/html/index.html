@@ -355,6 +355,49 @@
             color: #fff;
         }
 
+        /* 计算机名称：下拉里唯一需要键盘输入的项。样式与选项按钮对齐，
+           焦点边框用同一个蓝色，避免看起来像"不可编辑的灰块"。 */
+        .name-row {
+            display: flex;
+            gap: 6px;
+        }
+
+        .name-row input {
+            flex: 1;
+            min-width: 0;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: #eee;
+            padding: 6px 8px;
+            border-radius: 5px;
+            font-size: 12px;
+            outline: none;
+        }
+
+        .name-row input:focus {
+            border-color: #4a9eff;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .name-row input::placeholder {
+            color: #666;
+        }
+
+        .name-row button {
+            background: rgba(0, 102, 204, 0.5);
+            border: 1px solid #4a9eff;
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .name-row button:hover {
+            background: rgba(0, 122, 230, 0.7);
+        }
+
         .dropdown-overlay {
             display: none;
             position: fixed;
@@ -856,6 +899,19 @@
     <div id="config-overlay" class="dropdown-overlay" onclick="toggleConfigDropdown()"></div>
     <!-- 配置下拉菜单 -->
     <div id="config-dropdown">
+        <!-- 计算机名称：只改浏览器标签页标题，不碰被控机真实主机名。
+             放在第一块：多台被控机同时开着时，先能分清哪个标签页是哪台。
+             留空 = 跟随主机名（服务端 effectiveSystemName 的回退逻辑）。 -->
+        <div class="dropdown-section">
+            <div class="dropdown-title">计算机名称</div>
+            <div class="dropdown-note">显示在浏览器标签页标题；留空则使用被控机主机名</div>
+            <div class="name-row">
+                <input id="system-name-input" type="text" maxlength="64"
+                       placeholder="例如：办公室-242" autocomplete="off" spellcheck="false"
+                       onkeydown="if (event.key === 'Enter') { event.preventDefault(); saveSystemName(); }">
+                <button id="system-name-save" onclick="saveSystemName()">保存</button>
+            </div>
+        </div>
         <!-- 观看模式（只读）：放在第一块，开启后所有输入被拦，"按键没反应"必须一眼能看到原因 -->
         <div class="dropdown-section">
             <div class="dropdown-title">观看模式</div>
@@ -1238,7 +1294,8 @@
                         if (webrtcState.pc !== pc || pc.connectionState !== 'disconnected')
                             return;
                         if (state.currentConfig.videomode === 'webrtc') {
-                            fallbackToImage('WebRTC 连接中断，已切换图片模式');
+                            // 断连是链路抖动，不是浏览器能力问题：只本次降级，不持久化
+                            fallbackToImage('WebRTC 连接中断，已切换图片模式', false);
                         } else {
                             webrtcClose();
                         }
@@ -1300,7 +1357,9 @@
                     // intending 永不清除 → WS 视频帧被 handleBinary 持续忽略 → 永久黑屏。
                     webrtcClose();
                     if (state.currentConfig.videomode === 'webrtc') {
-                        fallbackToImage('WebRTC 连接超时，已切换图片模式');
+                        // 超时多半是服务端/helper 暂时没起来或链路慢，不是能力缺失：
+                        // 本次降级，下次进页面仍按用户选的 webrtc 重试
+                        fallbackToImage('WebRTC 连接超时，已切换图片模式', false);
                     }
                 }
             }, 15000);
@@ -1929,8 +1988,10 @@
             }
         }
 
-        function fallbackToImage(tip) {
-            console.log('RD-FALLBACK to image:', tip, 'active=', webrtcState.active, 'pc=', !!webrtcState.pc);
+        // persist=false：本次降级只是"这一次没成功"（网络抖动、服务端暂时给不出视频流），
+        // 不能写进 localStorage——否则刷新/重连后永远停在图片模式，用户看不到画面恢复。
+        function fallbackToImage(tip, persist = true) {
+            console.log('RD-FALLBACK to image:', tip, 'active=', webrtcState.active, 'pc=', !!webrtcState.pc, 'persist=', persist);
             // 释放 WebCodecs 解码器：降级后不会再有视频帧，留着会持续占用硬件
             // 解码器/显存。旧实现不 close，反复 auto 切换会叠加多个解码器实例。
             if (state.decoder && typeof state.decoder.close === 'function') {
@@ -1943,7 +2004,9 @@
             send({ type: 'set_mode', mode: 'image' });
             state.currentConfig.videomode = 'image';
             state.displayStreamMode = 'image';
-            try { localStorage.setItem('rd_videomode', 'image'); } catch (e) {}
+            if (persist) {
+                try { localStorage.setItem('rd_videomode', 'image'); } catch (e) {}
+            }
             updateDropdownActive();
             if (tip) showTransferStatus(tip, 2500);
         }
@@ -1955,7 +2018,9 @@
             // z-index:1) 盖住 canvas，而服务端只发 JPEG，客户端永远等不到 H.264 → 黑屏。
             if (state.videoSupported === false && mode !== 'image') {
                 state.pendingVideoRetry = (mode === 'auto' ? 'auto' : mode);
-                fallbackToImage('当前无法提供视频流，已使用图片模式');
+                // helper 未连/视频通道未起是服务端瞬时状态，视频能力稍后会回来：
+                // 本次用图片模式，但不能把它写死成用户的偏好
+                fallbackToImage('当前无法提供视频流，已使用图片模式', false);
                 return;
             }
             // 无 WebCodecs（WS 视频解不了 WebCodecs 通道）时：
@@ -2598,6 +2663,7 @@
                         console.warn('ignore invalid screen_info', msg.width, msg.height);
                         break;
                     }
+                    const sizeChanged = sw !== state.screenWidth || sh !== state.screenHeight;
                     state.screenWidth = sw;
                     state.screenHeight = sh;
                     state.canvas.width = sw;
@@ -2606,6 +2672,17 @@
                     updateScale();
                     buildResolutionOptions();
                     updateDropdownActive();
+                    // MSE 的 init segment 里写死了启动时的宽高，同一 SourceBuffer 继续
+                    // 追加新尺寸的样本，浏览器解码器不会重协商 → 花屏后冻结。整条管线
+                    // 拆掉重建（与 ms 被外部关闭的自愈路径同一套），并重新要关键帧。
+                    if (sizeChanged && msePlayer.using) {
+                        console.log('MSE rebuild after resolution change -> ' + sw + 'x' + sh);
+                        msePlayer.stop('resolution-change');
+                        msePlayer._needKf = true; // 必须在 stop 之后设置（stop 会清掉）
+                        if (msePlayer.start('h264')) {
+                            send({ type: 'request_keyframe' });
+                        }
+                    }
                     break;
                 }
                 case 'cursor_pos':
@@ -2867,6 +2944,10 @@
                     state.currentConfig.quality = msg.quality === 80 ? 'high' : msg.quality === 60 ? 'medium' : msg.quality === 35 ? (msg.fps >= 30 ? 'low' : 'verylow') : 'medium';
                     state.currentConfig.fps = msg.fps;
                     state.currentConfig.scale = msg.scale || 100;
+                    // 计算机名称：配置值回填输入框，生效值用于 <title>
+                    if (typeof msg.effectiveName === 'string')
+                        applySystemName(msg.effectiveName);
+                    syncSystemNameInput(msg.systemName);
                     if (msg.resolutions)
                         state.resolutions = msg.resolutions;
 
@@ -2884,6 +2965,11 @@
                     buildResolutionOptions();
                     updateDropdownActive();
                     updateQualityLabel();
+                    break;
+                case 'system_name':
+                    // 改名广播：所有打开的标签页（含其他客户端浏览器）一起换标题
+                    applySystemName(msg.effectiveName);
+                    syncSystemNameInput(msg.systemName);
                     break;
                 case 'mode_changed':
                     if (typeof msg.hwEncode === 'boolean')
@@ -2917,7 +3003,7 @@
                         (msePlayer.using || webrtcState.active || webrtcState.pc || webrtcState.intending)) {
                         if (state.currentConfig.videomode !== 'image')
                             state.pendingVideoRetry = state.currentConfig.videomode;
-                        fallbackToImage('当前无法提供视频流，已使用图片模式');
+                        fallbackToImage('当前无法提供视频流，已使用图片模式', false);
                         return;
                     }
                     // 服务端主动切回图片模式（如编码器初始化失败回退）时，本地必须同步
@@ -3705,6 +3791,31 @@
             // 打开时刷新一次高亮：剪贴板同步等纯前端设置在别处（弹窗）被改过、
             // 或服务端 config 尚未回执时，按钮高亮可能过期。
             if (open) updateDropdownActive();
+        }
+
+        // 计算机名称（页面标题）。服务端把名字烤进 index.html 的 <title>，
+        // 所以这里负责两件事：改名后本标签页立刻变、把输入框同步成服务端配置值。
+        // 多标签页场景靠服务端广播 system_name 一起更新，不需要各自刷新。
+        function applySystemName(name) {
+            if (name && typeof name === 'string')
+                document.title = name;
+        }
+
+        function syncSystemNameInput(raw) {
+            const el = document.getElementById('system-name-input');
+            // 用户正在输入时不要被广播覆盖（多人同时开页面时尤其明显）
+            if (!el || document.activeElement === el) return;
+            el.value = (typeof raw === 'string') ? raw : '';
+        }
+
+        function saveSystemName() {
+            const el = document.getElementById('system-name-input');
+            if (!el) return;
+            const name = (el.value || '').trim();
+            send({ type: 'config', systemName: name });
+            // 乐观更新：服务端 ack 会再校正（清空时回填主机名）
+            if (name) document.title = name;
+            el.blur();
         }
 
         function updateDropdownActive() {

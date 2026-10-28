@@ -10,6 +10,15 @@ ScreenCapturer::ScreenCapturer(QObject* parent)
     , screen_(QGuiApplication::primaryScreen())
 {
     connect(captureTimer_, &QTimer::timeout, this, &ScreenCapturer::captureFrame);
+    // [IDLE-WAKE] 0ms 单次定时器：不在输入处理函数里同步抓屏（慢机一帧数百 ms，
+    // 会把输入队列堵在后面），而是让事件循环尽快插入一次抓帧。
+    wakeTimer_ = new QTimer(this);
+    wakeTimer_->setSingleShot(true);
+    wakeTimer_->setInterval(0);
+    connect(wakeTimer_, &QTimer::timeout, this, [this]() {
+        if (captureTimer_->isActive())
+            captureFrame();
+    });
     flushPumpTimer_ = new QTimer(this);
     flushPumpTimer_->setSingleShot(true);
     connect(flushPumpTimer_, &QTimer::timeout, this, &ScreenCapturer::pumpFlushTick);
@@ -100,13 +109,25 @@ void ScreenCapturer::forceNextFrame()
     // 用户输入注入后，即使画面校验和未变化（如仅光标移动）也强制推送下一帧。
     // X11 光标是 overlay，不产生 XDamage；键盘/鼠标输入多不改变帧内容时会被
     // checksum 去重，导致远端画面长期不刷新。
-    // 同时恢复全速帧率：idle 降频到 1s 周期时若不恢复，交互反馈仍要等 1 秒。
+    // 同时恢复全速帧率：idle 降频到 ~3s 周期时若不恢复，交互反馈仍要等数秒。
     forceSendNextFrame_ = true;
     forceFrameCount_ = 2;
     lastFrameChecksum_ = 0;
     idleCount_ = 0;
-    if (captureTimer_->isActive())
+    if (captureTimer_->isActive()) {
+        const bool wasIdle = idleThrottled_;
         leaveIdleThrottle();
+        // 只在"从静止唤醒"时插即时抓帧：非 idle 时下一次 tick 本来就在 pace 内，
+        // 而鼠标移动会高频调用本函数，无条件唤醒等于恢复满速抓屏。
+        if (wasIdle)
+            requestImmediateCapture();
+    }
+}
+
+void ScreenCapturer::requestImmediateCapture()
+{
+    if (wakeTimer_ && !wakeTimer_->isActive())
+        wakeTimer_->start();
 }
 
 void ScreenCapturer::emitCapturedFrame(const QImage& frame)

@@ -64,8 +64,7 @@ void RDPServer::startSecureInputProcess()
         // 第一次尝试全废，只能等服务端 8s 后的第二轮，XP 解锁从 ~2s 拖到 ~9s。
         // 进程自己每轮都重新附着当前输入桌面（attachInputDesktop），所以序列不受伤。
         const QString wantDesktop = queryInputDesktopName();
-        const bool unlockInFlight
-            = QDateTime::currentMSecsSinceEpoch() < secureInputUnlockUntilMs_;
+        const bool unlockInFlight = monoNowMs() < secureInputUnlockUntilMs_;
         bool alive = false;
         HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, secureInputPid_);
         if (hProc) {
