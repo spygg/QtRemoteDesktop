@@ -123,7 +123,7 @@ bool ScreenCapturer::start(int fps)
     return true;
 }
 
-void ScreenCapturer::captureFrame()
+void ScreenCapturer::captureFrameBody()
 {
     QImage frame;
 
@@ -223,6 +223,11 @@ QJsonArray ScreenCapturer::enumerateSupportedResolutions()
 // 缺定义会在 macOS / Android 目标上链接失败（undefined reference）。
 // 这里给出空实现保持 ABI 一致；前端收到空 outputs 即不显示多屏选择。
 QJsonArray ScreenCapturer::enumerateOutputs() const { return QJsonArray(); }
-bool ScreenCapturer::refreshOutputs() { return false; }
+bool ScreenCapturer::refreshOutputs(bool* geometryChanged)
+{
+    if (geometryChanged)
+        *geometryChanged = false;
+    return false;
+}
 bool ScreenCapturer::switchOutput(int) { return false; }
 int ScreenCapturer::currentOutputIndex() const { return -1; }

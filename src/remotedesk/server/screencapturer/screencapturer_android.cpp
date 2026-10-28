@@ -29,7 +29,7 @@ bool ScreenCapturer::start(int fps)
     return true;
 }
 
-void ScreenCapturer::captureFrame()
+void ScreenCapturer::captureFrameBody()
 {
     QPixmap pixmap = screen_->grabWindow(0);
     QImage frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
@@ -77,6 +77,11 @@ QJsonArray ScreenCapturer::enumerateSupportedResolutions()
 // 多屏输出枚举/切换（Android 暂未实现）。
 // 同 mac：rdpserver.cpp 无平台守卫调用这四个方法，缺定义会链接失败。
 QJsonArray ScreenCapturer::enumerateOutputs() const { return QJsonArray(); }
-bool ScreenCapturer::refreshOutputs() { return false; }
+bool ScreenCapturer::refreshOutputs(bool* geometryChanged)
+{
+    if (geometryChanged)
+        *geometryChanged = false;
+    return false;
+}
 bool ScreenCapturer::switchOutput(int) { return false; }
 int ScreenCapturer::currentOutputIndex() const { return -1; }

@@ -2,15 +2,18 @@
 #ifndef SCREEN_CAPTURER_H
 #define SCREEN_CAPTURER_H
 
+#include <QAtomicInt>
 #include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
 #include <QList>
+#include <QMutex>
 #include <QObject>
 #include <QPoint>
 #include <QScreen>
 #include <QString>
+#include <QThread>
 #include <QTimer>
 
 // 快速帧校验和：每隔 N 行采样一行做 CRC，大幅减少计算量
@@ -99,6 +102,22 @@ public:
     virtual void setPaused(bool) {}
 };
 
+// [CAP-ASYNC] 抓屏工作对象：只在独立线程里执行"纯抓取"（BitBlt / DXGI 取帧 +
+// 整帧拷贝），不碰任何 QTimer、不改采集器状态机。详见 ScreenCapturer::workerGrab()。
+class ScreenCapturer;
+
+class CaptureGrabWorker : public QObject {
+    Q_OBJECT
+public:
+    explicit CaptureGrabWorker(ScreenCapturer* owner) : owner_(owner) {}
+public slots:
+    void grab();
+signals:
+    void done();
+private:
+    ScreenCapturer* owner_ = nullptr;
+};
+
 class ScreenCapturer : public QObject {
     Q_OBJECT
 
@@ -111,6 +130,19 @@ public:
     void suspend();
     void resume();
     void forceNextFrame();   // 输入注入后强制下一帧通过校验（光标移动不产生 XDamage）
+    // 立刻驱动一次**真实**抓帧：不等定时器、不受去重与 idle 降频影响。
+    // 与 forceNextFrame() 的区别是它无条件插一次即时抓帧（后者只在"从 idle 唤醒"
+    // 时插），因此可以在固定时间窗内稳定产出帧。喂帧泵必须用它：openh264 有 1 帧
+    // 流水线延迟，没有真实输入就没有输出，泵打空 → 兜底定时器误判"未产出 IDR"
+    // → 反复重建编码器（XP 实测一天 471 次）。
+    // paced=true：仍受 pace 节流（距上次抓帧结束不足 pace/2 就本次跳过）。喂帧泵
+    // 必须用它——泵每 80ms 调一次，而无节流版本会变成背靠背连抓（单帧 320ms 的
+    // XP 上占空比从 33% 飙到 ~90%，每次关键帧请求都是 1.3 秒满核尖峰）。
+    // 输入注入路径（forceNextFrame）用默认 false，不能为节流牺牲交互延迟。
+    void nudgeCapture(bool paced = false);
+    // 慢读回节流倍数：paceIntervalMs_ = capAvg × factor（默认 2 ⇒ duty≈33%）。
+    // 慢机可调大（4 ⇒ 20%、9 ⇒ 10%）用帧率换 CPU；快机不生效（pace 恒 0）。
+    void setPaceFactor(double factor) { paceFactor_ = qBound(1.0, factor, 12.0); }
     void setFps(int fps);
 
     // [KFR] 桌面内容真实变化计数：仅在两次**出帧**之间采样校验和不同时递增。
@@ -122,6 +154,11 @@ public:
     // 一次"服务端→helper→服务端"的关键帧请求往返）；不一致则必须重新出帧，
     // 否则重发旧 IDR 会让客户端参考链错位（花屏）。
     quint64 contentChangeCount() const { return contentChangeCount_; }
+
+    // [ADAPT] 实测单帧采集耗时（指数滑动平均，ms）。慢读回机器（VMware SVGA 上的
+    // XP 可达 320~350ms）据此自动下调 fps/缩放并提高节流倍数。异步抓取时由主线程
+    // 在 onGrabDone 里更新，跨线程读用原子。
+    int avgCaptureMs() const { return avgCaptureMs_.loadAcquire(); }
 
     // 切换恒全量抓取模式（图片模式 true；视频模式 false）。转发到平台捕获器。
     void setFullCaptureOnly(bool v) {
@@ -206,7 +243,11 @@ public:
 
     // 多屏切换（Linux X11）：枚举输出 / 切换捕获目标 / 当前输出索引
     QJsonArray enumerateOutputs() const;
-    bool refreshOutputs();   // 热插拔感知：重新枚举并保持/回退当前选择
+    // 热插拔感知：重新枚举并保持/回退当前选择。
+    // 返回值 = "当前输出可用"（可能什么都没变）；"几何是否变了/是否需要重建"必须
+    // 通过 geometryChanged 取——旧实现把这两件事混在一个 bool 里，几何未变也返回
+    // true，调用方若把 true 当"变了"就会白重建一次编码器。
+    bool refreshOutputs(bool* geometryChanged = nullptr);
     bool switchOutput(int index);
     int currentOutputIndex() const;
 
@@ -234,7 +275,17 @@ private slots:
     void captureFrame();
 
 private:
+    friend class CaptureGrabWorker;
     void cleanupPlatform();
+    // 平台实现的采集主体（原 captureFrame）。异步模式下由 onGrabDone() 在主线程
+    // 调用，抓取结果已由 workerGrab() 放在 grabFrame_ 等成员里。
+    void captureFrameBody();
+    // 只做"纯抓取"，在采集线程执行（Windows 限定；其余平台不建线程）。
+    void workerGrab();
+    void ensureGrabThread();
+    void teardownGrabThread();
+    // 采集线程完成的回调（主线程）：跑决策主体 + 计时 + 平均耗时。
+    void onCaptureDone();
     // 统一出帧入口：各平台分支一律经由它 emit，附带"画面是否真实变化"的累计。
     void emitCapturedFrame(const QImage& frame);
     // 已算过 quickFrameChecksum 的路径用这个重载：同一帧不重复做全帧采样扫描
@@ -242,6 +293,29 @@ private:
     void emitCapturedFrame(const QImage& frame, quint16 knownChecksum);
 
     QTimer* captureTimer_ = nullptr;
+    // [CAP-ASYNC] 抓屏线程（仅 Windows 启用；其余平台 grabThread_ 恒空 ⇒ 同步路径，
+    // 行为与改动前完全一致）。把 BitBlt/整帧拷贝从 GUI 线程挪走：慢读回机器单帧
+    // 320~350ms 期间主线程不再冻结，输入注入/心跳/兜底定时器不再被推迟。
+    QThread* grabThread_ = nullptr;
+    CaptureGrabWorker* grabWorker_ = nullptr;
+    QAtomicInt grabBusy_{ 0 };       // 1=已提交、尚未处理完（背压丢帧用）
+    QAtomicInt grabSkipTicks_{ 0 };  // 因上一帧未完成而跳过的 tick 数（诊断）
+    // worker → 主线程的抓取结果。可见性由 grabBusy_ 的 release/acquire 保证：
+    // worker 写完后 emit done()（queued），主线程在 onCaptureDone 里 acquire 后读。
+    QImage grabFrame_;
+    bool grabOk_ = false;
+    bool grabUpdated_ = false;
+    bool grabBlack_ = false;          // worker 判定本帧全黑（是否切换由主线程决定）
+    bool grabFmtUnsupported_ = false;
+    bool grabGdiHasContent_ = false;
+    // true = 本次 captureFrameBody() 的帧已由采集线程抓好（取 grabFrame_，不再本地抓屏）
+    bool useGrabResult_ = false;
+    qint64 grabSubmitMs_ = 0;
+    // 抓取资源（DXGI/GDI 实例、winOutputs_）跨线程访问互斥：workerGrab 抓取期间持有，
+    // 主线程 start/stop/refreshOutputs/切路径时也持有（低频，等一帧可接受）。
+    // 递归：start() → cleanupPlatform() → switchToGdiCapture() 等会嵌套加锁。
+    QMutex captureResMutex_{ QMutex::Recursive };
+    QAtomicInt avgCaptureMs_{ 0 };
     // [IDLE-WAKE] 静止降频后的即时唤醒：定时器可能还有 ~3s 才到点，这里插一次
     // 0ms 抓帧，让"闲置后第一次点击/按键"的反馈不必等满一个 idle 周期。
     QTimer* wakeTimer_ = nullptr;
@@ -305,6 +379,12 @@ private:
     // 采集回调背靠背连跑，单核被占满（XP 单核实测 50%~95%）。paceIntervalMs_
     // 由实测单帧耗时推导（≈2×capAvg，duty≈33%）。
     qint64 paceIntervalMs_ = 0;
+    double paceFactor_ = 2.0;
+    // 上一帧抓取**结束**的时刻与单帧实测耗时（ms）。nudgeCapture(true) 用它做
+    // 最小间隔判定：抓帧是同步阻塞的，间隔只能从"上一次结束"算起才等于真实占空比。
+    qint64 lastCaptureEndMs_ = 0;
+    qint64 lastCaptureCostMs_ = 0;
+    void captureOnce();      // 抓一帧并记录耗时（两个定时器入口都走这里）
     bool idleThrottled_ = false;
     // [IDLE-PACE] 慢读回机器上 pace 本身就有数百 ms，旧的 max(idle 250ms, pace)
     // 里 idle 分支永远选不上：静止桌面也一直按 duty≈33% 跑（XP 单核实测恒定

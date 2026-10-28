@@ -318,6 +318,11 @@ private:
     int configFps_ = 30;
     int configQuality_ = 60;
     int configScale_ = 75;
+    // [PACE-FACTOR] 慢读回机器（VMware SVGA 无 3D 加速）的采集节流倍数：
+    // 采集间隔 = 实测单帧耗时 × 该值，因此占空比 ≈ 1/(1+factor)。
+    // 2 ⇒ 33%（默认，兼顾帧率）；4 ⇒ 20%；9 ⇒ 10%（拿帧率换 CPU）。
+    // 只在读屏慢到触发 pace 的机器上生效，快机恒为全速。
+    double configPaceFactor_ = 2.0;
     CodecType configCodec_ = CodecType::H264;        // 编码协议（h264/hevc/vp8/vp9/av1）
     // WebRTC 固定 H.264，进入会话时临时改写 configCodec_（编码器只认这个成员），
     // 用户原本的选择单独保存：落盘写回原值，离开视频模式时恢复。

@@ -1,6 +1,7 @@
 // server/screen_capturer.cpp
 #include "screencapturer.h"
 #include <QColor>
+#include <QDateTime>
 #include <QDebug>
 #include <QPixmap>
 
@@ -9,7 +10,9 @@ ScreenCapturer::ScreenCapturer(QObject* parent)
     , captureTimer_(new QTimer(this))
     , screen_(QGuiApplication::primaryScreen())
 {
-    connect(captureTimer_, &QTimer::timeout, this, &ScreenCapturer::captureFrame);
+    // 两个入口都记"抓帧结束/单帧耗时"：nudgeCapture(true) 的最小间隔判定要靠它，
+    // 否则节流基准会退化成"上次请求时刻"，抓帧耗时本身被漏算。
+    connect(captureTimer_, &QTimer::timeout, this, &ScreenCapturer::captureOnce);
     // [IDLE-WAKE] 0ms 单次定时器：不在输入处理函数里同步抓屏（慢机一帧数百 ms，
     // 会把输入队列堵在后面），而是让事件循环尽快插入一次抓帧。
     wakeTimer_ = new QTimer(this);
@@ -17,7 +20,7 @@ ScreenCapturer::ScreenCapturer(QObject* parent)
     wakeTimer_->setInterval(0);
     connect(wakeTimer_, &QTimer::timeout, this, [this]() {
         if (captureTimer_->isActive())
-            captureFrame();
+            captureOnce();
     });
     flushPumpTimer_ = new QTimer(this);
     flushPumpTimer_->setSingleShot(true);
@@ -55,6 +58,112 @@ void ScreenCapturer::pumpFlushTick()
 ScreenCapturer::~ScreenCapturer()
 {
     stop();
+    teardownGrabThread();
+}
+
+// 计一帧的采集耗时进滑动平均（指数平均，α=1/4）。慢机自适应配置用它分级。
+static void noteCaptureCost(QAtomicInt& avg, qint64 cost)
+{
+    if (cost < 0)
+        cost = 0;
+    if (cost > 60000)
+        cost = 60000;
+    const int prev = avg.loadAcquire();
+    avg.storeRelease(prev > 0 ? (prev * 3 + static_cast<int>(cost)) / 4
+                              : static_cast<int>(cost));
+}
+
+void CaptureGrabWorker::grab()
+{
+    owner_->workerGrab();
+    emit done();
+}
+
+#ifndef Q_OS_WIN
+// 非 Windows 平台不启用采集线程（XGetImage/grabWindow 各有线程约束，且读回通常
+// 只有个位数 ms，收益远小于风险）。给 workerGrab 一个空实现避免链接缺失——
+// 这些平台上 grabWorker_ 恒为空，门面永远走同步的 captureFrameBody()。
+void ScreenCapturer::workerGrab() {}
+#endif
+
+void ScreenCapturer::ensureGrabThread()
+{
+#ifdef Q_OS_WIN
+    if (grabThread_)
+        return;
+    // 逃生阀：QTRD_CAPTURE_SYNC=1 时退回"采集在 GUI 线程"的老路径，便于线上排障。
+    if (qgetenv("QTRD_CAPTURE_SYNC") == QByteArrayLiteral("1")) {
+        qInfo() << "ScreenCapturer: async capture disabled by QTRD_CAPTURE_SYNC";
+        return;
+    }
+    grabThread_ = new QThread(this);
+    grabThread_->setObjectName(QStringLiteral("qtrd-capture"));
+    grabWorker_ = new CaptureGrabWorker(this);
+    grabWorker_->moveToThread(grabThread_);
+    connect(grabWorker_, &CaptureGrabWorker::done,
+            this, &ScreenCapturer::onCaptureDone, Qt::QueuedConnection);
+    grabThread_->start(QThread::NormalPriority);
+    qInfo() << "ScreenCapturer: async capture thread started";
+#endif
+}
+
+void ScreenCapturer::teardownGrabThread()
+{
+    if (!grabThread_)
+        return;
+    // 等最后一次抓取返回（最多一帧耗时，慢机 ~350ms），否则 worker 可能在对象析构后
+    // 继续访问 dxgiCapturer_/gdiCapturer_。
+    for (int i = 0; i < 300 && grabBusy_.loadAcquire() != 0; ++i)
+        QThread::msleep(10);
+    grabThread_->quit();
+    if (!grabThread_->wait(3000))
+        qWarning() << "ScreenCapturer: capture thread did not stop in 3s";
+    delete grabWorker_;
+    grabWorker_ = nullptr;
+    delete grabThread_;
+    grabThread_ = nullptr;
+}
+
+void ScreenCapturer::captureFrame()
+{
+    // 同步路径（非 Windows，或线程未启用，或当前无 DXGI/GDI 实例可离线抓取）：
+    // 与改动前完全一致。Qt 的 screen_->grabWindow() 只能在 GUI 线程调用，所以
+    // 兜底路径也必须留在这里。
+#ifdef Q_OS_WIN
+    bool canGrabOffThread = (useGDI_ && gdiCapturer_);
+#ifdef QTRD_HAVE_DXGI_DUP
+    canGrabOffThread = canGrabOffThread || (useDXGI_ && dxgiCapturer_);
+#endif
+#else
+    const bool canGrabOffThread = false;   // 其余平台不启用采集线程
+#endif
+    if (!grabWorker_ || !canGrabOffThread) {
+        captureFrameBody();
+        return;
+    }
+    // 背压：上一帧还在 worker 里跑就丢掉这个 tick。慢读回机器上必然发生（pace 已经
+    // 按 capAvg 放大，正常不会持续丢帧），比排队堆积好——排队会让延迟无界增长。
+    if (grabBusy_.loadAcquire() != 0) {
+        grabSkipTicks_.ref();
+        return;
+    }
+    grabBusy_.storeRelease(1);
+    grabSubmitMs_ = QDateTime::currentMSecsSinceEpoch();
+    QMetaObject::invokeMethod(grabWorker_, "grab", Qt::QueuedConnection);
+}
+
+void ScreenCapturer::onCaptureDone()
+{
+    // 抓取结果已就绪：在主线程跑原来的决策主体（checksum/去重/emit/idle/重建）。
+    // body 里不再真正抓屏，直接取 grabFrame_/grabOk_ 等成员。
+    useGrabResult_ = true;
+    captureFrameBody();
+    useGrabResult_ = false;
+    const qint64 end = QDateTime::currentMSecsSinceEpoch();
+    lastCaptureEndMs_ = end;
+    lastCaptureCostMs_ = end - grabSubmitMs_;
+    noteCaptureCost(avgCaptureMs_, lastCaptureCostMs_);
+    grabBusy_.storeRelease(0);
 }
 
 void ScreenCapturer::stop()
@@ -128,6 +237,46 @@ void ScreenCapturer::requestImmediateCapture()
 {
     if (wakeTimer_ && !wakeTimer_->isActive())
         wakeTimer_->start();
+}
+
+void ScreenCapturer::captureOnce()
+{
+    ensureGrabThread();
+    if (grabWorker_) {
+        // 异步：提交后立即返回，计时与平均耗时在 onCaptureDone() 里完成。
+        captureFrame();
+        return;
+    }
+    const qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+    captureFrameBody();
+    lastCaptureEndMs_ = QDateTime::currentMSecsSinceEpoch();
+    lastCaptureCostMs_ = lastCaptureEndMs_ - t0;
+    noteCaptureCost(avgCaptureMs_, lastCaptureCostMs_);
+}
+
+void ScreenCapturer::nudgeCapture(bool paced)
+{
+    forceSendNextFrame_ = true;
+    forceFrameCount_ = qMax(forceFrameCount_, 1);
+    lastFrameChecksum_ = 0;
+    idleCount_ = 0;
+    leaveIdleThrottle();          // 从 idle 降频回到 pace（交互/喂帧时都要即时响应）
+    // 定时器停着（无客户端 / 已 suspend）就只置标志，不越过闸门去抓屏
+    if (!captureTimer_->isActive())
+        return;
+    // [N1] 喂帧泵每 80ms 拍一次，而无条件插即时抓帧会让抓屏背靠背连跑：单帧
+    // 320ms 的机器上占空比从稳态 33% 飙到 ~90%，每次关键帧请求都是满核尖峰。
+    // 这里加下限间隔：取 min(pace/2, 上帧实测耗时) —— 前者跟随节流倍数（快机
+    // pace=0 时退化成"不节流"），后者保证慢机上补帧至少留出一个"单帧耗时"的
+    // 空隙，占空比封顶 50%，且不随 capturePaceFactor 调大而变慢。
+    // 输入注入路径（forceNextFrame）不传 paced，不受影响。
+    if (paced && paceIntervalMs_ > 0 && lastCaptureEndMs_ > 0) {
+        const qint64 minGap = qMin(paceIntervalMs_ / 2,
+                                   qMax<qint64>(1, lastCaptureCostMs_));
+        if (QDateTime::currentMSecsSinceEpoch() - lastCaptureEndMs_ < minGap)
+            return;
+    }
+    requestImmediateCapture();
 }
 
 void ScreenCapturer::emitCapturedFrame(const QImage& frame)

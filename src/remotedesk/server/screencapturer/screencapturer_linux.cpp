@@ -903,7 +903,7 @@ bool ScreenCapturer::start(int fps)
     return true;
 }
 
-void ScreenCapturer::captureFrame()
+void ScreenCapturer::captureFrameBody()
 {
     // 防重入：WaylandCapturer::captureFrame 在流 ERROR 时会在本槽内同步调用
     // initialize()，其等待 PipeWireStreamAdded 的嵌套事件循环会让同一个采集
@@ -1185,8 +1185,13 @@ QJsonArray ScreenCapturer::enumerateOutputs() const
     return arr;
 }
 
-bool ScreenCapturer::refreshOutputs()
+bool ScreenCapturer::refreshOutputs(bool* geometryChanged)
 {
+    // X11 侧的 refreshOutputs() 是 void：它在内部判断"索引失效/几何变化"并自己
+    // 重建缓冲，外部只能知道"刷新成功"。语义上这里只保证"当前输出可用"，
+    // 几何是否变化无法回传（调用方目前也只在热插拔/配置下发路径上用它判成败）。
+    if (geometryChanged)
+        *geometryChanged = false;
     if (!useX11_ || !x11Capturer_)
         return false;
     static_cast<X11Capturer*>(x11Capturer_)->refreshOutputs();

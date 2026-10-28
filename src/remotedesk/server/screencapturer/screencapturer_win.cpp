@@ -1,6 +1,7 @@
 // server/screen_capturer.cpp
 #include "screencapturer.h"
 #include <QColor>
+#include <QDateTime>
 #include <QDebug>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -764,6 +765,8 @@ static bool isFrameBlack(const QImage& frame)
 
 void ScreenCapturer::cleanupPlatform()
 {
+    // 与采集线程互斥：workerGrab 正在用实例时不能 delete（会崩在读屏里）。
+    QMutexLocker lock(&captureResMutex_);
     delete gdiCapturer_;
     gdiCapturer_ = nullptr;
     useGDI_ = false;
@@ -776,6 +779,7 @@ void ScreenCapturer::cleanupPlatform()
 
 bool ScreenCapturer::switchToGdiCapture()
 {
+    QMutexLocker lock(&captureResMutex_);
     if (useGDI_ && gdiCapturer_)
         return true;
     if (winCurrentIndex_ < 0 || winCurrentIndex_ >= winOutputs_.size())
@@ -809,19 +813,139 @@ bool ScreenCapturer::switchToGdiCapture()
     return true;
 }
 
-void ScreenCapturer::captureFrame()
+// [CAP-ASYNC] 采集线程入口：只做"纯抓取"，不碰任何 QTimer，也不改采集状态机。
+// 慢读回机器（VMware SVGA）单帧 BitBlt + 整帧拷贝 320~350ms，改动前这段直接跑在
+// GUI 线程上，等于每帧冻结事件循环 1/3 秒：输入注入、心跳、关键帧兜底定时器全部
+// 被推迟，表现为"按了键半秒才动"。这里把它挪到独立线程后，主线程只做决策（几 ms）。
+// GDI 交叉验证等低频异常处理仍留在主线程的 captureFrameBody()。
+void ScreenCapturer::workerGrab()
+{
+    QMutexLocker lock(&captureResMutex_);
+    grabOk_ = false;
+    grabUpdated_ = false;
+    grabBlack_ = false;
+    grabFmtUnsupported_ = false;
+    grabGdiHasContent_ = false;
+    grabFrame_ = QImage();
+
+#ifdef QTRD_HAVE_DXGI_DUP
+    if (useDXGI_ && dxgiCapturer_) {
+        // forceFrameCount_ 由主线程写、这里只读：最坏读到旧值（多请求一次强制帧），
+        // 不影响正确性，故不加锁（加锁会把这行放进热路径）。
+        if (forceFrameCount_ > 0)
+            dxgiCapturer_->requestForceFrame();
+        QImage f;
+        bool updated = false;
+        const bool ok = dxgiCapturer_->captureFrame(f, &updated);
+        grabOk_ = ok;
+        grabUpdated_ = updated;
+        grabFrame_ = f;
+        grabFmtUnsupported_ = dxgiCapturer_->frameFormatUnsupported();
+        if (ok && updated && !grabFmtUnsupported_ && isFrameBlack(f))
+            grabBlack_ = true;
+        return;
+    }
+#endif
+    if (useGDI_ && gdiCapturer_) {
+        QImage f;
+        grabOk_ = gdiCapturer_->captureFrame(f);
+        grabFrame_ = f;
+    }
+}
+
+void ScreenCapturer::captureFrameBody()
 {
     QImage frame;
 
 #ifdef QTRD_HAVE_DXGI_DUP
     if (useDXGI_ && dxgiCapturer_) {
         bool updated = false;
+        bool dxgiOk = false;
+        if (useGrabResult_) {
+            // 采集线程已抓完：只取结果（黑帧 GDI 交叉验证也在那边做完）。
+            frame = grabFrame_;
+            updated = grabUpdated_;
+            dxgiOk = grabOk_;
+            if (grabFmtUnsupported_) {
+                useDXGI_ = false;
+                delete dxgiCapturer_;
+                dxgiCapturer_ = nullptr;
+                switchToGdiCapture();
+                return;
+            }
+            if (dxgiOk) {
+                dxgiRetryCount_ = 0;
+                if (screenLocked_) {
+                    screenLocked_ = false;
+                    emit screenLocked(false);
+                }
+                if (updated) {
+                    // 黑帧兜底：worker 只报告"全黑"，是否切 GDI 由这里决定 ——
+                    // 交叉验证要新建一套 GDI DC + 全屏 BitBlt，属低频异常路径，
+                    // 放在主线程可以接受（正常路径一帧都不会走到这里）。
+                    if (grabBlack_) {
+                        if (dxgiBlackProbeCooldown_ > 0) {
+                            --dxgiBlackProbeCooldown_;
+                        } else if (++dxgiBlackCount_ >= 10) {
+                            dxgiBlackCount_ = 0;
+                            dxgiBlackProbeCooldown_ = 600;
+                            bool gdiHasContent = false;
+                            if (!useGDI_ && winCurrentIndex_ >= 0
+                                && winCurrentIndex_ < winOutputs_.size()) {
+                                const WinOutput& o = winOutputs_[winCurrentIndex_];
+                                GdiCapturer probe(o.x, o.y, o.w, o.h);
+                                QImage gdiFrame;
+                                if (probe.initialize() && probe.captureFrame(gdiFrame))
+                                    gdiHasContent = !isFrameBlack(gdiFrame);
+                            }
+                            if (gdiHasContent && switchToGdiCapture()) {
+                                qWarning() << "DXGI only delivers black frames while GDI has content"
+                                           << "- switching to GDI capture";
+                                useDXGI_ = false;
+                                delete dxgiCapturer_;
+                                dxgiCapturer_ = nullptr;
+                                return;
+                            }
+                        }
+                    } else {
+                        dxgiBlackCount_ = 0;
+                    }
+                    idleCount_ = 0;
+                    leaveIdleThrottle();
+                    if (forceFrameCount_ > 0) {
+                        forceSendNextFrame_ = false;
+                        forceFrameCount_--;
+                    }
+                    emitCapturedFrame(frame);
+                    schedulePumpFlush();
+                } else {
+                    idleCount_++;
+                    if (idleCount_ > idleThresholdFrames())
+                        enterIdleThrottle();
+                }
+                return;
+            }
+            // 抓取失败：沿用原来的重试计数/切 GDI/锁屏判定
+            dxgiRetryCount_++;
+            if (dxgiRetryCount_ >= 15) {
+                qWarning() << "DXGI persistently failing, falling back to GDI";
+                useDXGI_ = false;
+                delete dxgiCapturer_;
+                dxgiCapturer_ = nullptr;
+                switchToGdiCapture();
+            }
+            if (dxgiRetryCount_ >= 5 && !screenLocked_) {
+                screenLocked_ = true;
+                emit screenLocked(true);
+            }
+            return;
+        }
         // 强制帧（resume 预热 / 新客户端接入 / request_keyframe 喂帧泵）：DXGI 在
         // 静止桌面下只会返回超时（无新帧），必须让它复用上一帧缓存，否则
         // forceFrameCount_ 在 DXGI 路径上完全失效（新客户端一直黑屏）。
         if (forceFrameCount_ > 0)
             dxgiCapturer_->requestForceFrame();
-        const bool dxgiOk = dxgiCapturer_->captureFrame(frame, &updated);
+        dxgiOk = dxgiCapturer_->captureFrame(frame, &updated);
         // 帧纹理不是 BGRA8（HDR FP16 等）：本实现无法直通，立即切 GDI。
         // 不能只靠 dxgiRetryCount_ 累计——那会在切换前发出若干黑帧，且触发误报锁屏。
         if (dxgiCapturer_->frameFormatUnsupported()) {
@@ -917,18 +1041,29 @@ void ScreenCapturer::captureFrame()
     const bool gdiAttempted = useGDI_ && gdiCapturer_;
     bool gdiOk = false;
     if (useGDI_ && gdiCapturer_) {
-        // [WIN-DIAG] 计时：gap=相邻两次进入本函数的间隔，cap=本次采集调用耗时
+        // [WIN-DIAG] 计时：gap=相邻两次进入本函数的间隔，cap=本次采集调用耗时。
+        // 异步模式下真正的 BitBlt 已经不在本线程，单帧耗时必须按"提交 → 现在"
+        // 推算，否则 capAvg 会退化成 ~0 → pace 归零 → 满速空转（节流失效）。
         const double entryMs = qpcMs();
-        gdiOk = gdiCapturer_->captureFrame(frame);
+        double capCostMs = 0.0;
+        if (useGrabResult_) {
+            frame = grabFrame_;
+            gdiOk = grabOk_;
+            capCostMs = static_cast<double>(
+                QDateTime::currentMSecsSinceEpoch() - grabSubmitMs_);
+        } else {
+            gdiOk = gdiCapturer_->captureFrame(frame);
+            capCostMs = qpcMs() - entryMs;
+        }
         const double afterMs = qpcMs();
         if (g_gdiDiag.winStart == 0.0) {
             g_gdiDiag.winStart = entryMs;
             g_gdiDiag.lastEntry = entryMs;
         }
         g_gdiDiag.iters++;
-        g_gdiDiag.capSum += (afterMs - entryMs);
-        if (afterMs - entryMs > g_gdiDiag.capMax)
-            g_gdiDiag.capMax = afterMs - entryMs;
+        g_gdiDiag.capSum += capCostMs;
+        if (capCostMs > g_gdiDiag.capMax)
+            g_gdiDiag.capMax = capCostMs;
         if (g_gdiDiag.lastEntry > 0.0)
             g_gdiDiag.gapSum += (entryMs - g_gdiDiag.lastEntry);
         g_gdiDiag.lastEntry = entryMs;
@@ -936,10 +1071,11 @@ void ScreenCapturer::captureFrame()
         if (winElapsed >= 1000.0 && g_gdiDiag.iters > 0) {
             const double capAvg = g_gdiDiag.capSum / static_cast<double>(g_gdiDiag.iters);
             g_gdiDiag.windows++;
-            // 前 12 个窗口每秒一条（便于定位），之后每 10 秒一条、或读屏异常时继续打，
-            // 避免长期运行把日志刷满。
-            if (g_gdiDiag.windows <= 12 || (g_gdiDiag.windows % 10) == 0
-                || capAvg > kSlowReadbackMs) {
+            // 前 12 个窗口每秒一条（便于定位），之后每 10 秒一条。
+            // 原实现在慢读回机器上额外加了 "|| capAvg > kSlowReadbackMs" → 在
+            // VMware SVGA 这类机器上条件恒真，退化成每秒一条（XP 实测一天 3000+ 行），
+            // 而且这 8 个 QString::number 是在采集线程里做的，本身也有成本。
+            if (g_gdiDiag.windows <= 12 || (g_gdiDiag.windows % 10) == 0) {
                 qInfo() << "CAP-WIN iters=" << g_gdiDiag.iters
                         << "emits=" << g_gdiDiag.emits
                         << "fps=" << QString::number(g_gdiDiag.iters * 1000.0 / winElapsed, 'f', 1)
@@ -960,7 +1096,7 @@ void ScreenCapturer::captureFrame()
             // 这是 XP（无 DWM 可关）唯一有效的降 CPU 手段：读回慢时降到 ~1fps，
             // 换来单核从 ~95% 降到 ~33%，机器恢复可交互。
             paceIntervalMs_ = (capAvg > kSlowReadbackMs)
-                ? static_cast<qint64>(capAvg * 2.0) : 0;
+                ? static_cast<qint64>(capAvg * paceFactor_) : 0;
             applyCaptureInterval();
             const qint64 doneWindows = g_gdiDiag.windows;
             g_gdiDiag = GdiDiag();
@@ -1012,7 +1148,16 @@ void ScreenCapturer::captureFrame()
                                              &diffChanged, &diffSampled, &diffBox);
         if (smallChange)
             g_gdiDiag.smalls++;
-        lastFrameDiff_ = frame;   // QImage 隐式共享，无像素拷贝
+        // 只在慢读回机器上保留比较基准：QImage 隐式共享虽然"赋值不拷贝像素"，
+        // 但会让本帧的引用计数 >1，于是下游 VideoEncoder::encode()（及
+        // JpegCompressor::enqueue()）的 isDetached() 快路径失效 → 每帧多一次
+        // 整帧深拷贝（1920x1080 ≈ 8MB，2117x1398 ≈ 11.8MB）。
+        // [CAP-ASYNC] 再加一层限制：只有"接近静止"（idleCount_ 已过半阈值）时才保留。
+        // frameChangeIsSmall() 本来就是为静止场景服务的（别让 caret/时钟闪烁把降频
+        // 打回），交互时它必然判"大面积变化"、结果恒 false。这样交互帧不再持有基准，
+        // encode 的 isDetached() 成立 → 单核机器每帧省一次 11.8MB memcpy。
+        if (paceIntervalMs_ > 0 && idleCount_ >= idleThresholdFrames() / 2)
+            lastFrameDiff_ = frame;
         // 只记录"静止被大面积变化打断"：sameFrame 时 smallChange 同样是 false，
         // 不排除的话深空闲每个 tick 都会打一条 changed=0 的空日志。
         if (!sameFrame && !smallChange && idleThrottled_ && paceIntervalMs_ > 0) {
@@ -1126,6 +1271,7 @@ static QList<ScreenCapturer::WinOutput> winEnumMonitors();
 
 bool ScreenCapturer::start(int fps)
 {
+    QMutexLocker lock(&captureResMutex_);
     fps_ = fps;
 
     // 先释放可能已存在的捕获器（DXGI 持有 D3D COM 资源，GDI 持有 HDC/位图），
@@ -1177,7 +1323,26 @@ bool ScreenCapturer::start(int fps)
         }
     }
 
+    // 两条采集路径都初始化失败（老驱动 / 会话切换 / 权限不足）：必须如实返回失败。
+    // 旧实现无条件 return true，调用方（helper_process 的 "failed to start screen
+    // capturer" 分支、rdpserver 的 startCapture）以为采集已在跑，实际永不出一帧：
+    // 前端黑屏，日志里却只有一句 "Screen capture started:" 且没有任何错误。
+    if (!useDXGI_ && !useGDI_) {
+        qCritical() << "Screen capture unavailable: both DXGI and GDI initialization failed";
+        return false;
+    }
+
+    // 沿用上次实测的慢读回节流值（paceIntervalMs_），不要无条件按 1000/fps 起表：
+    // 每次 start()/输出重建后若从 66ms 重新跑，慢读回机器会先满速连抓好几帧
+    //（单帧 300~400ms → 约 1 秒满核），要等下一个 1s 统计窗口才被 pace 纠正。
+    // resume() 已是这个语义（见其注释），这里与之对齐。
     captureTimer_->start(1000 / fps);
+    // 新会话从干净的降频状态开始：沿用上一次的 idleThrottled_ 会让 applyCaptureInterval()
+    // 直接把间隔乘上 kIdlePaceFactor（×4），起手就慢一整拍。
+    idleThrottled_ = false;
+    idleCount_ = 0;
+    if (paceIntervalMs_ > 0)
+        applyCaptureInterval();
     qInfo() << "Screen capture started:" << width() << "x" << height() << "@" << fps << "fps";
     return true;
 }
@@ -1190,7 +1355,11 @@ bool ScreenCapturer::changeDisplayResolution(int w, int h)
     dm.dmPelsWidth = static_cast<DWORD>(w);
     dm.dmPelsHeight = static_cast<DWORD>(h);
     dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
-    LONG result = ChangeDisplaySettings(&dm, CDS_FULLSCREEN);
+    // CDS_FULLSCREEN 是"临时测试模式"标志：不写注册表，进程退出/注销后分辨率
+    // 会回退到原值。改分辨率是用户显式操作，用 CDS_UPDATEREGISTRY 让它在会话
+    // 重建后仍然保持。注意这里改的是默认显示设备（服务/helper 进程没有窗口，
+    // 拿不到具体输出句柄），多显示器场景下作用在 Primary 上。
+    LONG result = ChangeDisplaySettings(&dm, CDS_UPDATEREGISTRY);
     if (result == DISP_CHANGE_SUCCESSFUL) {
         qInfo() << "Display resolution changed to" << w << "x" << h;
         return true;
@@ -1315,8 +1484,11 @@ QJsonArray ScreenCapturer::enumerateOutputs() const
     return arr;
 }
 
-bool ScreenCapturer::refreshOutputs()
+bool ScreenCapturer::refreshOutputs(bool* geometryChanged)
 {
+    QMutexLocker lock(&captureResMutex_);
+    if (geometryChanged)
+        *geometryChanged = false;
     QList<WinOutput> fresh = winEnumMonitors();
     if (fresh.isEmpty())
         return false;
@@ -1332,20 +1504,25 @@ bool ScreenCapturer::refreshOutputs()
             const WinOutput& b = fresh[oldIdx];
             geomChanged = (a.x != b.x || a.y != b.y || a.w != b.w || a.h != b.h);
         }
-        if (geomChanged)
-            return winApplyOutput(oldIdx);
-        return true;
+        if (!geomChanged)
+            return true;              // 可用且未变：geometryChanged 保持 false
+        if (geometryChanged)
+            *geometryChanged = true;
+        return winApplyOutput(oldIdx);
     }
     // 当前选择失效（拔线）：回退 primary / 首个
     int idx = 0;
     for (int i = 0; i < fresh.size(); ++i) {
         if (fresh[i].primary) { idx = i; break; }
     }
+    if (geometryChanged)
+        *geometryChanged = true;
     return winApplyOutput(idx);
 }
 
 bool ScreenCapturer::pollOutputGeometry()
 {
+    QMutexLocker lock(&captureResMutex_);
     const QList<WinOutput> fresh = winEnumMonitors();
     if (fresh.isEmpty())
         return false;
@@ -1371,6 +1548,7 @@ bool ScreenCapturer::pollOutputGeometry()
 
 bool ScreenCapturer::winApplyOutput(int index)
 {
+    QMutexLocker lock(&captureResMutex_);
     if (index < 0 || index >= winOutputs_.size())
         return false;
     winCurrentIndex_ = index;

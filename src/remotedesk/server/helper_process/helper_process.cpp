@@ -239,9 +239,22 @@ int HelperProcess::run(int argc, char* argv[])
     // 永远配不出输出，服务端等不到新 IDR → 新接入的浏览器一直黑屏。
     // 解决：任何"需要立刻出帧"的场景都连喂若干帧，把延迟配对补上。
     QTimer* capturePumpTimer = new QTimer(&app);
-    int capturePumpLeft = 0;
+    int capturePumpLeft = 0;      // 还要"真实产出"多少帧（由 frameCaptured 递减）
+    int capturePumpTicksLeft = 0; // 保险丝：定时器最多打这么多拍，防泵永远泵不完
+    int capturePumpStall = 0;     // 连续多少拍没有新帧产出（采集停摆的判据）
+    // 一次关键帧请求需要连喂几帧：libopenh264 的输出比输入滞后 1 帧，所以
+    // 2 帧输入就能顶出第 1 帧（IDR）。原来喂 4 帧，多出的 2 帧纯粹是白抓
+    // 全屏（XP 单帧 320ms ⇒ 每次关键帧请求白烧 0.65 秒单核）。
+    static const int kKeyframePumpFrames = 2;
+    // 采集停摆判定：连续这么多拍（80ms/拍 ≈ 1.9s）没有任何新帧就放弃等待。
+    // 原来的保险丝是 n×25 拍（4 帧 = 8s），采集真停摆（锁屏/闸门关/驱动挂）时
+    // 前端要黑 8 秒才等到重建后的 IDR。取值要 ≥ 补帧本身的耗时：补帧按 50%
+    // 占空比走，单帧 320ms ⇒ 2 帧 ≈ 1.3s（16 拍），这里留到 24 拍。
+    static const int kPumpStallTicks = 24;
     auto pumpCaptureFrames = [&](int n) {
         capturePumpLeft = qMax(capturePumpLeft, n);
+        capturePumpStall = 0;
+        capturePumpTicksLeft = qMax(capturePumpTicksLeft, n * 25);
         if (!capturePumpTimer->isActive())
             capturePumpTimer->start(80);
     };
@@ -249,13 +262,34 @@ int HelperProcess::run(int argc, char* argv[])
         if (quitting || !videoActive) {
             capturePumpTimer->stop();
             capturePumpLeft = 0;
+            capturePumpTicksLeft = 0;
+            capturePumpStall = 0;
             return;
         }
-        capturer.forceNextFrame();
-        if (--capturePumpLeft <= 0) {
+        // 配额已满（真的出了足够多的帧）或保险丝烧断：立刻收工。
+        // 必须在这里判，否则定时器会一直空转到保险丝用完（慢机上等于持续满速抓屏）。
+        if (capturePumpLeft <= 0 || --capturePumpTicksLeft <= 0
+                || ++capturePumpStall > kPumpStallTicks) {
+            const bool stalled = capturePumpLeft > 0;
             capturePumpTimer->stop();
             capturePumpLeft = 0;
+            capturePumpTicksLeft = 0;
+            capturePumpStall = 0;
+            if (stalled) {
+                // 采集停摆：把配额清零，兜底定时器下一拍（≤400ms）就会看到
+                // capturePumpLeft==0 并立即走重建，不必再等满 8 秒保险丝。
+                qWarning() << "Helper: capture pump stalled, giving up after"
+                           << kPumpStallTicks << "ticks";
+            }
+            return;
         }
+        // 必须用 nudgeCapture()：forceNextFrame() 只在"从 idle 唤醒"那一次插即时
+        // 抓帧，慢读回机器上 pace 已到 2×capAvg（XP 约 640ms），80ms 的泵拍子全部
+        // 落空 → 泵窗口内一帧都不出 → 兜底定时器必然判"未产出 IDR"并重建编码器
+        //（XP 实测一天 471 次重建、491 次 encoder init）。
+        // paced=true：补帧也受 pace 约束（最小间隔 pace/2），否则泵会把抓屏拖成
+        // 背靠背连跑，占空比从 33% 飙到 ~90%（每次关键帧请求 1 秒满核尖峰）。
+        capturer.nudgeCapture(true);
     });
 
     // 上报视频能力（capture_caps）：服务端据此决定前端能否切视频模式。
@@ -324,15 +358,21 @@ int HelperProcess::run(int argc, char* argv[])
     // 编码器才能可靠拿到新 IDR。服务端 pumpKeyframe 的"单进程路径"也是同样兜底
     // （hasIdr 仍未见新 IDR 时重建），helper 侧此前缺这一步 → 新接入浏览器黑屏。
     bool kfRequestPending = false;
+    // [KF-SOFT-PATH] 该编码器实例是否认 requestKeyframe()。libopenh264（FFmpeg 3.4
+    // 内置软编）实测忽略 pict_type=I：requestKeyframe() 之后喂进去的帧吐出来仍是
+    // P 帧，只有重建编码器才能可靠拿到新 IDR。首次兜底失败即置 false，之后的关键帧
+    // 请求直接走"重建 + 喂帧"快路径，省掉每轮"2 帧白抓 + 800ms 空等 + 末尾再重建"
+    //（XP 实测一次显式关键帧请求从 ~2.7s 降到 ~1.1s，且不再有第二次满速抓屏）。
+    // 换 codec / 重进视频模式时复位（新实例可能认）。
+    bool encoderHonorsRequestKf = true;
     QTimer* kfFallbackTimer = new QTimer(&app);
     kfFallbackTimer->setSingleShot(true);
     QObject::connect(kfFallbackTimer, &QTimer::timeout, &app, [&]() {
         if (!kfRequestPending)
             return;
-        // 4 帧强制抓取是 80ms 一拍的定时泵，慢机（XP 全屏实测 ~207ms/帧）跑完
-        // 要 800ms+，此时兜底先到点会把"还在喂帧"误判成"没出 IDR"，白重建一次
-        // 编码器（新 IDR 与旧码流交错，纯粹烧 CPU）。泵没跑完就再等一轮，等泵
-        // 结束仍无 IDR 才走重建。
+        // 喂帧是 80ms 一拍的定时泵，慢机（XP 全屏实测 ~320ms/帧）跑完要 1s+，
+        // 此时兜底先到点会把"还在喂帧"误判成"没出 IDR"，白重建一次编码器（新 IDR
+        // 与旧码流交错，纯粹烧 CPU）。泵没跑完就再等一轮，等泵结束仍无 IDR 才重建。
         if (capturePumpLeft > 0) {
             kfFallbackTimer->start(400);
             return;
@@ -340,13 +380,73 @@ int HelperProcess::run(int argc, char* argv[])
         kfRequestPending = false;
         if (quitting || !videoActive || !encoder)
             return;
-        qWarning() << "Helper: request_keyframe 未产出 IDR，重建编码器强制关键帧";
+        qWarning() << "Helper: request_keyframe 未产出 IDR，重建编码器强制关键帧"
+                   << "(软路无效，后续直接重建)";
+        encoderHonorsRequestKf = false;
         reinitVideoEncoder();
         // 重建后的首帧 IDR 也要记录内容版本，否则 KF-REPLAY 缓存永远不生效
         // （reinitVideoEncoder 里已清空缓存）。
         pendingKfEpoch = capturer.contentChangeCount();
         pendingKfEpochValid = true;
-        pumpCaptureFrames(4);
+        pumpCaptureFrames(kKeyframePumpFrames);
+    });
+
+    // [ADAPT] 慢机自适应配置：按实测单帧采集耗时（capturer.avgCaptureMs）分级下调
+    // 帧率/缩放比、提高节流倍数。目标是让 VMware 上的 XP 这类"读屏 320ms/帧、单核"
+    // 的机器自动落到能交互的参数，而不是拿默认 15fps/75% 硬撑（实测只有 1.2fps 却
+    // 占单核 43%）。只在视频模式评估、最多 3 轮，用户之后在页面改的参数随时覆盖。
+    QTimer* adaptTimer = new QTimer(&app);
+    adaptTimer->setInterval(4000);
+    int adaptRounds = 0;
+    bool adaptDecided = false;
+    QObject::connect(adaptTimer, &QTimer::timeout, &app, [&]() {
+        if (quitting || !videoActive)
+            return;
+        const int avg = capturer.avgCaptureMs();
+        if (avg <= 0)
+            return;                       // 还没有有效样本
+        if (++adaptRounds < 2)
+            return;                       // 至少 2 个窗口（≈8s），避开启动抖动
+        adaptDecided = true;
+        adaptTimer->stop();
+
+        int wantFps = captureFps;
+        int wantScale = videoScale;
+        double wantPace = 2.0;
+        if (avg < 60) {
+            // 读回正常（真机/有加速的 VM）：保持用户配置
+        } else if (avg < 200) {
+            wantFps = qMin(captureFps, 12);
+        } else if (avg < 400) {
+            wantFps = qMin(captureFps, 10);
+            wantScale = qMin(videoScale, 60);
+            wantPace = 3.0;
+        } else {
+            wantFps = qMin(captureFps, 8);
+            wantScale = qMin(videoScale, 50);
+            wantPace = 4.0;
+        }
+        if (wantFps == captureFps && wantScale == videoScale && wantPace <= 2.0)
+            return;
+
+        qWarning() << "Helper: slow capture detected, avgCapMs=" << avg
+                   << "adapting fps" << captureFps << "->" << wantFps
+                   << "scale" << videoScale << "->" << wantScale
+                   << "paceFactor ->" << wantPace;
+        captureFps = wantFps;
+        videoScale = wantScale;
+        capturer.setFps(captureFps);
+        capturer.setPaceFactor(wantPace);
+        reinitVideoEncoder();
+        // 把实际生效的参数告诉服务端（页面上的下拉框仍显示用户选的值，但日志与
+        // capture_caps 能看出实际配置，避免"设了 15fps 却只有 8fps"的困惑）。
+        QJsonObject adapt;
+        adapt["type"] = "capture_adapt";
+        adapt["avgCapMs"] = avg;
+        adapt["fps"] = captureFps;
+        adapt["scale"] = videoScale;
+        adapt["paceFactor"] = wantPace;
+        ws.sendTextMessage(QString::fromUtf8(QJsonDocument(adapt).toJson(QJsonDocument::Compact)));
     });
 
     // 进入视频模式：按服务端下发的 config 建立编码器，成功后开始上报 H.264
@@ -385,17 +485,27 @@ int HelperProcess::run(int argc, char* argv[])
                 << "codec" << (videoCodec == CodecType::H264 ? "h264" : "hevc")
                 << "bitrate" << videoBaseBitrate;
         sendCaptureCaps(QString());
+        // 新实例可能认 requestKeyframe（换 codec / 换硬件后再试一次软路）
+        encoderHonorsRequestKf = true;
         // 立即连喂几帧：新编码器首帧即 IDR，且要喂够帧数才能突破 1 帧输出延迟，
         // 否则接入后要等桌面自然变化才有画面（静止桌面会长时间黑屏）。
-        pumpCaptureFrames(4);
+        pumpCaptureFrames(kKeyframePumpFrames);
+        // 开始慢机自适应评估（每 4s 一轮，最多 3 轮后停）
+        if (!adaptDecided) {
+            adaptRounds = 0;
+            adaptTimer->start();
+        }
     };
 
     // 退出视频模式：停编码器、恢复 JPEG 上报
     auto stopVideoMode = [&]() {
         capturePumpTimer->stop();
         capturePumpLeft = 0;
+        capturePumpTicksLeft = 0;
+        capturePumpStall = 0;
         kfRequestPending = false;
         kfFallbackTimer->stop();
+        adaptTimer->stop();
         if (encoder)
             encoder->shutdown();
         dropCachedIdr();
@@ -485,7 +595,7 @@ int HelperProcess::run(int argc, char* argv[])
             return;
         qWarning() << "Helper: encoder reported reinitRequired (MPP unavailable), rebuilding as software encoder";
         reinitVideoEncoder();
-        pumpCaptureFrames(4);
+        pumpCaptureFrames(kKeyframePumpFrames);
     });
 #endif // USE_FFMPEG
 
@@ -621,6 +731,11 @@ int HelperProcess::run(int argc, char* argv[])
             // 退出流程启动后（栈对象已开始析构）不再访问 compressor，
             // 避免队列中延迟投递的事件访问已析构对象
             if (quitting) return;
+            // 喂帧泵按"真实出帧"计数：只有真的产出一帧才算喂到，80ms 拍子本身
+            // 不代表任何一帧（慢读回机器上一个拍子连 BitBlt 都跑不完）。
+            if (capturePumpLeft > 0)
+                --capturePumpLeft;
+            capturePumpStall = 0;   // 有新帧 ⇒ 采集没停摆
 #ifdef USE_FFMPEG
             if (videoActive) {
                 // 视频模式：走编码器，不再喂 JPEG 压缩线程（省一半 CPU）
@@ -805,8 +920,7 @@ int HelperProcess::run(int argc, char* argv[])
                     // 显式请求（新客户端接入/前端自愈，reuse_ok=false）不走这里：
                     // 它要的是"从此刻起可解码"，缓存 IDR 的时间戳可能早于前端
                     // 已缓冲位置，重发会被 MSE 当过期帧丢掉。
-                    const bool reuseOk = obj["reuse_ok"].toBool();
-                    if (reuseOk && lastIdrEpochValid && !lastIdrData.isEmpty()
+                    const bool reuseOk = obj["reuse_ok"].toBool();                    if (reuseOk && lastIdrEpochValid && !lastIdrData.isEmpty()
                             && capturer.contentChangeCount() == lastIdrEpoch) {
                         const qint64 now = QDateTime::currentMSecsSinceEpoch();
                         // PLI 实测成对到达（同一毫秒两次），冷却内忽略重复请求。
@@ -834,10 +948,23 @@ int HelperProcess::run(int argc, char* argv[])
                     // 单帧输入配不出码流（详见 pumpCaptureFrames 处说明）。
                     pendingKfEpoch = capturer.contentChangeCount();
                     pendingKfEpochValid = true;
-                    encoder->requestKeyframe();
-                    pumpCaptureFrames(4);
-                    kfRequestPending = true;
-                    kfFallbackTimer->start(800);
+                    if (encoderHonorsRequestKf) {
+                        // 软路：先试 requestKeyframe（硬件编码器认这一套，能省一次
+                        // 编码器重建）。失败由 800ms 兜底接管并永久关闭软路。
+                        encoder->requestKeyframe();
+                        pumpCaptureFrames(kKeyframePumpFrames);
+                        kfRequestPending = true;
+                        kfFallbackTimer->start(800);
+                    } else {
+                        // 已知软路无效（libopenh264）：直接重建。新实例首帧必为 IDR，
+                        // 喂 2 帧就能把它顶出来，不用先白抓一轮再等 800ms。
+                        reinitVideoEncoder();
+                        pendingKfEpoch = capturer.contentChangeCount();
+                        pendingKfEpochValid = true;
+                        pumpCaptureFrames(kKeyframePumpFrames);
+                        kfRequestPending = true;
+                        kfFallbackTimer->start(1200);
+                    }
                 }
                 return;
             }
@@ -1111,6 +1238,17 @@ int HelperProcess::run(int argc, char* argv[])
                     if (fps > 60) fps = 60;
                     capturer.setFps(fps);
                     captureFps = fps; // [B-6] 记住配置帧率，供切分辨率后重启使用
+                }
+                // [PACE-FACTOR] 慢读回节流倍数（服务端 server_config.json 的
+                // capturePaceFactor）。采集间隔 = 单帧实测耗时 × 倍数，占空比
+                // ≈1/(1+倍数)：2 ⇒ 33%（默认）、4 ⇒ 20%、9 ⇒ 10%。只对读屏
+                // 慢到触发 pace 的机器有效，快机 pace 恒 0、不受影响。
+                if (obj.contains("paceFactor")) {
+                    const double pf = obj["paceFactor"].toDouble();
+                    if (pf >= 1.0 && pf <= 12.0) {
+                        capturer.setPaceFactor(pf);
+                        qInfo() << "Helper: capture pace factor =" << pf;
+                    }
                 }
 #ifdef USE_FFMPEG
                 // 视频参数（服务模式 helper 侧编码）：codec / hw_encode
@@ -1425,6 +1563,36 @@ int HelperProcess::run(int argc, char* argv[])
     // 光标各走各的）。
     inputMgr.setScreenSize(capturer.width(), capturer.height());
     inputMgr.setScreenOffset(capturer.originX(), capturer.originY());
+
+    // [EVLOOP] 主线程事件循环延迟探针。采集异步化（CAP-ASYNC）之后这里应长期是个
+    // 位数 ms；若又出现 100ms+ 的尖峰，说明有重活抢回了 GUI 线程（整帧拷贝/编码/
+    // 同步抓屏），是"操作一顿一顿"的量化指标。同步老路径下 XP 会稳定打出 ~300ms。
+    {
+        QTimer* lagTimer = new QTimer(&app);
+        lagTimer->setInterval(100);
+        qint64 lagPrev = QDateTime::currentMSecsSinceEpoch();
+        qint64 lagMax = 0, lagSum = 0;
+        int lagN = 0, lagTicks = 0;
+        QObject::connect(lagTimer, &QTimer::timeout, &app, [=]() mutable {
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            const qint64 d = now - lagPrev - 100;
+            lagPrev = now;
+            if (d > 0) {
+                lagSum += d;
+                ++lagN;
+                if (d > lagMax)
+                    lagMax = d;
+            }
+            if (++lagTicks >= 50) {   // 每 5 秒一条
+                qInfo() << "EVLOOP lagAvg=" << (lagN ? lagSum / lagN : 0) << "lagMax=" << lagMax;
+                lagSum = 0;
+                lagN = 0;
+                lagMax = 0;
+                lagTicks = 0;
+            }
+        });
+        lagTimer->start();
+    }
 
     // 枚举支持的分辨率并写入配置文件（QSaveFile 原子写，见 helperSaveConfigField）
     {

@@ -1380,7 +1380,8 @@
                 send({ type: 'signal_answer', sdp: pc.localDescription.sdp });
                 // 已获得远端描述，补发排队中的 ICE
                 for (const ic of webrtcState.pendingIce) {
-                    pc.addIceCandidate({ candidate: ic.candidate, sdpMid: ic.mid }).catch(() => {});
+                    pc.addIceCandidate({ candidate: ic.candidate, sdpMid: ic.mid })
+                      .catch((e) => console.warn('RD-ICE addIceCandidate (queued) failed:', e));
                 }
                 webrtcState.pendingIce = [];
             }).catch((e) => {
@@ -1402,7 +1403,8 @@
                 } catch (e) {}
             }
             if (pc && pc.remoteDescription) {
-                pc.addIceCandidate({ candidate: cand, sdpMid: mid }).catch(() => {});
+                pc.addIceCandidate({ candidate: cand, sdpMid: mid })
+                  .catch((e) => console.warn('RD-ICE addIceCandidate failed:', e));
             } else if (pc) {
                 webrtcState.pendingIce.push({ candidate: cand, mid });
             }

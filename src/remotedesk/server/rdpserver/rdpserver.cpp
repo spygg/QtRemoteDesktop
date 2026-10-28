@@ -663,6 +663,9 @@ void RDPServer::loadServerConfig(const QString& configPath)
         configScale_ = qBound(10, root["scale"].toInt(), 100);
         userScale_ = configScale_;
     }
+    // [PACE-FACTOR] 采集节流倍数（见 rdpserver.h）。缺省 2 = 保持历史行为。
+    if (root.contains("capturePaceFactor"))
+        configPaceFactor_ = qBound(1.0, root["capturePaceFactor"].toDouble(), 12.0);
 
     if (root.contains("codec"))
         configCodec_ = codecFromString(root["codec"].toString());
@@ -744,6 +747,7 @@ void RDPServer::saveServerConfig(const QString& configPath)
     // high/verylow 画质档位会临时把 configScale_ 改成 100/≤50，若按旧逻辑写
     // configScale_，选一次档位再重启，用户手动设的缩放就被永久覆盖。
     root["scale"] = userScale_;
+    root["capturePaceFactor"] = configPaceFactor_;
     // WebRTC 期间 configCodec_ 被临时改成 H.264：落盘必须写用户原本的选择，
     // 否则用一次 WebRTC 就会把 HEVC 等配置永久覆盖成 H.264。
     root["codec"] = codecToString(codecOverriddenForWebRtc_ ? codecBeforeWebRtc_ : configCodec_);
@@ -1190,6 +1194,16 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     out["isXP"] = !isVistaPlusOs();
 #endif
                     wsServer_->broadcastJson(out);
+                    return;
+                } else if (t == "capture_adapt") {
+                    // [ADAPT] helper 的慢机自适应结果：只记日志。页面上的 fps/画质
+                    // 下拉框仍显示用户选的值，这条代表"实际生效"的参数——排查
+                    // "设了 15fps 却只有 8fps" 时看它。
+                    qInfo() << "Capture adapted: avgCapMs =" << msg["avgCapMs"].toInt()
+                            << "fps =" << msg["fps"].toInt()
+                            << "scale =" << msg["scale"].toInt()
+                            << "paceFactor =" << msg["paceFactor"].toDouble();
+                    // 内部诊断消息，不转发给浏览器（末尾统一 broadcastJson 会发）
                     return;
                 } else if (t == "capture_caps") {
                     // helper 视频能力上报：仅服务端内部决策用，绝不能泄漏给浏览器
@@ -4727,40 +4741,49 @@ void RDPServer::injectPasteShortcut()
 
 void RDPServer::onFrameCaptured(const QImage& frame)
 {
+    // [缓存顺序] 先投递、后缓存。缓存（lastCapturedFrame_）是给"下一个接入的客户端"
+    // 用的，但它会让本帧 QImage 的引用计数变 2，于是下游 enqueue()/encode() 里
+    // `frame.isDetached() ? frame : frame.copy()` 的快路径失效 → 每帧多拷一整帧
+    //（2117x1398 ≈ 11.8MB）。改为投递完再持有，同一帧在入队时仍是独占的。
+    //
     // 仅图片模式需要缓存首帧（onClientConnected 用它给新客户端补图）。视频模式下
     // 无条件持有会让 QImage 引用计数始终 >1 → VideoEncoder::encode 的 isDetached()
     // 快路径永远失败 → 每帧多一次整帧深拷贝（1080p@30 ≈ 240MB/s）。
-    if (currentMode_ == ServerMode::Image) {
-        lastCapturedFrame_ = frame;
-    } else if (!lastCapturedFrame_.isNull()) {
-        lastCapturedFrame_ = QImage();
-    }
+    const bool needCache = (currentMode_ == ServerMode::Image);
 
-    if (wsServer_->clientCount() == 0)
-        return;
-
+    if (wsServer_->clientCount() > 0) {
+        bool dispatched = false;
 #ifdef USE_FFMPEG
-    if (currentMode_ == ServerMode::Video && videoEncoder_) {
-        // 编码器/sws 上下文的源尺寸与当前捕获尺寸不一致（分辨率切换、输出切换、
-        // 显示器热插拔后未重建）→ 节流重建，避免 sws_scale 越界读。
-        if (videoEncoder_->sizeMismatch()) {
-            const qint64 nowMs = monoNowMs();
-            if (nowMs - lastSizeReinitMs_ > 3000) {
-                lastSizeReinitMs_ = nowMs;
-                qInfo() << "Capture size changed, reinitializing video encoder";
-                reinitVideoEncoderForScale();
+        if (currentMode_ == ServerMode::Video && videoEncoder_) {
+            // 编码器/sws 上下文的源尺寸与当前捕获尺寸不一致（分辨率切换、输出切换、
+            // 显示器热插拔后未重建）→ 节流重建，避免 sws_scale 越界读。
+            if (videoEncoder_->sizeMismatch()) {
+                const qint64 nowMs = monoNowMs();
+                if (nowMs - lastSizeReinitMs_ > 3000) {
+                    lastSizeReinitMs_ = nowMs;
+                    qInfo() << "Capture size changed, reinitializing video encoder";
+                    reinitVideoEncoderForScale();
+                }
+            } else {
+                // 缩放已在编码线程 sws_scale 完成，主线程不再做全帧缩放（避免阻塞输入处理）
+                videoEncoder_->encode(frame);
             }
-            return;
+            dispatched = true;
         }
-        // 缩放已在编码线程 sws_scale 完成，主线程不再做全帧缩放（避免阻塞输入处理）
-        videoEncoder_->encode(frame);
-    } else
 #endif
-    {
-        // 图片模式：缩放移到 JPEG 压缩线程，避免全帧缩放占用主线程阻塞输入处理
-        if (jpegCompressor_)
-            jpegCompressor_->enqueue(frame);
+        if (!dispatched) {
+            // 图片模式：缩放移到 JPEG 压缩线程，避免全帧缩放占用主线程阻塞输入处理。
+            // （视频模式但编码器缺失时也落到这里，与改造前一致；onJpegCompressed
+            //  另有模式门，不会把 JPEG 混进视频流。）
+            if (jpegCompressor_)
+                jpegCompressor_->enqueue(frame);
+        }
     }
+
+    if (needCache)
+        lastCapturedFrame_ = frame;
+    else if (!lastCapturedFrame_.isNull())
+        lastCapturedFrame_ = QImage();
 }
 
 void RDPServer::broadcastCursorPos()
@@ -5379,6 +5402,8 @@ void RDPServer::sendVideoParamsToCaptureSource(const QString& action)
                                                                   : QStringLiteral("auto");
     cfg["fps"] = configFps_;
     cfg["scale"] = configScale_;
+    // 慢读回节流倍数：helper 的采集器据此算采集间隔（占空比 ≈ 1/(1+factor)）。
+    cfg["paceFactor"] = configPaceFactor_;
     cfg["quality"] = (configQuality_ >= 80) ? QStringLiteral("high")
                    : (configQuality_ <= 15) ? QStringLiteral("verylow")
                    : (configQuality_ <= 35) ? QStringLiteral("low")
