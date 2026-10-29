@@ -25,6 +25,10 @@
 #include <cerrno>
 #include <cstdio>
 
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+#include <csignal>
+#endif
+
 // 默认级别：debug 构建全量记录，release 构建只记 info 及以上
 // （release 部署如需全量调试，显式传 --log-level debug）。
 #ifdef QT_DEBUG
@@ -219,6 +223,16 @@ int main(int argc, char* argv[])
 {
 
     ensureQtPluginPath(argc, argv);
+
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+    // [SHELL-HUP] 作为服务运行时本进程没有控制终端，任何"终端挂断"都不该杀掉它。
+    // 但历史实现里网页终端 open pts 从端时漏了 O_NOCTTY，内核把该 pts 认领成我们
+    // 的控制终端，于是关掉网页终端 → master 挂断 → SIGHUP → 服务静默消失
+    // （systemd 把 SIGHUP 当干净退出，Restart=on-failure 也不会拉起来）。
+    // 根因已在 shell_linux.cpp 修好（O_NOCTTY），这里再兜一层：直接忽略 SIGHUP。
+    // 必须在 platformMain 之前——服务模式的初始化在那边提前返回。
+    ::signal(SIGHUP, SIG_IGN);
+#endif
 
     int ret = platformMain(argc, argv);
     if (ret >= 0)

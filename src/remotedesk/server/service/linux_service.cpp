@@ -2842,7 +2842,12 @@ int LinuxService::install(int argc, char* argv[])
     // 直接执行二进制本身：旧代码拼了 ".sh" 后缀，但工程并不生成该脚本，
     // 安装后 systemd 必然 start failure 并每 5s 重试。
     fprintf(f, "ExecStart=%s --service\n", exePath);
-    fprintf(f, "Restart=on-failure\n");
+    // 用 always 而不是 on-failure：systemd 把 SIGHUP/SIGINT/SIGPIPE 一律算作
+    // 「干净退出」（CLEAN_SIGNALS），on-failure 遇到这些信号不会重启。远程桌面
+    // 服务一旦静默消失，现场只能靠人肉发现（2026-10-29 龙蜥实测：网页终端把
+    // 主进程 SIGHUP 掉，服务死了半小时无人知情）。真正要停止时用 systemctl stop，
+    // always 同样遵守，不会被拉起。
+    fprintf(f, "Restart=always\n");
     fprintf(f, "RestartSec=5\n\n");
     fprintf(f, "[Install]\n");
     fprintf(f, "WantedBy=multi-user.target\n");

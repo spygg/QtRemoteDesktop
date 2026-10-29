@@ -69,7 +69,13 @@ void LinuxInteractiveShell::start()
         ws_->close();
         return;
     }
-    const int slaveFd = ::open(slaveName, O_RDWR);
+    // [SHELL-HUP] O_NOCTTY 不可省。本进程由 systemd 拉起、自身没有控制终端，
+    // 此时 open 一个 tty 设备（不带 O_NOCTTY）会被内核**认领为该进程的控制终端**。
+    // 后果（2026-10-29 实测）：网页终端一关，master 挂断 → 内核向该终端的前台
+    // 进程组发 SIGHUP → 服务主进程被自己开的 shell 打死；同时子进程 bash 拿不到
+    // 控制终端，启动即打印 "cannot set terminal process group (-1)"。
+    // 控制终端只应由下面的子进程 setsid()+TIOCSCTTY 建立。
+    const int slaveFd = ::open(slaveName, O_RDWR | O_NOCTTY);
     if (slaveFd < 0) {
         qWarning() << "InteractiveShell: open slave pty failed";
         close(masterFd_); masterFd_ = -1;
