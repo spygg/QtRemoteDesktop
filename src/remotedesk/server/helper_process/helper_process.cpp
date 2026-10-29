@@ -26,6 +26,7 @@
 #include <QJsonObject>
 #include <QMimeData>
 #include <QProcess>
+#include <QQueue>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QThread>
@@ -334,25 +335,55 @@ int HelperProcess::run(int argc, char* argv[])
     // 自然 GOP 出的 IDR 对应更早的输入帧，用出帧时刻的计数会把旧画面标成新版本。
     // 编码器每次（重）建都必须清缓存：旧实例的 IDR 带着旧 SPS/PPS 与旧分辨率。
     QByteArray lastIdrData;
-    qint64 lastVideoTs = 0;
     quint64 lastIdrEpoch = 0;
     bool lastIdrEpochValid = false;
+    // [KF-EPOCH] 提交给编码器的每一帧"采集时刻的桌面内容版本"，按 FIFO 与出帧配对。
+    // 编码器有 1 帧流水线延迟：出码流时 contentChangeCount() 可能已经包含了**下一帧**
+    // 带来的变化，直接拿它当这个 IDR 的版本，会把旧画面的 IDR 标成"当前"，
+    // 之后的重放就可能把陈旧画面当成最新帧发出去（新客户端先看到丢了一次更新的画面，
+    // 再收到引用未知参考帧的 P 帧 → 花屏直到下一个 IDR）。
+    // 有了这张表，自然 GOP 出的 IDR 也能确定版本，静止桌面下"接入必重建"随之消失。
+    QQueue<quint64> submittedEpochs;
     quint64 pendingKfEpoch = 0;
     bool pendingKfEpochValid = false;
     qint64 lastIdrReplayMs = 0;
     quint64 idrReplayCount = 0;
-    // [A4] 重放用的时间戳下界：同一份缓存 IDR 可在 250ms 冷却内被重放多次，
-    // 若每次都取 lastVideoTs + 1 帧，MSE 会连续收到 dts 完全相同的分片
-    // （部分浏览器直接 appendBuffer 失败并再次索要关键帧 → 自我放大的死循环）。
-    qint64 lastReplayTs = 0;
+    // [A4/KF-TS] 出帧时间戳的唯一出口：保证下发给服务端的 ts **严格单调递增**。
+    // 实测（2026-10-29 XP/Win7）两个来源会把时间线打乱：
+    //   1) 缓存 IDR 重放若沿用缓存帧的旧 ts，客户端帧时间线回溯 0.4~3.5 秒，
+    //      喂给 MSE 是解码报错/花屏的直接来源，且这时播放头早已越过该位置，
+    //      重发的数据既救不了画面又白花 60KB 带宽；
+    //   2) 编码器 ts 取 `now - startTime_`（墙钟），同一毫秒内吐两帧（重建后连泵）
+    //      会得到**相同** ts，MSE 把重复 ts 分片判为无效直接丢弃。
+    // 因此统一在发送前过一道 max(raw, last+1)：正常帧原样通过（不引入漂移），
+    // 重放帧与同毫秒帧被抬到上一帧 +1ms。相机时钟与真墙钟的偏差不累积。
+    qint64 lastEmitTs = 0;
+    qint64 lastEmitWallMs = 0;
+    auto stampTs = [&](qint64 rawTs) -> qint64 {
+        const qint64 t = qMax(rawTs, lastEmitTs + 1);
+        lastEmitTs = t;
+        lastEmitWallMs = QDateTime::currentMSecsSinceEpoch();
+        return t;
+    };
+    // 重放帧没有对应的采集时刻，时间轴靠"距上一帧的真实流逝时间"推进。
+    // 若简单地取 lastEmitTs + 1，静止桌面下 20 秒内的 20 个重放关键帧会把媒体
+    // 时间轴压在 19ms 里：MSE 的 buffered 区间几乎不前进、字节却一直在涨，
+    // 播放头与缓冲脱节（表现是越看越滞后，最后触发配额满 → 又要关键帧）。
+    auto stampReplayTs = [&]() -> qint64 {
+        const qint64 gap = qMax<qint64>(1, QDateTime::currentMSecsSinceEpoch() - lastEmitWallMs);
+        return stampTs(lastEmitTs + gap);
+    };
     // [A3] 编码器重建冷却：一次重建 ≈0.25 核·秒，前端在网络抖动/缓冲溢出时
     // 每 500ms 重试一次关键帧，两个客户端叠加就能把 XP 单核压在 ~55% 且帧率卡死。
     qint64 lastKfRebuildMs = 0;
     quint64 kfCooldownSkip = 0;
+    quint64 kfReuseMiss = 0;
     auto dropCachedIdr = [&]() {
         lastIdrData.clear();
         lastIdrEpochValid = false;
         pendingKfEpochValid = false;
+        // 编码器被换掉：在途帧的"提交-出帧"配对全部失效，留着会让版本号整体错位。
+        submittedEpochs.clear();
     };
 
     // 按当前 codec/hw/fps/scale/画质重建编码器（视频模式中参数变化时调用）
@@ -541,6 +572,13 @@ int HelperProcess::run(int argc, char* argv[])
     qint64 droppedVideoFrames = 0;
     QObject::connect(encoder.get(), &VideoEncoder::encodedFrame, &app,
         [&](const QByteArray& data, bool keyframe, qint64 ts) {
+            // 配对必须在**所有**早退分支之前完成：编码器每出一帧就要吃掉一个提交
+            // 记录，漏吃一个会让之后所有帧的版本号整体错位（错位方向正是"旧帧被
+            // 标成新版本"，属于不安全的一侧）。背压丢帧、断线丢弃同样要先配对。
+            quint64 frameEpoch = 0;
+            const bool frameEpochKnown = !submittedEpochs.isEmpty();
+            if (frameEpochKnown)
+                frameEpoch = submittedEpochs.dequeue();
             if (keyframe) {
                 // 关键帧已产出 → 撤销 request_keyframe 的重建兜底
                 kfRequestPending = false;
@@ -557,11 +595,15 @@ int HelperProcess::run(int argc, char* argv[])
                     lastIdrEpoch = pendingKfEpoch;
                     lastIdrEpochValid = true;
                     pendingKfEpochValid = false;
+                } else if (frameEpochKnown) {
+                    // 自然 GOP 出的 IDR：内容版本 = 被编码那一帧采集时的版本
+                    // （FIFO 配对得到，不是出帧时刻的计数——见 submittedEpochs）。
+                    lastIdrEpoch = frameEpoch;
+                    lastIdrEpochValid = true;
                 } else {
-                    lastIdrEpochValid = false; // 自然 GOP 关键帧：来源帧版本不可知
+                    lastIdrEpochValid = false; // 配对不可知：宁可下次重建
                 }
             }
-            lastVideoTs = ts;
             // 背压：服务端消费不过来时丢弃**非关键帧**。QWebSocket 写缓冲无上限，
             // 一直塞会让内存暴涨、延迟线性增长（画面越看越滞后）。丢帧是可接受的：
             // 关键帧仍然送，浏览器随时能重新同步。
@@ -574,12 +616,15 @@ int HelperProcess::run(int argc, char* argv[])
                                << "bytes - dropping video frames (total" << droppedVideoFrames << ")";
                 return;
             }
+            // 时间戳统一出口（见 stampTs 注释）：丢弃分支在它之前，被丢的帧不占用
+            // 时间轴位置，否则背压期间 ts 会被无谓抬高。
+            const qint64 outTs = stampTs(ts);
             QByteArray packet;
             QDataStream stream(&packet, QIODevice::WriteOnly);
             stream.setByteOrder(QDataStream::BigEndian);
             stream << quint8(keyframe ? 0x01 : 0x02);
             stream << quint32(data.size());
-            stream << qint64(ts);
+            stream << qint64(outTs);
             packet.append(data);
             wsBacklogBytes += qMax<qint64>(0, ws.sendBinaryMessage(packet));
         });
@@ -764,8 +809,19 @@ int HelperProcess::run(int argc, char* argv[])
 #ifdef USE_FFMPEG
             if (videoActive) {
                 // 视频模式：走编码器，不再喂 JPEG 压缩线程（省一半 CPU）
-                if (encoder)
+                if (encoder) {
+                    // 记下这一帧采集时刻的桌面内容版本，出码流时 FIFO 取回
+                    // （见 submittedEpochs 注释）。
+                    submittedEpochs.enqueue(capturer.contentChangeCount());
+                    if (submittedEpochs.size() > 16) {
+                        // 编码器吞帧/丢帧导致配对失衡：宁可整体作废重新对齐，
+                        // 也不能让版本号持续错位（错位方向是"把旧帧标成新版本"）。
+                        submittedEpochs.clear();
+                        lastIdrEpochValid = false;
+                        submittedEpochs.enqueue(capturer.contentChangeCount());
+                    }
                     encoder->encode(frame);
+                }
                 return;
             }
 #endif
@@ -938,16 +994,25 @@ int HelperProcess::run(int argc, char* argv[])
                 if (desktopPollLocked)
                     return;
                 if (videoActive && encoder) {
-                    // [KF-REPLAY] 浏览器 PLI（服务端标记 reuse_ok）且自缓存 IDR 起桌面
-                    // 逐像素未变：直接重发缓存码流，不抓屏、不碰编码器。
-                    // 这是静止桌面下 35% CPU 的来源——本机 openh264 不认
-                    // requestKeyframe()，每次都退到 800ms 兜底重建 + 强抓 4 帧。
-                    // 显式请求（新客户端接入/前端自愈，reuse_ok=false）不走这里：
-                    // 它要的是"从此刻起可解码"，缓存 IDR 的时间戳可能早于前端
-                    // 已缓冲位置，重发会被 MSE 当过期帧丢掉。
+                    // [KF-REPLAY] 复用判据从"这是不是浏览器 PLI"改成"桌面到底变没变"。
+                    //
+                    // 旧判据要求 reuse_ok=true，而只有"新客户端接入"才带这个标志；
+                    // 前端 request_keyframe（缓冲溢出/配额满/MSE 自愈，index.html 有
+                    // 4 处调用点）一律 reuse_ok=false → 直接重建编码器。实测 XP：
+                    // 20 秒内 12 次请求 = 12 次重建，每次约 1.1 个 CPU 百分点，
+                    // 静止桌面也能把弱机钉在半载。冷却（服务端 700ms / 本处 1500ms）
+                    // 只是限速，一次都没省掉。
+                    //
+                    // 现在改成：只要自缓存 IDR 起桌面逐像素未变，任何请求都重发缓存
+                    // 码流——缓存 IDR 是自包含的完整关键帧，时间戳按"下一帧"递增
+                    // （见下方 replayTs），客户端可从此处直接起解，不存在"过期帧被
+                    // MSE 丢弃"的问题；只有桌面真的变了才重建。这样静止桌面下的
+                    // 关键帧请求成本从"一次全屏抓取 + 一次编码器重建"降为"一次
+                    // 内存拷贝 + 一次 WS 写"。
                     const bool reuseOk = obj["reuse_ok"].toBool();
-                    if (reuseOk && lastIdrEpochValid && !lastIdrData.isEmpty()
-                            && capturer.contentChangeCount() == lastIdrEpoch) {
+                    const bool desktopUnchanged = lastIdrEpochValid && !lastIdrData.isEmpty()
+                            && capturer.contentChangeCount() == lastIdrEpoch;
+                    if (desktopUnchanged) {
                         const qint64 now = QDateTime::currentMSecsSinceEpoch();
                         // PLI 实测成对到达（同一毫秒两次），冷却内忽略重复请求。
                         if (now - lastIdrReplayMs < 250)
@@ -957,25 +1022,35 @@ int HelperProcess::run(int argc, char* argv[])
                         QByteArray packet;
                         QDataStream stream(&packet, QIODevice::WriteOnly);
                         stream.setByteOrder(QDataStream::BigEndian);
-                        // 时间戳取"下一帧"位置：MSE 要求严格单调递增，直接复用旧 ts
-                        // 会倒退；同一 ts 重复投递同样会被判为无效分片。
-                        const qint64 step = qMax(1, 1000 / qMax(1, captureFps));
-                        const qint64 replayTs = qMax(lastVideoTs + step, lastReplayTs + step);
+                        // 时间戳取"上一帧之后 + 真实流逝时间"：缓存 IDR 的原始 ts
+                        // 属于过去，直接复用会让客户端帧时间线倒退（MSE 解码出错/
+                        // 花屏）；只 +1ms 又会让静止桌面的媒体时间轴停住。
+                        const qint64 replayTs = stampReplayTs();
                         stream << quint8(0x01);
                         stream << quint32(lastIdrData.size());
                         stream << qint64(replayTs);
                         packet.append(lastIdrData);
                         wsBacklogBytes += qMax<qint64>(0, ws.sendBinaryMessage(packet));
                         lastIdrReplayMs = now;
-                        lastReplayTs = replayTs;
                         if ((++idrReplayCount % 10) == 1)
                             qInfo() << "Helper: replayed cached IDR (static desktop, no capture/encode)"
-                                    << "reuse=" << idrReplayCount;
+                                    << "reuse=" << idrReplayCount
+                                    << "requestWasPli=" << reuseOk;
                         return;
                     }
                     // 服务端请求新 IDR（新客户端接入 / 解码器自愈）：强制下一帧为关键帧，
                     // 并连喂几帧。注意不能只喂 1 帧：libopenh264 有 1 帧输出延迟，
                     // 单帧输入配不出码流（详见 pumpCaptureFrames 处说明）。
+                    // 走到这里说明"复用没成立"，原因只有三种：桌面真的变了、
+                    // 缓存版本未知（配对丢失）、缓存为空。三者代价与修法完全不同，
+                    // 不打日志就只能靠猜（限流 1/5，避免慢机日志刷屏）。
+                    if ((++kfReuseMiss % 5) == 1)
+                        qInfo() << "Helper: kf reuse miss"
+                                << "cur=" << capturer.contentChangeCount()
+                                << "idrEpoch=" << lastIdrEpoch
+                                << "epochValid=" << lastIdrEpochValid
+                                << "idrBytes=" << lastIdrData.size()
+                                << "miss=" << kfReuseMiss;
                     pendingKfEpoch = capturer.contentChangeCount();
                     pendingKfEpochValid = true;
                     if (encoderHonorsRequestKf) {
@@ -1281,8 +1356,12 @@ int HelperProcess::run(int argc, char* argv[])
                         compressor->setScalePercent(scale);
                         videoScale = scale;
                     }
-                    qInfo() << "Helper: config applied, quality" << jpegQ << "scale"
-                            << (scale >= 10 && scale <= 100 ? scale : 100);
+                    // 日志打的是"实际生效值"：此前的 `scale >= 10 ? scale : 100`
+                    // 在消息没带 scale 字段时会打印硬编码 100，与真实生效的
+                    // videoScale（如 60）不符，排查画质问题时会被这条日志带偏。
+                    qInfo() << "Helper: config applied, quality" << jpegQ
+                            << "scale" << videoScale
+                            << (obj.contains("scale") ? "" : "(default, not sent)");
                 }
                 const int fpsBefore = captureFps;
                 int fps = obj["fps"].toInt();

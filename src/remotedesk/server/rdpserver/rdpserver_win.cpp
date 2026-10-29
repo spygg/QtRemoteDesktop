@@ -131,24 +131,37 @@ void RDPServer::startSecureInputProcess()
     //
     // 名字来源按可信度排序：自己切到 WinSta0 问到的输入桌面 > helper 上报的锁屏桌面
     // （helper 在用户会话里，但桌面切换瞬间它也可能拿不到）> winsta0\Winlogon 兜底。
-    wchar_t desktop[] = L"winsta0\\Winlogon";
+    // [DESKNAME-BUF] 缓冲区必须留足余量。旧代码是
+    //   wchar_t desktop[] = L"winsta0\\Winlogon";   // 只有 18 个 wchar
+    // 于是 "winsta0\" + 桌面名 超过 17 个字符就被静默截断：XP 锁屏时输入桌面叫
+    // "Screen-saver"（12 字符），拼出来 20 字符 → 截成 "winsta0\Screen-sav"。
+    // 那个桌面并不存在，可 CreateProcessAsUserW **照样成功**（内核会新建/映射），
+    // 于是安全输入进程被投到一个没人看的桌面上，解锁按钮点了完全没反应，而日志
+    // 打印的还是截断前的全名，根本看不出问题。Win7 的 "Default"（15 字符）刚好
+    // 放得下，所以这个 bug 只在特定桌面名上暴露。
+    // 桌面名是内核对象名，长度上限远小于此；64 wchar 足够且避免截断。
+    wchar_t desktop[64] = L"winsta0\\Winlogon";
     QString desktopName = queryInputDesktopName();
     if (desktopName.isEmpty())
         desktopName = lockedDesktop_;
     if (desktopName.isEmpty())
         desktopName = QStringLiteral("Winlogon");
     {
-        // "winsta0\" 占 8 个 wchar，后面拼桌面名；桌面名是内核对象名，只可能是
-        // 字母/数字/连字符，超长直接截断到缓冲区末尾。
+        // "winsta0\" 占 8 个 wchar，后面拼桌面名。
         const QString full = QStringLiteral("winsta0\\") + desktopName;
         const std::wstring w = full.toStdWString();
         const size_t n = qMin<size_t>(w.size(), sizeof(desktop) / sizeof(wchar_t) - 1);
         w.copy(desktop, n);
         desktop[n] = L'\0';
+        if (n < w.size())
+            qWarning() << "Secure input desktop name truncated:" << full
+                       << "->" << QString::fromWCharArray(desktop);
     }
     secureInputDesktop_ = desktopName;
     si.lpDesktop = desktop;
-    qInfo() << "Secure input process will attach to desktop" << desktopName;
+    // 打印**实际生效**的 lpDesktop（而不是 desktopName），截断/取舍一眼可见。
+    qInfo() << "Secure input process will attach to desktop"
+            << QString::fromWCharArray(desktop);
     PROCESS_INFORMATION pi = {};
 
     // Load dynamically: MinGW 5.3.0 import lib may map to kernel32.dll

@@ -168,6 +168,34 @@ bool AuthManager::saveConfig()
     return false;
 }
 
+// 空密码判定：只做一次常量时间的哈希比对，不改动存储（故可为 const）。
+// 为什么要单独实现而不复用 validateUser：validateUser 会在命中旧 MD5 格式时
+// 顺手把用户迁移到新格式（写配置、非 const），用空串去调用会改变磁盘状态。
+bool AuthManager::hasEmptyPassword(const QString& username) const
+{
+    auto it = users_.find(username);
+    if (it == users_.end())
+        return false;
+
+    const QString& stored = it.value().passwordHash;
+
+    // 新格式: "salt:sha256hex" —— 空串的哈希由同一 salt 决定
+    const int colonIdx = stored.indexOf(':');
+    if (colonIdx > 0) {
+        const QString salt = stored.left(colonIdx);
+        return constantTimeEquals(stored.mid(colonIdx + 1).toLatin1(),
+                                  hashPassword(QString(), salt).toLatin1());
+    }
+
+    // 旧格式（MD5，尚未迁移）：空串的 MD5 是个固定常量
+    if (stored.length() == 32) {
+        const QString emptyMd5 = QString(QCryptographicHash::hash(
+            QByteArray(), QCryptographicHash::Md5).toHex());
+        return constantTimeEquals(stored.toLower().toLatin1(), emptyMd5.toLatin1());
+    }
+    return false;
+}
+
 bool AuthManager::validateUser(const QString& username, const QString& password)
 {
     auto it = users_.find(username);

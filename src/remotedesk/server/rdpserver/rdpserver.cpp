@@ -2425,7 +2425,10 @@ void RDPServer::handleApiUsers(QTcpSocket* socket)
     foreach (const QString& u, usernames) {
         QJsonObject uo;
         uo["username"] = u;
-        uo["hasPassword"] = true; // we don't expose empty-password status via API for security
+        // 如实上报"是否设置了密码"。这里曾经写死 true（"不通过 API 暴露空密码状态"），
+        // 结果用户管理页对所有账号都显示"有密码"，管理员看不出哪个账号是空密码裸奔。
+        // 该接口本身要求管理员会话，管理员本就能改任何人的密码，不存在额外的提权面。
+        uo["hasPassword"] = !authManager_->hasEmptyPassword(u);
         usersArr.append(uo);
     }
 
@@ -4090,8 +4093,10 @@ void RDPServer::onClientConnected(const QString& clientId)
         // 再强制抓取当前屏幕出一帧新关键帧：解决静态桌面抓取去重导致
         // 新客户端永远等不到关键帧而黑屏的问题。
 #ifdef USE_FFMPEG
-        if (!lastKeyframeData_.isEmpty())
-            wsServer_->sendFrameToClient(clientId, lastKeyframeData_, true, lastKeyframeTs_);
+        // [A2] 带 TTL 回放：只在缓存帧足够新（默认 1.5s）时先铺一张图让客户端
+        // 立刻出画面；更旧的缓存意义不大——下面的 pumpKeyframe 会立刻产一帧当前
+        // 画面，先铺旧帧等于让用户先看一眼过时内容再重绘，还多花几十 KB。
+        replayCachedKeyframe(clientId, 1500);
 #endif
         // allowStaticReuse：这里的目标是"让新客户端拿到一帧可解码的 IDR"。桌面静止
         // 且有缓存 IDR 时直接复用（零成本），否则产一帧真 IDR。**不能**走旧的
@@ -4375,12 +4380,17 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         // 桌面下抓取去重（XDamage/checksum）会一直抑制出帧，requestKeyframe
         // 标志永远等不到原始帧而失效，客户端只收到 P 帧无法解码，画面黑屏。
 #ifdef USE_FFMPEG
-        if (!lastKeyframeData_.isEmpty()) {
-            // 先回放缓存 IDR（客户端立刻有可解起点），但仅对新加入的客户端足够；
-            // 若客户端已丢弃此前的帧（等帧门被清空），缓存帧可能被其按"旧序列"
-            // 忽略，故下方仍要产一帧全新 IDR。
-            wsServer_->sendFrameToClient(clientId, lastKeyframeData_, true, lastKeyframeTs_);
-        }
+        // 先回放缓存 IDR（客户端立刻有可解起点），但仅对新加入的客户端足够；
+        // 若客户端已丢弃此前的帧（等帧门被清空），缓存帧可能被其按"旧序列"
+        // 忽略，故下方仍要产一帧全新 IDR。回放时间戳由 replayCachedKeyframe
+        // 抬到"上一帧之后"，不再沿用缓存帧的旧 ts（否则时间线倒退）。
+        //
+        // 服务模式**不在本地回放**：编码在 helper 侧，"桌面变没变"和最新的码流都在
+        // 那边，转过去的 request_keyframe 会由 helper 自己重发缓存 IDR 或重建。
+        // 两边都回放会让每个请求多收一帧重复 IDR（实测 PLI 1Hz 时"每请求 2 帧、
+        // 20 秒 2.0MB"，而 p 帧只有 4 个）。
+        if (!remoteVideoSourceAvailable())
+            replayCachedKeyframe(clientId, 0);
 #endif
         // requestNewIdr=true：强制产**新** IDR。仅靠回放缓存帧救不了已重置等帧门
         // 的客户端（它需要"新"关键帧才放行后续 P 帧），也救不了静态桌面下
@@ -4999,10 +5009,18 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
     // 否则前端会收到无解码器对应的 0x01/0x02 视频帧（花屏/误触发降级）。
     if (currentMode_ != ServerMode::Video)
         return;
+    // [A2] 出站时间戳单调化。两个来源会让客户端看到的帧时间线倒退：
+    //   1) 缓存 IDR 回放（replayCachedKeyframe 用旧 ts）；
+    //   2) helper/编码器重启后 `now - startTime_` 从 0 重新计时，而客户端缓冲里
+    //      还是上一轮的大 ts → MSE 判为乱序分片，整段丢弃（表现为"重启后黑屏一会儿"）。
+    // 统一在这里抬到"上一帧 +1"：正常帧原样通过，不引入累积漂移。
+    timestamp = qMax(timestamp, lastSentVideoTs_ + 1);
+    lastSentVideoTs_ = timestamp;
     // 缓存最近关键帧，供新客户端接入时立即回放以引导出图
     if (isKeyframe) {
         lastKeyframeData_ = data;
         lastKeyframeTs_ = timestamp;
+        lastKeyframeWallMs_ = monoNowMs();
         // IDR 已产出：其对应的"待命请求"被满足，撤销兜底重建。
         idrRequestMs_ = 0;
         if (idrFallbackTimer_)
@@ -5089,11 +5107,50 @@ void RDPServer::invalidateCachedIdr()
     lastCodecExtra_.clear();
 }
 
+bool RDPServer::replayCachedKeyframe(const QString& clientId, qint64 maxAgeMs)
+{
+#ifdef USE_FFMPEG
+    if (lastKeyframeData_.isEmpty())
+        return false;
+    if (maxAgeMs > 0 && lastKeyframeWallMs_ > 0
+            && monoNowMs() - lastKeyframeWallMs_ > maxAgeMs)
+        return false;
+    // 时间戳必须严格大于"已经下发过的最大值"。缓存帧带的是它产出时的旧 ts，
+    // 原样下发会让客户端帧时间线倒退（实测 XP 回退 422~3563ms、Win7 最大 2684ms），
+    // 而前端 LL-MSE 的播放头早已越过该位置：这一帧既救不了画面，又白花 55~60KB，
+    // 还多一次解码报错/花屏的机会。
+    const qint64 ts = qMax(lastKeyframeTs_, lastSentVideoTs_ + 1);
+    lastSentVideoTs_ = ts;
+    wsServer_->sendFrameToClient(clientId, lastKeyframeData_, true, ts);
+    return true;
+#else
+    Q_UNUSED(clientId);
+    Q_UNUSED(maxAgeMs);
+    return false;
+#endif
+}
+
 void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
 {
 #ifdef USE_FFMPEG
     if (currentMode_ != ServerMode::Video)
         return;
+
+    // 服务模式：编码在 helper 侧，**桌面是否变化只有 helper 知道**——服务进程的
+    // screenCapturer_ 为空，下面那套基于 contentChangeCount 的本地复用判据在这里
+    // 永远不成立（实测 [PLI-REUSE] replayed 恒为 0，每次请求都退化成一次重建）。
+    // 因此服务模式直接转发请求，让 helper 自己按"桌面是否逐像素未变"决定重发缓存
+    // IDR 还是重建编码器；服务端不再做（也不可能做）这个判断。
+    if (remoteVideoSourceAvailable()) {
+        QJsonObject rq;
+        rq["type"] = "request_keyframe";
+        // 语义标记：true = 浏览器 PLI（可能可以复用），false = 显式请求新 IDR。
+        // helper 现在的判据是"桌面变没变"，此字段只用于日志区分请求来源。
+        rq["reuse_ok"] = allowStaticReuse && !requestNewIdr;
+        wsServer_->sendToCaptureSource(rq);
+        Q_UNUSED(requestNewIdr);
+        return;
+    }
 
     // [PLI-REUSE] 静止桌面下的 PLI 优化（判据说明见 rdpserver.h）。
     // 复用前提：有缓存 IDR、缓存时的桌面内容版本 == 当前内容版本（桌面未变）、
@@ -5139,22 +5196,6 @@ void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
         qInfo() << "[PLI-REUSE] need fresh IDR (enc=" << pliEncodeCount_
                 << "epoch=" << staticIdrEpoch_ << "cur="
                 << (screenCapturer_ ? screenCapturer_->contentChangeCount() : 0) << ")";
-
-    // 服务模式：编码在 helper 侧。请求 helper 产一帧新 IDR（它内部 requestKeyframe +
-    // forceNextFrame + 800ms 兜底重建），服务端不做本地编码，也不应走下面的
-    // videoEncoder_ 分支。
-    if (remoteVideoSourceAvailable()) {
-        QJsonObject rq;
-        rq["type"] = "request_keyframe";
-        // [KF-REPLAY] 告诉 helper 这次是"浏览器 PLI"（静止桌面可重发缓存 IDR），
-        // 还是"必须从此刻起可解码"的显式请求（新客户端接入 / 前端自愈）。
-        // 前者若缓存 IDR 的内容版本未变，helper 直接重发、不抓屏不编码——否则
-        // 本机 openh264 每次都退到兜底重建 + 强抓 4 帧，静止桌面 CPU ~35%。
-        rq["reuse_ok"] = allowStaticReuse && !requestNewIdr;
-        wsServer_->sendToCaptureSource(rq);
-        Q_UNUSED(requestNewIdr);
-        return;
-    }
 
     if (!videoEncoder_)
         return;

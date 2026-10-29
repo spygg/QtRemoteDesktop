@@ -2980,7 +2980,19 @@
                     }
                     break;
                 case 'server_config':
-                    state.currentConfig.quality = msg.quality === 80 ? 'high' : msg.quality === 60 ? 'medium' : msg.quality === 35 ? (msg.fps >= 30 ? 'low' : 'verylow') : 'medium';
+                    // 服务端自 A9 起下发的是**档位名**（high/medium/low/verylow），
+                    // 这里旧代码却按数字位图判断（=== 80 / 60 / 35），字符串一个都
+                    // 匹配不上，全部落到最后的 'medium'。后果：设置面板永远显示"中"，
+                    // 且用户只要动过 FPS，前端就把推导出来的 medium 回写服务端，
+                    // 画质被静默改掉（实测 verylow → 前端 medium → 服务端 medium）。
+                    // 数字分支仅保留给旧版服务端。
+                    if (typeof msg.quality === 'string'
+                            && (msg.quality === 'high' || msg.quality === 'medium'
+                                || msg.quality === 'low' || msg.quality === 'verylow')) {
+                        state.currentConfig.quality = msg.quality;
+                    } else {
+                        state.currentConfig.quality = msg.quality === 80 ? 'high' : msg.quality === 60 ? 'medium' : msg.quality === 35 ? (msg.fps >= 30 ? 'low' : 'verylow') : 'medium';
+                    }
                     state.currentConfig.fps = msg.fps;
                     state.currentConfig.scale = msg.scale || 100;
                     // 计算机名称：配置值回填输入框，生效值用于 <title>

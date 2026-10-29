@@ -256,6 +256,17 @@ private:
     // （静态桌面抓取去重不会主动出帧，否则新客户端永远等不到关键帧而黑屏）。
     QByteArray lastKeyframeData_;
     qint64 lastKeyframeTs_ = 0;
+    // [A2] 出站视频时间戳的单调基准 + 缓存 IDR 的落库时刻。
+    // 缓存 IDR 回放只能沿用它的原始 ts（属于过去），实测让客户端帧时间线倒退
+    // 422~3563ms；helper 重启后编码器 ts 从 0 重新计时同样会倒退。两者都统一在
+    // onEncodedFrame 出口抬到"上一帧 +1"之上（见 replayCachedKeyframe 注释）。
+    qint64 lastSentVideoTs_ = 0;
+    qint64 lastKeyframeWallMs_ = 0;
+    // 把缓存 IDR 回放给单个客户端，返回是否真的发了。
+    // maxAgeMs > 0 时超过该时长就不再发：静止桌面的缓存帧内容仍然正确，但新客户端
+    // 宁可等一次 pumpKeyframe（约一个 RTT）拿当前帧，也不先铺一帧两秒前的画面
+    // 再立刻重绘，还省掉一次几十 KB 的重复关键帧。
+    bool replayCachedKeyframe(const QString& clientId, qint64 maxAgeMs);
     // [A15] 作废"编码器相关的进程内缓存"（关键帧 / SPS-PPS / 复用基准）。
     // 服务模式下编码器在 helper 进程里：本进程拿不到"内容变了没"的信号，缓存的
     // IDR/SPS 一旦与 helper 的新编码器不一致，新接入的浏览器就会先收到一条

@@ -19,6 +19,11 @@ public:
     void cleanExpiredSessions();
 
     QStringList users() const;
+    // 该用户是否设置了空密码。addUser 对空串也存 hash（salt:sha256("")），
+    // 因此无法从存储形态直接判断，只能拿空串做一次校验。
+    // 仅供**已鉴权的管理接口**使用（用户管理页需要如实显示"无密码"这一风险状态，
+    // 旧实现把 hasPassword 写死为 true，页面对所有用户都显示"有密码"）。
+    bool hasEmptyPassword(const QString& username) const;
     bool addUser(const QString& username, const QString& password);
     bool removeUser(const QString& username);
 
