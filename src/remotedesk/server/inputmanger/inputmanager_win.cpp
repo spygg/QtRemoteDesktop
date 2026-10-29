@@ -21,6 +21,41 @@ static bool sendInputChecked(UINT count, LPINPUT inputs, int cbSize)
     return sent == count;
 }
 
+// [A12] 需要 0xE0 前缀的「扩展键」。
+// SendInput 只填 wVk 时，系统按虚拟键码反查 scan code；KEYEVENTF_EXTENDEDKEY
+// 决定是否补 0xE0 前缀。缺了这个标志，按 scan code 判键的程序（终端类、部分
+// 老控件、游戏）会把主键盘 Delete/Home/方向键当成小键盘等价键，或干脆不响应。
+// 注意：小键盘 NumLock 关闭时的方向键也报 VK_LEFT/37 等，但它们**不是**扩展键，
+// 由调用方用前端 code("Numpad4") 排除。
+static bool isExtendedVk(UINT vk)
+{
+    switch (vk) {
+    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+    case VK_PRIOR:  case VK_NEXT:
+    case VK_LEFT:   case VK_RIGHT:  case VK_UP:  case VK_DOWN:
+    case VK_NUMLOCK: case VK_DIVIDE: case VK_SNAPSHOT:
+    case VK_RCONTROL: case VK_RMENU:
+    case VK_LWIN: case VK_RWIN: case VK_APPS:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// 小键盘上那几个"与主键盘同名"的键（NumLock 关闭时前端 keyCode 与主键盘
+// 完全相同），不能被当作扩展键处理。
+static bool isNumpadTwin(UINT vk)
+{
+    switch (vk) {
+    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+    case VK_PRIOR:  case VK_NEXT:
+    case VK_LEFT:   case VK_RIGHT:  case VK_UP:  case VK_DOWN:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void InputManager::injectMouseMove(int x, int y)
 {
     INPUT input = {};
@@ -92,14 +127,47 @@ void InputManager::injectWheel(int delta)
     sendInputChecked(1, &input, sizeof(INPUT));
 }
 
-void InputManager::sendModifierEvent(int vk, bool isDown)
+// 发送一次按键/抬起，返回是否真的注入成功。
+// [A13] 调用方据此决定要不要提交修饰键记账：注入失败却提交状态，下一次按键
+// 的 diff 会认为 Ctrl 已在按下状态，组合键前缀永久丢失（远端"Ctrl 失灵"）。
+//
+// [A12b] 必须走**扫描码**路径（wScan + KEYEVENTF_SCANCODE，wVk 留 0）。
+// 只填 wVk 时 SendInput 照样返回 1（不算失败），但 XP 上实测**完全没有效果**：
+// Win 键弹不出开始菜单、cmd 里打字零字符，而同一进程的鼠标注入一切正常。
+// 扫描码是硬件层语义，直接进键盘状态机；VK 路径要靠系统把虚拟键翻成字符，
+// 这条链在「服务进程以 lpDesktop=winsta0\default 拉起的 helper」里不生效。
+//
+// 隔离实验（XP 2026-10-29，xpuserrun 把探针放进用户会话跑 keystest.exe）：
+//   mode 0  wVk=0x5B + EXTENDED            → 开始菜单不弹
+//   mode 2  wScan=0x5B + EXTENDED|SCANCODE → 开始菜单弹出
+//   mode21  Win+R 全扫描码                  → 弹出「运行」对话框
+// 能拿到扫描码时一律走扫描码；MapVirtualKey 返回 0（媒体键等没有物理键位的
+// VK）才退回 VK 路径，保证这类键仍然可注入。
+static bool sendVkEvent(UINT vk, bool isDown, bool extended)
 {
     INPUT input = {};
     input.type = INPUT_KEYBOARD;
-    input.ki.wVk = vk;
+    const UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    DWORD flags = 0;
     if (!isDown)
-        input.ki.dwFlags = KEYEVENTF_KEYUP;
-    sendInputChecked(1, &input, sizeof(INPUT));
+        flags |= KEYEVENTF_KEYUP;
+    if (extended)
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    if (scan != 0) {
+        input.ki.wScan = static_cast<WORD>(scan);
+        input.ki.wVk = 0;
+        flags |= KEYEVENTF_SCANCODE;
+    } else {
+        input.ki.wVk = static_cast<WORD>(vk);
+    }
+    input.ki.dwFlags = flags;
+    return sendInputChecked(1, &input, sizeof(INPUT));
+}
+
+void InputManager::sendModifierEvent(int vk, bool isDown)
+{
+    sendVkEvent(static_cast<UINT>(vk), isDown,
+                isExtendedVk(static_cast<UINT>(vk)));
 }
 
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar, bool meta)
@@ -130,31 +198,25 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
 
     // Meta(Win 键)修饰键同步：与 Linux 端同语义，前端 e.metaKey 随 keydown
     // 上报、keyup 缺省视为释放。VK_LWIN 0x5B / VK_RWIN 0x5C。
-    if (meta != metaDown_) {
-        sendModifierEvent(VK_LWIN, meta);
+    // [A13] 注入失败不记账，下次仍会重试。
+    if (meta != metaDown_ && sendVkEvent(VK_LWIN, meta, /*extended=*/true))
         metaDown_ = meta;
-    }
 
-    INPUT input = {};
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = keycode;
-    if (!isDown)
-        input.ki.dwFlags = KEYEVENTF_KEYUP;
-    sendInputChecked(1, &input, sizeof(INPUT));
+    // [A12] 扩展键标志：主键盘 Delete/Home/方向键等需要 0xE0 前缀；小键盘上
+    // 同名的键（前端 code 以 "Numpad" 开头）不需要，否则会多一个前缀。
+    const UINT vk = static_cast<UINT>(keycode);
+    const bool numpadTwin = code.startsWith(QLatin1String("Numpad"))
+                            && isNumpadTwin(vk);
+    sendVkEvent(vk, isDown, isExtendedVk(vk) && !numpadTwin);
 }
 
 void InputManager::updateModifiers(bool ctrl, bool alt, bool shift)
 {
-    if (ctrl != ctrlDown_) {
-        sendModifierEvent(VK_CONTROL, ctrl);
+    // [A13] 与 Linux 实现对齐：注入失败不提交记账。
+    if (ctrl != ctrlDown_ && sendVkEvent(VK_CONTROL, ctrl, false))
         ctrlDown_ = ctrl;
-    }
-    if (alt != altDown_) {
-        sendModifierEvent(VK_MENU, alt);
+    if (alt != altDown_ && sendVkEvent(VK_MENU, alt, false))
         altDown_ = alt;
-    }
-    if (shift != shiftDown_) {
-        sendModifierEvent(VK_SHIFT, shift);
+    if (shift != shiftDown_ && sendVkEvent(VK_SHIFT, shift, false))
         shiftDown_ = shift;
-    }
 }

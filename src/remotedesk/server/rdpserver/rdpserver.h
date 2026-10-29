@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QImage>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QMutex>
 #include <QObject>
 #include <QQueue>
@@ -138,6 +139,19 @@ public:
     bool isCaptureSourceConnected() const;
     bool isScreenLocked() const { return screenLocked_; }
 
+    // [A8] /shell（终端页）的画质/帧率/缩放/分辨率下拉框此前把消息发给了终端
+    // WebSocket，服务端只当终端输入，配置被静默丢弃。这个入口让 HTTP 侧走与
+    // 浏览器 WS 完全相同的处理路径。
+    // clientId 传空串是安全的：所有 sendJson 都按 clientId 查表，查不到即 no-op，
+    // 而 broadcastJson 照常把结果发给所有在线页面。
+    void applyConfigFromHttp(const QJsonObject& cfg);
+
+    // [A17] 剪贴板轮询的挂起状态由"helper 通道活跃"与"没有观众"两个条件合成：
+    // X11 CLI 后端每秒 fork 两次 xclip（实测 20s 内 33 次 execve ≈14 万进程/天），
+    // 无人观看时纯属白烧。
+    void updateClipboardSuspend();
+    bool clipSuspendedByHelper_ = false;
+
     void loadSslConfig();
 private slots:
     void onClientConnected(const QString& clientId);
@@ -242,6 +256,14 @@ private:
     // （静态桌面抓取去重不会主动出帧，否则新客户端永远等不到关键帧而黑屏）。
     QByteArray lastKeyframeData_;
     qint64 lastKeyframeTs_ = 0;
+    // [A15] 作废"编码器相关的进程内缓存"（关键帧 / SPS-PPS / 复用基准）。
+    // 服务模式下编码器在 helper 进程里：本进程拿不到"内容变了没"的信号，缓存的
+    // IDR/SPS 一旦与 helper 的新编码器不一致，新接入的浏览器就会先收到一条
+    // 尺寸/参数集都不匹配的旧码流（花屏），直到 helper 的新 IDR 到达。
+    void invalidateCachedIdr();
+    // [A9] 内部画质码率（80/60/35/15）→ 档位名（high/medium/low/verylow）。
+    // 下发给前端与下发给 helper 必须同一口径，否则前端下拉框回落显示"中"。
+    QString qualityName() const;
     // 编码器尺寸不匹配触发的重建节流时间戳（单调时钟毫秒，避免每帧都尝试重建阻塞主线程）
     qint64 lastSizeReinitMs_ = 0;
     // [PLI-REUSE] 静止桌面下的关键帧请求（PLI）优化状态。
@@ -275,6 +297,12 @@ private:
     quint64 pliReuseCount_ = 0;
     quint64 pliEncodeCount_ = 0;
 #endif
+    // [A3] 每个客户端的"显式关键帧请求"时刻（单调时钟毫秒）。
+    // 前端在网络抖动/缓冲溢出/配额满时会每 500ms 重试一轮，无冷却时每次都触发
+    // helper 重建编码器（XP 实测 ≈0.25 核·秒）。一个卡住的客户端就能把单核机
+    // 从 28% 拉到 55%，两个叠加可到 42 次重建/20s，机器被长期锁在"半载 + 卡帧"。
+    QHash<QString, qint64> kfRequestMsByClient_;
+    quint64 kfCooldownSkips_ = 0;
 
     std::unique_ptr<InputManager> inputManager_;
     std::unique_ptr<JpegCompressor> jpegCompressor_;
@@ -307,6 +335,10 @@ private:
     qint64 lastCursorQueryMs_ = 0;
     int videoBaseBitrate_ = 0; // 视频模式目标码率（过载降质后用于恢复）
     QJsonObject lastScreenInfo_;
+    // 服务模式的多屏输出快照：服务进程在 Session 0 枚举不到用户会话的显示器，
+    // 由 helper 的 capture_outputs 消息喂进来，新客户端接入时随 server_config 下发。
+    QJsonArray lastCaptureOutputs_;
+    int lastCaptureOutputIdx_ = 0;
 
     bool useSsl_ = true; // 默认启用 HTTPS/WSS：WebRTC 需安全上下文；无 OpenSSL 时自动降级
     bool serviceMode_ = false;
@@ -323,6 +355,18 @@ private:
     // 2 ⇒ 33%（默认，兼顾帧率）；4 ⇒ 20%；9 ⇒ 10%（拿帧率换 CPU）。
     // 只在读屏慢到触发 pace 的机器上生效，快机恒为全速。
     double configPaceFactor_ = 2.0;
+    // [ADAPT-CAP] helper 的慢机自适应结果（运行期上限，不落盘）。0 = 未自适应。
+    // 只作为"上限"参与：用户/画质档位给出的 fps/scale 都要被它钳一次，否则一次
+    // 模式切换（前端重发 config 或画质档位从 userScale_ 重算 configScale_）就会把
+    // 自适应结果冲回默认值，机器重新掉进 1.2fps/43% CPU 的坑；下一次也不会再降
+    // （helper 的 adaptDecided 已置真）。重启后从用户配置重新评估，机器条件变化能自愈。
+    int adaptFpsCap_ = 0;
+    int adaptScaleCap_ = 0;
+    double adaptPaceFactor_ = 0.0;
+    // 应用自适应上限（0/未设置时原值返回）
+    int cappedFps(int fps) const { return adaptFpsCap_ > 0 ? qMin(fps, adaptFpsCap_) : fps; }
+    int cappedScale(int scale) const { return adaptScaleCap_ > 0 ? qMin(scale, adaptScaleCap_) : scale; }
+    double cappedPaceFactor() const { return qMax(configPaceFactor_, adaptPaceFactor_); }
     CodecType configCodec_ = CodecType::H264;        // 编码协议（h264/hevc/vp8/vp9/av1）
     // WebRTC 固定 H.264，进入会话时临时改写 configCodec_（编码器只认这个成员），
     // 用户原本的选择单独保存：落盘写回原值，离开视频模式时恢复。

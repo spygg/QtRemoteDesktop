@@ -309,6 +309,20 @@ int HelperProcess::run(int argc, char* argv[])
         ws.sendTextMessage(QString::fromUtf8(QJsonDocument(caps).toJson(QJsonDocument::Compact)));
     };
 
+    // [多屏] 上报采集输出列表（capture_outputs）。服务模式的服务进程在 Session 0，
+    // 自己枚举不到用户会话的显示器，前端多屏下拉只能由 helper 喂数据；服务端收到
+    // 后存快照、在新客户端接入时随 server_config 一起下发（不直接广播，避免前端
+    // 收到两条字段不完整的 server_config）。
+    auto sendOutputList = [&]() {
+        if (ws.state() != QAbstractSocket::ConnectedState)
+            return;
+        QJsonObject out;
+        out["type"] = "capture_outputs";
+        out["outputs"] = capturer.enumerateOutputs();
+        out["currentOutput"] = capturer.currentOutputIndex();
+        ws.sendTextMessage(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+    };
+
     // [KF-REPLAY] 静止桌面下的关键帧请求：缓存最近 IDR 及其"桌面内容版本"，
     // 再次被索要时若画面逐像素未变则直接重发缓存码流（不抓屏、不编码）。
     // 背景（2026-10-28 XP 实测）：服务模式下服务端把浏览器每个 PLI（静止桌面
@@ -327,6 +341,14 @@ int HelperProcess::run(int argc, char* argv[])
     bool pendingKfEpochValid = false;
     qint64 lastIdrReplayMs = 0;
     quint64 idrReplayCount = 0;
+    // [A4] 重放用的时间戳下界：同一份缓存 IDR 可在 250ms 冷却内被重放多次，
+    // 若每次都取 lastVideoTs + 1 帧，MSE 会连续收到 dts 完全相同的分片
+    // （部分浏览器直接 appendBuffer 失败并再次索要关键帧 → 自我放大的死循环）。
+    qint64 lastReplayTs = 0;
+    // [A3] 编码器重建冷却：一次重建 ≈0.25 核·秒，前端在网络抖动/缓冲溢出时
+    // 每 500ms 重试一次关键帧，两个客户端叠加就能把 XP 单核压在 ~55% 且帧率卡死。
+    qint64 lastKfRebuildMs = 0;
+    quint64 kfCooldownSkip = 0;
     auto dropCachedIdr = [&]() {
         lastIdrData.clear();
         lastIdrEpochValid = false;
@@ -670,6 +692,9 @@ int HelperProcess::run(int argc, char* argv[])
         // 不记账（回声抑制只在发送成功后记录），此时补传。
         if (clipTimer)
             clipTimer->start();
+        // [多屏] 输出列表同样每次连接上报：服务端重启后它的快照是空的，
+        // 前端多屏下拉就退化成只有当前屏一项。
+        sendOutputList();
     });
     QObject::connect(&ws, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
         &app, [&](QAbstractSocket::SocketError err) {
@@ -920,7 +945,8 @@ int HelperProcess::run(int argc, char* argv[])
                     // 显式请求（新客户端接入/前端自愈，reuse_ok=false）不走这里：
                     // 它要的是"从此刻起可解码"，缓存 IDR 的时间戳可能早于前端
                     // 已缓冲位置，重发会被 MSE 当过期帧丢掉。
-                    const bool reuseOk = obj["reuse_ok"].toBool();                    if (reuseOk && lastIdrEpochValid && !lastIdrData.isEmpty()
+                    const bool reuseOk = obj["reuse_ok"].toBool();
+                    if (reuseOk && lastIdrEpochValid && !lastIdrData.isEmpty()
                             && capturer.contentChangeCount() == lastIdrEpoch) {
                         const qint64 now = QDateTime::currentMSecsSinceEpoch();
                         // PLI 实测成对到达（同一毫秒两次），冷却内忽略重复请求。
@@ -931,13 +957,17 @@ int HelperProcess::run(int argc, char* argv[])
                         QByteArray packet;
                         QDataStream stream(&packet, QIODevice::WriteOnly);
                         stream.setByteOrder(QDataStream::BigEndian);
-                        // 时间戳取"下一帧"位置：MSE 要求单调递增，直接复用旧 ts 会倒退。
+                        // 时间戳取"下一帧"位置：MSE 要求严格单调递增，直接复用旧 ts
+                        // 会倒退；同一 ts 重复投递同样会被判为无效分片。
+                        const qint64 step = qMax(1, 1000 / qMax(1, captureFps));
+                        const qint64 replayTs = qMax(lastVideoTs + step, lastReplayTs + step);
                         stream << quint8(0x01);
                         stream << quint32(lastIdrData.size());
-                        stream << qint64(lastVideoTs + qMax(1, 1000 / qMax(1, captureFps)));
+                        stream << qint64(replayTs);
                         packet.append(lastIdrData);
                         wsBacklogBytes += qMax<qint64>(0, ws.sendBinaryMessage(packet));
                         lastIdrReplayMs = now;
+                        lastReplayTs = replayTs;
                         if ((++idrReplayCount % 10) == 1)
                             qInfo() << "Helper: replayed cached IDR (static desktop, no capture/encode)"
                                     << "reuse=" << idrReplayCount;
@@ -956,6 +986,24 @@ int HelperProcess::run(int argc, char* argv[])
                         kfRequestPending = true;
                         kfFallbackTimer->start(800);
                     } else {
+                        // [A3] 重建冷却：前端在缓冲溢出/配额满时每 500ms 重试一次
+                        // 关键帧，多个客户端叠加会把弱机长期锁在"半载 + 帧率卡死"。
+                        // 冷却内只泵帧让采集器自然出帧（最坏等一个 GOP），不重建。
+                        // 显式请求（新客户端接入 / 解码器自愈）通常间隔远大于 1.5s，
+                        // 不会被这条挡住。
+                        constexpr qint64 kKfRebuildCooldownMs = 1500;
+                        const qint64 nowKf = QDateTime::currentMSecsSinceEpoch();
+                        if (lastKfRebuildMs > 0 && nowKf - lastKfRebuildMs < kKfRebuildCooldownMs) {
+                            // 完全不做（连泵帧也不做）：泵帧同样要全屏抓屏，等于把
+                            // 被抑制的开销又花一半。采集器仍在按自己的节拍跑，前端
+                            // 500ms 后重试，冲过冷却即拿到真 IDR。
+                            if ((++kfCooldownSkip % 20) == 1)
+                                qInfo() << "Helper: keyframe rebuild suppressed (cooldown"
+                                        << (nowKf - lastKfRebuildMs) << "ms)"
+                                        << "skipped=" << kfCooldownSkip;
+                            return;
+                        }
+                        lastKfRebuildMs = nowKf;
                         // 已知软路无效（libopenh264）：直接重建。新实例首帧必为 IDR，
                         // 喂 2 帧就能把它顶出来，不用先白抓一轮再等 800ms。
                         reinitVideoEncoder();
@@ -1216,6 +1264,12 @@ int HelperProcess::run(int argc, char* argv[])
                           : qname == "medium" ? 60
                           : qname == "low" ? 35
                           : qname == "verylow" ? 20 : -1;
+                // [A16] 只在参数**真的变了**才重建编码器。旧判断是
+                // `videoParamChanged || fps >= 1 || jpegQ > 0`——后两项只要消息里
+                // 带了字段就成立，而前端每次连接都会把全量配置发一遍，于是
+                // "开一个标签页 = 一次编码器重建"（约 0.25 核·秒，还丢一帧 IDR）。
+                const int qualityBefore = videoQualityLevel;
+                const int scaleBefore = videoScale;
                 if (jpegQ > 0) {
                     compressor->setQuality(jpegQ);
                     // 视频码率档位：verylow 单独用更低档（与服务端 videoBitrateFor 一致）
@@ -1230,6 +1284,7 @@ int HelperProcess::run(int argc, char* argv[])
                     qInfo() << "Helper: config applied, quality" << jpegQ << "scale"
                             << (scale >= 10 && scale <= 100 ? scale : 100);
                 }
+                const int fpsBefore = captureFps;
                 int fps = obj["fps"].toInt();
                 if (fps >= 1) {
                     // 与 ScreenCapturer::setFps 的上界保持一致：captureFps 还要参与
@@ -1239,6 +1294,9 @@ int HelperProcess::run(int argc, char* argv[])
                     capturer.setFps(fps);
                     captureFps = fps; // [B-6] 记住配置帧率，供切分辨率后重启使用
                 }
+                const bool qualityChanged = (videoQualityLevel != qualityBefore)
+                        || (videoScale != scaleBefore);
+                const bool fpsChanged = (captureFps != fpsBefore);
                 // [PACE-FACTOR] 慢读回节流倍数（服务端 server_config.json 的
                 // capturePaceFactor）。采集间隔 = 单帧实测耗时 × 倍数，占空比
                 // ≈1/(1+倍数)：2 ⇒ 33%（默认）、4 ⇒ 20%、9 ⇒ 10%。只对读屏
@@ -1268,9 +1326,37 @@ int HelperProcess::run(int argc, char* argv[])
                 // 视频模式中参数（编码协议/硬件开关/帧率/缩放/画质）变化 → 重建编码器即时生效。
                 // 注意：切视频前服务端会先下发 config 再发 video_on，此时 videoActive 仍为 false，
                 // 参数已记录到上面的变量，startVideoMode() 会按新值建立编码器。
-                if (videoActive && (videoParamChanged || fps >= 1 || jpegQ > 0))
+                if (videoActive && (videoParamChanged || qualityChanged || fpsChanged))
                     reinitVideoEncoder();
 #endif
+                return;
+            }
+
+            // [多屏] 切换采集输出。旧实现只在"服务进程自己采集"的分支里处理
+            // set_output，服务模式（Windows 双进程 / Linux --service）下服务端的
+            // screenCapturer_ 是空的，消息落到那里既不切屏也不报错，前端按钮点了
+            // 完全没反应。真正持有采集器的是 helper，所以在这里执行，并把新的
+            // 尺寸/输出列表回传：screen_info 让浏览器重算画布，server_config 更新
+            // 多屏下拉；服务端对这两种消息既存快照又广播（见 captureMessageReceived）。
+            if (type == "set_output") {
+                const int idx = obj["index"].toInt();
+                if (capturer.refreshOutputs() && capturer.switchOutput(idx)) {
+                    inputMgr.setScreenSize(capturer.width(), capturer.height());
+                    inputMgr.setScreenOffset(capturer.originX(), capturer.originY());
+                    QJsonObject info;
+                    info["type"] = "screen_info";
+                    info["width"] = capturer.width();
+                    info["height"] = capturer.height();
+                    ws.sendTextMessage(QString::fromUtf8(
+                        QJsonDocument(info).toJson(QJsonDocument::Compact)));
+                    sendOutputList();
+                    qInfo() << "Helper: switched capture output to" << idx
+                            << capturer.width() << "x" << capturer.height();
+                } else {
+                    // 输出索引越界/显示器被拔掉：保持原输出比强行切到未知目标安全
+                    qWarning() << "Helper: switch capture output" << idx
+                               << "failed, keeping current output";
+                }
                 return;
             }
 
@@ -1308,8 +1394,24 @@ int HelperProcess::run(int argc, char* argv[])
             // [IDLE-WAKE] 静止降频到 ~3s 一帧后，点击/按键必须立刻逼出一帧，
             // 否则第一次输入的效果要等下一个 idle 周期才看得见。鼠标移动不唤醒：
             // 光标由客户端本地绘制，且移动是高频事件，唤醒等于把抓屏重新拉满。
-            if (needFrame)
-                capturer.forceNextFrame();
+            //
+            // [A14] 但键盘不能每键都唤醒：连续打字时每个 keydown/keyup（含修饰键
+            // 同步）都算一次，抓屏被钉在满帧。XP 单核实测 BitBlt ~350ms/帧，
+            // 逐键唤醒直接吃掉 25~30% 的 CPU，而画面要显示的只是"多了一个字符"。
+            // 按键唤醒按 150ms 节流（约 6~7 次/秒），人眼完全够用；鼠标点击/滚轮
+            // 不节流，那些操作必须立刻看到反馈。
+            if (needFrame) {
+                if (type == "keydown" || type == "keyup") {
+                    static qint64 lastKeyWakeMs = 0;
+                    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                    if (nowMs - lastKeyWakeMs >= 150) {
+                        lastKeyWakeMs = nowMs;
+                        capturer.forceNextFrame();
+                    }
+                } else {
+                    capturer.forceNextFrame();
+                }
+            }
         });
 
     QObject::connect(&capturer, &ScreenCapturer::screenLocked, &app,
@@ -1572,7 +1674,7 @@ int HelperProcess::run(int argc, char* argv[])
         lagTimer->setInterval(100);
         qint64 lagPrev = QDateTime::currentMSecsSinceEpoch();
         qint64 lagMax = 0, lagSum = 0;
-        int lagN = 0, lagTicks = 0;
+        int lagN = 0, lagTicks = 0, lagQuiet = 0;
         QObject::connect(lagTimer, &QTimer::timeout, &app, [=]() mutable {
             const qint64 now = QDateTime::currentMSecsSinceEpoch();
             const qint64 d = now - lagPrev - 100;
@@ -1583,8 +1685,17 @@ int HelperProcess::run(int argc, char* argv[])
                 if (d > lagMax)
                     lagMax = d;
             }
-            if (++lagTicks >= 50) {   // 每 5 秒一条
-                qInfo() << "EVLOOP lagAvg=" << (lagN ? lagSum / lagN : 0) << "lagMax=" << lagMax;
+            if (++lagTicks >= 600) {   // 每 60 秒汇总一条
+                // [N8] 只在真有尖峰（>100ms）时打：正常时 5s 一条等于 16000 行/天，
+                // 把上一轮刚降下来的日志噪声又打回去了。安静时 10 分钟给一条心跳，
+                // 保证"探针还活着"和"确实没卡"可区分。
+                if (lagMax > 100) {
+                    qInfo() << "EVLOOP lagAvg=" << (lagN ? lagSum / lagN : 0) << "lagMax=" << lagMax;
+                    lagQuiet = 0;
+                } else if (++lagQuiet >= 10) {
+                    qInfo() << "EVLOOP OK lagAvg=" << (lagN ? lagSum / lagN : 0) << "lagMax=" << lagMax;
+                    lagQuiet = 0;
+                }
                 lagSum = 0;
                 lagN = 0;
                 lagMax = 0;

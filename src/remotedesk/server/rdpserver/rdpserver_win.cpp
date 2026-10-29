@@ -63,22 +63,33 @@ void RDPServer::startSecureInputProcess()
         // screen_locked=true，于是这里判定"桌面不符"、把正在写密码的进程杀掉 ——
         // 第一次尝试全废，只能等服务端 8s 后的第二轮，XP 解锁从 ~2s 拖到 ~9s。
         // 进程自己每轮都重新附着当前输入桌面（attachInputDesktop），所以序列不受伤。
+        //
+        // [A18] 因此桌面名**不能**用来判"要重启"：secureInputDesktop_ 只是启动
+        // 那一刻的快照，之后从不更新，而屏保/欢迎屏/登录桌面之间的切换会让它与
+        // 当前输入桌面长期错位。旧逻辑每错位一次就杀掉活得好好的进程重启（XP
+        // 七天日志 25 次误杀），表现为"点一次解锁没反应，要点第二次"。
+        // 现在只把桌面名当"跟随记录"：进程下一轮会自己 attach 过去。
         const QString wantDesktop = queryInputDesktopName();
-        const bool unlockInFlight = monoNowMs() < secureInputUnlockUntilMs_;
         bool alive = false;
         HANDLE hProc = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, secureInputPid_);
         if (hProc) {
             alive = (WaitForSingleObject(hProc, 0) == WAIT_TIMEOUT);
             CloseHandle(hProc);
         }
-        const bool desktopOk = wantDesktop.isEmpty()
-            || secureInputDesktop_.compare(wantDesktop, Qt::CaseInsensitive) == 0
-            || unlockInFlight;
-        if (alive && wsServer_ && wsServer_->isSecureInputConnected() && desktopOk)
+        const bool connected = (wsServer_ && wsServer_->isSecureInputConnected());
+        if (alive && connected) {
+            if (!wantDesktop.isEmpty()
+                    && secureInputDesktop_.compare(wantDesktop, Qt::CaseInsensitive) != 0) {
+                qInfo() << "Secure input followed input desktop:"
+                        << secureInputDesktop_ << "->" << wantDesktop;
+                secureInputDesktop_ = wantDesktop;
+            }
             return;
+        }
         qWarning() << "Secure input process unhealthy (alive =" << alive
+                   << "connected =" << connected
                    << "desktop =" << secureInputDesktop_ << "want =" << wantDesktop
-                   << "unlockInFlight =" << unlockInFlight << ") - restarting";
+                   << ") - restarting";
         stopSecureInputProcess();
     }
 

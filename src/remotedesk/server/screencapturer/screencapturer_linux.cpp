@@ -974,7 +974,6 @@ void ScreenCapturer::captureFrameBody()
             if (forceFrameCount_ > 0)
                 forceFrameCount_--;
             emitCapturedFrame(frame);
-            schedulePumpFlush();
             return;
         }
 
@@ -1004,7 +1003,6 @@ void ScreenCapturer::captureFrameBody()
             s_lastEmitMs = nowMs;
         }
         emitCapturedFrame(frame);
-        schedulePumpFlush();
         return;
     }
 
@@ -1075,7 +1073,6 @@ void ScreenCapturer::captureFrameBody()
         lastFrameChecksum_ = checksum;
 
         emitCapturedFrame(frame);
-        schedulePumpFlush();
         return;
     }
 #endif
@@ -1112,7 +1109,6 @@ void ScreenCapturer::captureFrameBody()
     lastFrameChecksum_ = checksum;
 
     emitCapturedFrame(frame);
-    schedulePumpFlush();
 }
 
 bool ScreenCapturer::changeDisplayResolution(int w, int h)

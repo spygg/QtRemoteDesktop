@@ -864,6 +864,10 @@ void ScreenCapturer::captureFrameBody()
         if (useGrabResult_) {
             // 采集线程已抓完：只取结果（黑帧 GDI 交叉验证也在那边做完）。
             frame = grabFrame_;
+            // [A5] 取完立即释放中转：grabFrame_ 长期持有会让这一帧多一个引用者，
+            // 下游 VideoEncoder::encode() 的 isDetached() 快路径就失效 → 每帧多
+            // 一次整帧深拷贝（1080p≈8MB、2117×1398≈11.8MB），并常驻一份等大内存。
+            grabFrame_ = QImage();
             updated = grabUpdated_;
             dxgiOk = grabOk_;
             if (grabFmtUnsupported_) {
@@ -917,7 +921,6 @@ void ScreenCapturer::captureFrameBody()
                         forceFrameCount_--;
                     }
                     emitCapturedFrame(frame);
-                    schedulePumpFlush();
                 } else {
                     idleCount_++;
                     if (idleCount_ > idleThresholdFrames())
@@ -1005,7 +1008,6 @@ void ScreenCapturer::captureFrameBody()
                     forceFrameCount_--;
                 }
                 emitCapturedFrame(frame);
-                schedulePumpFlush();
             }
             else {
                 // 无新帧（DXGI 无桌面更新）：同样递增 idle 计数并降频，
@@ -1048,6 +1050,7 @@ void ScreenCapturer::captureFrameBody()
         double capCostMs = 0.0;
         if (useGrabResult_) {
             frame = grabFrame_;
+            grabFrame_ = QImage();   // [A5] 取完即释放中转，见上面 DXGI 分支注释
             gdiOk = grabOk_;
             capCostMs = static_cast<double>(
                 QDateTime::currentMSecsSinceEpoch() - grabSubmitMs_);
@@ -1071,6 +1074,9 @@ void ScreenCapturer::captureFrameBody()
         if (winElapsed >= 1000.0 && g_gdiDiag.iters > 0) {
             const double capAvg = g_gdiDiag.capSum / static_cast<double>(g_gdiDiag.iters);
             g_gdiDiag.windows++;
+            // [N9] 背压丢帧计数：每个统计窗口取一次并清零。旧实现只 ref() 不读，
+            // 采集线程因上一帧未返回而丢弃的 tick 完全不可观测。
+            const int skipNow = grabSkipTicks_.fetchAndStoreOrdered(0);
             // 前 12 个窗口每秒一条（便于定位），之后每 10 秒一条。
             // 原实现在慢读回机器上额外加了 "|| capAvg > kSlowReadbackMs" → 在
             // VMware SVGA 这类机器上条件恒真，退化成每秒一条（XP 实测一天 3000+ 行），
@@ -1086,6 +1092,7 @@ void ScreenCapturer::captureFrameBody()
                         << "chkAvg=" << QString::number(g_gdiDiag.chkSum / g_gdiDiag.iters, 'f', 2)
                         << "small=" << g_gdiDiag.smalls
                         << "pace=" << paceIntervalMs_
+                        << "skip=" << skipNow
                         << "idle=" << idleCount_;
             }
             // 自适应判定读屏是否异常慢（VMware SVGA + DWM 合成时单帧 550ms）
@@ -1195,7 +1202,6 @@ void ScreenCapturer::captureFrameBody()
 
         g_gdiDiag.emits++;
         emitCapturedFrame(frame);
-        schedulePumpFlush();
         return;
     }
 
@@ -1263,7 +1269,6 @@ void ScreenCapturer::captureFrameBody()
     lastFrameChecksum_ = checksum;
 
     emitCapturedFrame(frame);
-    schedulePumpFlush();
 }
 
 // Windows 多屏：文件级枚举函数前置声明（实现在文件末尾）

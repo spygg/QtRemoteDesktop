@@ -190,15 +190,15 @@
 
                 if (key === 'quality') {
                     state.currentConfig.quality = val;
-                    send({ type:'config', quality:val, fps:state.currentConfig.fps });
+                    postConfig({ quality: val, fps: state.currentConfig.fps });
                 } else if (key === 'fps') {
                     const newFps = parseInt(val);
                     state.currentConfig.fps = newFps;
-                    send({ type:'config', quality:state.currentConfig.quality, fps:newFps });
+                    postConfig({ quality: state.currentConfig.quality, fps: newFps });
                 } else if (key === 'scale') {
                     const newScale = parseInt(val);
                     state.currentConfig.scale = newScale;
-                    send({ type:'config', scale:newScale });
+                    postConfig({ scale: newScale });
                     buildResolutionOptions();
                 } else if (key === 'resolution') {
                     const parts = val.split('x');
@@ -206,7 +206,7 @@
                     state.currentConfig.resolution = val;
                     if (state.screenWidth > 0 && resW <= state.screenWidth) {
                         state.currentConfig.scale = 100;
-                        send({ type:'set_resolution', width:resW, height:resH });
+                        postConfig({ width: resW, height: resH });
                     }
                     buildResolutionOptions();
                 }
@@ -253,10 +253,29 @@
                     document.exitFullscreen();
                 }
             }
-            function toggleFilePanel() { window.open('/files','_blank'); }
+            // [#17] 旧实现 window.open('/files')：服务端没有这条路由，点了会落到
+            // 兜底页。文件面板在桌面页，用 #files 让它打开后自动展开。
+            function toggleFilePanel() { window.open('/#files','_blank'); }
             function send(data) {
                 if (state.ws && state.ws.readyState === WebSocket.OPEN) {
                     state.ws.send(JSON.stringify(data));
+                }
+            }
+            // [A8] 画质/帧率/缩放/分辨率必须走 HTTP 接口，不能走终端 WebSocket：
+            // 那个连接服务端只处理"终端输入"和"粘贴文本"，配置消息会被当成乱码
+            // 静默丢弃（点了一点反应都没有）。/api/config 内部与浏览器 WS 走
+            // 完全相同的处理路径，所以这里的改动对所有在线页面立即生效。
+            async function postConfig(obj) {
+                try {
+                    const r = await fetch('/api/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(obj)
+                    });
+                    if (!r.ok)
+                        console.warn('config rejected: HTTP ' + r.status);
+                } catch (e) {
+                    console.warn('config failed:', e);
                 }
             }
 

@@ -731,11 +731,31 @@ void RDPServer::saveServerConfig(const QString& configPath)
 
     // 读取已有的配置文件，保留 users 等其他字段
     QFile file(path);
+    bool parsedOk = true;
     if (file.open(QIODevice::ReadOnly)) {
-        QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-        if (doc.isObject())
-            root = doc.object();
+        const QByteArray raw = file.readAll();
         file.close();
+        if (!raw.trimmed().isEmpty()) {
+            QJsonParseError perr;
+            const QJsonDocument doc = QJsonDocument::fromJson(raw, &perr);
+            if (doc.isObject())
+                root = doc.object();
+            else
+                parsedOk = false;
+        }
+    }
+    // [A11] 解析失败时**绝不能**用默认值整份覆盖：这个文件里同时存着 users
+    // （账号与口令哈希）。覆盖后 AuthManager 会因"有文件但无用户"而拒绝重建
+    // 默认管理员（防止口令被重置成 admin/admin），结果是永久无法登录，且
+    // 用户的端口/画质/分辨率配置全部丢失、原文件无从恢复。
+    // 这里保留原文件、另存一份 .corrupt 供人工修复，并拒写。
+    if (!parsedOk) {
+        const QString broken = path + QStringLiteral(".corrupt");
+        QFile::remove(broken);
+        QFile::copy(path, broken);
+        qCritical() << "server config is not valid JSON, refusing to overwrite it."
+                    << "Original kept at" << path << "copy at" << broken;
+        return;
     }
 
     // 更新 ssl、httpPort、fps、quality 为当前运行值
@@ -900,13 +920,19 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     clipboardService_ = std::unique_ptr<ClipboardService>(new ClipboardService(this));
     clipboardService_->start();
 
-    // [流畅度] 光标位置独立 33Hz 广播：与视频帧解耦（原挂在 onFrameCaptured，
-    // 静止桌面时 overlay 完全不更新、运动时上报率=帧率被抓屏延迟拖累）。
-    // XQueryPointer 本地往返 <0.1ms，33Hz 主线程开销可忽略；
-    // broadcastCursorPos 内部自带无客户端/位置未变跳过。
+    // [A10] 光标位置广播默认关闭。
+    // 前端 updateRemoteCursor() 只把 x/y 写进 state.remoteCursorX/Y，整个 index.html
+    // 没有任何读取点（光标 overlay 早已停用、恢复成浏览器默认光标）⇒ 这个 33Hz
+    // 定时器是纯死流量：每次 mousemove 一次 QJsonObject 构造 + 每个客户端一次 WS 写，
+    // 换来前端两个谁也不读的字段。
+    // 实现保留：将来要恢复 overlay（或做"多端同看一个光标"）时用 QTRD_CURSOR_POS=1
+    // 打开即可，不必重新写一遍平台查询。
     cursorTimer_ = new QTimer(this);
     connect(cursorTimer_, &QTimer::timeout, this, &RDPServer::broadcastCursorPos);
-    cursorTimer_->start(30);
+    if (qgetenv("QTRD_CURSOR_POS") == "1") {
+        cursorTimer_->start(30);
+        qInfo() << "Cursor position broadcast enabled (QTRD_CURSOR_POS=1)";
+    }
 
     connect(clipboardService_.get(), &ClipboardService::contentChanged,
         this, [this](const QString& mime, const QByteArray& data) {
@@ -1196,14 +1222,43 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     wsServer_->broadcastJson(out);
                     return;
                 } else if (t == "capture_adapt") {
-                    // [ADAPT] helper 的慢机自适应结果：只记日志。页面上的 fps/画质
-                    // 下拉框仍显示用户选的值，这条代表"实际生效"的参数——排查
-                    // "设了 15fps 却只有 8fps" 时看它。
+                    // [ADAPT] helper 的慢机自适应结果。以前只记日志：结果只活在 helper
+                    // 的局部变量里，任何一次 config 重下发（切模式/改画质/重连）都会把
+                    // 它冲回用户配置值（实测 XP 切一次 ffmpeg 就从 1386×838@10fps 弹回
+                    // 1732×1048@15fps），而 helper 的 adaptDecided 已置真不会再降一次。
+                    // 现在把它存成服务端的上限（运行期，不落盘），从此所有下发值都过一遍。
+                    const int aFps = msg["fps"].toInt();
+                    const int aScale = msg["scale"].toInt();
+                    const double aPace = msg["paceFactor"].toDouble();
+                    if (aFps >= 1 && aFps <= 60)
+                        adaptFpsCap_ = (adaptFpsCap_ > 0) ? qMin(adaptFpsCap_, aFps) : aFps;
+                    if (aScale >= 10 && aScale <= 100)
+                        adaptScaleCap_ = (adaptScaleCap_ > 0) ? qMin(adaptScaleCap_, aScale) : aScale;
+                    if (aPace >= 1.0 && aPace <= 12.0)
+                        adaptPaceFactor_ = qMax(adaptPaceFactor_, aPace);
+                    // 立刻把生效值压到上限：服务端后续给 helper 的 config（sendVideoParams-
+                    // ToCaptureSource）和给新客户端的状态报告都取这两个成员。
+                    const int prevFps = configFps_, prevScale = configScale_;
+                    configFps_ = cappedFps(configFps_);
+                    configScale_ = cappedScale(configScale_);
+                    if (screenCapturer_ && configFps_ != prevFps)
+                        screenCapturer_->setFps(configFps_);
+                    if (jpegCompressor_ && configScale_ != prevScale)
+                        jpegCompressor_->setScalePercent(configScale_);
                     qInfo() << "Capture adapted: avgCapMs =" << msg["avgCapMs"].toInt()
-                            << "fps =" << msg["fps"].toInt()
-                            << "scale =" << msg["scale"].toInt()
-                            << "paceFactor =" << msg["paceFactor"].toDouble();
-                    // 内部诊断消息，不转发给浏览器（末尾统一 broadcastJson 会发）
+                            << "fps =" << configFps_ << "(cap" << adaptFpsCap_ << ")"
+                            << "scale =" << configScale_ << "(cap" << adaptScaleCap_ << ")"
+                            << "paceFactor =" << cappedPaceFactor();
+                    // 前端据此把 fps/画质标签改成"实际生效"值，否则用户看到 15fps
+                    // 实际只有 10fps，只会以为又卡了。
+                    if (wsServer_ && wsServer_->clientCount() != 0) {
+                        QJsonObject out;
+                        out["type"] = "config_adapted";
+                        out["avgCapMs"] = msg["avgCapMs"].toInt();
+                        out["fps"] = configFps_;
+                        out["scale"] = configScale_;
+                        wsServer_->broadcastJson(out);
+                    }
                     return;
                 } else if (t == "capture_caps") {
                     // helper 视频能力上报：仅服务端内部决策用，绝不能泄漏给浏览器
@@ -1230,6 +1285,13 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     if (!captureVideoCapable_ && currentMode_ == ServerMode::Video)
                         switchToImageMode();
                     return;
+                } else if (t == "capture_outputs") {
+                    // [多屏] helper 的采集输出列表：服务端只存快照，在新客户端接入时
+                    // 随 server_config 下发（这里广播会让前端收到一条不完整的配置，
+                    // 把画质/帧率标签清成默认值）。绝不透传给浏览器。
+                    lastCaptureOutputs_ = msg["outputs"].toArray();
+                    lastCaptureOutputIdx_ = msg["currentOutput"].toInt();
+                    return;
                 } else if (t == "capture_hb") {
                     // [N2] helper 保活心跳：仅刷新 /capture 空闲计时（websocketserver
                     // 收到任何上行文本都已刷新），绝不能转发给浏览器。
@@ -1246,8 +1308,8 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 qInfo() << "Service: capture source connected, hasClients =" << hasClients;
                 // [N1] helper 自带剪贴板通道，挂起 service 进程的 xclip 轮询，
                 // 避免双通道重复广播 + 无谓的轮询进程开销
-                if (clipboardService_)
-                    clipboardService_->setSuspended(true);
+                clipSuspendedByHelper_ = true;
+                updateClipboardSuspend();
                 QJsonObject msg;
                 msg["type"] = "capture_control";
                 msg["action"] = hasClients ? "resume" : "pause";
@@ -1260,8 +1322,8 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         connect(wsServer_.get(), &WebSocketServer::captureSourceDisconnected,
             this, [this]() {
                 // [N1] helper 断开 → 恢复 service 通道剪贴板同步
-                if (clipboardService_)
-                    clipboardService_->setSuspended(false);
+                clipSuspendedByHelper_ = false;
+                updateClipboardSuspend();
                 captureVideoCapable_ = false;
                 captureHwEncode_ = false;
                 // helper 掉线且当前在视频模式：回落图片模式并通知前端（否则画面冻结无提示）
@@ -2136,6 +2198,42 @@ void RDPServer::onHttpRequest()
             return;
         }
 
+        if (path == "/api/config" || path.startsWith("/api/config?")) {
+            // [A8] 管理页（/shell，终端页面）里也有画质/帧率/缩放/分辨率下拉框，
+            // 但它把消息发给了**终端** WebSocket（/api/shell/ws），服务端只认
+            // "终端输入"和"粘贴"两种，配置消息被当成乱码静默丢弃 —— 用户点了
+            // 一点反应都没有，也不报错。
+            // 这里给终端页一个同源的 HTTP 入口，内部走与浏览器 WS 完全相同的
+            // 处理路径（applyConfigFromHttp），配置真正生效。
+            QString token = extractSessionToken(request);
+            if (!authManager_->validateSession(token)) {
+                QByteArray resp = buildHttpResponse(401, "Unauthorized", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", "未登录" } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
+                return;
+            }
+            int bodyLen = 0;
+            const QByteArray body = readPostBody(bodyLen);
+            const QJsonDocument doc = QJsonDocument::fromJson(body);
+            if (!doc.isObject()) {
+                QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", "Invalid JSON body" } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
+                return;
+            }
+            applyConfigFromHttp(doc.object());
+            QByteArray ok = buildHttpResponse(200, "OK", "application/json; charset=utf-8",
+                QJsonDocument(QJsonObject { { "success", true } }).toJson(QJsonDocument::Compact));
+            socket->write(ok);
+            socket->flush();
+            socket->disconnectFromHost();
+            return;
+        }
+
         if (path == "/api/shell/exec" || path.startsWith("/api/shell/exec?")) {
             QString token = extractSessionToken(request);
             if (!authManager_->validateSession(token)) {
@@ -2807,10 +2905,6 @@ void RDPServer::start()
                 configFps_, videoBitrateFor(ew, eh, configFps_, configCodec_), configHwEncodeMode_)) {
             currentMode_ = ServerMode::Video;
             videoBaseBitrate_ = videoBitrateFor(ew, eh, configFps_, configCodec_);
-            // [FLUSH-PUMP] 视频模式启用编码器 flush 泵：孤立变化帧不被 1 帧流水线延迟吞住
-            if (screenCapturer_)
-                screenCapturer_->setFrameFlushPump(true);
-
             qInfo() << "Video encoder initialized, using video mode.";
         } else
 #endif
@@ -3869,6 +3963,8 @@ void RDPServer::onClientConnected(const QString& clientId)
     // 首个客户端连接 → 阻止被控端睡眠/熄屏（远程会话期间保持唤醒）
     if (wsServer_->clientCount() == 1)
         updateSleepInhibit(true);
+    // [A17] 有观众了 → 解除"无观众"导致的剪贴板轮询挂起（helper 通道活跃时仍挂起）
+    updateClipboardSuspend();
 
     // 有客户端连接 → 恢复屏幕捕获
     if (screenCapturer_)
@@ -3916,7 +4012,11 @@ void RDPServer::onClientConnected(const QString& clientId)
         QJsonObject cfg;
         cfg["type"] = "server_config";
         cfg["fps"] = configFps_;
-        cfg["quality"] = configQuality_;
+        // [A9] 必须下发**档位名**而不是内部数字：前端下拉框按
+        // high/medium/low/verylow 匹配，拿不到就回落显示"中"；而 next 次提交
+        // 又把这个不认识的值当档位名回传，服务端匹配不上 → 画质设置被静默丢弃
+        // （典型现象：选"极低"后刷新变"中"，再动一下 FPS 画质就永久回中档）。
+        cfg["quality"] = qualityName();
         cfg["scale"] = configScale_;
         // 计算机名称：systemName 是原始配置（可能为空 = 跟随主机名），
         // effectiveName 是实际显示值，前端输入框用前者、<title> 用后者。
@@ -3935,7 +4035,9 @@ void RDPServer::onClientConnected(const QString& clientId)
             cfg["outputs"] = screenCapturer_->enumerateOutputs();
             cfg["currentOutput"] = screenCapturer_->currentOutputIndex();
         } else {
-            // 服务模式：从配置文件读取（由 helper 写入）
+            // 服务模式：分辨率列表从配置文件读取（由 helper 写入）；多屏输出列表
+            // 用 helper 上报的快照 —— 服务进程在 Session 0 枚举不到用户会话的显示器，
+            // 前端多屏下拉只能靠这份数据，否则永远是空的。
             QFile file(QCoreApplication::applicationDirPath() + "/server_config.json");
             if (file.open(QIODevice::ReadOnly)) {
                 QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
@@ -3947,6 +4049,10 @@ void RDPServer::onClientConnected(const QString& clientId)
                         cfg["currentResolution"] = root["currentResolution"].toString();
                 }
                 file.close();
+            }
+            if (!lastCaptureOutputs_.isEmpty()) {
+                cfg["outputs"] = lastCaptureOutputs_;
+                cfg["currentOutput"] = lastCaptureOutputIdx_;
             }
         }
 
@@ -4105,6 +4211,8 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 
     // 观看模式按连接记录，断线即清理（clientId 可能被复用）。
     viewOnlyClients_.remove(clientId);
+    // [A3] 关键帧请求冷却时刻按连接记录，clientId 可能被复用，断线必须清。
+    kfRequestMsByClient_.remove(clientId);
 
 
 #ifdef USE_WEBRTC
@@ -4115,6 +4223,7 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 
     // 没有客户端了 → 暂停屏幕捕获，降低 CPU
     if (wsServer_->clientCount() == 0) {
+        updateClipboardSuspend();   // [A17] 无观众时停掉 xclip 轮询
         updateSleepInhibit(false); // 远程会话结束，解除睡眠抑制
         if (screenCapturer_)
             screenCapturer_->suspend();
@@ -4276,6 +4385,24 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         // requestNewIdr=true：强制产**新** IDR。仅靠回放缓存帧救不了已重置等帧门
         // 的客户端（它需要"新"关键帧才放行后续 P 帧），也救不了静态桌面下
         // 编码器已 hasIdr_=true 后不再出 IDR 的情况（ffmpeg/MSE 冻结的主因）。
+        //
+        // [A3] 但每帧回调里都无条件走一次"请求新 IDR"会被前端重试放大：缓冲溢出 /
+        // 配额满时前端每 500ms 发一轮，服务端直接转发、helper 收到就重建编码器。
+        // 这里按客户端加冷却：冷却内的重复请求不再索要新 IDR（上面的缓存回放
+        // 已经让该客户端拿到一帧可解码的 IDR），把重建频率钉在 ≤1 次/700ms。
+        {
+            constexpr qint64 kClientKfCooldownMs = 700;
+            const qint64 nowKf = monoNowMs();
+            const qint64 lastKf = kfRequestMsByClient_.value(clientId, 0);
+            if (lastKf > 0 && nowKf - lastKf < kClientKfCooldownMs) {
+                if ((++kfCooldownSkips_ % 20) == 1)
+                    qInfo() << "[KF-COOLDOWN] suppressed client keyframe request"
+                            << "client=" << clientId << "since=" << (nowKf - lastKf) << "ms"
+                            << "skipped=" << kfCooldownSkips_;
+                return;
+            }
+            kfRequestMsByClient_[clientId] = nowKf;
+        }
         pumpKeyframe(true);
         return;
     }
@@ -4288,6 +4415,17 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             // [B17] config 也要转发：服务模式下 JPEG 质量/缩放/帧率都由 helper
             // 侧执行，本地 jpegCompressor_ 不在视频路径上，旧代码跳过 config
             // → 画质/帧率热更新静默失效。helper 对未知类型安全忽略。
+            // [A15] 视频参数变化 ⇒ helper 会按新参数重建编码器（新尺寸/新 SPS），
+            // 本进程缓存的 IDR/SPS 立刻过期。不清的话，此窗口内新接入的浏览器
+            // 会先收到一条参数集不匹配的旧码流 → 花屏，直到 helper 的新 IDR 到达。
+            // 只带 systemName 的 config 不涉及编码器，不能误清。
+            // set_output 同样会换捕获尺寸（多屏切换），缓存 IDR 一起作废。
+            if (type == "set_resolution" || type == "set_output"
+                    || (type == "config" && (input.contains("quality") || input.contains("fps")
+                                             || input.contains("scale") || input.contains("codec")
+                                             || input.contains("hw_encode")))) {
+                invalidateCachedIdr();
+            }
             wsServer_->sendToCaptureSource(input);
             if (screenLocked_ && secureInputRunning_)
                 wsServer_->sendToSecureInput(input);
@@ -4443,20 +4581,20 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         int jpegQ = -1;
         if (qname == "high") {
             jpegQ = 80;
-            configScale_ = 100;
+            configScale_ = cappedScale(100);
         } else if (qname == "medium") {
             jpegQ = 60;
-            configScale_ = userScale_;
+            configScale_ = cappedScale(userScale_);
         } else if (qname == "low") {
             jpegQ = 35;
-            configScale_ = userScale_;
+            configScale_ = cappedScale(userScale_);
         } else if (qname == "verylow") {
             // 极低：在 low 基础上进一步大幅降码率，并强制降分辨率（封顶 50%），
             // 让静止桌面也肉眼可见地变模糊。原因：openh264 在静止内容上会大量
             // 跳 P 帧（仅周期传清晰 I 帧），仅靠降码率（low=0.08）在静态 UI 上几乎
             // 看不出差异，必须叠加降分辨率才能体现“极低”。
             jpegQ = 20;
-            configScale_ = qMin(userScale_, 50);
+            configScale_ = cappedScale(qMin(userScale_, 50));
         }
         // 视频码率档位：默认与 JPEG 质量一致；verylow 单独用更低档位（videoBitrateFor
         // 的 case 15 = 0.035 bpp），使“极低”相较“低”有额外可见降级，而非等价。
@@ -4494,6 +4632,9 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         int newFps = input["fps"].toInt();
         // [H22] 配置侧同步钳制（configFps_ 也参与编码器 GOP/间隔计算）
         if (newFps > 60) newFps = 60;
+        // 慢机自适应上限：机器只能跑 10fps 时，用户设 15 也不必按 15 重建编码器
+        // （那是白付一次 shutdown/initialize + 丢 IDR）。
+        if (newFps >= 1) newFps = cappedFps(newFps);
         // 只在帧率**真的变化**时才处理：前端切画质也顺手带上了当前 fps
         // （index.html 的 quality 分支），无条件重建会让"只改画质"变成
         // shutdown/initialize + 丢 IDR + 客户端等关键帧，画面卡一下。
@@ -4511,13 +4652,16 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         }
         int newScale = input["scale"].toInt();
         if (newScale >= 10 && newScale <= 100) {
+            // 用户意图原样记住（落盘写 userScale_）；实际生效值再压自适应上限，
+            // 否则慢机上用户随手选个 100% 就把降档结果冲掉。
+            userScale_ = newScale;
+            const int appliedScale = cappedScale(newScale);
             // 仅当生效缩放（configScale_）真实变化才重建：high/verylow 档位可能已把
             // configScale_ 设成相同值，重复重建会丢 IDR 造成画面卡顿。
-            const bool scaleChanged = (configScale_ != newScale);
-            userScale_ = newScale;
-            configScale_ = newScale;
+            const bool scaleChanged = (configScale_ != appliedScale);
+            configScale_ = appliedScale;
             if (jpegCompressor_)
-                jpegCompressor_->setScalePercent(newScale);
+                jpegCompressor_->setScalePercent(appliedScale);
             scheduleSaveConfig(); // [P2] 去抖落盘
 #ifdef USE_FFMPEG
             // 视频模式下缩放档位改变需按新尺寸重建编码器，
@@ -4894,6 +5038,57 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
     wsServer_->broadcastFrame(data, isKeyframe, timestamp);
 }
 
+void RDPServer::applyConfigFromHttp(const QJsonObject& cfg)
+{
+    // 消息类型由服务端决定，前端不传（否则这个入口就成了"任意消息注入"）。
+    // 只允许改显示/编码参数，不允许 keydown/input 等输入类消息。
+    QJsonObject input;
+    for (auto it = cfg.begin(); it != cfg.end(); ++it) {
+        const QString k = it.key();
+        if (k == "quality" || k == "fps" || k == "scale" || k == "codec"
+                || k == "hw_encode" || k == "systemName" || k == "width" || k == "height")
+            input.insert(k, it.value());
+    }
+    input["type"] = cfg.contains("width") ? QStringLiteral("set_resolution")
+                                          : QStringLiteral("config");
+    qInfo() << "HTTP config applied:" << QString::fromUtf8(
+        QJsonDocument(input).toJson(QJsonDocument::Compact));
+    onInputReceived(QString(), input);
+}
+
+void RDPServer::updateClipboardSuspend()
+{
+    if (!clipboardService_)
+        return;
+    const bool noViewer = (wsServer_ && wsServer_->clientCount() == 0);
+    clipboardService_->setSuspended(clipSuspendedByHelper_ || noViewer);
+}
+
+QString RDPServer::qualityName() const
+{
+    // 15 是 verylow 的内部码率档（videoBitrateFor 的 0.035bpp 档），不是"低"。
+    if (configQuality_ >= 80)
+        return QStringLiteral("high");
+    if (configQuality_ <= 15)
+        return QStringLiteral("verylow");
+    if (configQuality_ <= 35)
+        return QStringLiteral("low");
+    return QStringLiteral("medium");
+}
+
+void RDPServer::invalidateCachedIdr()
+{
+#ifdef USE_FFMPEG
+    lastKeyframeData_.clear();
+    lastKeyframeTs_ = 0;
+    // 复用基准一并作废：staticIdrEpoch_ 在服务模式下恒为 0（本进程没有采集器），
+    // 保留 valid 会让"桌面未变"这个判据永远成立。
+    staticIdrEpochValid_ = false;
+#endif
+    // 分辨率/画质变化后 SPS/PPS 也会变；helper 重建编码器后会重发 codec_config。
+    lastCodecExtra_.clear();
+}
+
 void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
 {
 #ifdef USE_FFMPEG
@@ -5106,8 +5301,6 @@ void RDPServer::switchToImageMode()
     // 重绘导致的局部黑块，且图片模式多为低动态，全量抓取的 CPU 成本可接受。
     if (screenCapturer_) {
         screenCapturer_->setFullCaptureOnly(true);
-        // 图片模式无编码器流水线延迟，关闭 flush 泵（JPEG 帧内编码不受影响）
-        screenCapturer_->setFrameFlushPump(false);
         // 立即强制抓一帧：视频模式期间桌面可能静止，checksum 去重会让客户端
         // 切回图片后迟迟等不到第一张 JPEG（画面停留在旧帧/黑屏）。
         screenCapturer_->forceNextFrame();
@@ -5216,8 +5409,6 @@ bool RDPServer::switchToVideoMode()
     // 视频模式恢复增量抓取（低延迟、省 CPU）；图片模式关闭此开关时已恒全量。
     if (screenCapturer_) {
         screenCapturer_->setFullCaptureOnly(false);
-        // [FLUSH-PUMP] 视频模式启用编码器 flush 泵
-        screenCapturer_->setFrameFlushPump(true);
     }
 
     // 通知所有客户端
@@ -5403,11 +5594,9 @@ void RDPServer::sendVideoParamsToCaptureSource(const QString& action)
     cfg["fps"] = configFps_;
     cfg["scale"] = configScale_;
     // 慢读回节流倍数：helper 的采集器据此算采集间隔（占空比 ≈ 1/(1+factor)）。
-    cfg["paceFactor"] = configPaceFactor_;
-    cfg["quality"] = (configQuality_ >= 80) ? QStringLiteral("high")
-                   : (configQuality_ <= 15) ? QStringLiteral("verylow")
-                   : (configQuality_ <= 35) ? QStringLiteral("low")
-                                            : QStringLiteral("medium");
+    // 取用户配置与自适应结果中的较大者：慢机自适应要求更省 CPU 时不能被用户默认值盖回去。
+    cfg["paceFactor"] = cappedPaceFactor();
+    cfg["quality"] = qualityName();
     wsServer_->sendToCaptureSource(cfg);
 
     QJsonObject ctrl;

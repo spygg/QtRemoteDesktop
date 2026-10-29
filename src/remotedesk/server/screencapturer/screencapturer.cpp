@@ -22,38 +22,14 @@ ScreenCapturer::ScreenCapturer(QObject* parent)
         if (captureTimer_->isActive())
             captureOnce();
     });
-    flushPumpTimer_ = new QTimer(this);
-    flushPumpTimer_->setSingleShot(true);
-    connect(flushPumpTimer_, &QTimer::timeout, this, &ScreenCapturer::pumpFlushTick);
 }
 
-void ScreenCapturer::schedulePumpFlush()
-{
-    // [PUMP-DISABLED 2026-10-09] 243 实测：补帧泵在桌面有持续微变化（光标闪烁/
-    // GNOME 面板刷新等）时形成自持循环——journal 显示 5 分钟自激发 1441 次
-    // (~4.8/s)，采集被迫以 ~9.5fps 空转发射 1920x1200 帧，打字 g2g 延迟中位
-    // 1.73s、最差 4.47s。泵原本只为解决"孤立变化帧被编码器 1 帧流水线吞掉"，
-    // 代价远大于收益，先整体禁用（代码保留，pumpFlushEnabled_ 由模式切换控制）。
-    return;
-    if (!pumpFlushEnabled_ || pumpInProgress_)
-        return;
-    if (flushPumpTimer_ && !flushPumpTimer_->isActive())
-        flushPumpTimer_->start(kFlushPumpDelayMs);
-}
-
-void ScreenCapturer::pumpFlushTick()
-{
-    if (!captureTimer_->isActive())
-        return;
-    pumpInProgress_ = true;
-    // 强制推一帧（允许与上一帧内容相同），把编码器流水线里被 1 帧延迟吞住的
-    // 真实变化帧顶出来。pumpInProgress_ 防止补帧再次调度泵（否则静止时无限
-    // 80ms 空转）。
-    forceFrameCount_ = qMax(forceFrameCount_, 1);
-    qInfo() << "FLUSH-PUMP fire (forceFrameCount->1)";
-    captureFrame();
-    pumpInProgress_ = false;
-}
+// [PUMP-REMOVED 2026-10-29] 原 schedulePumpFlush()/pumpFlushTick() 的"补帧泵"整段删除。
+// 2026-10-09 起它就被 `return;` 整体短路（243 实测：桌面微变化时形成自持循环，
+// 5 分钟自激发 1441 次、采集被迫 ~9.5fps 空转、打字 g2g 延迟中位 1.73s），此后
+// 5 处调用点（win 1 处、linux 4 处）仍在调但全是空转。孤立变化帧被编码器
+// 1 帧流水线吞掉的问题，现在由 helper 的 [KFR] + kfFallbackTimer 承担，
+// 采集器这一层不该再有第二条影子路径。
 
 ScreenCapturer::~ScreenCapturer()
 {
@@ -118,6 +94,10 @@ void ScreenCapturer::teardownGrabThread()
     grabThread_->quit();
     if (!grabThread_->wait(3000))
         qWarning() << "ScreenCapturer: capture thread did not stop in 3s";
+    // [N9] 用 deleteLater 而不是 delete：grabWorker_ 的 affinity 在 qtrd-capture，
+    // 线程退出后由主线程直接 delete 属于跨线程析构（实践中线程已停所以安全，
+    // 但不是 Qt 的推荐口径）。事件循环已停，这里仍走 delete：deleteLater 在
+    // 无事件循环的线程里不会被执行，反而泄漏。改为先 wait 完再 delete 并留注释。
     delete grabWorker_;
     grabWorker_ = nullptr;
     delete grabThread_;

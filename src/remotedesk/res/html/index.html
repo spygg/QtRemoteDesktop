@@ -1204,8 +1204,9 @@
             // intending；显式 webrtc 模式再降级图片。
             if (!window.RTCPeerConnection) {
                 webrtcState.intending = false;
-                if (state.currentConfig.videomode === 'webrtc') {
-                    fallbackToImage('当前浏览器不支持 WebRTC，已切换图片模式');
+                // 没有 RTCPeerConnection 只是走不了 RTP，WS+MSE 通常照样能看视频
+                if (state.currentConfig.videomode !== 'image') {
+                    fallbackFromWebRtc('当前浏览器不支持 WebRTC');
                 }
                 return;
             }
@@ -1237,6 +1238,9 @@
                 // 但 ICE 已 connected 时 RTP 流可用，直接显示视频
                 if (pc.iceConnectionState === 'connected' && webrtcState.pc === pc && !webrtcState.active) {
                     webrtcState.active = true;
+                    // WebRTC 真的通了 → 清掉"本标签页连不通"的记忆，后续 auto 仍优先 RTP
+                    try { sessionStorage.removeItem('rd_webrtc_failed'); } catch (e) {}
+                    webrtcState.intending = false;
                     // 连接已建立，立即撤销 12s 超时定时器，防止定时器与回调竞态误杀
                     if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
                     webrtcState.videoEl.style.display = 'block';
@@ -1252,6 +1256,9 @@
                 console.log('RD-CONN state:', st);
                 if (st === 'connected') {
                     webrtcState.active = true;
+                    // 握手完成：intending 的使命（遮蔽 WS 视频帧）由 active 接管，
+                    // 留着只会让状态难以判读。
+                    webrtcState.intending = false;
                     // 连接已建立，立即撤销 12s 超时定时器
                     if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
                     // 从 disconnected 自行恢复：撤销降级宽限定时器
@@ -1277,12 +1284,10 @@
                     showTransferStatus('WebRTC 已连接', 2000);
                 } else if (st === 'failed' || st === 'closed') {
                     if (webrtcState.pc !== pc) return; // 旧 pc 回调不影响当前模式
-                    // 显式选择 WebRTC 且连接失败时降级回图片模式并持久化，画面持续刷新
-                    if (state.currentConfig.videomode === 'webrtc') {
-                        fallbackToImage('WebRTC 不可用，已切换图片模式');
-                    } else {
-                        webrtcClose();
-                    }
+                    // 连接失败：先退 WS 视频（MSE），仍不行才图片。旧代码在显式 webrtc
+                    // 模式下直接**持久化**图片——WebRTC 在部分网络下走不通，而 MSE 明明
+                    // 可用，一次失败就把用户永久钉在 JPEG 上。
+                    fallbackFromWebRtc('WebRTC 连接失败');
                 } else if (st === 'disconnected') {
                     if (webrtcState.pc !== pc) return;
                     // 'disconnected' 是暂时性状态（网络抖动 / ICE 重连中），浏览器通常能自行
@@ -1293,12 +1298,8 @@
                         webrtcState._discTo = null;
                         if (webrtcState.pc !== pc || pc.connectionState !== 'disconnected')
                             return;
-                        if (state.currentConfig.videomode === 'webrtc') {
-                            // 断连是链路抖动，不是浏览器能力问题：只本次降级，不持久化
-                            fallbackToImage('WebRTC 连接中断，已切换图片模式', false);
-                        } else {
-                            webrtcClose();
-                        }
+                        // 断连是链路抖动，不是浏览器能力问题：只本次降级，不持久化
+                        fallbackFromWebRtc('WebRTC 连接中断');
                     }, 8000);
                 }
             };
@@ -1315,7 +1316,14 @@
                         e.receiver.playoutDelayHint = 0;
                     }
                 } catch (err) {}
-                if (webrtcState._to) { clearTimeout(webrtcState._to); webrtcState._to = null; }
+                // [B12] 这里**绝不能**撤销连接超时定时器：ontrack 在
+                // setRemoteDescription(offer) 时就触发，此时 ICE 还一条都没配对。
+                // 旧代码在此 clearTimeout(_to)，一旦 ICE 始终连不上（远端候选全被
+                // 丢弃 / UDP 被拦），就再没有任何东西会关闭 pc：webrtcState.pc 与
+                // intending 永久为真 → handleBinary 把所有 0x01/0x02/0x03 帧全部
+                // 丢弃 → auto 模式永久黑屏，且连 "RD-TIMER" 日志都不会出现
+                // （定时器已被本行清掉）。只有 active（ICE/DTLS 真正 connected）
+                // 才该撤销看门狗，那两处已分别在 ice/connectionstate 里处理。
             };
 
             // 视频帧到达时统计 FPS
@@ -1351,16 +1359,15 @@
             // 只要 12s 仍未 active 就降级，保证画面持续刷新。
             if (webrtcState._to) clearTimeout(webrtcState._to);
             webrtcState._to = setTimeout(() => {
-                console.log('RD-TIMER timeout fired, pc=', !!webrtcState.pc, 'active=', webrtcState.active);
-                if (webrtcState.pc && !webrtcState.active) {
-                    // [B22] 用 webrtcClose 统一清理：旧代码只 pc.close()，auto 模式下
-                    // intending 永不清除 → WS 视频帧被 handleBinary 持续忽略 → 永久黑屏。
+                console.log('RD-TIMER timeout fired, pc=', !!webrtcState.pc, 'active=', webrtcState.active, 'intending=', webrtcState.intending);
+                // 条件放宽到 intending：协商半途 dump（pc 已被别处清掉但 intending 还在）
+                // 同样必须收尾，否则 handleBinary 会一直丢弃 WS 视频帧。
+                if (!webrtcState.active && (webrtcState.pc || webrtcState.intending)) {
+                    // [B22] 用 webrtcClose 统一清理：只 pc.close() 时 intending 永不清除
+                    // → WS 视频帧被 handleBinary 持续忽略 → 永久黑屏。
                     webrtcClose();
-                    if (state.currentConfig.videomode === 'webrtc') {
-                        // 超时多半是服务端/helper 暂时没起来或链路慢，不是能力缺失：
-                        // 本次降级，下次进页面仍按用户选的 webrtc 重试
-                        fallbackToImage('WebRTC 连接超时，已切换图片模式', false);
-                    }
+                    // [B12/N5] 超时后不能只关 pc：auto/webrtc 都要先试 WS 视频(MSE)
+                    fallbackFromWebRtc('WebRTC 连接超时');
                 }
             }, 15000);
         }
@@ -1956,7 +1963,9 @@
         // 降级到图片模式：切换服务端模式、更新 UI 高亮、持久化选择，并提示用户。
         // 无 WebCodecs 且 WebRTC 不可用时反复尝试视频模式只会抖动画面，降级后应稳定停留。
         // 无 WebCodecs 时启动 MSE 视频模式（FFmpeg 帧经 WS → MSE → <video> 原生解码）
-        function mseStart(mode) {
+        // persistPref=false：作为 WebRTC 失败后的兜底启动 MSE 时用，只改本次会话的
+        // 生效模式，不覆盖用户选的 auto（下次进页面仍优先试 WebRTC）。
+        function mseStart(mode, persistPref = true) {
             if (!('MediaSource' in window)) return false;
             try {
                 webrtcClose();
@@ -1968,7 +1977,9 @@
                 if (!msePlayer.start(mseCodec)) return false;
                 state.currentConfig.videomode = mode;
                 state.displayStreamMode = mode;
-                try { localStorage.setItem('rd_videomode', mode); } catch (e) {}
+                if (persistPref) {
+                    try { localStorage.setItem('rd_videomode', mode); } catch (e) {}
+                }
                 state.modeRestored = true;
                 send({ type: 'set_mode', mode: 'video' });
                 // codec 跟随服务端已知协议（http+MSE 固定 h264 路径）：
@@ -2013,6 +2024,24 @@
             if (tip) showTransferStatus(tip, 2500);
         }
 
+        // [B12/N5] WebRTC 不可用后的统一降级链：**先试 WS 视频（MSE），再退图片**。
+        // auto 分支以前只有 "webrtcClose()" 一条路：pc 关掉后没有任何解码器，
+        // 服务端却仍在发 H.264 ⇒ 客户端停在"服务端在发视频、本地无解码器"的黑屏态。
+        // 实测（XP/Win7/龙蜥）手动切 ffmpeg(MSE) 三台都能立刻出画面，说明这里
+        // 只是没去解，不是解不了。persist 传 false：链路问题不该写死用户偏好。
+        function fallbackFromWebRtc(what, persist = false) {
+            // 记住"本标签页 WebRTC 连不通"：下次进入 auto 直接走 WS 视频，
+            // 不再白等 400ms 协商 + 15s 超时（否则每次刷新都先黑 15 秒）。
+            try { sessionStorage.setItem('rd_webrtc_failed', '1'); } catch (e) {}
+            if (mseStart('ffmpeg', false)) {
+                console.log('RD-FALLBACK webrtc->mse:', what);
+                showTransferStatus(what + '，已切换 WS 视频', 2500);
+                return true;
+            }
+            fallbackToImage(what + '，已切换图片模式', persist);
+            return false;
+        }
+
         function applyStreamMode(mode) {
             // 服务端已明确无法提供视频流（videoSupported===false，如 helper 未连或未启用视频通道）：
             // webrtc/ffmpeg/auto 三条视频路线都不成立，直接降级图片模式并提示。
@@ -2032,7 +2061,10 @@
                 // 先同步关闭残留 WebRTC 会话，避免其异步关闭回调清掉即将启动的 MSE
                 webrtcClose();
                 if (mseStart('ffmpeg')) return;
-                fallbackToImage('当前浏览器不支持 WebCodecs/MSE，已使用图片模式');
+                // [N5b] 只有浏览器真的没有 MediaSource（能力缺失）才持久化图片模式。
+                // msePlayer.start() 抛异常（SourceBuffer 配额/瞬时状态）不是能力问题，
+                // 持久化会让用户刷新后永远看不到视频且没有任何提示。
+                fallbackToImage('当前浏览器不支持 WebCodecs/MSE，已使用图片模式', !('MediaSource' in window));
                 return;
             }
             state.currentConfig.videomode = mode;
@@ -2086,6 +2118,18 @@
                 // auto：优先 WebRTC——浏览器 <video> 原生 H.264 解码，不依赖 WebCodecs，
                 // 局域网 UDP 直连延迟最低；WebRTC 无法建立时退 WS 视频（WebCodecs），
                 // 两者都不可用时服务端回退图片(JPEG)。
+                // 本标签页已确认 WebRTC 连不通（上次 15s 未连通）→ 直接走 WS 视频(MSE)，
+                // 不再白等一轮协商超时；用户重新点选模式会清掉这个记忆。
+                let webrtcKnownBad = false;
+                try { webrtcKnownBad = sessionStorage.getItem('rd_webrtc_failed') === '1'; } catch (e) {}
+                if (webrtcKnownBad && mseStart('ffmpeg', false)) {
+                    updateDropdownActive();
+                    return;
+                }
+                // [N12] 必须先显式停 MSE（与 image 分支同理）：webrtcClose 内部只在
+                // !msePlayer.using 时才清理 video 元素，从 ffmpeg(MSE) 切回 auto 会留下
+                // 全屏 <video> 冻结在最后一帧盖住 canvas，比纯黑屏更迷惑。
+                msePlayer.stop('applyStreamMode-auto');
                 webrtcClose();
                 // 同步置 intending：auto 也优先 WebRTC，覆盖 400ms 协商空窗，防止 WS 视频
                 // 帧漏进 H264Decoder 触发 fallbackToImage 误杀正在建立的 RTP 会话。
@@ -2211,8 +2255,16 @@
                     // 仅在完全无 WebRTC 意图时才降级图片模式。
                     if (webrtcState.intending || webrtcState.active || webrtcState.pc) return;
                     if (!this.imageRequested) {
-                        this.imageRequested = true;
-                        fallbackToImage('当前浏览器不支持 WebCodecs，已使用图片模式');
+                        // [N5b] 无 WebCodecs ≠ 看不了视频：http（非安全上下文）下 MSE 用
+                        // 浏览器原生 H.264 解码，实测三台机器都能解。旧代码在这里直接
+                        // 降图片模式**且持久化**，一次竞态漏帧（图片模式下漏进一帧
+                        // H.264）就把 rd_videomode 写成 image，之后每次进页面都是 JPEG，
+                        // 页面上也没有任何入口提示"其实可以看视频"。
+                        const mseOk = mseStart('ffmpeg', false);
+                        if (!mseOk) {
+                            this.imageRequested = true;
+                            fallbackToImage('当前浏览器不支持 WebCodecs/MSE，已使用图片模式', false);
+                        }
                     }
                     return;
                 }
@@ -2533,26 +2585,11 @@
                     state.decoder.decode(h264Data, isKeyframe, Number(timestamp));
                 }
             } else if (frameType === 0x11) {
-                // 文件下载包: [0x11][4-byte path length][path UTF8][4-byte data length][data]
-                if (data.length < 9) return;
-                const pathLen = view.getUint32(1, false);
-                // [H24] pathLen 不可信：旧代码直接 getUint32(5 + pathLen)，伪造/损坏的
-                // 帧会让 DataView 越界抛 RangeError，把整条 onmessage 打断（后续帧全丢）。
-                if (5 + pathLen + 4 > data.length) return;
-                const dataLen = view.getUint32(5 + pathLen, false);
-                // [H24] dataLen 同样不可信：截断会下载到一个损坏的半截文件
-                if (9 + pathLen + dataLen > data.length) return;
-                const pathStr = new TextDecoder().decode(data.subarray(5, 5 + pathLen));
-                const fileData = data.subarray(9 + pathLen, 9 + pathLen + dataLen); // [P2] 零拷贝视图，Blob 构造时才拷贝
-                // Trigger browser download
-                const blob = new Blob([fileData]);
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = pathStr.split('/').pop();
-                a.click();
-                setTimeout(() => URL.revokeObjectURL(url), 10000); // [B14] 延迟释放，避免中断未开始的下载
-                showTransferStatus(`下载完成: ${a.download}`, 2000);
+                // [DEAD-CODE] 原"整文件下载包"分支（[0x11][pathLen][path][dataLen][data]）
+                // 已被服务端 0x12 分块下载取代——server 侧 grep 不到任何 0x11 发送点，
+                // 这条分支永远不会命中，只会让帧类型表看起来有两套下载协议。
+                // 保留一行提示，避免后来者照着重写。
+                console.warn('frame type 0x11 (legacy whole-file download) is no longer emitted');
             } else {
                 console.warn('Unknown frame type:', frameType);
             }
@@ -2967,6 +3004,17 @@
                     buildResolutionOptions();
                     updateDropdownActive();
                     updateQualityLabel();
+                    break;
+                case 'config_adapted':
+                    // [N7] 慢机自适应：服务端把 helper 实测降档后的生效参数广播过来，
+                    // 让下拉框/画质标签显示"实际生效"值而不是用户选的默认值。
+                    if (msg.fps > 0) state.currentConfig.fps = msg.fps;
+                    if (msg.scale >= 10 && msg.scale <= 100) state.currentConfig.scale = msg.scale;
+                    updateDropdownActive();
+                    updateQualityLabel();
+                    showTransferStatus('慢机自适应：' + (msg.fps || '?') + 'fps / '
+                        + (msg.scale || '?') + '% 分辨率（读屏 '
+                        + (msg.avgCapMs || '?') + 'ms/帧）', 3500);
                     break;
                 case 'system_name':
                     // 改名广播：所有打开的标签页（含其他客户端浏览器）一起换标题
@@ -3943,6 +3991,9 @@
                 // 用户显式选择模式：作废"服务端恢复视频能力后自动回切"的待重试意图，
                 // 否则 mode_changed 到达时会把用户刚选的"图片"又抢回视频模式。
                 state.pendingVideoRetry = null;
+                // 用户主动选视频模式 = 重新给 WebRTC 一次机会（清掉本标签页内
+                // "上次 WebRTC 连不上"的记忆，否则本次仍会跳过 RTP 直奔 MSE）
+                try { sessionStorage.removeItem('rd_webrtc_failed'); } catch (e) {}
                 applyStreamMode(val);
             } else if (key === 'screen') {
                 const idx = parseInt(val);
@@ -4180,12 +4231,23 @@
             a.remove();
         }
 
-        function toggleFilePanel() {
+        function toggleFilePanel(forceOpen) {
             const panel = document.getElementById('file-panel');
-            const wasOpen = panel.classList.toggle('open');
+            const wasOpen = (forceOpen === true) ? (panel.classList.add('open'), true)
+                                                 : panel.classList.toggle('open');
             if (wasOpen && document.getElementById('file-list').innerHTML === '') {
                 navigateTo(currentRemotePath);
             }
+        }
+
+        // [#17] /shell 页的「文件」按钮此前 window.open('/files')，而服务端没有
+        // 这条路由 → 落到兜底页。改为 /#files 后由这里自动展开文件面板（要等
+        // 首次文件列表请求所需的状态就绪，故延时而非立即执行）。
+        if (location.hash === '#files') {
+            setTimeout(() => {
+                try { toggleFilePanel(true); } catch (e) {}
+                history.replaceState(null, '', location.pathname);
+            }, 900);
         }
 
         // ==================== 共享剪贴板（无缝双向同步，文本/图片） ====================
@@ -5245,7 +5307,12 @@
             el.textContent = text;
             el.style.display = 'block';
             if (autoHideMs > 0) {
-                transferStatusTimer = setTimeout(() => { el.style.display = 'none'; }, autoHideMs);
+                // [N13] 隐藏时连文本一起清掉：只设 display:none 会让"已使用图片模式"
+                // "正在注入解锁密码…"这类过期文案留在 DOM 里，截图取证/排障时误导。
+                transferStatusTimer = setTimeout(() => {
+                    el.textContent = '';
+                    el.style.display = 'none';
+                }, autoHideMs);
             }
         }
 
