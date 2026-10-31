@@ -1,0 +1,19 @@
+=== pwd: /home/runner/work/QtRemoteDesktop/QtRemoteDesktop
+=== setup_qt.log ===
+(不存在)
+=== fetch_sources.log ===
+=== downloading FFmpeg 6.1.2 ===
+mv: cannot stat 'src/remotedesk/thridparty/ffmpeg/FFmpeg-6.1.2': No such file or directory
+=== configure.log ===
+(不存在)
+=== build.log ===
+(不存在)
+=== build_linux.log ===
+(不存在)
+=== deploy.log ===
+(不存在)
+=== package.log ===
+(不存在)
+=== smoke.log ===
+(不存在)
+=== 错误摘要 ===
