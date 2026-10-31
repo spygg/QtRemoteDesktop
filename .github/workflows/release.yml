@@ -1,0 +1,460 @@
+name: Release
+
+# 推 v* 标签即构建三平台产物并发布 GitHub Release。
+# workflow_dispatch（手动）只产出 workflow artifacts，方便先验证流水线再打 tag。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      # 一个平台失败不要拖掉另外两个：三方源码 + FFmpeg 首次编译几十分钟，
+      # 全量重跑代价很高
+      fail-fast: false
+      matrix:
+        config:
+          # Windows 现代平台（Win7/10/11 x64）：Qt 5.15.2 + MinGW 8.1 64 位，FFmpeg 6.1.2。
+          # 新驱动不再回答 NVENC API 8.0 的「预设 GUID」接口，3.4.8 在这类机器上
+          # avcodec_open2 直接返回 -40，4.1 起的 p1–p7 词表才可用。
+          # tools: tools_mingw —— install-qt-action 装 mingw 架构的 Qt 时并不会顺带装编译器，
+          # 必须显式要，否则 cmake 只能找到 runner 的 MSVC（而三方源码只支持 GNU make/GCC）。
+          - name: Windows x64
+            key: windows-x64
+            os: windows-2022
+            qt_official: 'true'
+            qt: '5.15.2'
+            qt_host: windows
+            qt_target: desktop
+            qt_arch: win64_mingw81
+            qt_tools: 'tools_mingw'
+            ffmpeg: '6.1.2'
+            # FFmpeg >= 5 源码树里没有 compat/nvenc，必须外部 nv-codec-headers
+            nvcodec: 'n12.2.72.0'
+            artifact: QtRemoteDesktop-windows-x64.zip
+          # Windows XP / 老 Win7（32 位）：Qt 5.7 是最后一个官方支持 XP 的版本；MSVC 运行库
+          # 在 XP 上装不上，所以用 MinGW 5.3 32 位（产物无 VC 运行时依赖）。
+          # Qt 5.7 在线仓库已下架、aqtinstall 不支持 5.9 以下，因此从离线安装包解包。
+          # FFmpeg 固定 3.4.8：mingw530 是 32 位而 NVIDIA 不提供 32 位 CUDA，
+          # 这里硬编本来就用不上，升版本只会逼着全部三方产物重编。
+          - name: Windows XP x86
+            key: windows-xp
+            os: windows-2022
+            qt_official: 'false'
+            qt: '5.7.1'
+            qt_host: windows
+            qt_target: desktop
+            qt_arch: win32_mingw53
+            qt_tools: ''
+            ffmpeg: '3.4.8'
+            nvcodec: ''
+            artifact: QtRemoteDesktop-windows-xp.zip
+          # Linux x86_64：ubuntu-22.04（较旧的 glibc，产物能回到更老的发行版）。
+          # 直接复用仓库内的 build_linux.sh —— 它的依赖检查、NVENC/VAAPI 探测和
+          # FFmpeg/openh264 构建顺序都在本机验证过，比在这里重写一遍 cmake 更可信。
+          # macOS 不入矩阵：Service/Shell/ScreenCapturer 缺 Apple 平台实现，
+          # build_mac.sh 头部已注明「大概率在链接阶段失败」，发布出去也不可用。
+          - name: Linux x86_64
+            key: linux-x86_64
+            os: ubuntu-22.04
+            qt_official: 'true'
+            qt: '5.15.2'
+            qt_host: linux
+            qt_target: desktop
+            qt_arch: gcc_64
+            qt_tools: ''
+            ffmpeg: '6.1.2'
+            nvcodec: 'n12.2.72.0'
+            artifact: QtRemoteDesktop-linux-x86_64.tar.gz
+
+    env:
+      # 矩阵值不直接写进 run 块（GitHub 先做字符串替换，带空格的值会把命令行拆碎），
+      # 统一经环境变量交给脚本
+      QT_VERSION: ${{ matrix.config.qt }}
+      QT_ARCH: ${{ matrix.config.qt_arch }}
+      FFMPEG_VER: ${{ matrix.config.ffmpeg }}
+      NVCODEC_TAG: ${{ matrix.config.nvcodec }}
+      ARTIFACT_NAME: ${{ matrix.config.artifact }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------- Qt（在线仓库覆盖得到的版本）----------
+      - name: Install Qt
+        if: matrix.config.qt_official == 'true'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ matrix.config.qt }}
+          host: ${{ matrix.config.qt_host }}
+          target: ${{ matrix.config.qt_target }}
+          arch: ${{ matrix.config.qt_arch }}
+          tools: ${{ matrix.config.qt_tools }}
+          # 关掉 action 自带的 Qt 缓存：它按输入做 key，出现过恢复出旧版本 Qt 导致链接错乱；
+          # Qt 本体解压只有几十秒，不值得冒这个风险
+          cache: false
+
+      # ---------- Qt 5.7.1 + MinGW 5.3（XP 目标，只能走离线安装包）----------
+      - name: Restore Qt 5.7 cache
+        if: matrix.config.qt_official == 'false'
+        uses: actions/cache@v4
+        with:
+          path: D:/qt571
+          key: qt571-win32-mingw53-v1
+
+      # 离线 exe 是 7-Zip 三层结构：exe → [0] 流（安装器容器）→ 编号 7z 组件载荷。
+      # 只抽取含 mingw53 的组件（Qt 库 + MinGW 工具链），跳过文档/示例。
+      - name: Setup Qt 5.7 + MinGW 5.3 (Windows XP)
+        if: matrix.config.qt_official == 'false'
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            mkdir -p /d/qt571 && cd /d/qt571
+            QMAKE=$(find /d/qt571 -type f -name qmake.exe 2>/dev/null | head -1)
+            if [ -z "$QMAKE" ]; then
+              echo "=== cache miss: downloading offline installer ==="
+              curl -sL --retry 3 -o qt571.exe \
+                "https://download.qt.io/archive/qt/5.7/5.7.1/qt-opensource-windows-x86-mingw530-5.7.1.exe"
+              ls -la qt571.exe
+              mkdir -p stage && cd stage
+              echo "=== layer 1: extract [0] payload container from exe ==="
+              7z x -y "../qt571.exe" -t'*' -i'![0]' > /dev/null
+              echo "=== layer 2: split numbered component archives ==="
+              7z x -y "[0]" -t'#' -i'!*.7z' > /dev/null
+              echo "=== layer 3: extract components containing mingw53 ==="
+              for f in [0-9]*.7z; do
+                if 7z l "$f" 2>/dev/null | grep -q "mingw53"; then
+                  echo "HIT: $f"
+                  7z x -y -o/d/qt571 "$f" | tail -1
+                else
+                  echo "skip: $f"
+                fi
+              done
+            fi
+            QTBIN=$(find /d/qt571 -type f -name qmake.exe | head -1 | xargs dirname)
+            GCCBIN=$(find /d/qt571 -type f -name "g++.exe" | head -1 | xargs dirname)
+            echo "QTBIN=$QTBIN"
+            echo "GCCBIN=$GCCBIN"
+            { [ -n "$QTBIN" ] && [ -n "$GCCBIN" ]; } || { echo "::error::Qt5.7/mingw530 未解包成功"; exit 1; }
+
+            # 解包出来的 qmake/windeployqt 仍带着构建机路径 (c:/Users/qt/work/install)，
+            # 用 qt.conf 把前缀指回解包目录
+            printf '[Paths]\nPrefix=..\n' > "$QTBIN/qt.conf"
+            # cc1plus 等在 libexec 目录，运行时按「程序目录 → PATH」找 libwinpthread-1.dll；
+            # PATH 上 Git 自带的 64 位同名 DLL 会让 32 位 cc1plus 静默加载失败，
+            # 所以把运行库复制进程序目录（搜索优先级最高）
+            for d in "$GCCBIN/../libexec/gcc/i686-w64-mingw32/5.3.0" \
+                     "$GCCBIN/../lib/gcc/i686-w64-mingw32/5.3.0"; do
+              for f in libwinpthread-1.dll libstdc++-6.dll libgcc_s_dw2-1.dll; do
+                cp "$GCCBIN/$f" "$d/$f" 2>/dev/null && echo "seeded $d/$f"
+              done
+            done
+
+            # QT_ROOT_DIR 与 install-qt-action 的变量名对齐，Windows 两个 job 后续的
+            # configure/deploy 步骤因此完全共用
+            echo "QT_ROOT_DIR=$(cygpath -w "$QTBIN/..")" >> "$GITHUB_ENV"
+            echo "MINGW_BIN=$(cygpath -w "$GCCBIN")" >> "$GITHUB_ENV"
+            echo "=== toolchain check ==="
+            "$GCCBIN/gcc.exe" -v 2>&1 | head -3
+            "$QTBIN/qmake.exe" -query QT_INSTALL_PREFIX
+            "$QTBIN/qmake.exe" -query QT_VERSION
+            echo 'int main(){return 0;}' > smoke.cxx
+            "$GCCBIN/g++.exe" -m32 smoke.cxx -o smoke.exe && ./smoke.exe && echo "COMPILE_OK"
+          } 2>&1 | tee setup_qt.log
+
+      # ---------- 定位 MinGW 编译器 ----------
+      # tools_mingw 的具体变体名随 Qt 上游仓库变化（mingw810_64 / mingw1310_64 …），
+      # 所以这里按位宽扫目录而不是硬编码路径；找不到就直接失败并报清楚，
+      # 不能让 cmake 悄悄退回 runner 的 MSVC（三方源码编不过，错误会在几十分钟后才爆）。
+      - name: Locate MinGW
+        if: matrix.config.qt_official == 'true' && startsWith(matrix.config.os, 'windows')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bits = if ($env:QT_ARCH -like 'win64*') { '64' } else { '32' }
+          $roots = @($env:IQTA_TOOLS, (Join-Path (Split-Path $env:QT_ROOT_DIR -Parent) 'Tools')) |
+                   Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          $gpp = $null
+          foreach ($r in $roots) {
+            $cand = Get-ChildItem $r -Directory -Filter "mingw*_$bits" -ErrorAction SilentlyContinue |
+                    ForEach-Object { Join-Path $_.FullName 'bin\g++.exe' } |
+                    Where-Object { Test-Path $_ } | Sort-Object | Select-Object -Last 1
+            if ($cand) { $gpp = $cand; break }
+          }
+          if (-not $gpp) {
+            $onPath = Get-Command g++.exe -ErrorAction SilentlyContinue
+            if ($onPath) {
+              $gpp = $onPath.Source
+              Write-Warning "IQTA_TOOLS 下没有 mingw$bits，退回 PATH 里的 $gpp（与 Qt 的编译器版本可能不一致）"
+            }
+          }
+          if (-not $gpp) {
+            Write-Host "::error::找不到 MinGW g++（QT_ARCH=$env:QT_ARCH, IQTA_TOOLS=$env:IQTA_TOOLS）"
+            exit 1
+          }
+          $mingwBin = Split-Path $gpp -Parent
+          Write-Host "g++: $gpp"
+          & $gpp -v 2>&1 | Select-Object -Last 1
+          "MINGW_BIN=$mingwBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Qt WebSockets 缺失会在链接阶段才报 -lQt5WebSockets not found，
+          # 这里提前判：需要时给 install-qt-action 加 modules: 'qtwebsockets'
+          if (-not (Get-ChildItem "$env:QT_ROOT_DIR\bin" -Filter 'Qt*WebSockets*' -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::Qt WebSockets 模块缺失：给 Install Qt 步骤加 modules: 'qtwebsockets'"
+            exit 1
+          }
+
+      # ---------- 三方源码（仓库里被 .gitignore 排除，CI 现场下载）----------
+      - name: Fetch FFmpeg + nv-codec-headers sources
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            FFDIR=src/remotedesk/thridparty/ffmpeg
+            mkdir -p "$FFDIR"
+            # 目录名必须符合 CMake/构建脚本的 FFmpeg-n<版本> 约定
+            if [ ! -d "$FFDIR/FFmpeg-n$FFMPEG_VER" ]; then
+              echo "=== downloading FFmpeg $FFMPEG_VER ==="
+              curl -sL --retry 3 -o /tmp/ff.tar.gz \
+                "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$FFMPEG_VER.tar.gz"
+              tar -xzf /tmp/ff.tar.gz -C "$FFDIR"
+              mv "$FFDIR/FFmpeg-$FFMPEG_VER" "$FFDIR/FFmpeg-n$FFMPEG_VER"
+              # Git bash 在 Windows 文件系统上不一定保得住 tar 里的执行位，
+              # 而 BuildFFmpeg.cmake 是把 configure 当命令直接执行的
+              chmod +x "$FFDIR/FFmpeg-n$FFMPEG_VER/configure"
+              ls -l "$FFDIR/FFmpeg-n$FFMPEG_VER/configure"
+            fi
+            # 3.4.8 自带 compat/nvenc，不需要外部头
+            if [ -n "$NVCODEC_TAG" ] && [ ! -d "$FFDIR/nv-codec-headers-$NVCODEC_TAG" ]; then
+              echo "=== downloading nv-codec-headers $NVCODEC_TAG ==="
+              curl -sL --retry 3 -o /tmp/nv.tar.gz \
+                "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/$NVCODEC_TAG.tar.gz"
+              tar -xzf /tmp/nv.tar.gz -C "$FFDIR"
+              ls "$FFDIR/nv-codec-headers-$NVCODEC_TAG/include/ffnvcodec"
+            fi
+            # Linux 的 metaRTC OpenSSL 兼容层要仓库内的 tarball
+            # （third_party_src/openssl/CMakeLists.txt 缺失即 FATAL_ERROR，而 *.tar.gz 被忽略）
+            OSSL=src/remotedesk/thridparty/third_party_src/openssl
+            if [ "$RUNNER_OS" = "Linux" ] && [ ! -f "$OSSL/openssl-1.0.2u.tar.gz" ]; then
+              echo "=== downloading OpenSSL 1.0.2u tarball ==="
+              ok=""
+              for u in \
+                "https://github.com/openssl/openssl/releases/download/openssl-1.0.2u/openssl-1.0.2u.tar.gz" \
+                "https://openssl-library.org/source/old/1.0.2/openssl-1.0.2u.tar.gz" \
+                "https://www.openssl.org/source/openssl-1.0.2u.tar.gz"; do
+                if curl -sfL --retry 2 -o "$OSSL/openssl-1.0.2u.tar.gz" "$u"; then ok="$u"; break; fi
+              done
+              [ -n "$ok" ] || { echo "::error::OpenSSL 1.0.2u tarball 下载失败"; exit 1; }
+              echo "from $ok"
+              sha256sum "$OSSL/openssl-1.0.2u.tar.gz"
+            fi
+          } 2>&1 | tee fetch_sources.log
+
+      - name: Install Linux dependencies
+        if: startsWith(matrix.config.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install --no-install-recommends \
+            build-essential cmake pkg-config yasm nasm autoconf libtool patchelf \
+            libx11-dev libxext-dev libxi-dev libxtst-dev libxdamage-dev libxcomposite-dev \
+            libxrender-dev libxfixes-dev libxrandr-dev libxcb-shm0-dev \
+            libssl-dev zlib1g-dev libasound2-dev libpcap-dev libdrm-dev
+          nasm -v
+
+      # ---------- 构建 ----------
+      # Windows 直接 cmake：生成器固定 MinGW Makefiles（三方源码要 GNU make），
+      # 编译器/make 都用上一步定位到的 MinGW，避免混进 MSVC 或 MSYS2 的 GCC 13。
+      - name: Configure (Windows)
+        if: startsWith(matrix.config.os, 'windows')
+        shell: bash
+        run: |
+          set -o pipefail
+          QT=$(cygpath -u "$QT_ROOT_DIR")
+          MG=$(cygpath -u "$MINGW_BIN")
+          cmake -G "MinGW Makefiles" -S src -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$MG/gcc.exe" \
+            -DCMAKE_CXX_COMPILER="$MG/g++.exe" \
+            -DCMAKE_MAKE_PROGRAM="$MG/mingw32-make.exe" \
+            -DCMAKE_PREFIX_PATH="$QT" \
+            -DBUILD_THIRDPARTY=ON \
+            -DFFMPEG_VERSION="$FFMPEG_VER" 2>&1 | tee configure.log
+          echo "=== FFmpeg 版本 / 硬编探测 ==="
+          grep -E "FFmpeg 版本|硬件编码器自动探测|x86asm|NVENC" configure.log || true
+
+      - name: Build (Windows)
+        if: startsWith(matrix.config.os, 'windows')
+        shell: bash
+        run: |
+          set -o pipefail
+          # 首次构建要现编 FFmpeg + openh264 + metaRTC + srtp，几十分钟量级
+          cmake --build build --parallel 3 2>&1 | tee build.log
+          ls -la bin/QtRemoteDesktop.exe
+
+      # Linux 调仓库自带脚本：依赖检查、硬编探测、FFmpeg 构建顺序都在本机验证过
+      - name: Build (Linux)
+        if: startsWith(matrix.config.os, 'ubuntu')
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x src/linux_build_script/build_linux.sh
+          FFMPEG_VERSION="$FFMPEG_VER" \
+            ./src/linux_build_script/build_linux.sh -Q "$QT_ROOT_DIR" -j "$(nproc)" \
+            2>&1 | tee build_linux.log
+          echo "=== 硬编探测 ==="
+          grep -E "NVENC|VAAPI|FFmpeg 版本|硬件" build_linux.log || true
+          ls -la bin/QtRemoteDesktop
+
+      # ---------- 部署 + 打包 ----------
+      - name: Package (Windows)
+        if: startsWith(matrix.config.os, 'windows')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # windeployqt 负责 Qt DLL 与平台/图像插件；运行库自己拷，
+          # 因为 MinGW 运行库按位宽换名（dw2 / seh），按工具链实际文件名取更稳
+          & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations `
+              --no-opengl-sw --no-compiler-runtime "bin\QtRemoteDesktop.exe" 2>&1 | Tee-Object deploy.log
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::windeployqt 失败"; exit 1 }
+          foreach ($pat in @('libgcc_s_*.dll', 'libstdc++-*.dll', 'libwinpthread-*.dll')) {
+            Get-ChildItem $env:MINGW_BIN -Filter $pat -File -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName bin\ -Force; Write-Host "copied $($_.Name)" }
+          }
+          # 发布包不能 32/64 位混装：逐个校验 PE 机器类型（0x14c=x86, 0x8664=x64）
+          $want = if ($env:QT_ARCH -like 'win64*') { 0x8664 } else { 0x14c }
+          $bad = @()
+          Get-ChildItem bin -Recurse -Include *.exe, *.dll | ForEach-Object {
+            $fs = [IO.File]::OpenRead($_.FullName)
+            try {
+              $br = New-Object IO.BinaryReader($fs)
+              $fs.Position = 0x3C; $pe = $br.ReadInt32()
+              $fs.Position = $pe + 4
+              if ($br.ReadUInt16() -ne $want) { $bad += $_.Name }
+            } finally { $fs.Dispose() }
+          }
+          if ($bad.Count) { Write-Host "::error::PE 位宽不一致: $($bad -join ', ')"; exit 1 }
+          Get-ChildItem bin | Select-Object Name, Length
+          Compress-Archive -Path bin\* -DestinationPath $env:ARTIFACT_NAME -Force
+          Get-Item $env:ARTIFACT_NAME | Select-Object Name, Length
+
+      - name: Package (Linux)
+        if: startsWith(matrix.config.os, 'ubuntu')
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            DIST=dist
+            rm -rf "$DIST" && mkdir -p "$DIST/lib"
+            cp bin/QtRemoteDesktop "$DIST/"
+            # 插件按 Qt 标准布局放在可执行文件同级（main.cpp 的 ensureQtPluginPath
+            # 也会按 argv[0] 目录再兜一次）
+            for g in platforms imageformats platforminputcontexts xcbglintegrations styles; do
+              [ -d "$QT_ROOT_DIR/plugins/$g" ] && cp -a "$QT_ROOT_DIR/plugins/$g" "$DIST/" || true
+            done
+            # BFS 只收 $QT_ROOT_DIR/lib 下的 Qt .so：glibc/libxcb 之类系统库留在目标机，
+            # 打进包反而会和宿主 ABI 冲突
+            qtlibs() { ldd "$@" 2>/dev/null | awk -v p="$QT_ROOT_DIR/lib" '$3 ~ p {print $3}'; }
+            seen=""
+            queue=$(qtlibs "$DIST/QtRemoteDesktop" $(find "$DIST" -name '*.so' -o -name '*.so.*'))
+            while [ -n "$queue" ]; do
+              next=""
+              for f in $queue; do
+                case "$seen" in *" $f "*) continue ;; esac
+                [ -f "$f" ] || continue
+                cp -a -n "$f" "$DIST/lib/" 2>/dev/null || true
+                seen="$seen $f "
+                next="$next $(qtlibs "$DIST/lib/$(basename "$f")")"
+              done
+              queue="$next"
+            done
+            # 运行时搜索路径：exe → $ORIGIN/lib，lib/* → $ORIGIN，插件 → $ORIGIN/../lib
+            patchelf --set-rpath '$ORIGIN/lib' "$DIST/QtRemoteDesktop"
+            for f in "$DIST"/lib/*; do patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true; done
+            for d in "$DIST"/platforms "$DIST"/imageformats "$DIST"/platforminputcontexts "$DIST"/xcbglintegrations "$DIST"/styles; do
+              [ -d "$d" ] || continue
+              for f in "$d"/*.so; do patchelf --set-rpath '$ORIGIN/../lib' "$f" 2>/dev/null || true; done
+            done
+            echo "=== staged ==="
+            du -sh "$DIST"; ls "$DIST"; ls "$DIST/lib" | head -40
+            miss=$(LD_LIBRARY_PATH= ldd "$DIST/QtRemoteDesktop" | grep 'not found' || true)
+            echo "=== 未解析依赖: ${miss:-none} ==="
+            [ -z "$miss" ] || { echo "::error::打包后仍有未解析依赖"; exit 1; }
+            # 冒烟：offscreen 平台跑 --version，证明 Qt 运行库 + 平台插件真能被加载
+            QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH="$DIST" "$DIST/QtRemoteDesktop" --version 2>&1 | tee smoke.log || true
+            tar -czf "$ARTIFACT_NAME" -C dist .
+            ls -la "$ARTIFACT_NAME"
+          } 2>&1 | tee package.log
+
+      - name: Verify artifact exists
+        shell: bash
+        run: |
+          test -f "$ARTIFACT_NAME" || { echo "::error::产物缺失: $ARTIFACT_NAME"; exit 1; }
+          ls -la "$ARTIFACT_NAME"
+
+      # 调试：失败时把日志推到 logs-<key> 分支（公开仓库网页上直接可读），
+      # 否则只能在一屏就被截断的 Actions 输出里猜哪一步错了
+      - name: Dump logs to logs branch
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          BR="logs-${{ matrix.config.key }}"
+          git config user.email "ci@remotedesk.local"
+          git config user.name "remotedesk-ci"
+          git fetch origin "$BR" 2>/dev/null || true
+          git checkout -B "$BR" "origin/$BR" 2>/dev/null || git checkout -B "$BR"
+          mkdir -p ci-logs
+          {
+            echo "=== pwd: $(pwd)"
+            for f in setup_qt.log fetch_sources.log configure.log build.log build_linux.log deploy.log package.log smoke.log; do
+              echo "=== $f ==="
+              cat "$f" 2>/dev/null || echo "(不存在)"
+            done
+            echo "=== 错误摘要 ==="
+            grep -inE "error|undefined reference|cannot find|No such file|fatal" \
+              build.log build_linux.log configure.log 2>/dev/null | tail -80
+          } > ci-logs/all.log
+          # .gitignore 里有 *.txt / build*/，必须 -f 才加得进来
+          git add -f ci-logs/all.log
+          git commit -m "ci logs: ${{ matrix.config.name }} run ${{ github.run_id }} $(date -u +%Y%m%d%H%M%S)" || true
+          git push --force origin "$BR"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.config.key }}
+          path: ${{ matrix.config.artifact }}
+          if-no-files-found: error
+
+  # 汇总发布：三个 job 并发往同一个 release 传文件会互相覆盖（release 是同一个对象），
+  # 所以改成各 job 只交产物，由这一个 job 一次性上传。
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: List
+        run: find release-assets -type f -printf '%p %s bytes\n'
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 用上一个 tag 到本 tag 的提交记录自动生成发布说明，
+          # 否则 release 页面是空的，用户不知道这一版改了什么
+          generate_release_notes: true
+          files: |
+            release-assets/*/*.zip
+            release-assets/*/*.tar.gz
