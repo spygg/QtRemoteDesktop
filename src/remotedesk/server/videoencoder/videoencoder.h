@@ -36,6 +36,9 @@ public:
     bool initialize(CodecType type, int srcW, int srcH, int encW, int encH, int fps, int bitrate,
                     HwEncodeMode hwMode = HwEncodeMode::Auto);
     void encode(const QImage& frame);
+    // 采集端保证外发帧在编码完成前不被原地改写（X11 双缓冲）时开启：encode()
+    // 直接入队共享帧，省掉每帧 8MB 级深拷贝。默认 false，其他平台行为不变。
+    void setAssumeExclusiveInput(bool on) { assumeExclusiveInput_ = on; }
     void shutdown();
     // [N6] 重建路径专用：停线程并释放资源；线程卡死在驱动调用时返回 false
     // （绝不 qFatal——调用方必须退役本对象、新建编码器继续服务）。
@@ -126,6 +129,9 @@ private:
     QMutex mutex_;
     QWaitCondition condition_;
     QQueue<QImage> frameQueue_;
+    // 采集端是否保证帧缓冲独占（见 setAssumeExclusiveInput）。非原子：只在主线程写、
+    // encode() 也在主线程调用（信号直连）。
+    bool assumeExclusiveInput_ = false;
     // [DIAG] 最近一次入队时刻（mutex_ 保护）：用于 ENC-LAT 延迟分解日志
     qint64 lastEnqueueMs_ = 0;
     static constexpr int kMaxFrameQueueSize = 10; // 队列上限，防止 OOM
@@ -133,6 +139,12 @@ private:
 
     AVCodecContext* codecCtx_ = nullptr;
     AVFrame* frame_ = nullptr;
+    // VAAPI 硬编：frame_ 是 CPU 可写的软件帧（NV12），编码前 upload 到临时
+    // AV_PIX_FMT_VAAPI 表面再送编码器；hwDeviceCtx_ 是 DRM render node 创建的
+    // VAAPI 设备。非 VAAPI 路径该指针恒空，行为与旧版一致。
+    AVBufferRef* hwDeviceCtx_ = nullptr;
+    // 色彩转换的目标格式：普通软编=codec 的 pix_fmt；VAAPI=NV12（软件侧格式）。
+    AVPixelFormat swPixFmt_ = AV_PIX_FMT_YUV420P;
     // 色彩转换上下文：按 CPU 核数切成 N 条（每条独立 SwsContext），
     // 把单线程 sws_scale（ARM 上 RGB32→YUV 无 NEON 实现，实测 1600x1200 达 86ms）
     // 拆成并行条带。N=1 时退化为原来的单上下文路径。

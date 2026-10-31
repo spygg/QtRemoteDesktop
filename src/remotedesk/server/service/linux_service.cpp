@@ -2818,6 +2818,14 @@ int LinuxService::install(int argc, char* argv[])
     fprintf(f, "Wants=network-online.target\n\n");
     fprintf(f, "[Service]\n");
     fprintf(f, "Type=simple\n");
+    // [P2] glibc 堆参数：远程桌面进程会周期性重建编码器（切画质/分辨率/客户端
+    // 重连），每次都要分配/释放多块 MB 级帧缓冲。glibc 默认按 CPU 核数开 arena，
+    // 且 free 后只留在 arena 里不归还 OS（RSS 只涨不落）；mmap 阈值动态上涨后
+    // 大块分配也改走 brk/arena，同样只涨不落。这里把 arena 限制为 2，并固定
+    // mmap/trim 阈值，让大块释放能真正 return 给系统。只影响堆布局，不影响功能。
+    fprintf(f, "Environment=MALLOC_ARENA_MAX=2\n");
+    fprintf(f, "Environment=MALLOC_MMAP_THRESHOLD_=131072\n");
+    fprintf(f, "Environment=MALLOC_TRIM_THRESHOLD_=131072\n");
     if (startDelaySec > 0) {
         // 兜底的"晚点启动"：After= 只保证顺序，不保证"再等几秒"。
         // - 前缀让 sleep 失败（某些系统 sleep 不在 /bin）也不影响启动。

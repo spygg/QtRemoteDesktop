@@ -202,6 +202,13 @@ cd "$dirname/"
 
 export QT_LOGGING_RULES="*.debug=true"
 
+# [P2] glibc 堆参数（与 systemd unit 保持一致）：编码器重建会频繁分配/释放
+# MB 级帧缓冲，默认按核数开 arena 且 free 后不归还 OS，长跑 RSS 只涨不落。
+# 用 \${VAR:-默认值} 保留启动前手动覆盖的能力。
+export MALLOC_ARENA_MAX="\${MALLOC_ARENA_MAX:-2}"
+export MALLOC_MMAP_THRESHOLD_="\${MALLOC_MMAP_THRESHOLD_:-131072}"
+export MALLOC_TRIM_THRESHOLD_="\${MALLOC_TRIM_THRESHOLD_:-131072}"
+
 "$dirname/$appname" "$@"
 EOF
 

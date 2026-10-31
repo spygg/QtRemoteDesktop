@@ -820,6 +820,10 @@ int HelperProcess::run(int argc, char* argv[])
                         lastIdrEpochValid = false;
                         submittedEpochs.enqueue(capturer.contentChangeCount());
                     }
+                    // 采集端保证外发帧在编码读完前不被改写（X11 双缓冲）时走零拷贝入队，
+                    // 否则 1080p 每帧多一次 8.3MB 深拷贝。与单进程路径 rdpserver.cpp
+                    // 的同名调用一致；Windows 采集返回 false，行为不变。
+                    encoder->setAssumeExclusiveInput(capturer.framesAreExclusive());
                     encoder->encode(frame);
                 }
                 return;

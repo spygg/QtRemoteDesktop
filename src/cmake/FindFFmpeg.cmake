@@ -1,6 +1,8 @@
 # Custom FindFFmpeg module for QtRemoteDesktop.
-# Locates the locally-built FFmpeg 3.4.8 static libs (libavcodec/libavutil/libswscale)
-# under <repo>/build_output/ffmpeg_install.
+# Locates the locally-built FFmpeg static libs (libavcodec/libavutil/libswscale).
+# 搜索根由 src/CMakeLists.txt 按版本选择结果设进 FFMPEG_ROOT（3.4.8 走
+# <repo>/build_output/ffmpeg_install，6.x 走 …/ffmpeg_install-<版本>），
+# 因此这里不再假设具体版本。
 #
 # 库文件名兼容多种工具链：
 #   MinGW/GCC/Clang : libavcodec.a / libavcodec.lib
@@ -93,12 +95,61 @@ if(FFMPEG_FOUND)
     if(WIN32)
         set(FFMPEG_EXTRA_LIBS
             ws2_32 user32 vfw32 secur32 psapi advapi32 shell32 ole32)
+        # FFmpeg >= 5 的 libavutil/random_seed.c 走 BCryptGenRandom 取随机种子
+        # （configure 的 check_lib bcrypt 通过就会编进这条路径，3.4.8 没有），
+        # 少了 -lbcrypt 会在链接 QtRemoteDesktop 时报
+        # undefined reference to `BCryptOpenAlgorithmProvider'。
+        # bcrypt.dll 是 Vista+ 的系统 DLL，所以这条只影响 64 位新版本产物；
+        # 32 位（XP/Win7 那批机器）沿用 3.4.8，链接行与以前完全一致。
+        if(NOT FFMPEG_VERSION_EFFECTIVE VERSION_LESS 5)
+            list(APPEND FFMPEG_EXTRA_LIBS bcrypt)
+        endif()
         if(MINGW)
             # MinGW 运行时提供 m；iconv 仅在使用 libiconv 的 MinGW 版 FFmpeg 时需要。
             list(APPEND FFMPEG_EXTRA_LIBS iconv m)
         endif()
     else()
         set(FFMPEG_EXTRA_LIBS pthread dl m)
+        # FFmpeg 以 --enable-vaapi 静态编译时，libavutil/hwcontext_vaapi.o 会引用
+        # libva（以及可选的 libva-drm/libva-x11/libdrm）。仅当产物确实带 VAAPI 时
+        # 才追加，否则会让可执行文件无端依赖 libva（部署机没装时直接启动失败）。
+        set(_ffmpeg_has_vaapi FALSE)
+        set(_ffmpeg_avcodec_pc "${FFMPEG_ROOT}/lib/pkgconfig/libavcodec.pc")
+        if(EXISTS "${_ffmpeg_avcodec_pc}")
+            file(READ "${_ffmpeg_avcodec_pc}" _ffmpeg_pc_text)
+            # 静态构建的 Libs 行带 -lva（vaapi/vaapi_drm/vaapi_x11 的 check_lib
+            # 结果会累加进全局 extralibs 并写进 .pc）
+            if(_ffmpeg_pc_text MATCHES "-lva([ )]|$)")
+                set(_ffmpeg_has_vaapi TRUE)
+            endif()
+        elseif(FFMPEG_ASSUME_BUILT)
+            # 首次构建：FFmpeg 尚未 install（无 .pc）。构建脚本按 libva 是否存在
+            # 决定是否 --enable-vaapi，这里用同样的判据。
+            find_library(FFMPEG_VA_LIBRARY NAMES va)
+            if(FFMPEG_VA_LIBRARY)
+                set(_ffmpeg_has_vaapi TRUE)
+            endif()
+        endif()
+        if(_ffmpeg_has_vaapi)
+            if(NOT FFMPEG_VA_LIBRARY)
+                find_library(FFMPEG_VA_LIBRARY NAMES va)
+            endif()
+            if(FFMPEG_VA_LIBRARY)
+                list(APPEND FFMPEG_EXTRA_LIBS "${FFMPEG_VA_LIBRARY}")
+                find_library(FFMPEG_VA_DRM_LIBRARY NAMES va-drm)
+                if(FFMPEG_VA_DRM_LIBRARY)
+                    list(APPEND FFMPEG_EXTRA_LIBS "${FFMPEG_VA_DRM_LIBRARY}")
+                endif()
+                find_library(FFMPEG_VA_X11_LIBRARY NAMES va-x11)
+                if(FFMPEG_VA_X11_LIBRARY)
+                    list(APPEND FFMPEG_EXTRA_LIBS "${FFMPEG_VA_X11_LIBRARY}")
+                endif()
+                find_library(FFMPEG_DRM_LIBRARY NAMES drm)
+                if(FFMPEG_DRM_LIBRARY)
+                    list(APPEND FFMPEG_EXTRA_LIBS "${FFMPEG_DRM_LIBRARY}")
+                endif()
+            endif()
+        endif()
     endif()
     if(_OPENH264_LIB)
         list(INSERT FFMPEG_EXTRA_LIBS 0 "${_OPENH264_LIB}")
@@ -115,4 +166,8 @@ endif()
 mark_as_advanced(FFMPEG_INCLUDE_DIR
                  FFMPEG_AVCODEC_LIBRARY
                  FFMPEG_AVUTIL_LIBRARY
-                 FFMPEG_SWSCALE_LIBRARY)
+                 FFMPEG_SWSCALE_LIBRARY
+                 FFMPEG_VA_LIBRARY
+                 FFMPEG_VA_DRM_LIBRARY
+                 FFMPEG_VA_X11_LIBRARY
+                 FFMPEG_DRM_LIBRARY)

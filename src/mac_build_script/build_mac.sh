@@ -13,7 +13,7 @@
 #       即便编译通过也无法获得屏幕录制权限（CGDisplayCreateImage 返回空）。
 #   结论：macOS 目前属于"未验证/不可用"平台，仅 Windows 与 Linux(X11) 可用。
 #
-# 与 Linux/Windows 构建对应：FFmpeg 3.4.8 + openh264 源码编译，产物输出到
+# 与 Linux/Windows 构建对应：FFmpeg（默认 6.1.2，见 FFMPEG_VERSION）+ openh264 源码编译，产物输出到
 #   <repo>/build    (cmake 中间目录)
 #   <repo>/bin      (最终可执行文件)
 #   <repo>/build_output  (第三方库产物: ffmpeg_install/openh264_install)
@@ -97,10 +97,21 @@ detect_qt() {
     exit 1
 }
 
-FFMPEG_SRC="$SRC_DIR/remotedesk/thridparty/ffmpeg/FFmpeg-n3.4.8"
+# FFmpeg 版本：默认 6.1.2（与 src/CMakeLists.txt 的 64 位默认一致，末尾用
+# -DFFMPEG_VERSION 显式传给 cmake，两边不会各选各的）。老工程沿用 3.4.8：
+# FFMPEG_VERSION=3.4.8 ./build_mac.sh
+FFMPEG_VERSION="${FFMPEG_VERSION:-6.1.2}"
+FFMPEG_MAJOR="${FFMPEG_VERSION%%.*}"
+
+FFMPEG_SRC="$SRC_DIR/remotedesk/thridparty/ffmpeg/FFmpeg-n$FFMPEG_VERSION"
 OPENH264_SRC="$SRC_DIR/remotedesk/thridparty/third_party_src/openh264"
 
-FFMPEG_INSTALL="$OUT_DIR/ffmpeg_install"
+# 老版本沿用 ffmpeg_install（已编好的机器不重编），新版本单独落盘，两版可共存
+if [ "$FFMPEG_MAJOR" -lt 5 ]; then
+    FFMPEG_INSTALL="$OUT_DIR/ffmpeg_install"
+else
+    FFMPEG_INSTALL="$OUT_DIR/ffmpeg_install-$FFMPEG_VERSION"
+fi
 OPENH264_INSTALL="$OUT_DIR/openh264_install"
 
 step() { echo ""; echo ">>> $*"; }
@@ -121,7 +132,8 @@ check_tools() {
     done
     if [ ! -d "$FFMPEG_SRC" ]; then
         echo "错误: 找不到 FFmpeg 源码 $FFMPEG_SRC" >&2
-        echo "请确认 ffmpeg-3.4.8.tar.bz2 已解压到 src/remotedesk/thridparty/ffmpeg/FFmpeg-n3.4.8" >&2
+        echo "请把 ffmpeg-$FFMPEG_VERSION 解压到 $FFMPEG_SRC" >&2
+        echo "（想用其他版本：FFMPEG_VERSION=3.4.8 $0，需该版本源码已就位）" >&2
         exit 1
     fi
 }
@@ -140,7 +152,7 @@ build_openh264() {
     fi
 }
 
-# ---------------- 2. FFmpeg 3.4.8 ----------------
+# ---------------- 2. FFmpeg（版本见 FFMPEG_VERSION）----------------
 build_ffmpeg() {
     if [ -f "$FFMPEG_INSTALL/lib/libavcodec.a" ] && [ $SKIP_FFMPEG -eq 1 ]; then
         echo ">>> FFmpeg 已存在，跳过 ($FFMPEG_INSTALL/lib/libavcodec.a)"
@@ -153,16 +165,25 @@ build_ffmpeg() {
         *)             FFMPEG_ARCH="$(uname -m)" ;;
     esac
     echo "[ffmpeg] 检测到架构: $(uname -m) -> --arch=$FFMPEG_ARCH"
-    step "2/5 编译 FFmpeg 3.4.8 -> $FFMPEG_INSTALL"
-    local ffbuild="$BUILD_DIR/ffmpeg_build"
+    step "2/5 编译 FFmpeg $FFMPEG_VERSION -> $FFMPEG_INSTALL"
+    # 构建目录随版本分开：切版本时不会用上另一个版本的 configure 结果
+    local ffbuild
+    if [ "$FFMPEG_MAJOR" -lt 5 ]; then
+        ffbuild="$BUILD_DIR/ffmpeg_build"
+    else
+        ffbuild="$BUILD_DIR/ffmpeg_build-$FFMPEG_VERSION"
+    fi
     rm -rf "$ffbuild"
     mkdir -p "$ffbuild" "$FFMPEG_INSTALL/lib" "$FFMPEG_INSTALL/include"
+    # avresample 在 FFmpeg 5.0 里已被删除，>=5 的 configure 不认这个开关（给了就直接报错）
+    local ff_avresample_flag="--disable-avresample"
+    [ "$FFMPEG_MAJOR" -lt 5 ] || ff_avresample_flag=""
     ( cd "$ffbuild" && PKG_CONFIG_PATH="$OPENH264_INSTALL/lib/pkgconfig:$HOME/.local/lib/pkgconfig" \
         "$FFMPEG_SRC/configure" \
         --cc=gcc --ld=gcc --arch="$FFMPEG_ARCH" \
         --disable-debug --disable-doc --disable-programs --disable-network \
         --disable-avformat --disable-avfilter --disable-avdevice \
-        --disable-swresample --disable-postproc --disable-avresample \
+        --disable-swresample --disable-postproc $ff_avresample_flag \
         --disable-everything --enable-swscale --enable-libopenh264 \
         --enable-encoder=libopenh264 \
         --enable-decoder=h264 --enable-decoder=mjpeg --enable-decoder=mpeg4 \
@@ -210,6 +231,7 @@ cmake_configure() {
     cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_THIRDPARTY=ON \
+        -DFFMPEG_VERSION="$FFMPEG_VERSION" \
         "${qarg[@]}"
 }
 

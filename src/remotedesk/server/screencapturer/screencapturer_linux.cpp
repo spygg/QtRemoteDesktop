@@ -8,8 +8,10 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QPixmap>
+#include <QRect>
 #include <QScopedValueRollback>
 #include <QSet>
+#include <QVector>
 #include <QRegularExpression>
 #include <chrono>
 #include <cstring>
@@ -214,7 +216,25 @@ class X11Capturer : public PlatformCapturer {
     Damage damage_;
     XserverRegion region_;
     bool damageSupported_ = false;
-    QImage fullFrame_;         // 全屏持久缓冲（RGB32），区域抓取时在其上原地更新
+    // [P1 zero-copy] 双缓冲：编码线程可能还持有上一帧（QImage 隐式共享），
+    // 此时绝不能原地改写同一块像素，否则要整帧 detach（8.3MB memcpy）。
+    // 采集永远写"当前缓冲"，外发时把脏矩形同步到"另一块"后交换角色；只有另一块
+    // 仍被编码线程占用（isDetached()==false）时才退化为整帧 copy。
+    // 这样 VideoEncoder 可以安全地零拷贝入队（framesAreExclusive()==true）。
+    QImage frameBufs_[2];
+    int curBuf_ = 0;
+    bool bufValid_[2] = { false, false };
+    QVector<QRect> pendingRects_;   // 自两块缓冲上次同步以来的脏矩形（图像坐标）
+    bool fullSyncPending_ = false;  // 刚做过全量抓取/换输出：另一块需整帧同步
+    // [P0] 小面积变化合并：光标闪烁/终端 caret/托盘时钟会让 XDamage 每帧都非空，
+    // 但实际只改了几十×几十像素。旧逻辑只要 damage 非空就整屏转换+编码，
+    // 15fps 下纯属浪费。这里把"面积 <5% 且距上次出帧 <100ms"的变化推迟到
+    // 下一个周期；大面积变化（滚动/视频/窗口切换）仍立即出帧，交互延迟由
+    // forceNextFrame() 的全量强制帧兜底。
+    static constexpr int kSmallChangeCoalesceMs = 100;
+    static constexpr qint64 kSmallChangeAreaDiv = 20;   // < 1/20 屏幕面积 = 5%
+    bool pendingFrame_ = false;
+    std::chrono::steady_clock::time_point lastFrameOut_ { };
     bool regionDirty_ = false; // 本次捕获走了区域抓取（已知有变化），无需再做全帧校验和
     bool forceFull_ = false;   // 切换输出后强制下一帧全量抓取（陈旧 damage 区域不适用新输出）
     // 主输出（primary）捕获区域：多屏拼接时虚拟屏大于主屏，
@@ -300,11 +320,7 @@ public:
             offsetX_ = 0; offsetY_ = 0;
         }
 
-        fullFrame_ = QImage(primaryW_, primaryH_, QImage::Format_RGB32);
-        // [B25] 必须清零：damage 路径只回写损伤矩形，未清零的堆内存会随
-        // 画面帧外发（未初始化内存泄漏 + 花屏）。applyOutput 重建路径已有
-        // fill(0)，这里是 initialize 直建路径的补齐。
-        fullFrame_.fill(0);
+        resetFrameBuffers(primaryW_, primaryH_);
 
 #ifdef HAVE_XSHM
         // resolvePrimaryOutput → applyOutput 已按需建过 shm（尺寸匹配时）；
@@ -338,6 +354,113 @@ public:
         return true;
     }
 
+    void resetFrameBuffers(int w, int h)
+    {
+        frameBufs_[0] = QImage(w, h, QImage::Format_RGB32);
+        // [B25] 必须清零：damage 路径只回写损伤矩形，未清零的堆内存会随
+        // 画面帧外发（未初始化内存泄漏 + 花屏）。
+        frameBufs_[0].fill(0);
+        frameBufs_[1] = frameBufs_[0].copy();
+        curBuf_ = 0;
+        bufValid_[0] = bufValid_[1] = true;
+        pendingRects_.clear();
+        fullSyncPending_ = false;
+        pendingFrame_ = false;
+        regionDirty_ = false;
+        lastFrameOut_ = std::chrono::steady_clock::time_point { };
+    }
+
+    QImage& curFrame() { return frameBufs_[curBuf_]; }
+
+    void noteDamageRect(const QRect& r)
+    {
+        if (r.isEmpty())
+            return;
+        // damage 矩形数量异常多时，逐矩形同步反而比整帧拷贝贵：标记整帧同步。
+        if (pendingRects_.size() >= 64) {
+            fullSyncPending_ = true;
+            return;
+        }
+        pendingRects_.append(r);
+    }
+
+    // 把当前缓冲同步到另一块并外发。调用前 curFrame() 已是完整的最新画面。
+    // 另一块若仍被编码线程引用（isDetached()==false），原地写会触发 QImage
+    // 整帧 detach —— 不如直接换一块新缓冲（旧像素由编码线程持有，读完自动释放）。
+    bool emitFrame(QImage& outImage, bool* updated)
+    {
+        QImage& cur = frameBufs_[curBuf_];
+        QImage& other = frameBufs_[1 - curBuf_];
+        const bool otherFree = bufValid_[1 - curBuf_] && other.isDetached();
+        if (!otherFree || fullSyncPending_
+            || other.size() != cur.size() || other.format() != cur.format()) {
+            other = cur.copy();
+            bufValid_[1 - curBuf_] = true;
+        } else {
+            const QRect bounds(0, 0, cur.width(), cur.height());
+            for (const QRect& raw : pendingRects_) {
+                const QRect r = raw.intersected(bounds);
+                if (r.isEmpty())
+                    continue;
+                const int bytes = r.width() * 4;
+                for (int y = r.top(); y <= r.bottom(); ++y) {
+                    memcpy(other.scanLine(y) + r.left() * 4,
+                           cur.constScanLine(y) + r.left() * 4,
+                           static_cast<size_t>(bytes));
+                }
+            }
+        }
+        pendingRects_.clear();
+        fullSyncPending_ = false;
+        pendingFrame_ = false;
+        outImage = cur;
+        curBuf_ ^= 1;
+        lastFrameOut_ = std::chrono::steady_clock::now();
+        if (updated)
+            *updated = true;
+        return true;
+    }
+
+    // 全量抓取结果写回当前缓冲。图片模式（fullCaptureOnly_）不做双缓冲：
+    // JPEG 线程本来就深拷贝，切缓冲只会多一次整帧复制。
+    bool emitFullFrame(QImage&& img, QImage& outImage, bool* updated)
+    {
+        curFrame() = std::move(img);
+        bufValid_[curBuf_] = true;
+        pendingRects_.clear();
+        fullSyncPending_ = false;
+        pendingFrame_ = false;
+        regionDirty_ = false;
+        lastFrameOut_ = std::chrono::steady_clock::now();
+        if (fullCaptureOnly_) {
+            // 图片模式：每次全量抓取都替换 QImage（旧像素由下游持有），不交换缓冲。
+            bufValid_[1 - curBuf_] = false;
+            outImage = curFrame();
+        } else {
+            // 视频模式：3s 自愈全量帧之后还要继续走 damage 增量，另一块必须同步。
+            frameBufs_[1 - curBuf_] = curFrame().copy();
+            bufValid_[1 - curBuf_] = true;
+            outImage = curFrame();
+            curBuf_ ^= 1;
+        }
+        if (updated)
+            *updated = true;
+        return true;
+    }
+
+    bool framesAreExclusive() const override { return !fullCaptureOnly_; }
+
+    void setFullCaptureOnly(bool v) override
+    {
+        if (fullCaptureOnly_ == v)
+            return;
+        fullCaptureOnly_ = v;
+        // 模式切换后两块缓冲的内容不再对应（图片模式可能只更新了 cur），
+        // 重建并强制下一帧全量，避免把陈旧帧当增量基准。
+        resetFrameBuffers(primaryW_, primaryH_);
+        forceFull_ = true;
+    }
+
     bool captureFrame(QImage& outImage, bool* updated = nullptr) override
     {
         // 失败限流：上一次抓取失败后 1s 内不再触碰 X（只回报"未更新"）。
@@ -347,12 +470,24 @@ public:
             if (updated) *updated = false;
             return true;
         }
+        // 上一轮因"小面积变化"被推迟的帧：等到合并窗口结束就出帧（不重新抓屏，
+        // 像素已经在 curFrame() 里）。大面积变化会在下方 damage 分支立刻出帧。
+        if (pendingFrame_ && !forceFull_ && !fullCaptureOnly_) {
+            const auto nowPending = std::chrono::steady_clock::now();
+            if (nowPending - lastFrameOut_
+                >= std::chrono::milliseconds(kSmallChangeCoalesceMs)) {
+                regionDirty_ = true;
+                return emitFrame(outImage, updated);
+            }
+        }
         if (damageSupported_ && !forceFull_ && !fullCaptureOnly_) {
-            // 周期性自愈：即使本次有 damage 矩形，若距上次全量抓取已超 ~0.8s，
+            // 周期性自愈：即使本次有 damage 矩形，若距上次全量抓取已超 ~3s，
             // 也强制走一次全量抓取。这是为了修复 XComposite/面板类常变区域
             // 损伤不上报到根窗口导致的顽固黑块（尤其任务栏、顶部）。
+            // 旧值 800ms 在静态桌面上等价于每秒 1.25 次整屏 XShm 抓取 + 8MB
+            // 拷贝，收益远小于成本；自愈兜底 3s 足够。
             auto nowFull = std::chrono::steady_clock::now();
-            if (nowFull - lastFullRefresh_ >= std::chrono::milliseconds(800))
+            if (nowFull - lastFullRefresh_ >= std::chrono::milliseconds(3000))
                 forceFull_ = true; // 本次改走下方全量路径；成功后由下方清除标志并更新计时
         }
         if (damageSupported_ && !forceFull_ && !fullCaptureOnly_) {
@@ -387,6 +522,7 @@ public:
                 }
 
                 int copied = 0;
+                QImage& buf = curFrame();
                 bool shmGrabbed = false;
 #ifdef HAVE_XSHM
                 if (shmOk_ && totalArea >= qint64(primaryW_) * primaryH_ / 8) {
@@ -408,11 +544,12 @@ public:
                             const int cw = x1 - x0;
                             const int ch = y1 - y0;
                             for (int yy = 0; yy < ch; ++yy) {
-                                memcpy(fullFrame_.scanLine(dstY + yy) + dstX * 4,
+                                memcpy(buf.scanLine(dstY + yy) + dstX * 4,
                                        base + (y0 - offsetY_ + yy) * stride
                                            + (x0 - offsetX_) * 4,
                                        static_cast<size_t>(cw) * 4);
                             }
+                            noteDamageRect(QRect(dstX, dstY, cw, ch));
                             ++copied;
                         }
                     }
@@ -442,7 +579,7 @@ public:
                         const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
                         int srcStride = ximage->bytes_per_line;
                         for (int yy = 0; yy < ch; ++yy) {
-                            memcpy(fullFrame_.scanLine(dstY + yy) + dstX * 4,
+                            memcpy(buf.scanLine(dstY + yy) + dstX * 4,
                                    src + yy * srcStride,
                                    static_cast<size_t>(cw) * 4);
                         }
@@ -452,7 +589,7 @@ public:
                         int srcStride = ximage->bytes_per_line;
                         for (int yy = 0; yy < ch; ++yy) {
                             const uchar* s = src + yy * srcStride;
-                            QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(dstY + yy)) + dstX;
+                            QRgb* d = reinterpret_cast<QRgb*>(buf.scanLine(dstY + yy)) + dstX;
                             for (int xx = 0; xx < cw; ++xx) {
                                 // ZPixmap 24bpp 在 little-endian 下是 B,G,R；qRgb 要 R,G,B，
                                 // 与全量路径（Format_RGB888 + rgbSwapped）保持一致，否则
@@ -463,7 +600,7 @@ public:
                     } else {
                         // 其他 bpp（如 16bpp）：用 XGetPixel 逐像素转换（安全，兜底慢路径）
                         for (int yy = 0; yy < ch; ++yy) {
-                            QRgb* d = reinterpret_cast<QRgb*>(fullFrame_.scanLine(dstY + yy)) + dstX;
+                            QRgb* d = reinterpret_cast<QRgb*>(buf.scanLine(dstY + yy)) + dstX;
                             for (int xx = 0; xx < cw; ++xx) {
                                 unsigned long px = XGetPixel(ximage, xx, yy);
                                 d[xx] = qRgb((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
@@ -471,6 +608,7 @@ public:
                         }
                     }
                     XDestroyImage(ximage);
+                    noteDamageRect(QRect(dstX, dstY, cw, ch));
                     ++copied;
                 }
                 }
@@ -481,14 +619,23 @@ public:
                 XFixesDestroyRegion(display_, region);
                 region = 0; // XserverRegion 是整数句柄（非指针），用 0 置空
                 if (copied > 0) {
-                    if (updated) *updated = true;
-                    // [P1 perf] COW 浅共享替代整帧 .copy()（1080p≈8.3MB）：
-                    // 消费方（编码/压缩线程）不写像素则零拷贝；若采集线程随后写
-                    // fullFrame_，QImage 自动在写侧 detach，成本不高于旧显式拷贝，
-                    // 而静态场景（缓冲不再被写、直接被下一帧替换）完全省掉。
-                    outImage = fullFrame_;
+                    // [P0] 小面积变化且距上一帧 <100ms：先不出帧，把变化留在
+                    // curFrame() 里，下个周期再发（见 captureFrame 开头的
+                    // pendingFrame_ 分支）。大面积变化立即出帧。
+                    const auto nowOut = std::chrono::steady_clock::now();
+                    const qint64 fullArea = qint64(primaryW_) * primaryH_;
+                    const bool small = totalArea > 0
+                        && totalArea * kSmallChangeAreaDiv < fullArea;
+                    const bool tooSoon = lastFrameOut_ != std::chrono::steady_clock::time_point()
+                        && nowOut - lastFrameOut_
+                            < std::chrono::milliseconds(kSmallChangeCoalesceMs);
+                    if (small && tooSoon) {
+                        pendingFrame_ = true;
+                        if (updated) *updated = false;
+                        return true;
+                    }
                     regionDirty_ = true;
-                    return true;
+                    return emitFrame(outImage, updated);
                 }
                 // 所有 damage 矩形都在当前输出区域之外（如切屏后的陈旧损伤）：
                 // 不得谎报 updated，落到下方全量抓取，避免发出未更新的旧缓冲
@@ -509,9 +656,6 @@ public:
                 lastProbe_ = now;
             }
         }
-
-        if (updated) *updated = true;
-        regionDirty_ = false; // 全屏抓取，仍用校验和判断是否有变化
 
         // [P1 perf] 全量抓取优先 MIT-SHM（grabPrimary）：XGetImage 的 socket 逐像素
         // 回传在 1080p@30fps 下 ≈ 500MB/s，XShm 由 X server 直写共享内存后零传输
@@ -541,30 +685,26 @@ public:
         forceFull_ = false; // 全量抓取成功，清除强制标志
         lastFullRefresh_ = std::chrono::steady_clock::now(); // 记录全量刷新时刻，供下方周期性自愈计时
 
+        // 全量抓取：输出由 emitFullFrame 统一处理（图片模式不交换缓冲，视频模式
+        // 同步另一块后交换，保证后续 damage 增量有正确基准）。
+        QImage full;
         if (ximage->bits_per_pixel == 32) {
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
                           primaryW_, primaryH_, ximage->bytes_per_line,
                           QImage::Format_RGB32);
             // 直接输出 RGB32（小端=BGRA），不再转换到 RGB888。
-            // 视频编码线程的 sws_scale 直接以 BGRA 为输入，把转换从主线程移走，
-            // 显著降低主线程 CPU（X11 捕获本机数据就是 32bpp）。
-            // [FIX] 必须同步进 fullFrame_：damage 区域抓取路径输出的就是这份持久缓冲，
-            // 若全量抓取不回填，缓冲自 applyOutput 清零后永远只有零散 damage 矩形，
-            // 视频模式会交替输出"黑底+局部内容"的损坏帧（表现为画面闪烁）。
-            fullFrame_ = rawImg.copy();
-            outImage = fullFrame_;
+            // 视频编码线程的 sws_scale 直接以 BGRA 为输入。
+            full = rawImg.copy();
         } else {
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
                           primaryW_, primaryH_, ximage->bytes_per_line,
                           QImage::Format_RGB888);
-            outImage = rawImg.rgbSwapped();
-            // 非 32bpp 平台：同样保持缓冲与实际画面一致（damage 路径依赖它）
-            fullFrame_ = outImage.convertToFormat(QImage::Format_RGB32);
+            full = rawImg.rgbSwapped().convertToFormat(QImage::Format_RGB32);
         }
 
         if (!fromShm)
             XDestroyImage(ximage); // shm 路径的 shmImage_ 复用，禁止 destroy
-        return true;
+        return emitFullFrame(std::move(full), outImage, updated);
     }
 
     void resetDamage() override
@@ -654,8 +794,7 @@ public:
         primaryH_ = g.h;
         // 重建缓冲并清零，避免陈旧 damage 只覆盖部分区域时泄漏未初始化内容；
         // 同时强制下一帧全量抓取、重置区域/校验和语义
-        fullFrame_ = QImage(primaryW_, primaryH_, QImage::Format_RGB32);
-        fullFrame_.fill(0);
+        resetFrameBuffers(primaryW_, primaryH_);
         forceFull_ = true;
         regionDirty_ = false;
         lastProbe_ = std::chrono::steady_clock::now();
@@ -799,7 +938,7 @@ public:
             applyOutput(outputs_[idx]);
             currentOutputIndex_ = idx;
         } else {
-            // [FIX] 几何未变化时不得重建缓冲：applyOutput 会清零 fullFrame_ 并置
+            // [FIX] 几何未变化时不得重建缓冲：applyOutput 会清零双缓冲并置
             // forceFull_，而客户端连接/拉取配置都会走到这里；清零后 damage 帧
             // 会输出"黑底+局部矩形"的损坏帧（视频模式闪烁根因之一）。
             const OutputGeom& g = outputs_[currentOutputIndex_];

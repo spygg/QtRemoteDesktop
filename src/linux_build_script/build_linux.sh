@@ -1,7 +1,8 @@
 #!/bin/bash
 # ============================================================================
 # QtRemoteDesktop Linux 一键编译脚本
-# 与 Windows 构建对应：FFmpeg 3.4.8 + openh264 源码编译，产物全部输出到
+# 与 Windows 构建对应：FFmpeg（默认 6.1.2，见 FFMPEG_VERSION）+ openh264 源码编译，
+# 产物全部输出到
 #   <repo>/build    (cmake 中间目录)
 #   <repo>/bin      (最终可执行文件)
 #   <repo>/build_output  (第三方库产物: ffmpeg_install/openh264_install)
@@ -155,13 +156,54 @@ detect_qt() {
 
 
 
-FFMPEG_SRC="$SRC_DIR/remotedesk/thridparty/ffmpeg/FFmpeg-n3.4.8"
+# ---- FFmpeg 版本 ----
+# 默认 6.1.2：新驱动不再回答 NVENC API 8.0 的"预设 GUID"接口，3.4.8 的
+# avcodec_open2 在这类机器上直接返回 -40（本机 RTX 5060 / 32.0.15.9071 实测），
+# 4.1 起的 p1–p7 词表才可用；软编与 VAAPI 路径两个版本都正常。
+# 老机器沿用 3.4.8：FFMPEG_VERSION=3.4.8 ./build_linux.sh。这里选定的版本会用
+# -DFFMPEG_VERSION 显式传给 cmake（覆盖 CMakeLists 的按位宽默认），脚本与 CMake
+# 用的源码目录、产物目录因此始终一致。
+FFMPEG_VERSION="${FFMPEG_VERSION:-6.1.2}"
+FFMPEG_MAJOR="${FFMPEG_VERSION%%.*}"
+
+FFMPEG_SRC="$SRC_DIR/remotedesk/thridparty/ffmpeg/FFmpeg-n$FFMPEG_VERSION"
 OPENH264_SRC="$SRC_DIR/remotedesk/thridparty/third_party_src/openh264"
 MPP_SRC="$SRC_DIR/remotedesk/thridparty/mpp"
 
-FFMPEG_INSTALL="$OUT_DIR/ffmpeg_install"
+# 版本目录与本文件末尾传给 cmake 的 -DFFMPEG_VERSION 是同一份事实源：
+# 老版本沿用 ffmpeg_install（已编好的机器不重编），新版本单独落盘，两版可共存。
+if [ "$FFMPEG_MAJOR" -lt 5 ]; then
+    FFMPEG_INSTALL="$OUT_DIR/ffmpeg_install"
+else
+    FFMPEG_INSTALL="$OUT_DIR/ffmpeg_install-$FFMPEG_VERSION"
+fi
 OPENH264_INSTALL="$OUT_DIR/openh264_install"
 MPP_INSTALL="$OUT_DIR/mpp_install"
+
+# ---- NVENC 外部头（仅 FFmpeg >= 5 需要）----
+# 5.x 起源码树里没有 compat/nvenc，configure 只通过 pkg-config 找 ffnvcodec
+# （要求 >= 12.1.14.0），因此需要仓库内的 nv-codec-headers-* 目录 + 一份
+# ffnvcodec.pc。两者任一缺失 → NVENC 自动关闭退回软编，不影响构建成功。
+FFNV_SEARCH_DIR="$SRC_DIR/remotedesk/thridparty/ffmpeg"
+
+ff_is_legacy_ffmpeg() { [ "$FFMPEG_MAJOR" -lt 5 ]; }
+
+# 打印可用的 ffnvcodec 头目录；不可用时返回非 0（不打印）。
+# configure 的 check_pkg_config 一次带上 4 个头，缺一个就判不满足。
+ff_nv_inc_dir() {
+    local dir count
+    dir="$(ls -d "$FFNV_SEARCH_DIR"/nv-codec-headers-* 2>/dev/null | sort -V | tail -1)"
+    [ -n "$dir" ] || return 1
+    [ -f "$dir/include/ffnvcodec/nvEncodeAPI.h" ] || return 1
+    count="$(ls "$dir"/include/ffnvcodec/*.h 2>/dev/null | wc -l)"
+    [ "$count" -ge 4 ] || return 1
+    echo "$dir/include"
+}
+
+# nv-codec-headers-n12.2.72.0 -> 12.2.72.0（configure 拿它比对版本门槛）
+ff_nv_version() {
+    basename "${1%/include}" | sed 's/^nv-codec-headers-n\?//'
+}
 
 step() { echo ""; echo ">>> $*"; }
 
@@ -212,6 +254,7 @@ pkg_for() {
         pipewire) case "$d" in apt) echo "libpipewire-0.3-dev";; dnf|yum) echo "pipewire-devel";; pacman) echo "pipewire";; apk) echo "pipewire-dev";; *) echo "libpipewire-0.3-dev";; esac ;;
         mlocate) case "$d" in apt) echo "mlocate";; pacman) echo "mlocate";; *) echo "mlocate";; esac ;;
         drm) case "$d" in apt) echo "libdrm-dev";; dnf|yum|zypper) echo "libdrm-devel";; pacman) echo "libdrm";; apk) echo "libdrm-dev";; *) echo "libdrm-devel";; esac ;;
+        vaapi) case "$d" in apt) echo "libva-dev libdrm-dev";; dnf|yum|zypper) echo "libva-devel libdrm-devel";; pacman) echo "libva libdrm";; apk) echo "libva-dev libdrm-dev";; *) echo "libva-devel libdrm-devel";; esac ;;
         Xrandr) case "$d" in apt|apk) echo "libxrandr-dev";; dnf|yum|zypper) echo "libXrandr-devel";; pacman) echo "libxrandr";; *) echo "libXrandr-devel";; esac ;;
         yasm) case "$d" in apt|dnf|yum|zypper|pacman|apk) echo "yasm";; *) echo "yasm";; esac ;;
         *) echo "$id" ;;
@@ -232,6 +275,7 @@ hdr_for() {
         alsa) echo "alsa/asoundlib.h" ;;
         pcap) echo "pcap/pcap.h" ;;
         drm) echo "libdrm/drm.h" ;;
+        vaapi) echo "va/va.h" ;;
         Xrandr) echo "X11/extensions/Xrandr.h" ;;
         *) echo "" ;;
     esac
@@ -293,6 +337,35 @@ check_deps() {
         echo "  [可选] PipeWire: 未找到（Wayland 抓屏将不可用，仅 X11 抓屏）"
         MISSING_OPT="$MISSING_OPT pipewire"
     fi
+    # --- VAAPI（可选：x86 硬编；缺失时继续用 openh264 软编）---
+    # FFmpeg 的 --enable-vaapi 由 configure 里的 check_lib 验证：头文件在但
+    # 链接不到 -lva 时会自动禁用，不会让构建失败。这里用 libva.pc + 头文件
+    # 双重判断，避免"有头文件没库"时每次构建都误判为需要重建 FFmpeg。
+    if have_header "$(hdr_for vaapi)" && pkg-config --exists libva 2>/dev/null; then
+        echo "  [可选] VAAPI: 已找到（FFmpeg 将启用 h264_vaapi/hevc_vaapi 硬编）"
+    else
+        echo "  [可选] VAAPI: 未找到（硬编不可用，视频编码使用 openh264 软编）"
+        # 只装了 libva 运行时（桌面/驱动依赖带进来的）而没有 -devel 头包时，上面
+        # 那句"未找到"很容易被误读成"我机器上明明有 libva"，然后反复确认 FFmpeg
+        # 却编不出硬编。这里区分开，并把两个必要条件一次说全。
+        if ldconfig -p 2>/dev/null | grep -q 'libva\.so\.'; then
+            echo "           注意：本机有 libva 运行时但缺开发包 —— 需要装 $(pkg_for vaapi)"
+            echo "           另：硬编还要求部署机有对应 GPU 的 VA-API 驱动（如 i965/radeonsi 的 *_video.so），"
+            echo "           虚机（VMware/virtio 等）通常没有该驱动，装了开发包也仍然只能软编。"
+        fi
+        MISSING_OPT="$MISSING_OPT vaapi"
+    fi
+    # --- NVENC（可选：x86 NVIDIA 硬编；无需 CUDA Toolkit，驱动在运行时才要）---
+    if ff_nvenc_probe; then
+        echo "  [可选] NVENC: 可用（FFmpeg 将启用 h264_nvenc/hevc_nvenc，运行时需 NVIDIA 驱动）"
+    elif ff_is_legacy_ffmpeg; then
+        echo "  [可选] NVENC: 不可用（非 x86 平台，或源码内 compat/nvenc 头文件编译不过）"
+    else
+        # FFmpeg >= 5 不再自带 NVENC 头：缺仓库内的 nv-codec-headers 是最常见原因，
+        # 说清楚比只报"编译不过"更容易自助排查。
+        echo "  [可选] NVENC: 不可用（非 x86 平台，或 $FFNV_SEARCH_DIR 下没有 nv-codec-headers-*）"
+        echo "           需要硬编时：解压 nv-codec-headers（FFmpeg $FFMPEG_VERSION 用 API >= 12.1.14）到该目录后重新构建"
+    fi
     # --- XRandR（可选：进程内多显示器枚举）---
     if have_header "$(hdr_for Xrandr)"; then
         echo "  [可选] XRandR: 已找到（进程内多显示器枚举可用）"
@@ -335,7 +408,8 @@ check_deps() {
         for id in $MISSING_REQ; do
             case "$id" in
                 ffmpeg-src)
-                    echo "  - FFmpeg 源码缺失：请解压 ffmpeg-3.4.8 到 $FFMPEG_SRC" >&2
+                    echo "  - FFmpeg 源码缺失：请把 ffmpeg-$FFMPEG_VERSION 解压到 $FFMPEG_SRC" >&2
+                    echo "    （想用其他版本：FFMPEG_VERSION=3.4.8 $0，需该版本源码已就位）" >&2
                     continue ;;
                 *) pkgs="$pkgs $(pkg_for "$id")" ;;
             esac
@@ -433,17 +507,138 @@ build_mpp() {
     fi
 }
 
-# ---------------- 2.5 FFmpeg 3.4.8 ----------------
+# ---------------- 2.5 FFmpeg（版本见 FFMPEG_VERSION）----------------
+# 硬编自动探测（都不需要用户手动加开关）：
+#   VAAPI —— 要 libva 开发包（头文件 + pkg-config 记录，FFmpeg configure 还会
+#            再验证一次能否链接 -lva/-lva-drm）；只有运行时 libva.so 不够。
+#   NVENC —— 不需要 CUDA Toolkit，运行时才 dlopen 驱动（libnvencodeapi.so*），
+#            且仅在 x86 平台受支持（configure 里非 x86 会强制 disable nvenc）。
+#            头文件来源随版本不同：3.4.8 自带 compat/nvenc；>=5 必须用仓库内的
+#            nv-codec-headers，并且 configure 只通过 pkg-config 认它（下方
+#            ff_write_ffnvcodec_pc 生成 .pc 并加进 PKG_CONFIG_PATH）。
+# 探测方式与 configure 自身的检查保持一致，探测通过才把开关传进 configure，
+# 避免出现"显式 --enable-xxx 但环境不满足 → configure 直接报错中断构建"。
+ff_nvenc_probe() {
+    # 与 FFmpeg configure 自己的门槛一致：x86 家族 + 头文件可编译。
+    # 位宽/驱动是否真能用交给运行时（videoencoder 的 findHwEncoder 逐个候选 open，
+    # 失败就 blockHwBackend 退回软编）：新驱动的 32 位 libcuda/nvcuda 只剩占位实现，
+    # 而老显卡+老驱动的 32 位环境仍能硬编，构建期一刀切会把后者永久挡掉。
+    case "$(uname -m)" in
+        x86_64|amd64|i686|i386) ;;
+        *) return 1 ;;
+    esac
+    local probe rc
+    local -a inc_args=()
+    probe="$(mktemp "${TMPDIR:-/tmp}/qtrd_nvenc_probe_XXXXXX.c")" || return 1
+    if ff_is_legacy_ffmpeg; then
+        cat > "$probe" <<'EOF'
+#include "compat/nvenc/nvEncodeAPI.h"
+NV_ENCODE_API_FUNCTION_LIST flist;
+void f(void) { struct { const GUID guid; } s[] = { { NV_ENC_PRESET_HQ_GUID } }; }
+int main(void) { return 0; }
+EOF
+        inc_args=(-I"$FFMPEG_SRC")
+    else
+        # 新版头里已经没有 NV_ENC_PRESET_*_GUID（那正是 3.4.8 在新驱动上打不开的
+        # 原因），探测样例改用 NV_ENC_CODEC_H264_GUID —— 与 configure 的自检一致。
+        local nv_inc
+        nv_inc="$(ff_nv_inc_dir)" || { rm -f "$probe"; return 1; }
+        cat > "$probe" <<'EOF'
+#include <ffnvcodec/nvEncodeAPI.h>
+NV_ENCODE_API_FUNCTION_LIST flist;
+void f(void) { struct { const GUID guid; } s[] = { { NV_ENC_CODEC_H264_GUID } }; }
+int main(void) { return 0; }
+EOF
+        inc_args=(-I"$nv_inc")
+    fi
+    ${CC:-gcc} "${inc_args[@]}" -c "$probe" -o /dev/null >/dev/null 2>&1
+    rc=$?
+    rm -f "$probe"
+    return $rc
+}
+
+# FFmpeg >= 5 的 configure 认 ffnvcodec 只走 pkg-config（没有 --extra-cflags 的
+# 旁路），所以给它一份 .pc：版本取自目录名，Cflags 指向头目录。
+ff_write_ffnvcodec_pc() {
+    local pkgdir="$1" inc ver
+    if ff_is_legacy_ffmpeg; then return 0; fi
+    inc="$(ff_nv_inc_dir)" || return 1
+    ver="$(ff_nv_version "$inc")"
+    mkdir -p "$pkgdir"
+    cat > "$pkgdir/ffnvcodec.pc" <<EOF
+prefix=${inc}/..
+includedir=\${prefix}
+
+Name: ffnvcodec
+Description: FFmpeg version of Nvidia Codec SDK headers
+Version: ${ver}
+Cflags: -I${inc}
+EOF
+}
+
 build_ffmpeg() {
+    # 构建目录随版本分开：切版本时不会读到上一个版本的 config.h（增量判断靠它）
+    local ffbuild
+    if ff_is_legacy_ffmpeg; then
+        ffbuild="$BUILD_DIR/ffmpeg_build"
+    else
+        ffbuild="$BUILD_DIR/ffmpeg_build-$FFMPEG_VERSION"
+    fi
+    local pkgconfig_dir="$BUILD_DIR/ffmpeg_pkgconfig"
+    local vaapi_marker="$ffbuild/.vaapi_requested"
+    local nvenc_marker="$ffbuild/.nvenc_requested"
+    # libva 是可选依赖：有头文件且有 pkg-config 记录才启用 VAAPI。FFmpeg 的
+    # configure 还会用 check_lib(-lva/-lva-drm) 再验证一次，缺库时自动降级。
+    local want_vaapi=0
+    if have_header "$(hdr_for vaapi)" && pkg-config --exists libva 2>/dev/null; then
+        want_vaapi=1
+    fi
+    local want_nvenc=0
+    if ff_nvenc_probe; then
+        want_nvenc=1
+    fi
+
     # 增量约定：产物已存在则跳过（configure+make 仅首次执行；如需全量重建用 --clean）。
     # 显式 --skip-ffmpeg 强制跳过；若产物尚不存在则报错（无法凭空复用）。
-    if [ -f "$FFMPEG_INSTALL/lib/libavcodec.a" ]; then
-        echo ">>> FFmpeg 已存在 ($FFMPEG_INSTALL/lib/libavcodec.a)，跳过（增量构建）"
-        return
-    fi
     if [ $SKIP_FFMPEG -eq 1 ]; then
+        if [ -f "$FFMPEG_INSTALL/lib/libavcodec.a" ]; then
+            echo ">>> --skip-ffmpeg：复用已有 FFmpeg ($FFMPEG_INSTALL/lib/libavcodec.a)"
+            return
+        fi
         echo "错误: --skip-ffmpeg 指定但 FFmpeg 产物不存在: $FFMPEG_INSTALL" >&2
         exit 1
+    fi
+    if [ -f "$FFMPEG_INSTALL/lib/libavcodec.a" ]; then
+        local have_vaapi=0 have_nvenc=0
+        if [ -f "$ffbuild/config.h" ]; then
+            grep -q '^#define CONFIG_H264_VAAPI_ENCODER 1' "$ffbuild/config.h" && have_vaapi=1
+            grep -q '^#define CONFIG_H264_NVENC_ENCODER 1' "$ffbuild/config.h" && have_nvenc=1
+        fi
+        # 任一硬编功能"现在探测得到、但已有产物里没编进去、且上次没失败过"→ 必须
+        # 全量重配（config.h、对象文件与 Makefile 都已过时，仅 make 增量可能链接到缺符号的目标）。
+        local need_reconfig=0
+        if [ $want_vaapi -eq 1 ] && [ $have_vaapi -eq 0 ] && [ ! -f "$vaapi_marker" ]; then
+            echo ">>> 检测到 libva，但已有 FFmpeg 未启用 VAAPI，重新配置并构建"
+            need_reconfig=1
+        fi
+        if [ $want_nvenc -eq 1 ] && [ $have_nvenc -eq 0 ] && [ ! -f "$nvenc_marker" ]; then
+            echo ">>> 本机支持 NVENC，但已有 FFmpeg 未启用 NVENC，重新配置并构建"
+            need_reconfig=1
+        fi
+        if [ $need_reconfig -eq 1 ]; then
+            rm -rf "$ffbuild"
+        else
+            [ $want_vaapi -eq 1 ] && [ $have_vaapi -eq 0 ] && \
+                echo ">>> [warn] 已有 FFmpeg 未启用 VAAPI（上次尝试未成功），继续复用产物"
+            [ $want_nvenc -eq 1 ] && [ $have_nvenc -eq 0 ] && \
+                echo ">>> [warn] 已有 FFmpeg 未启用 NVENC（上次尝试未成功），继续复用产物"
+            if [ \( $want_vaapi -eq 1 -a $have_vaapi -eq 0 \) -o \( $want_nvenc -eq 1 -a $have_nvenc -eq 0 \) ]; then
+                echo "           如需重试：修好依赖后执行 --clean 重新构建"
+            else
+                echo ">>> FFmpeg 已存在 ($FFMPEG_INSTALL/lib/libavcodec.a)，跳过（增量构建）"
+            fi
+            return
+        fi
     fi
     # 按本机架构选择 FFmpeg 架构参数，避免 x86 专用的 mathops.h / emms 在 ARM 上误编
     case "$(uname -m)" in
@@ -454,12 +649,29 @@ build_ffmpeg() {
         *)              FFMPEG_ARCH="$(uname -m)" ;;
     esac
     echo "[ffmpeg] 检测到架构: $(uname -m) -> --arch=$FFMPEG_ARCH"
-    step "2/5 编译 FFmpeg 3.4.8 -> $FFMPEG_INSTALL"
-    local ffbuild="$BUILD_DIR/ffmpeg_build"
+    step "2/5 编译 FFmpeg $FFMPEG_VERSION -> $FFMPEG_INSTALL"
     # 增量约定：默认复用已有构建目录（make 增量），仅 --clean 时清空。
     # 架构/前缀变化由下面的 configure 覆盖，无需删目录。
     if [ $CLEAN -eq 1 ]; then rm -rf "$ffbuild"; fi
     mkdir -p "$ffbuild" "$FFMPEG_INSTALL/lib" "$FFMPEG_INSTALL/include"
+    # 硬编开关只在本次配置时按探测结果启用；各自的 marker 记录"已尝试过"，
+    # 防止某些发行版 libva 头/库不匹配（或探测与 configure 判定不一致）导致
+    # 每次构建都反复删目录重编（几十次构建后才发现的构建时间黑洞）。
+    local ff_hw_flags=""
+    if [ $want_vaapi -eq 1 ]; then
+        ff_hw_flags="$ff_hw_flags --enable-vaapi --enable-encoder=h264_vaapi --enable-encoder=hevc_vaapi"
+        echo "[ffmpeg] 启用 VAAPI 硬编: h264_vaapi / hevc_vaapi"
+    else
+        echo "[ffmpeg] 未检测到 libva，VAAPI 硬编禁用（视频编码走 openh264 软编）"
+    fi
+    if [ $want_nvenc -eq 1 ]; then
+        ff_hw_flags="$ff_hw_flags --enable-nvenc --enable-encoder=h264_nvenc --enable-encoder=hevc_nvenc"
+        echo "[ffmpeg] 启用 NVENC 硬编: h264_nvenc / hevc_nvenc（运行时需 NVIDIA 驱动）"
+    elif ff_is_legacy_ffmpeg; then
+        echo "[ffmpeg] 非 x86 或 compat/nvenc 头文件不可编译，NVENC 禁用"
+    else
+        echo "[ffmpeg] 非 x86 或缺 nv-codec-headers（FFmpeg $FFMPEG_VERSION 的外部 NVENC 头），NVENC 禁用"
+    fi
     # GCC 13+ 兼容补丁：x86/mathops.h 用 "ic" 内联汇编约束会触发
     # "operand type mismatch for shr"（GCC 生成非法 8 位移位操作数）。
     # 改为 "c"（强制 cl 寄存器，允许立即数），幂等，仅在首次 patch。
@@ -503,20 +715,47 @@ build_ffmpeg() {
     # 启用后若个别老 GCC 版本出现汇编语法错误，configure 日志会指明具体文件，
     # 届时按文件做等价 patch 即可（不要整平台退回纯 C）。
     local ff_inline_asm_flag=""
-    ( cd "$ffbuild" && PKG_CONFIG_PATH="$OPENH264_INSTALL/lib/pkgconfig" \
+    # avresample 在 FFmpeg 5.0 里已被删除，>=5 的 configure 不认这个开关（给了就
+    # 直接报错），所以只有老分支带它。
+    local ff_avresample_flag="--disable-avresample"
+    ff_is_legacy_ffmpeg || ff_avresample_flag=""
+    # FFmpeg >= 5 通过 pkg-config 认 NVENC 头（ffnvcodec），把 .pc 写进本仓库目录
+    # 并排在 PKG_CONFIG_PATH 最前；老版本这里什么都不做，仍只吃 openh264 的 .pc。
+    if [ $want_nvenc -eq 1 ] && ! ff_write_ffnvcodec_pc "$pkgconfig_dir"; then
+        echo "[warn] NVENC 探测通过但写不出 ffnvcodec.pc，本次不启用 NVENC" >&2
+        ff_hw_flags="${ff_hw_flags/--enable-nvenc/}"
+        want_nvenc=0
+    fi
+    ( cd "$ffbuild" && PKG_CONFIG_PATH="$pkgconfig_dir:$OPENH264_INSTALL/lib/pkgconfig" \
         "$FFMPEG_SRC/configure" \
         --cc=gcc --ld=gcc --arch="$FFMPEG_ARCH" \
         --disable-debug --disable-doc --disable-programs --disable-network \
         --disable-avformat --disable-avfilter --disable-avdevice \
-        --disable-swresample --disable-postproc --disable-avresample \
+        --disable-swresample --disable-postproc $ff_avresample_flag \
         --disable-everything --enable-swscale --enable-libopenh264 \
         --enable-encoder=libopenh264 \
         --enable-decoder=h264 --enable-decoder=mjpeg --enable-decoder=mpeg4 \
+        $ff_hw_flags \
         $ffasm_flag $ff_inline_asm_flag --enable-static --disable-shared \
         --extra-cflags="-I$OPENH264_INSTALL/include $gcc14_flags" \
         --extra-ldflags="-L$OPENH264_INSTALL/lib" \
         --prefix="$FFMPEG_INSTALL" )
     ( cd "$ffbuild" && make -j"$JOBS" && make install )
+    # 探测通过但 configure 仍把某个硬编关掉（发行版头/库版本不匹配等）：写 marker
+    # 记录"已尝试"，避免下次构建又因"产物未启用硬编"删目录全量重编（构建时间黑洞）。
+    local cfg="$ffbuild/config.h"
+    if [ $want_vaapi -eq 1 ] \
+       && ! grep -q '^#define CONFIG_H264_VAAPI_ENCODER 1' "$cfg" 2>/dev/null; then
+        : > "$vaapi_marker"
+        echo "[warn] libva 已安装但 FFmpeg 未能启用 h264_vaapi（头/库版本不匹配）" >&2
+        echo "       继续使用软编；修好 libva 后执行 --clean 重新构建即可启用硬编" >&2
+    fi
+    if [ $want_nvenc -eq 1 ] \
+       && ! grep -q '^#define CONFIG_H264_NVENC_ENCODER 1' "$cfg" 2>/dev/null; then
+        : > "$nvenc_marker"
+        echo "[warn] NVENC 探测通过但 FFmpeg 未能启用 h264_nvenc" >&2
+        echo "       继续使用软编；执行 --clean 重新构建可重试" >&2
+    fi
     # 头文件补拷（make install 在带版本号源码目录名时可能漏装部分头）
     for lib in libavcodec libavutil libswscale; do
         mkdir -p "$FFMPEG_INSTALL/include/$lib"
@@ -560,6 +799,7 @@ cmake_configure() {
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_THIRDPARTY=ON \
         -DVENDOR_OPENSSL_102="$VENDOR_SSL102" \
+        -DFFMPEG_VERSION="$FFMPEG_VERSION" \
         "${qarg[@]}"
 }
 

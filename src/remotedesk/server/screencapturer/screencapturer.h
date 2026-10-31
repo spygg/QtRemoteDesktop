@@ -100,6 +100,11 @@ public:
     // 运行（光标闪烁/面板刷新会不断出帧），暂停可把整帧拷贝降到 1fps。
     // 仅有后台生产线程的平台需要实现；默认 no-op。
     virtual void setPaused(bool) {}
+    // 本平台输出的帧是否"独占且稳定"：采集端保证在编码线程读完之前不会原地
+    // 改写同一块像素（X11 双缓冲实现见 screencapturer_linux.cpp 的 emitFrame）。
+    // 为 true 时 VideoEncoder 可省掉每帧 8MB 级深拷贝；默认 false 表示调用方
+    // 仍按 QImage 隐式共享语义复制，其他平台行为不变。
+    virtual bool framesAreExclusive() const { return false; }
 };
 
 // [CAP-ASYNC] 抓屏工作对象：只在独立线程里执行"纯抓取"（BitBlt / DXGI 取帧 +
@@ -168,6 +173,24 @@ public:
         if (useWayland_ && waylandCapturer_)
             waylandCapturer_->setFullCaptureOnly(v);
 #endif
+    }
+
+    // 当前采集端是否保证外发帧在编码完成前不被原地改写（见 PlatformCapturer
+    // 同名方法）。RDPServer 据此让 VideoEncoder 走零拷贝入队。
+    bool framesAreExclusive() const {
+#ifdef Q_OS_LINUX
+        if (useX11_ && x11Capturer_)
+            return x11Capturer_->framesAreExclusive();
+        if (useWayland_ && waylandCapturer_)
+            return waylandCapturer_->framesAreExclusive();
+#endif
+#ifdef Q_OS_WIN
+        if (useDXGI_ && dxgiCapturer_)
+            return dxgiCapturer_->framesAreExclusive();
+        if (useGDI_ && gdiCapturer_)
+            return gdiCapturer_->framesAreExclusive();
+#endif
+        return false;
     }
 
     int width() const {

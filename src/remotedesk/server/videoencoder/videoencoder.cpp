@@ -3,15 +3,20 @@
 #include "rgb2yuv.h"
 #include <QDateTime>
 #include <chrono>
+#include <cstdarg>
 #include <cstring>
 #include <QDebug>
 #include <QFile>
 #include <thread>
 extern "C" {
 #include <libavutil/error.h>
+#include <libavutil/hwcontext.h>
 }
 #ifdef Q_OS_LINUX
 #include <QDir>
+#endif
+#if defined(Q_OS_LINUX) && defined(__GLIBC__)
+#include <malloc.h>
 #endif
 
 // [FIX-B2] 编码时间戳基准必须是进程级单调值。
@@ -55,6 +60,77 @@ VideoEncoder::VideoEncoder(QObject*)
 // 每次切换都要 shutdown+initialize（含线程停止/启动），画面长时间中断且 CPU 空转。
 static std::atomic<bool> g_mppDisabled{ false };
 
+// 硬编后端的进程级"已证明打不开"黑名单（每个后端一位）。
+//
+// 原因：编码器重建很频繁（切画质/分辨率/帧率、客户端重连、PLI 兜底），而
+// "有驱动/有设备"这件事在进程生命周期内不会变。若每次重建都重走一遍必然失败的
+// open（nvenc 无驱动时 open 会去加载驱动库并让 FFmpeg 自己刷一条错误日志；
+// VAAPI 无权限时每次都要试开 4 个 render node），就是纯付延迟 + 刷屏。
+// 与 g_mppDisabled 同理，但覆盖 avcodec 侧的所有硬件后端。
+enum HwBackendBit : unsigned {
+    HwBitVaapi = 1u << 0,
+    HwBitNvenc = 1u << 1,
+    HwBitAmf = 1u << 2,
+    HwBitVideoToolbox = 1u << 3,
+    HwBitRkMpp = 1u << 4
+};
+static std::atomic<unsigned> g_hwBackendBlocked { 0 };
+
+static unsigned hwBackendBit(const char* name)
+{
+    if (!name)
+        return 0;
+    if (strstr(name, "vaapi"))
+        return HwBitVaapi;
+    if (strstr(name, "nvenc"))
+        return HwBitNvenc;
+    if (strstr(name, "amf"))
+        return HwBitAmf;
+    if (strstr(name, "videotoolbox"))
+        return HwBitVideoToolbox;
+    if (strstr(name, "rkmpp"))
+        return HwBitRkMpp;
+    return 0;
+}
+
+static void blockHwBackend(const char* name)
+{
+    g_hwBackendBlocked.fetch_or(hwBackendBit(name));
+}
+
+static bool hwBackendBlocked(const char* name)
+{
+    return (g_hwBackendBlocked.load() & hwBackendBit(name)) != 0;
+}
+
+// 依次尝试常见 DRM render node。返回的 AVBufferRef 由调用方释放（或挂到
+// codecCtx_->hw_device_ctx）。auto 路径（nullptr）放最后兜底。
+static AVBufferRef* createVaapiDevice()
+{
+    if (hwBackendBlocked("vaapi"))
+        return nullptr;
+    const char* nodes[] = { "/dev/dri/renderD128", "/dev/dri/renderD129",
+                            "/dev/dri/renderD130", nullptr };
+    AVBufferRef* dev = nullptr;
+    for (int i = 0; nodes[i]; ++i) {
+        if (av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_VAAPI, nodes[i], nullptr, 0) >= 0
+            && dev) {
+            qInfo() << "VAAPI device initialized:" << nodes[i];
+            return dev;
+        }
+        dev = nullptr;
+    }
+    // 未显式指定 render node 时让 FFmpeg 自行选择（部分发行版节点号不同）
+    if (av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0) >= 0
+        && dev) {
+        qInfo() << "VAAPI device initialized: (auto)";
+        return dev;
+    }
+    qWarning() << "VAAPI device unavailable (/dev/dri/renderD*), falling back to software encoder";
+    blockHwBackend("vaapi");
+    return nullptr;
+}
+
 bool VideoEncoder::isMppDisabled()
 {
     return g_mppDisabled.load();
@@ -65,11 +141,31 @@ VideoEncoder::~VideoEncoder()
     shutdown();
 }
 
+// FFmpeg 的错误默认只写 stderr。服务/helper 以 Windows 服务或 systemd 启动时没有
+// 控制台，"Cannot init CUDA"、"OpenH264 encoder failure" 这类真正的失败原因永远
+// 进不了 logs/*.txt，日志里只剩一个数字错误码（例如 -1313558101），排障时无法判断
+// 是驱动问题、选项问题还是打包缺编码器。只转发 ERROR 及以下（数值越小越严重）：
+// 信息级/警告级日志量大且对排障无帮助。
+static void forwardAvLogToQt(void* ptr, int level, const char* fmt, va_list vl)
+{
+    if (level > AV_LOG_ERROR)
+        return;
+    char line[1024];
+    int printPrefix = 1;
+    av_log_format_line2(ptr, level, fmt, vl, line, sizeof(line), &printPrefix);
+    const QString text = QString::fromLocal8Bit(line).trimmed();
+    if (!text.isEmpty())
+        qWarning() << "[ffmpeg]" << text;
+}
+
 // FFmpeg < 4.0 需要显式注册编解码器；而能力探测类 static 可能在 initialize() 之前
 // 被调用（如服务模式 helper 启动即上报 capture_caps），若不先注册，
 // avcodec_find_encoder() 会返回 nullptr → 误报"本机不支持视频"，前端被永久降级。
 static void ensureAvCodecsRegistered()
 {
+    static std::atomic<bool> logHookInstalled{ false };
+    if (!logHookInstalled.exchange(true))
+        av_log_set_callback(forwardAvLogToQt);
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 0, 0)
     static std::atomic<bool> done{ false };
     if (!done.exchange(true))
@@ -95,15 +191,57 @@ static bool hwPlatformAvailable(const char* encName){
     }
     // rkmpp：FFmpeg 编译带 rkmpp 即有编码器，可用性由 avcodec_open2 验证并回退
 #endif
+#ifdef Q_OS_WIN
+    // nvenc 在 Windows 上没有设备节点可查，但编码器 open 时会去 LoadLibrary
+    // 驱动自带的 nvEncodeAPI*.dll。缺该 DLL（无 NVIDIA 卡/驱动过旧）时 open 必然
+    // 失败并让 FFmpeg 自己刷一条错误日志，所以在这里按指针大小探测同名 DLL。
+    // 32 位进程访问 System32 会被 WOW64 重定向到 SysWOW64，正好是 32 位 DLL 的
+    // 位置，因此两个候选目录都检查一次即可覆盖。
+    if (strstr(encName, "nvenc")) {
+        static const bool hasDriver = [] {
+            const char* names[] = {
+#if defined(Q_OS_WIN64)
+                "nvEncodeAPI64.dll",
+#else
+                "nvEncodeAPI.dll",
+#endif
+                nullptr
+            };
+            QByteArray root = qgetenv("SystemRoot");
+            if (root.isEmpty())
+                root = "C:\\Windows";
+            const QStringList dirs { QString::fromLocal8Bit(root) + QStringLiteral("\\System32"),
+                                      QString::fromLocal8Bit(root) + QStringLiteral("\\SysWOW64") };
+            for (const QString& d : dirs) {
+                for (int i = 0; names[i]; ++i) {
+                    if (QFile::exists(d + QStringLiteral("\\") + QString::fromLatin1(names[i])))
+                        return true;
+                }
+            }
+            return false;
+        }();
+        if (!hasDriver)
+            return false;
+    }
+#endif
     return true;
 }
 
-// 按编码类型 + 平台返回硬件编码器候选链（优先板载/通用方案，最后才是厂商专有）
-static const char* findHwEncoder(CodecType type, HwEncodeMode mode)
+// 按编码类型 + 平台返回硬件编码器候选链（优先板载/通用方案，最后才是厂商专有）。
+// diag 非空时逐个候选记录不可用的原因，供上层在"用户要硬编却退到软编"时打出
+// 可定位的告警（见 warnHwRequestedButUnavailable）。
+static const char* findHwEncoder(CodecType type, HwEncodeMode mode, QString* diag = nullptr)
 {
     ensureAvCodecsRegistered();
     if (mode == HwEncodeMode::Off)
         return nullptr;
+    auto note = [diag](const QString& why) {
+        if (diag) {
+            if (!diag->isEmpty())
+                *diag += QStringLiteral("; ");
+            *diag += why;
+        }
+    };
     const char* candidates[4] = { nullptr, nullptr, nullptr, nullptr };
     switch (type) {
     case CodecType::H264:
@@ -145,18 +283,66 @@ static const char* findHwEncoder(CodecType type, HwEncodeMode mode)
         break; // MPEG4/MJPEG 无硬件编码
     }
     for (int i = 0; i < 4 && candidates[i]; ++i) {
+        if (hwBackendBlocked(candidates[i])) {
+            note(QStringLiteral("%1: 本进程已证明打不开，跳过").arg(candidates[i]));
+            continue;
+        }
         const AVCodec* c = avcodec_find_encoder_by_name(candidates[i]);
-        if (!c)
+        if (!c) {
+            note(QStringLiteral("%1: 打包的 FFmpeg 未编入").arg(candidates[i]));
             continue;
-        if (!hwPlatformAvailable(candidates[i]))
+        }
+        if (!hwPlatformAvailable(candidates[i])) {
+            note(QStringLiteral("%1: 本机无对应设备/驱动").arg(candidates[i]));
             continue;
+        }
+        bool fmtMatched = false;
         for (const AVPixelFormat* p = c->pix_fmts; p && *p != AV_PIX_FMT_NONE; ++p) {
             if (*p == AV_PIX_FMT_NV12 || *p == AV_PIX_FMT_YUV420P) {
+                fmtMatched = true;
+                return candidates[i];
+            }
+            // VAAPI 编码器只接受 AV_PIX_FMT_VAAPI：由 initialize() 走
+            // hwframe_transfer_data 上传，不能按普通 NV12 路径处理。
+            if (*p == AV_PIX_FMT_VAAPI && strstr(candidates[i], "vaapi")) {
+                fmtMatched = true;
                 return candidates[i];
             }
         }
+        if (!fmtMatched)
+            note(QStringLiteral("%1: 无 NV12/YUV420P 输入格式").arg(candidates[i]));
     }
     return nullptr;
+}
+
+// 用户明确设了 hw_encode=on 却没有可用硬件编码器时，把逐个候选的失败原因打出来。
+// 以前这种情况只在 info 里留一行 "Using software encoder: h264"，部署机上
+// "配了硬编却一直软编、CPU 白烧一半"从日志里根本看不出来（曾见带 /dev/dri 的
+// 机器上 FFmpeg 未编入 h264_vaapi，静默软编数周）。编码器重建会反复走到，
+// 所以整进程只告警一次。
+static void warnHwRequestedButUnavailable(const QString& why)
+{
+    static std::atomic<bool> warned { false };
+    if (warned.exchange(true))
+        return;
+#if defined(Q_OS_LINUX)
+    static const char* kFixHint =
+        "「FFmpeg 未编入」= 打包的 FFmpeg 没带该硬编：装好 libva-devel/libdrm-devel 后重跑 "
+        "build_linux.sh（探测到就自动加 --enable-vaapi/--enable-nvenc 及对应 encoder）；"
+        "「本机无对应设备/驱动」= 有编码器但没 GPU/驱动，虚机里通常只能软编";
+#elif defined(Q_OS_WIN)
+    static const char* kFixHint =
+        "「FFmpeg 未编入」= 打包的 FFmpeg 没带 nvenc（构建机不是 x86，或 NVENC 头编不过；"
+        "3.4.8 要 compat/nvenc、6.x 要仓库里的 nv-codec-headers，缺就自动不启用）；"
+        "「本机无对应设备/驱动」= 系统里没有 nvEncodeAPI 驱动 DLL，即无 NVIDIA 显卡或没装驱动；"
+        "「本进程已证明打不开」= 驱动拒绝了这个编码器，上一行 [ffmpeg] 给出的才是真原因"
+        "（32 位构建用的是 3.4.8：NVIDIA 不提供 32 位 CUDA，cuInit 先失败，而且新驱动也拒绝 "
+        "API 8.0 的预设接口；要硬编请用 64 位构建 build64.bat，它会链 6.1.2）";
+#else
+    static const char* kFixHint = "";
+#endif
+    qWarning() << "hw_encode=on but no hardware encoder is usable -> software encoder."
+               << "candidates:" << why << "|" << kFixHint;
 }
 
 static AVPixelFormat encoderPixFmt(const AVCodec* codec, const char* hwName)
@@ -175,8 +361,18 @@ static AVPixelFormat encoderPixFmt(const AVCodec* codec, const char* hwName)
 static void applyHwOpts(const QString& hwName, AVDictionary** opts)
 {
     if (hwName.contains("nvenc")) {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 35, 100)
+        // FFmpeg 4.0 起 nvenc 的 preset 换成 p1..p7 字符串（旧枚举名保留为 deprecated
+        // 别名，每次 open 都会打警告）。本机 RTX 5060 + 6.1.2 实测：p1 打开成功、
+        // 1080p 1278fps、稳态滞后 2 帧，再加 tune=ll/ull 码流完全一致，所以只给 p1。
         av_dict_set(opts, "preset", "p1", 0);
-        av_dict_set(opts, "tune", "ll", 0);
+#else
+        // 3.4.8 的 nvenc `preset` 是 AV_OPT_TYPE_INT 的枚举名（nvenc_h264.c 的
+        // default/slow/…/llhp），而且**没有 `tune`**（两者都是 FFmpeg 4.0 才加的）。
+        // 给它传 p1 会让 avcodec_open2 直接返回 EINVAL(-22)，表现为"探测到 h264_nvenc
+        // 却每次都退回软编"。llhp = 低延迟 + HP 档，是老版本里最接近 p1 的合法值。
+        av_dict_set(opts, "preset", "llhp", 0);
+#endif
     } else if (hwName.contains("amf")) {
         // h264_amf/hevc_amf/av1_amf：无 preset/tune；usage=transcoding 走低延迟实时档
         av_dict_set(opts, "usage", "transcoding", 0);
@@ -187,7 +383,8 @@ static void applyHwOpts(const QString& hwName, AVDictionary** opts)
 // 释放 FFmpeg 编码链路资源（幂等，指针置空）。
 // 独立出来的原因：initialize() 会被重复调用（上层 reinit 未必先 shutdown），
 // 必须能安全地把上一轮的上下文清干净，否则每次重建都泄漏一套编码器。
-static void releaseAv(AVCodecContext** ctx, AVFrame** frame, std::vector<SwsContext*>* sws)
+static void releaseAv(AVCodecContext** ctx, AVFrame** frame, std::vector<SwsContext*>* sws,
+                      AVBufferRef** hwDevice = nullptr)
 {
     if (sws) {
         for (SwsContext*& c : *sws) {
@@ -197,6 +394,10 @@ static void releaseAv(AVCodecContext** ctx, AVFrame** frame, std::vector<SwsCont
             }
         }
         sws->clear();
+    }
+    if (hwDevice && *hwDevice) {
+        av_buffer_unref(hwDevice);
+        *hwDevice = nullptr;
     }
     if (frame && *frame) {
         av_frame_free(frame);
@@ -294,6 +495,11 @@ int VideoEncoder::estimateBitrate(CodecType codec, int encW, int encH, int fps, 
 bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int encH, int fps, int bitrate,
                               HwEncodeMode hwMode)
 {
+    // MPEG4/MJPEG 走不到下面的 findHwEncoder，若 initialize 恰好是进程里第一个碰
+    // FFmpeg 的入口（helper 刚起、能力探测还没跑），未注册时 avcodec_find_encoder
+    // 返回 nullptr，表现为"编码器不存在"直接黑屏。注册本身幂等，放最前面兜住顺序。
+    ensureAvCodecsRegistered();
+
     // 契约安全：initialize() 允许被重复调用（上层 reinit 未必先 shutdown）。若编码
     // 线程仍在运行，必须先把线程停下来再释放/覆盖上下文，否则线程会继续使用马上
     // 被 releaseAv() 释放的 codecCtx_/frame_/swsCtxs_（use-after-free）。
@@ -313,7 +519,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     }
     // 释放上一轮 FFmpeg 资源：initialize 允许重复调用（上层 reinit 未必先 shutdown），
     // 若不先释放就直接覆盖指针，会泄漏整套编码器上下文（硬编时还含 GPU/驱动资源）。
-    releaseAv(&codecCtx_, &frame_, &swsCtxs_);
+    releaseAv(&codecCtx_, &frame_, &swsCtxs_, &hwDeviceCtx_);
     releaseBandScratch();
 
     abort_ = false;
@@ -356,9 +562,12 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     sizeMismatch_.store(false);
 
     // ---- RK3588 MPP 硬编：H264/HEVC + 硬件开关非 Off 时优先走 MPP 直连 ----
-    // MPP 不是 avcodec 编码器（无编码器名可探测），需单独初始化；其他平台 isSupported()=false 自动跳过
+    // MPP 不是 avcodec 编码器（无编码器名可探测），需单独初始化。
+    // isSupported() 先判：非 Rockchip 机器（含 Windows/macOS 的 stub）以前也会
+    // new 一个 MppEncoder 跑一遍必然失败的 initialize，然后在日志里留下
+    // "MPP encoder unavailable" —— 在根本没接 MPP 的机器上属于误导信息。
     if ((type == CodecType::H264 || type == CodecType::HEVC) && hwMode != HwEncodeMode::Off
-        && !g_mppDisabled.load()) {
+        && !g_mppDisabled.load() && MppEncoder::isSupported()) {
         mpp_ = new MppEncoder();
         // 源尺寸 srcW×srcH 与编码尺寸 encW×encH 分开传：MPP 内部 sws 需要按
         // 源尺寸解释输入帧，只传编码尺寸会导致画面裁切+压扁。
@@ -412,23 +621,36 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
 
     // 支持硬件编码的编码类型才探测（MPEG4/MJPEG 直接软编）
     const char* hwName = nullptr;
+    QString hwDiag;
     switch (type) {
     case CodecType::H264: case CodecType::HEVC:
     case CodecType::VP8:  case CodecType::VP9: case CodecType::AV1:
-        hwName = findHwEncoder(type, hwMode);
+        hwName = findHwEncoder(type, hwMode, hwMode == HwEncodeMode::On ? &hwDiag : nullptr);
         break;
     default:
         break;
     }
+    bool vaapiHw = false;
     if (hwName) {
         codec = avcodec_find_encoder_by_name(hwName);
         if (codec) {
-            pixFmt_ = encoderPixFmt(codec, hwName);
+            vaapiHw = strstr(hwName, "vaapi") != nullptr;
+            // VAAPI 编码器只收 AV_PIX_FMT_VAAPI；软件侧先转成 NV12 再 upload。
+            pixFmt_ = vaapiHw ? AV_PIX_FMT_NV12 : encoderPixFmt(codec, hwName);
             hwName_ = QString::fromUtf8(hwName);
             codecName_ = QString("%1 (%2)").arg(QString::fromUtf8(avcodec_get_name(codecId))).arg(hwName_);
             qInfo() << "Using HW encoder:" << hwName_ << "pix_fmt:" << av_get_pix_fmt_name(pixFmt_);
+            if (vaapiHw) {
+                hwDeviceCtx_ = createVaapiDevice();
+                if (!hwDeviceCtx_) {
+                    // 设备不可用：让 openCodec 失败并走下方软编回退，
+                    // 避免"日志说硬编、实际每帧全失败"。
+                    vaapiHw = false;
+                }
+            }
         }
     }
+    swPixFmt_ = pixFmt_;
 
     if (!codec) {
         codec = avcodec_find_encoder(codecId);
@@ -438,10 +660,14 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         }
         hwName_.clear();
         qInfo() << "Using software encoder:" << codecName_;
+        if (hwMode == HwEncodeMode::On)
+            warnHwRequestedButUnavailable(hwDiag.isEmpty() ? QStringLiteral("无候选编码器") : hwDiag);
     }
 
     // openCodec：分配 ctx + 设置参数 + open；失败返回 false（由调用方决定回退或放弃）
     auto openCodec = [&](const AVCodec* c) -> bool {
+        if (c->name && strstr(c->name, "vaapi") && !hwDeviceCtx_)
+            return false;
         AVCodecContext* ctx = avcodec_alloc_context3(c);
         if (!ctx)
             return false;
@@ -450,11 +676,31 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         ctx->time_base = { 1, fps };
         ctx->framerate = { fps, 1 };
         ctx->bit_rate = bitrate;
-        // 关键帧间隔取半秒到一秒之间：太短浪费码率，太长则画面突变后
-        // 要等待整个 GOP 才能恢复清晰。桌面远程建议 ~0.5s 一个 IDR。
-        ctx->gop_size = qMax(1, fps / 2);
+        // 关键帧间隔：静态桌面几乎不需要 I 帧。原先 0.5s 一个 IDR（15fps 时
+        // gop=7）在 openh264 上约等于每秒 2 个全帧关键帧，纯浪费；放宽到 2s 后
+        // 关键帧开销降到 1/4。新客户端/PLI/丢包恢复仍由 pumpKeyframe() + flush
+        // 强制 IDR 兜底（见 encodingLoop 的 forceKeyframe_ 分支）。
+        ctx->gop_size = qMax(1, fps * 2);
         ctx->max_b_frames = 0;
-        ctx->pix_fmt = pixFmt_;
+        ctx->pix_fmt = vaapiHw ? AV_PIX_FMT_VAAPI : pixFmt_;
+        if (vaapiHw && hwDeviceCtx_) {
+            // h264_vaapi/hevc_vaapi 必须挂 hw_frames_ctx（NV12 软件帧 → VAAPI 表面）。
+            AVBufferRef* framesRef = av_hwframe_ctx_alloc(hwDeviceCtx_);
+            if (!framesRef)
+                return false;
+            AVHWFramesContext* fctx = reinterpret_cast<AVHWFramesContext*>(framesRef->data);
+            fctx->format = AV_PIX_FMT_VAAPI;
+            fctx->sw_format = pixFmt_;          // NV12
+            fctx->width = encW;
+            fctx->height = encH;
+            fctx->initial_pool_size = 20;       // 编码器流水线 + 我们复用的 1 帧
+            if (av_hwframe_ctx_init(framesRef) < 0) {
+                av_buffer_unref(&framesRef);
+                qWarning() << "VAAPI hwframe init failed for" << encW << "x" << encH;
+                return false;
+            }
+            ctx->hw_frames_ctx = framesRef;     // 所有权转移给 codecCtx
+        }
         // 硬件编码器内部自带加速与缓冲管理，线程数固定 1；多线程仅对软编有效
         ctx->thread_count = hwName_.isEmpty() ? qMax(1, qMin(QThread::idealThreadCount(), 4)) : 1;
 
@@ -483,7 +729,25 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
                 av_dict_set(&opts, "preset", "ultrafast", 0);
                 av_dict_set(&opts, "tune", "zerolatency", 0);
             }
-            av_dict_set(&opts, "profile", "baseline", 0);
+            // VAAPI 对 baseline 的映射依驱动而异，交给编码器默认 profile 更稳；
+            // 浏览器 MSE/WebCodecs 对 High/Main 都能解。
+            if (!vaapiHw) {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 0, 0)
+                // FFmpeg 5.0 起 libopenh264 的 profile 从自由字符串换成命名常量，
+                // 只注册 constrained_baseline/main/high。传 "baseline" 会得到
+                // "Unable to parse option value" → avcodec_open2 返回 -22，
+                // 表现为"硬编不可用退回软编后完全没有视频源，只能停在图片模式"。
+                // constrained_baseline 与 3.4.8 里 "baseline" 的效果一致
+                // （CAVLC、无 B 帧）；nvenc 仍认 "baseline"，所以只对 openh264 改名。
+                const bool swOpenH264 = c->name &&
+                    (qstrcmp(c->name, "libopenh264") == 0 ||
+                     qstrcmp(c->name, "h264_openh264") == 0);
+                av_dict_set(&opts, "profile",
+                            swOpenH264 ? "constrained_baseline" : "baseline", 0);
+#else
+                av_dict_set(&opts, "profile", "baseline", 0);
+#endif
+            }
             break;
         case CodecType::HEVC:
             if (!hwName_.isEmpty()) {
@@ -530,14 +794,20 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         if (!hwName_.isEmpty()) {
             // 探测到硬件编码器但 open 失败（无驱动/设备/选项不兼容）→ 回退软编，保证画面不中断
             qWarning() << "HW encoder open failed, falling back to software encoder";
+            // 与 createVaapiDevice 同理：open 失败说明该后端在本机/本进程内不可用
+            // （驱动缺失、版本不匹配、选项不兼容），后续每次重建都别再试一遍。
+            blockHwBackend(hwName_.toUtf8().constData());
             codec = avcodec_find_encoder(codecId);
             if (!codec) {
                 qCritical() << "Software encoder" << codecName_ << "not found";
                 return false;
             }
             hwName_.clear();
+            vaapiHw = false;
+            av_buffer_unref(&hwDeviceCtx_);
             codecName_ = QString::fromUtf8(avcodec_get_name(codecId));
             pixFmt_ = AV_PIX_FMT_YUV420P;
+            swPixFmt_ = pixFmt_;
             qInfo() << "Using software encoder:" << codecName_;
             if (!openCodec(codec))
                 return false;
@@ -561,7 +831,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         qCritical() << "Failed to allocate AVFrame";
         return false;
     }
-    frame_->format = codecCtx_->pix_fmt;
+    frame_->format = swPixFmt_;
     frame_->width = codecCtx_->width;
     frame_->height = codecCtx_->height;
     if (av_frame_get_buffer(frame_, 0) < 0) {
@@ -689,10 +959,10 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
             const bool useTmp = swsBandedScale_;
             if (swsHorizontal_)
                 return sws_getContext(p.srcW, srcH, AV_PIX_FMT_RGB32,
-                    useTmp ? p.tmpW : p.dstW, encH, codecCtx_->pix_fmt,
+                    useTmp ? p.tmpW : p.dstW, encH, swPixFmt_,
                     SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
             return sws_getContext(srcW, p.srcH, AV_PIX_FMT_RGB32,
-                encW, useTmp ? p.tmpH : p.dstH, codecCtx_->pix_fmt,
+                encW, useTmp ? p.tmpH : p.dstH, swPixFmt_,
                 SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
         };
         // 原生转换（ARM 标量 / x86 AVX2）不经过 sws：不要为条带创建 SwsContext
@@ -714,7 +984,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
                 for (int i = 0; i < swsBands_; ++i) {
                     AVFrame* tmp = av_frame_alloc();
                     if (!tmp) { tmpOk = false; break; }
-                    tmp->format = codecCtx_->pix_fmt;
+                    tmp->format = swPixFmt_;
                     tmp->width = swsHorizontal_ ? bandPlans_[i].tmpW : encW;
                     tmp->height = swsHorizontal_ ? encH : bandPlans_[i].tmpH;
                     if (av_frame_get_buffer(tmp, 32) < 0) {
@@ -1066,7 +1336,10 @@ void VideoEncoder::encode(const QImage& frame)
     // [V-2] 深拷贝移出锁外：持锁做 8MB 级 copy 会阻塞编码线程出队与并发 encode。
     // QImage 隐式共享下 copy() 仅在缓冲被共享时才真正复制；isDetached() 已独占
     // （如 JpegCompressor 输出）则零拷贝直接入队。
-    QImage copy = frame.isDetached() ? frame : frame.copy();
+    // [P1 zero-copy] X11 采集改为双缓冲后，外发帧在编码线程读完之前不会被采集端
+    // 原地改写（见 X11Capturer::emitFrame）。此时即使 QImage 引用计数 >1 也可
+    // 直接入队，省掉每帧 8.3MB malloc+memcpy（15fps ≈ 125MB/s）。
+    QImage queued = (assumeExclusiveInput_ || frame.isDetached()) ? frame : frame.copy();
     QMutexLocker locker(&mutex_);
     // 已退役/停止：直接丢弃（否则帧会积在队列里，只能等下一次 initialize 清空）
     if (abort_)
@@ -1078,10 +1351,11 @@ void VideoEncoder::encode(const QImage& frame)
         frameQueue_.dequeue();
     // [DIAG] 记录入队时刻，供编码线程分解 排队等待 / 编码耗时
     lastEnqueueMs_ = QDateTime::currentMSecsSinceEpoch();
-    // 必须深拷贝再入队：X11 全量抓取路径把持久缓冲 fullFrame_ 浅共享给上层，
-    // 而 Damage 区域抓取路径会在同一缓冲上 memcpy 原地改写。若这里只存 QImage 引用，
-    // 编码线程出队时可能读到被捕获线程并发改写的半新半旧帧 → 画面撕裂/花屏。
-    frameQueue_.enqueue(copy);
+    // 独占模式（X11 双缓冲）下直接入队共享帧：采集端只会改写"另一块"缓冲，
+    // 若该缓冲仍被本线程引用则改用整帧 copy，绝不会原地覆写正在编码的像素。
+    // 非独占平台（Windows/Android/Wayland）仍深拷贝：GDI/DXGI 的帧缓冲会被
+    // 下一次抓取原地复用，只存 QImage 引用会让编码线程读到半新半旧帧。
+    frameQueue_.enqueue(queued);
     condition_.wakeOne();
 }
 
@@ -1239,6 +1513,32 @@ void VideoEncoder::encodingLoop()
         continue;
     }
 
+    // VAAPI：软件帧（NV12）→ GPU 表面。每帧向 hw_frames_ctx 申请一块（池化复用），
+    // send 后立即释放本 AVFrame —— 编码器内部持有自己的引用，不会用到已释放的内存。
+    // 不复用单个 hwFrame_：avcodec_send_frame 不拷贝像素，复用会让"上一帧还在读"
+    // 和"本帧正在上传"指向同一表面（撕裂/花屏）。
+    AVFrame* sendFrame = frame_;
+    AVFrame* hwUpload = nullptr;
+    if (codecCtx_->hw_frames_ctx) {
+        hwUpload = av_frame_alloc();
+        if (!hwUpload
+            || av_hwframe_get_buffer(codecCtx_->hw_frames_ctx, hwUpload, 0) < 0) {
+            av_frame_free(&hwUpload);
+            qWarning() << "VideoEncoder: VAAPI hwframe allocation failed";
+            continue;
+        }
+        int tr = av_hwframe_transfer_data(hwUpload, frame_, 0);
+        if (tr < 0) {
+            char errBuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+            av_strerror(tr, errBuf, sizeof(errBuf));
+            av_frame_free(&hwUpload);
+            qWarning() << "VideoEncoder: VAAPI upload failed:" << errBuf;
+            continue;
+        }
+        hwUpload->pict_type = AV_PICTURE_TYPE_NONE;
+        sendFrame = hwUpload;
+    }
+
         // 应用 WebRTC 反馈：REMB 码率调整 / PLI 强制关键帧
         int br = pendingBitrate_.exchange(0);
         if (br > 0 && codecCtx_->bit_rate != br) {
@@ -1252,24 +1552,26 @@ void VideoEncoder::encodingLoop()
             // GOP 帧计数器，下一帧必为 IDR（含 SPS/PPS，MSE 可衔接解码）。
             avcodec_flush_buffers(codecCtx_);
             codecCtx_->gop_size = 1; // 双保险：部分编码器运行时读取
-            frame_->pict_type = AV_PICTURE_TYPE_I; // 双保险：新版 ffmpeg 认
+            sendFrame->pict_type = AV_PICTURE_TYPE_I; // 双保险：新版 ffmpeg 认
         } else {
-            frame_->pict_type = AV_PICTURE_TYPE_NONE; // 防残留：非强制帧不继承上一帧的 I 标记
+            sendFrame->pict_type = AV_PICTURE_TYPE_NONE; // 防残留：非强制帧不继承上一帧的 I 标记
         }
 
-        frame_->pts = frameCount_++;
+        sendFrame->pts = frameCount_++;
 
         // 编码耗时监控（EMA）：
         // 平均耗时超过帧间隔的 80% 视为过载，每 5 秒最多告警一次，便于定位单板 CPU 压力
         qint64 encodeStart = QDateTime::currentMSecsSinceEpoch();
-        int ret = avcodec_send_frame(codecCtx_, frame_);
+        int ret = avcodec_send_frame(codecCtx_, sendFrame);
+        // send 内部已 av_frame_ref；本帧的 hw 表面引用可以立即释放。
+        av_frame_free(&hwUpload);
         if (ret < 0) {
             // 失败路径也必须恢复 GOP：否则强制关键帧后 gop_size 一直为 1，
             // 导致后续每一帧都被强制为 IDR（码率暴增、CPU 过载）。
-            // 恢复值必须与 initialize() 里的初值一致（fps/2，0.5s），
-            // 用 fps_（1s）会让强制关键帧后 IDR 间隔永久翻倍。
+            // 恢复值必须与 initialize() 里的初值一致（fps*2，2s），
+            // 用 fps_（1s）会让强制关键帧后 IDR 间隔永久减半。
             if (codecCtx_->gop_size == 1)
-                codecCtx_->gop_size = qMax(1, fps_ / 2);
+                codecCtx_->gop_size = qMax(1, fps_ * 2);
             // [FIX-B3] 编码错误不再静默：此前 ret<0 直接 continue，既不打日志
             // 也不上报，编码器进入错误态后会长期每帧失败，上层只能靠 hasIdr()
             // 每 4s 盲目重建，形成"重建-失败"死循环且日志无痕。
@@ -1328,7 +1630,7 @@ void VideoEncoder::encodingLoop()
         // 冷启动前几帧含编码器预热（首帧必然慢），跳过过载判定避免启动时误降码率
         if (frameCount_ <= 5) {
             if (codecCtx_->gop_size == 1)
-                codecCtx_->gop_size = qMax(1, fps_ / 2);
+                codecCtx_->gop_size = qMax(1, fps_ * 2);
             continue;
         }
         updateOverloadState(encodeStart);
@@ -1336,9 +1638,9 @@ void VideoEncoder::encodingLoop()
         if (frameCount_ % 60 == 0)
             qInfo() << "ENC-LAT queueWait=" << queueWaitMs << "ms total=" << (QDateTime::currentMSecsSinceEpoch() - enqueueMs) << "ms";
 
-        // 恢复正常 GOP 间隔（与 initialize() 初值一致：fps/2）
+        // 恢复正常 GOP 间隔（与 initialize() 初值一致：fps*2，2s）
         if (codecCtx_->gop_size == 1)
-            codecCtx_->gop_size = qMax(1, fps_ / 2);
+            codecCtx_->gop_size = qMax(1, fps_ * 2);
     }
     av_packet_free(&packet); // [P2] 复用的 packet 在线程退出时统一释放
 }
@@ -1481,6 +1783,13 @@ void VideoEncoder::releaseStoppedResources()
     stopBandWorkers();
 
     // 与 initialize() 开头的清理保持一致，保证 shutdown 后可安全重建
-    releaseAv(&codecCtx_, &frame_, &swsCtxs_);
+    releaseAv(&codecCtx_, &frame_, &swsCtxs_, &hwDeviceCtx_);
     releaseBandScratch();
+
+#if defined(Q_OS_LINUX) && defined(__GLIBC__)
+    // [P2] 编码器重建/关闭时归还大块空闲内存。glibc 的 free 默认只把页留在
+    // arena 里，反复重建（切画质、客户端重连）后 RSS 只涨不落；malloc_trim
+    // 主动把空闲页还给内核。只在编码线程已停止时调用，频率低，开销可忽略。
+    malloc_trim(0);
+#endif
 }

@@ -19,8 +19,13 @@ endif()
 
 set(HOME_BASE "${PROJECT_SOURCE_DIR}/..")
 
-# metaRTC 自带 ffmpeg 头为裁剪版（缺 AVHWDeviceType 等），改用安装的完整 FFmpeg 头
-set(FFMPEG_USER_INCLUDE "${BUILD_OUTPUT_DIR}/ffmpeg_install/include")
+# metaRTC 自带 ffmpeg 头为裁剪版（缺 AVHWDeviceType 等），改用安装的完整 FFmpeg 头。
+# 目录名随 FFmpeg 版本变化（3.4.8 → ffmpeg_install，6.x → ffmpeg_install-<版本>），
+# 所以用顶层按版本推导出的 FFMPEG_INSTALL_DIR；单独配置本目录时才回退老名字。
+if(NOT DEFINED FFMPEG_INSTALL_DIR)
+    set(FFMPEG_INSTALL_DIR "${BUILD_OUTPUT_DIR}/ffmpeg_install")
+endif()
+set(FFMPEG_USER_INCLUDE "${FFMPEG_INSTALL_DIR}/include")
 
 include_directories(
     ${HOME_BASE}/include

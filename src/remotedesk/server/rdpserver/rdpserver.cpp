@@ -4920,6 +4920,9 @@ void RDPServer::onFrameCaptured(const QImage& frame)
                 }
             } else {
                 // 缩放已在编码线程 sws_scale 完成，主线程不再做全帧缩放（避免阻塞输入处理）
+                // X11 双缓冲采集：帧在编码读完前不会被改写，可零拷贝入队。
+                videoEncoder_->setAssumeExclusiveInput(
+                    screenCapturer_ && screenCapturer_->framesAreExclusive());
                 videoEncoder_->encode(frame);
             }
             dispatched = true;
