@@ -1,0 +1,166 @@
+=== pwd: /d/a/QtRemoteDesktop/QtRemoteDesktop
+=== setup_qt.log ===
+=== cache miss: downloading offline installer ===
+-rwxr-xr-x 1 runneradmin 197121 1201453136 Oct 31 13:43 qt571.exe
+=== layer 1: extract [0] payload container from exe ===
+=== layer 2: split numbered component archives ===
+=== layer 3: extract components containing mingw53 ===
+skip: 10.7z
+skip: 100.7z
+skip: 102.7z
+skip: 104.7z
+skip: 106.7z
+skip: 108.7z
+skip: 110.7z
+skip: 112.7z
+skip: 114.7z
+skip: 116.7z
+skip: 118.7z
+skip: 12.7z
+skip: 120.7z
+skip: 122.7z
+skip: 124.7z
+skip: 126.7z
+HIT: 128.7z
+Compressed: 59160985
+skip: 130.7z
+skip: 132.7z
+HIT: 134.7z
+Compressed: 11975751
+skip: 136.7z
+HIT: 138.7z
+Compressed: 20341136
+HIT: 14.7z
+Compressed: 10971298
+skip: 140.7z
+skip: 142.7z
+skip: 144.7z
+HIT: 146.7z
+Compressed: 375699
+HIT: 148.7z
+Compressed: 3417299
+HIT: 150.7z
+Compressed: 53631259
+HIT: 152.7z
+Compressed: 3072808
+HIT: 154.7z
+Compressed: 125889230
+HIT: 156.7z
+Compressed: 4102111
+HIT: 158.7z
+Compressed: 4706801
+skip: 16.7z
+HIT: 160.7z
+Compressed: 71182378
+HIT: 162.7z
+Compressed: 542372
+HIT: 164.7z
+Compressed: 1619629
+HIT: 166.7z
+Compressed: 17337360
+HIT: 168.7z
+Compressed: 13425216
+HIT: 170.7z
+Compressed: 8157856
+HIT: 172.7z
+Compressed: 13018627
+HIT: 174.7z
+Compressed: 3637310
+HIT: 176.7z
+Compressed: 309082
+HIT: 178.7z
+Compressed: 2124165
+skip: 18.7z
+HIT: 180.7z
+Compressed: 48317715
+HIT: 182.7z
+Compressed: 1247067
+HIT: 184.7z
+Compressed: 744334
+HIT: 186.7z
+Compressed: 1732880
+HIT: 188.7z
+Compressed: 2063825
+HIT: 190.7z
+Compressed: 27371463
+skip: 192.7z
+skip: 194.7z
+skip: 2.7z
+skip: 20.7z
+HIT: 22.7z
+Compressed: 1794454
+skip: 24.7z
+skip: 26.7z
+skip: 28.7z
+HIT: 30.7z
+Compressed: 990417
+skip: 32.7z
+HIT: 34.7z
+Compressed: 2489853
+HIT: 36.7z
+Compressed: 1836463
+HIT: 38.7z
+Compressed: 702440
+skip: 4.7z
+skip: 40.7z
+HIT: 42.7z
+Compressed: 2743378
+skip: 44.7z
+skip: 46.7z
+skip: 48.7z
+skip: 50.7z
+skip: 52.7z
+skip: 54.7z
+skip: 56.7z
+skip: 58.7z
+skip: 6.7z
+skip: 60.7z
+skip: 62.7z
+skip: 64.7z
+skip: 66.7z
+skip: 68.7z
+skip: 70.7z
+skip: 72.7z
+skip: 74.7z
+skip: 76.7z
+skip: 78.7z
+skip: 8.7z
+skip: 80.7z
+skip: 82.7z
+skip: 84.7z
+skip: 86.7z
+skip: 88.7z
+skip: 90.7z
+skip: 92.7z
+skip: 94.7z
+skip: 96.7z
+skip: 98.7z
+QTBIN=/d/qt571/5.7/mingw53_32/bin
+GCCBIN=/d/qt571/Tools/mingw530_32/bin
+seeded /d/qt571/Tools/mingw530_32/bin/../libexec/gcc/i686-w64-mingw32/5.3.0/libwinpthread-1.dll
+seeded /d/qt571/Tools/mingw530_32/bin/../libexec/gcc/i686-w64-mingw32/5.3.0/libstdc++-6.dll
+seeded /d/qt571/Tools/mingw530_32/bin/../libexec/gcc/i686-w64-mingw32/5.3.0/libgcc_s_dw2-1.dll
+seeded /d/qt571/Tools/mingw530_32/bin/../lib/gcc/i686-w64-mingw32/5.3.0/libwinpthread-1.dll
+seeded /d/qt571/Tools/mingw530_32/bin/../lib/gcc/i686-w64-mingw32/5.3.0/libstdc++-6.dll
+seeded /d/qt571/Tools/mingw530_32/bin/../lib/gcc/i686-w64-mingw32/5.3.0/libgcc_s_dw2-1.dll
+=== toolchain check ===
+Using built-in specs.
+COLLECT_GCC=D:\qt571\Tools\mingw530_32\bin\gcc.exe
+COLLECT_LTO_WRAPPER=D:/qt571/Tools/mingw530_32/bin/../libexec/gcc/i686-w64-mingw32/5.3.0/lto-wrapper.exe
+D:/qt571/5.7/mingw53_32
+5.7.1
+=== fetch_sources.log ===
+(不存在)
+=== configure.log ===
+(不存在)
+=== build.log ===
+(不存在)
+=== build_linux.log ===
+(不存在)
+=== deploy.log ===
+(不存在)
+=== package.log ===
+(不存在)
+=== smoke.log ===
+(不存在)
+=== 错误摘要 ===
