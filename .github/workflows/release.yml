@@ -573,9 +573,12 @@ jobs:
   # Qt 5.15.2 的官方 macOS 安装包只有 x86_64，所以跑 Intel runner、出 Intel 包：
   # 产物在 Apple Silicon 上靠 Rosetta 2 运行。要出 arm64 原生包得换 Qt 6（官方
   # 从 6.3 起才是 universal），而 Qt6 桌面路径本仓库还没验证过，不适合顺手带上。
+  # 标签必须带 -intel：macos-13 已于 2025-12-04 下线，任务会一直卡在 queued
+  # （release 通过 needs 等它，等于整个发布不产出），Intel/x86_64 现在只有
+  # macos-15-intel / macos-26-intel 两档。
   build-macos:
     name: macOS x86_64
-    runs-on: macos-13
+    runs-on: macos-15-intel
     env:
       QT_VERSION: '5.15.2'
       FFMPEG_VER: '6.1.2'
@@ -648,8 +651,14 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # 显式钉部署下限：不写的话 clang 把 minos 打成 runner 自己的系统版本
+          # （macos-15-intel 就是 15.0），等于产物只有最新系统能用。这里用到的
+          # API 都远低于此（CGDisplayCreateImage 10.6+、CGEventPost 10.5+，
+          # 10.15 的 CGPreflightScreenCaptureAccess 是 dlsym 运行期取的），
+          # Qt 5.15.2 官方要求 10.13+，取 10.14 留余量。
           cmake -S src -B build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.14 \
             -DBUILD_THIRDPARTY=ON \
             -DFFMPEG_VERSION="$FFMPEG_VER" \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$OPENSSL_PREFIX" 2>&1 | tee configure.log
@@ -673,6 +682,51 @@ jobs:
             "$QT_ROOT_DIR/bin/macdeployqt" "$APP_BUNDLE" -verbose=2 2>&1 | tee deploy.log
             # 平台插件没进去的包在目标机上直接起不来（"failed to load cocoa"）
             ls "$APP_BUNDLE/Contents/PlugIns/platforms/" | tee -a deploy.log
+
+            # ---- 把包外 dylib 搬进 .app（brew 的 OpenSSL 等）----
+            # macdeployqt 只搬 Qt 自己的 framework；libssl/libcrypto 来自 brew，
+            # 链接期记的是 /usr/local/opt/... 绝对路径，用户机没装 brew 就
+            # "dyld: Library not loaded" 直接起不来（在构建机上冒烟照样通过，
+            # 所以这一步不能靠冒烟发现）。递归到依赖闭包，最后断言包内 Mach-O
+            # 不再引用任何包外绝对路径。必须在 codesign 之前做完。
+            FW="$APP_BUNDLE/Contents/Frameworks"
+            mkdir -p "$FW"
+            ext_deps() {
+              find "$APP_BUNDLE/Contents" -type f | while read -r f; do
+                file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
+                otool -L "$f" 2>/dev/null | awk '/^[[:space:]]+\// {print $1}'
+              done | sort -u | grep -vE '^(/usr/lib/|/System/|@rpath/|@executable_path/|@loader_path/)' || true
+            }
+            refs_dep() {
+              awk -v d="$1" '/^[[:space:]]+\// && $1 == d {found = 1} END {exit !found}'
+            }
+            for pass in 1 2 3 4 5; do
+              todo=$(ext_deps)
+              [ -z "$todo" ] && break
+              echo "=== 外部依赖 pass $pass ==="
+              echo "$todo"
+              for dep in $todo; do
+                [ -e "$dep" ] || { echo "::error::外部依赖在构建机上不存在，无法打包：$dep"; exit 1; }
+                base=$(basename "$dep")
+                if [ ! -e "$FW/$base" ]; then
+                  cp -L "$dep" "$FW/$base"
+                  chmod u+w "$FW/$base"
+                  install_name_tool -id "@executable_path/../Frameworks/$base" "$FW/$base"
+                fi
+                find "$APP_BUNDLE/Contents" -type f | while read -r f; do
+                  file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
+                  otool -L "$f" 2>/dev/null | refs_dep "$dep" || continue
+                  install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" "$f"
+                done
+              done
+            done
+            left=$(ext_deps)
+            if [ -n "$left" ]; then
+              echo "::error::产物仍依赖包外 dylib（目标机会 dyld 打不开）："
+              echo "$left"
+              exit 1
+            fi
+            otool -L "$APP_BUNDLE/Contents/MacOS/QtRemoteDesktop" | tee deps_after.log
 
             # 代码签名：TCC（屏幕录制/辅助功能）的授权记录是绑在签名的 Designated
             # Requirement 上的，未签名的包每次重编都要重新勾一次；x86_64 虽然不签也
