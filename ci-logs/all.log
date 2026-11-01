@@ -243,7 +243,7 @@ CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/libya
 -- Performing Test QTRD_FF_HAVE_V4L2_HEVC
 -- Performing Test QTRD_FF_HAVE_V4L2_HEVC - Success
 -- FFmpeg 硬件编码器自动探测：nvenc v4l2m2m
--- Configuring done (5.1s)
+-- Configuring done (4.5s)
 -- Generating done (0.2s)
 -- Build files have been written to: /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build
 
@@ -511,8 +511,8 @@ CC	libavcodec/videodsp.o
 CC	libavcodec/vlc.o
 CC	libavcodec/vorbis_parser.o
 X86ASM	libavcodec/x86/blockdsp.o
-CC	libavcodec/x86/blockdsp_init.o
 STRIP	libavcodec/x86/blockdsp.o
+CC	libavcodec/x86/blockdsp_init.o
 CC	libavcodec/x86/constants.o
 CC	libavcodec/x86/fdct.o
 CC	libavcodec/x86/fdctdsp_init.o
@@ -520,8 +520,8 @@ X86ASM	libavcodec/x86/fpel.o
 X86ASM	libavcodec/x86/h263_loopfilter.o
 STRIP	libavcodec/x86/fpel.o
 CC	libavcodec/x86/h263dsp_init.o
-X86ASM	libavcodec/x86/h264_chromamc.o
 STRIP	libavcodec/x86/h263_loopfilter.o
+X86ASM	libavcodec/x86/h264_chromamc.o
 X86ASM	libavcodec/x86/h264_chromamc_10bit.o
 STRIP	libavcodec/x86/h264_chromamc_10bit.o
 X86ASM	libavcodec/x86/h264_deblock.o
@@ -529,37 +529,37 @@ STRIP	libavcodec/x86/h264_chromamc.o
 X86ASM	libavcodec/x86/h264_deblock_10bit.o
 STRIP	libavcodec/x86/h264_deblock_10bit.o
 X86ASM	libavcodec/x86/h264_idct.o
-STRIP	libavcodec/x86/h264_idct.o
-X86ASM	libavcodec/x86/h264_idct_10bit.o
 STRIP	libavcodec/x86/h264_deblock.o
+X86ASM	libavcodec/x86/h264_idct_10bit.o
+STRIP	libavcodec/x86/h264_idct.o
 X86ASM	libavcodec/x86/h264_intrapred.o
 STRIP	libavcodec/x86/h264_idct_10bit.o
 X86ASM	libavcodec/x86/h264_intrapred_10bit.o
 CC	libavcodec/x86/h264_intrapred_init.o
 CC	libavcodec/x86/h264_qpel.o
-STRIP	libavcodec/x86/h264_intrapred_10bit.o
 X86ASM	libavcodec/x86/h264_qpel_10bit.o
 STRIP	libavcodec/x86/h264_intrapred.o
 X86ASM	libavcodec/x86/h264_qpel_8bit.o
+STRIP	libavcodec/x86/h264_intrapred_10bit.o
 X86ASM	libavcodec/x86/h264_weight.o
 X86ASM	libavcodec/x86/h264_weight_10bit.o
 STRIP	libavcodec/x86/h264_weight.o
 CC	libavcodec/x86/h264chroma_init.o
 CC	libavcodec/x86/h264dsp_init.o
-STRIP	libavcodec/x86/h264_weight_10bit.o
 X86ASM	libavcodec/x86/hpeldsp.o
+STRIP	libavcodec/x86/h264_qpel_10bit.o
 CC	libavcodec/x86/hpeldsp_init.o
+STRIP	libavcodec/x86/h264_weight_10bit.o
 X86ASM	libavcodec/x86/idctdsp.o
-STRIP	libavcodec/x86/idctdsp.o
 CC	libavcodec/x86/idctdsp_init.o
-STRIP	libavcodec/x86/hpeldsp.o
+STRIP	libavcodec/x86/idctdsp.o
 X86ASM	libavcodec/x86/me_cmp.o
 CC	libavcodec/x86/me_cmp_init.o
+STRIP	libavcodec/x86/hpeldsp.o
 CC	libavcodec/x86/mpeg4videodsp.o
 CC	libavcodec/x86/mpegvideo.o
-STRIP	libavcodec/x86/h264_qpel_8bit.o
 X86ASM	libavcodec/x86/qpel.o
-STRIP	libavcodec/x86/h264_qpel_10bit.o
+STRIP	libavcodec/x86/h264_qpel_8bit.o
 X86ASM	libavcodec/x86/qpeldsp.o
 CC	libavcodec/x86/qpeldsp_init.o
 STRIP	libavcodec/x86/qpel.o
@@ -575,9 +575,9 @@ CC	libavcodec/xiph.o
 CC	libavcodec/xvididct.o
 CC	libswscale/alphablend.o
 CC	libswscale/gamma.o
+STRIP	libavcodec/x86/xvididct.o
 CC	libswscale/half2float.o
 CC	libswscale/hscale.o
-STRIP	libavcodec/x86/xvididct.o
 CC	libswscale/hscale_fast_bilinear.o
 CC	libswscale/input.o
 CC	libswscale/options.o
@@ -602,16 +602,16 @@ X86ASM	libswscale/x86/scale_avx2.o
 STRIP	libswscale/x86/scale_avx2.o
 CC	libswscale/x86/swscale.o
 CC	libswscale/x86/yuv2rgb.o
-STRIP	libswscale/x86/scale.o
 X86ASM	libswscale/x86/yuv2yuvX.o
-STRIP	libswscale/x86/yuv2yuvX.o
+STRIP	libswscale/x86/scale.o
 X86ASM	libswscale/x86/yuv_2_rgb.o
+STRIP	libswscale/x86/yuv2yuvX.o
 CC	libswscale/yuv2rgb.o
-STRIP	libswscale/x86/output.o
-CC	libavutil/adler32.o
 STRIP	libswscale/x86/yuv_2_rgb.o
+CC	libavutil/adler32.o
 CC	libavutil/aes.o
 CC	libavutil/aes_ctr.o
+STRIP	libswscale/x86/output.o
 CC	libavutil/ambient_viewing_environment.o
 CC	libavutil/audio_fifo.o
 CC	libavutil/avsscanf.o
@@ -1701,10 +1701,10 @@ CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/libya
 >>> 4/5 CMake 构建
 [  0%] Built target VideoEncoder_autogen_timestamp_deps
 [  0%] Built target AuthManager_autogen_timestamp_deps
-[  0%] Built target FileTransferService_autogen_timestamp_deps
 [  0%] Built target InputManager_autogen_timestamp_deps
-[  0%] Built target Clipboardservice_autogen_timestamp_deps
+[  0%] Built target FileTransferService_autogen_timestamp_deps
 [  0%] Built target SystemInfo_autogen_timestamp_deps
+[  0%] Built target Clipboardservice_autogen_timestamp_deps
 [  0%] Built target ScreenCapturer_autogen_timestamp_deps
 [  0%] Built target InteractiveShell_autogen_timestamp_deps
 [  0%] Built target WebsocketServer_autogen_timestamp_deps
@@ -1713,142 +1713,133 @@ CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/libya
 [  1%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/srtp/srtp.c.o
 [  1%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_asconf.c.o
 [  1%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioMix.c.o
+[  1%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangWhip.c.o
 [  2%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioUtil.c.o
-[  2%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangWhip.c.o
 [  2%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangZlmConnection.c.o
 [  3%] Linking C static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangwhip8.a
 [  3%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangjson/YangJson.c.o
 [  3%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangjson/YangJsonImpl.c.o
 [  3%] Built target yangwhip8
-[  3%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangBuffer2.c.o
+[  3%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher.c.o
 [  4%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_auth.c.o
-[  5%] Creating directories for 'openssl102_ep'
-[  5%] Performing download step for 'openssl102_ep'
-[  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher.c.o
+[  4%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangBuffer2.c.o
+[  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher_test_cases.c.o
+[  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/null_cipher.c.o
 [  5%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_bsd_addr.c.o
-[  5%] No update step for 'openssl102_ep'
-[  5%] No patch step for 'openssl102_ep'
-[  5%] No configure step for 'openssl102_ep'
-[  6%] Performing build step for 'openssl102_ep'
-[  7%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher_test_cases.c.o
-[  7%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/null_cipher.c.o
-[  8%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangMediaBuffer2.c.o
-[  8%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_callout.c.o
-[  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes.c.o
-[  8%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangPacket.c.o
+[  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes.c.o
+[  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes_icm.c.o
+[  6%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangMediaBuffer2.c.o
+[  7%] Creating directories for 'openssl102_ep'
+[  7%] Performing download step for 'openssl102_ep'
+[  7%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangPacket.c.o
+[  7%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_callout.c.o
+[  7%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangSortBuffer.c.o
+[  8%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangVideoEncoderBuffer2.c.o
 [  9%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_cc_functions.c.o
-[  9%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangSortBuffer.c.o
-[ 10%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangVideoEncoderBuffer2.c.o
-[ 10%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangAvtype.c.o
+[  9%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangAvtype.c.o
+[  9%] No update step for 'openssl102_ep'
+[  9%] No patch step for 'openssl102_ep'
+[  9%] No configure step for 'openssl102_ep'
+[ 10%] Performing build step for 'openssl102_ep'
 [ 10%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangBuffer.c.o
-[ 10%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCLog.c.o
-[ 10%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_crc32.c.o
-[ 11%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCString.c.o
-[ 11%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes_icm.c.o
-[ 11%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_indata.c.o
-[ 11%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCTimer.c.o
-[ 12%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth.c.o
-[ 12%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangEndian.c.o
-[ 12%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth_test_cases.c.o
-[ 12%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/null_auth.c.o
-[ 13%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangFile.c.o
-[ 14%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/hmac.c.o
+[ 11%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth.c.o
+[ 11%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth_test_cases.c.o
+[ 11%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCLog.c.o
+[ 11%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/null_auth.c.o
+[ 12%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/hmac.c.o
+[ 13%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCString.c.o
+[ 13%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/sha1.c.o
+[ 13%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_crc32.c.o
+[ 13%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCTimer.c.o
+[ 13%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_indata.c.o
+[ 13%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangEndian.c.o
+[ 13%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/alloc.c.o
+[ 14%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangFile.c.o
+[ 14%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/crypto_kernel.c.o
 [ 14%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangHttp.c.o
-[ 14%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/sha1.c.o
 [ 14%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangIni.c.o
-[ 14%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangLibHandle.c.o
-[ 14%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/alloc.c.o
-[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangMath.c.o
-[ 15%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/crypto_kernel.c.o
-[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocket.c.o
-[ 16%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/err.c.o
-[ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketIP.c.o
-[ 16%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/key.c.o
-[ 16%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/math/datatypes.c.o
-[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketCompat.c.o
-[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSsrc.c.o
-[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangThread.c.o
-[ 18%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdb.c.o
-[ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTime.c.o
-[ 18%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdbx.c.o
-[ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTimestamp.c.o
-[ 19%] Linking C static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libsrtp2.a
-[ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangUrl.c.o
-[ 19%] Built target srtp2
-[ 19%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.o
-[ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangVector.c.o
-[ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangMeta.c.o
-[ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangNalu.c.o
-[ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangSpspps.c.o
-[ 23%] Built target openh264_ep
-[ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/err.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/key.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangLibHandle.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/math/datatypes.c.o
+[ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangMath.c.o
+[ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocket.c.o
+[ 17%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdb.c.o
+[ 17%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdbx.c.o
+[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketIP.c.o
+[ 17%] Linking C static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libsrtp2.a
+[ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketCompat.c.o
+[ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSsrc.c.o
+[ 18%] Built target srtp2
+[ 21%] Built target openh264_ep
+[ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangThread.c.o
+[ 21%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.o
+[ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTime.c.o
+[ 22%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTimestamp.c.o
+[ 22%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangUrl.c.o
+[ 22%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangVector.c.o
+[ 23%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangMeta.c.o
+[ 23%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangNalu.c.o
+[ 23%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangSpspps.c.o
+[ 23%] Built target SingleApp_autogen_timestamp_deps
+[ 23%] Built target SystemSleepBlocker_autogen_timestamp_deps
+[ 23%] Built target radiometer_breakpad_autogen_timestamp_deps
+[ 24%] Automatic MOC for target VideoEncoder
+[ 24%] Built target VideoEncoder_autogen
+[ 24%] Automatic MOC for target AuthManager
 [ 24%] Linking C static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a
-[ 24%] Built target yangutil8
-[ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_pcb.c.o
-[ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.o
-[ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.o
-[ 25%] Built target SingleApp_autogen_timestamp_deps
-[ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_ss_functions.c.o
-[ 25%] Built target SystemSleepBlocker_autogen_timestamp_deps
-[ 25%] Built target radiometer_breakpad_autogen_timestamp_deps
-[ 26%] Automatic MOC for target VideoEncoder
-[ 26%] Built target VideoEncoder_autogen
+[ 24%] Built target AuthManager_autogen
+[ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.o
+[ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_pcb.c.o
+[ 25%] Built target yangutil8
+[ 25%] Automatic MOC for target FileTransferService
+[ 25%] Built target FileTransferService_autogen
+[ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.o
+[ 25%] Automatic MOC for target InputManager
+[ 25%] Built target InputManager_autogen
+[ 25%] Automatic MOC for target SystemInfo
+[ 25%] Built target SystemInfo_autogen
+[ 25%] Automatic MOC for target Clipboardservice
+[ 25%] Built target Clipboardservice_autogen
+[ 26%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.o
+[ 26%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_ss_functions.c.o
 [ 26%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sysctl.c.o
-[ 26%] Automatic MOC for target AuthManager
-[ 26%] Automatic MOC for target FileTransferService
-[ 26%] Built target AuthManager_autogen
-[ 26%] Automatic MOC for target InputManager
-[ 26%] Built target FileTransferService_autogen
-[ 26%] Automatic MOC for target SystemInfo
-[ 26%] Built target SystemInfo_autogen
-[ 26%] Automatic MOC for target Clipboardservice
-[ 26%] Built target InputManager_autogen
 [ 26%] Automatic MOC for target ScreenCapturer
-[ 26%] Built target Clipboardservice_autogen
+[ 26%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_timer.c.o
+[ 26%] Built target ScreenCapturer_autogen
 [ 27%] Automatic MOC for target InteractiveShell
-[ 27%] Built target ScreenCapturer_autogen
-[ 27%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_timer.c.o
 [ 27%] Built target InteractiveShell_autogen
 [ 27%] Automatic MOC for target WebsocketServer
-[ 27%] Automatic MOC for target XdndMonitor
-[ 27%] Built target XdndMonitor_autogen
-[ 28%] Automatic MOC for target SingleApp
+[ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_userspace.c.o
 [ 28%] Built target WebsocketServer_autogen
-[ 28%] Automatic MOC for target SystemSleepBlocker
-[ 29%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_userspace.c.o
+[ 28%] Automatic MOC for target XdndMonitor
+[ 29%] Automatic MOC for target SingleApp
+[ 29%] Built target XdndMonitor_autogen
+[ 29%] Automatic MOC for target SystemSleepBlocker
+[ 29%] Built target SingleApp_autogen
+[ 29%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_usrreq.c.o
 [ 29%] Built target SystemSleepBlocker_autogen
 [ 30%] Automatic MOC for target radiometer_breakpad
-[ 30%] Built target SingleApp_autogen
 [ 30%] Built target radiometer_breakpad_autogen
-[ 30%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_usrreq.c.o
+[ 30%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctputil.c.o
 [ 30%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/VideoEncoder_autogen/mocs_compilation.cpp.o
 [ 30%] Building CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/AuthManager_autogen/mocs_compilation.cpp.o
-[ 30%] Building CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/authmanager.cpp.o
-[ 31%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/videoencoder.cpp.o
-[ 31%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctputil.c.o
-[ 32%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet6/sctp6_usrreq.c.o
+[ 31%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet6/sctp6_usrreq.c.o
+[ 32%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/videoencoder.cpp.o
 [ 32%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_environment.c.o
 [ 32%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_mbuf.c.o
 [ 32%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_recv_thread.c.o
-[ 33%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libAuthManager.a
-[ 33%] Built target AuthManager
-[ 33%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/mppencoder.cpp.o
-[ 34%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.o
-[ 34%] Linking C static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libusrsctp.a
-[ 34%] Built target usrsctp
-[ 34%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/FileTransferService_autogen/mocs_compilation.cpp.o
+[ 33%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.o
+[ 33%] Building CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/authmanager.cpp.o
+[ 33%] Linking C static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libusrsctp.a
+[ 33%] Built target usrsctp
+[ 33%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/FileTransferService_autogen/mocs_compilation.cpp.o
+[ 33%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/filetransferservice.cpp.o
+[ 34%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libAuthManager.a
+[ 34%] Built target AuthManager
 [ 34%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/InputManager_autogen/mocs_compilation.cpp.o
-[ 34%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libVideoEncoder.a
-[ 34%] Built target VideoEncoder
+[ 34%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/mppencoder.cpp.o
 [ 34%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager.cpp.o
-[ 34%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/filetransferservice.cpp.o
-[ 34%] Building CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/SystemInfo_autogen/mocs_compilation.cpp.o
-[ 35%] Building CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/systeminfo.cpp.o
-[ 35%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager_linux.cpp.o
-[ 35%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemInfo.a
-[ 35%] Built target SystemInfo
-[ 36%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/Clipboardservice_autogen/mocs_compilation.cpp.o
-[ 36%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/clipboardservice.cpp.o
 /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/filetransferservice/filetransferservice.cpp: In static member function ‘static void FileTransferService::writeTarHeader(QByteArray&, const QString&, qint64, char)’:
 /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/filetransferservice/filetransferservice.cpp:513:14: warning: writing 1 byte into a region of size 0 [-Wstringop-overflow=]
   513 |         p[0] |= 0x80u;   // base-256 标记
@@ -1862,46 +1853,62 @@ In file included from /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/include
 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/include/QtCore/qarraydata.h:129:8: note: at offset [124, 148] into destination object ‘QTypedArrayData<char>::<anonymous>’ of size 24
   129 | struct QTypedArrayData
       |        ^~~~~~~~~~~~~~~
-[ 37%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libFileTransferService.a
-[ 38%] Built target FileTransferService
+[ 34%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libVideoEncoder.a
+[ 34%] Built target VideoEncoder
+[ 34%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager_linux.cpp.o
+[ 34%] Building CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/SystemInfo_autogen/mocs_compilation.cpp.o
+[ 35%] Building CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/systeminfo.cpp.o
+[ 36%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libFileTransferService.a
+[ 37%] Built target FileTransferService
+[ 38%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/Clipboardservice_autogen/mocs_compilation.cpp.o
+[ 38%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemInfo.a
+[ 38%] Built target SystemInfo
+[ 38%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/ScreenCapturer_autogen/mocs_compilation.cpp.o
+[ 38%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/clipboardservice.cpp.o
 [ 39%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInputManager.a
-[ 39%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/ScreenCapturer_autogen/mocs_compilation.cpp.o
+[ 39%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer.cpp.o
 [ 40%] Built target InputManager
-[ 40%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer.cpp.o
-[ 40%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libClipboardservice.a
-[ 40%] Built target Clipboardservice
-[ 41%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer_linux.cpp.o
-[ 42%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/InteractiveShell_autogen/mocs_compilation.cpp.o
-[ 43%] Building CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/WebsocketServer_autogen/mocs_compilation.cpp.o
-[ 43%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell.cpp.o
-[ 43%] Building CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/websocketserver.cpp.o
+[ 41%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/InteractiveShell_autogen/mocs_compilation.cpp.o
+[ 41%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libClipboardservice.a
+[ 41%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell.cpp.o
+[ 41%] Built target Clipboardservice
+[ 42%] Building CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/WebsocketServer_autogen/mocs_compilation.cpp.o
+[ 43%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer_linux.cpp.o
 [ 43%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_linux.cpp.o
+[ 43%] Building CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/websocketserver.cpp.o
+[ 43%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInteractiveShell.a
+[ 43%] Built target InteractiveShell
+[ 43%] Building CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/XdndMonitor_autogen/mocs_compilation.cpp.o
 [ 43%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libScreenCapturer.a
 [ 44%] Built target ScreenCapturer
-[ 44%] Building CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/XdndMonitor_autogen/mocs_compilation.cpp.o
-[ 44%] Building CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/xdndmonitor.cpp.o
-[ 44%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInteractiveShell.a
-[ 44%] Built target InteractiveShell
 [ 44%] Building CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/SingleApp_autogen/mocs_compilation.cpp.o
-[ 45%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libXdndMonitor.a
-[ 46%] Built target XdndMonitor
-[ 47%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/SystemSleepBlocker_autogen/mocs_compilation.cpp.o
-[ 47%] Building CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/singleapplication.cpp.o
-[ 47%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libWebsocketServer.a
-[ 47%] Built target WebsocketServer
+[ 44%] Building CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/xdndmonitor.cpp.o
+[ 44%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libWebsocketServer.a
+[ 44%] Built target WebsocketServer
+[ 44%] Building CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/singleapplication.cpp.o
+[ 45%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/SystemSleepBlocker_autogen/mocs_compilation.cpp.o
+[ 46%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libXdndMonitor.a
+[ 47%] Built target XdndMonitor
+[ 47%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker.cpp.o
+[ 47%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker_linux.cpp.o
 [ 47%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/radiometer_breakpad_autogen/mocs_compilation.cpp.o
 [ 47%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/crashhandler.cpp.o
-[ 47%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker.cpp.o
 [ 47%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSingleApp.a
-[ 48%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/crash_generation/crash_generation_client.cc.o
-[ 49%] Built target SingleApp
-[ 49%] Built target SecureInputProcess_autogen_timestamp_deps
-[ 49%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/handler/exception_handler.cc.o
-[ 49%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker_linux.cpp.o
-[ 50%] Automatic MOC for target SecureInputProcess
-[ 50%] Built target SecureInputProcess_autogen
-[ 51%] Building CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/SecureInputProcess_autogen/mocs_compilation.cpp.o
-[ 51%] Building CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/secure_input_process.cpp.o
+[ 48%] Built target SingleApp
+[ 48%] Built target SecureInputProcess_autogen_timestamp_deps
+[ 49%] Automatic MOC for target SecureInputProcess
+[ 49%] Built target SecureInputProcess_autogen
+[ 50%] Building CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/SecureInputProcess_autogen/mocs_compilation.cpp.o
+[ 50%] Building CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/secure_input_process.cpp.o
+[ 51%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemSleepBlocker.a
+[ 51%] Built target SystemSleepBlocker
+[ 52%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/crash_generation/crash_generation_client.cc.o
+[ 52%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/handler/exception_handler.cc.o
+[ 52%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/handler/minidump_descriptor.cc.o
+[ 52%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSecureInputProcess.a
+[ 52%] Built target SecureInputProcess
+[ 53%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/minidump_writer/minidump_writer.cc.o
+[ 53%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/minidump_writer/linux_dumper.cc.o
 In file included from /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/breakpad/src/common/memory_allocator.h:50,
                  from /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/breakpad/src/client/linux/dump_writer_common/thread_info.h:37,
                  from /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/breakpad/src/client/linux/minidump_writer/linux_dumper.h:54,
@@ -1913,13 +1920,6 @@ In file included from /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remo
  2078 |         __asm__ __volatile__(/* if (fn == NULL)
       |         ^~~~~~~
 /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/breakpad/src/third_party/lss/linux_syscall_support.h:2078:9: note: the value of the stack pointer after an ‘asm’ statement must be the same as it was before the statement
-[ 51%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/handler/minidump_descriptor.cc.o
-[ 52%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemSleepBlocker.a
-[ 52%] Built target SystemSleepBlocker
-[ 53%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/minidump_writer/minidump_writer.cc.o
-[ 53%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/minidump_writer/linux_dumper.cc.o
-[ 53%] Linking CXX static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSecureInputProcess.a
-[ 53%] Built target SecureInputProcess
 [ 53%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/minidump_writer/linux_ptrace_dumper.cc.o
 [ 53%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/linux/log/log.cc.o
 [ 54%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/minidump_file_writer.cc.o
@@ -1943,8 +1943,8 @@ In file included from /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remo
 [ 57%] Built target openssl102_ep
 [ 57%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIce.c.o
 [ 58%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIceAgent.c.o
-[ 58%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcSocket.c.o
 [ 58%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcStun.c.o
+[ 58%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcSocket.c.o
 [ 59%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangTurnConnection.c.o
 [ 59%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpacer/YangPacer.c.o
 [ 59%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPacketData.c.o
@@ -2235,9 +2235,9 @@ In file included from /usr/include/openssl/x509.h:29,
 [ 77%] Linking C static library /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a
 [ 77%] Built target metartccore8
 [ 77%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCapture.cpp.o
+[ 77%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCaptureData.cpp.o
 [ 78%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCaptureHandle.cpp.o
 [ 78%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioPlay.cpp.o
-[ 77%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCaptureData.cpp.o
 [ 78%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioRenderData.cpp.o
 [ 79%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangCaptureFactory.cpp.o
 [ 79%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangScreenShare.cpp.o
@@ -2248,8 +2248,8 @@ In file included from /usr/include/openssl/x509.h:29,
 [ 80%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoderHandleCb.cpp.o
 [ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoderOpus.cpp.o
 [ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangEncoderFactory.cpp.o
-[ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH264EncoderSoft.cpp.o
 [ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangEncoderMediacodec.cpp.o
+[ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH264EncoderSoft.cpp.o
 [ 82%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH265EncoderSoft.cpp.o
 [ 82%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangOpenH264Encoder.cpp.o
 [ 82%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoder.cpp.o
@@ -2267,6 +2267,7 @@ In file included from /usr/include/openssl/x509.h:29,
 [ 86%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangVideoDecoderHandle.cpp.o
 [ 86%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangVideoDecoderHandles.cpp.o
 [ 86%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangVideoDecoderMac.cpp.o
+[ 87%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangAvinfo.cpp.o
 /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangdecoder/YangVideoDecoderFfmpeg.cpp: In member function ‘virtual void YangVideoDecoderFfmpeg::parseHeader(uint8_t*, int32_t, int32_t*, int32_t*, int32_t*)’:
 /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangdecoder/YangVideoDecoderFfmpeg.cpp:191:28: warning: ‘void av_init_packet(AVPacket*)’ is deprecated [-Wdeprecated-declarations]
   191 |         yang_av_init_packet(&packet);
@@ -2276,7 +2277,6 @@ In file included from /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/../b
 /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/../build_output/ffmpeg_install-6.1.2/include/libavcodec/packet.h:629:6: note: declared here
   629 | void av_init_packet(AVPacket *pkt);
       |      ^~~~~~~~~~~~~~
-[ 87%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangAvinfo.cpp.o
 [ 87%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangLoadLib.cpp.o
 [ 87%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangString.cpp.o
 [ 87%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangSysMessageHandle.cpp.o
@@ -2341,13 +2341,13 @@ In file included from /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/include
 [ 95%] Built target HelperProcess_autogen_timestamp_deps
 [ 95%] Automatic MOC for target Service
 [ 95%] Automatic MOC for target HelperProcess
-[ 95%] Built target HelperProcess_autogen
 [ 95%] Built target Service_autogen
-[ 95%] Building CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/HelperProcess_autogen/mocs_compilation.cpp.o
-[ 96%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/Service_autogen/mocs_compilation.cpp.o
-[ 96%] Building CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/helper_process.cpp.o
-[ 96%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/service_linux.cpp.o
-[ 97%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/linux_service.cpp.o
+[ 95%] Built target HelperProcess_autogen
+[ 95%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/Service_autogen/mocs_compilation.cpp.o
+[ 95%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/service_linux.cpp.o
+[ 96%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/linux_service.cpp.o
+[ 96%] Building CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/HelperProcess_autogen/mocs_compilation.cpp.o
+[ 97%] Building CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/helper_process.cpp.o
 /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/service/linux_service.cpp: In function ‘void startDesktopSession(const char*)’:
 /home/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/service/linux_service.cpp:1037:14: warning: ignoring return value of ‘int chown(const char*, __uid_t, __gid_t)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
  1037 |         chown(runtimeDir, du.uid, du.gid);
@@ -2478,6 +2478,52 @@ Split debug symbols into .debug and strip executable
 === deploy.log ===
 (不存在)
 === package.log ===
+=== staged ===
+131M	dist
+QtRemoteDesktop
+imageformats
+lib
+platforminputcontexts
+platforms
+xcbglintegrations
+libQt5Core.so.5
+libQt5Core.so.5.15.2
+libQt5DBus.so.5
+libQt5DBus.so.5.15.2
+libQt5EglFSDeviceIntegration.so.5
+libQt5EglFSDeviceIntegration.so.5.15.2
+libQt5Gui.so.5
+libQt5Gui.so.5.15.2
+libQt5Network.so.5
+libQt5Network.so.5.15.2
+libQt5Svg.so.5
+libQt5Svg.so.5.15.2
+libQt5WaylandClient.so.5
+libQt5WaylandClient.so.5.15.2
+libQt5WebSockets.so.5
+libQt5WebSockets.so.5.15.2
+libQt5Widgets.so.5
+libQt5Widgets.so.5.15.2
+libQt5XcbQpa.so.5
+libQt5XcbQpa.so.5.15.2
+libicudata.so.56
+libicudata.so.56.1
+libicui18n.so.56
+libicui18n.so.56.1
+libicuuc.so.56
+libicuuc.so.56.1
+=== 未解析依赖: none ===
+=== 落到宿主 Qt 的依赖: libQt5Core.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5Core.so.5
+libQt5DBus.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5DBus.so.5
+libQt5EglFSDeviceIntegration.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5EglFSDeviceIntegration.so.5
+libQt5Gui.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5Gui.so.5
+libQt5Network.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5Network.so.5
+libQt5Svg.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5Svg.so.5
+libQt5WaylandClient.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5WaylandClient.so.5
+libQt5WebSockets.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5WebSockets.so.5
+libQt5Widgets.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5Widgets.so.5
+libQt5XcbQpa.so.5 /home/runner/work/QtRemoteDesktop/Qt/5.15.2/gcc_64/lib/libQt5XcbQpa.so.5 ===
+::error::打包缺 Qt 库，运行时会回落到宿主 Qt
 === smoke.log ===
 (不存在)
 === 错误摘要 ===
