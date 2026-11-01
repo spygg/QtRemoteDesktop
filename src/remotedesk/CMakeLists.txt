@@ -99,6 +99,19 @@ else()
     )
 endif()
 
+if(APPLE)
+    # 打包成 .app：TCC（屏幕录制、辅助功能、输入监控）的授权是绑在
+    # CFBundleIdentifier 上的，裸可执行文件每次重编译都会丢授权、要重新勾。
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "QtRemoteDesktop"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.radiometer.remotedesktop"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    )
+endif()
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
     AuthManager
     FileTransferService
@@ -118,7 +131,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 # Debug 构建跳过（保留内嵌符号）。
 # [R1] 仅工具链提供 objcopy（GNU/MinGW）时执行：MSVC 下 CMAKE_OBJCOPY 为空，
 # 旧实现无条件展开 → 构建失败。MSVC 的符号拆分由 /DEBUG+PDB 原生处理，无需此步。
-if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_OBJCOPY)
+# Apple 同理要排除：Xcode 工具链里的 llvm-objcopy 虽然能被 CMake 探测到，但
+# --only-keep-debug/--add-gnu-debuglink 是 ELF 专用，对 Mach-O 直接报错。
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_OBJCOPY AND NOT APPLE)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} --only-keep-debug
                 $<TARGET_FILE:${PROJECT_NAME}>

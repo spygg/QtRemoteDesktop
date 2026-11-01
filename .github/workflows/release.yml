@@ -59,8 +59,8 @@ jobs:
           # Linux x86_64：ubuntu-22.04（较旧的 glibc，产物能回到更老的发行版）。
           # 直接复用仓库内的 build_linux.sh —— 它的依赖检查、NVENC/VAAPI 探测和
           # FFmpeg/openh264 构建顺序都在本机验证过，比在这里重写一遍 cmake 更可信。
-          # macOS 不入矩阵：Service/Shell/ScreenCapturer 缺 Apple 平台实现，
-          # build_mac.sh 头部已注明「大概率在链接阶段失败」，发布出去也不可用。
+          # macOS 不在本矩阵里，由下面独立的 build-macos job 构建：矩阵里每一步都按
+          # Windows/Linux 条件化（NASM、apt、windeployqt、patchelf），macOS 一步都复用不了。
           - name: Linux x86_64
             key: linux-x86_64
             os: ubuntu-22.04
@@ -567,12 +567,189 @@ jobs:
           path: ${{ matrix.config.artifact }}
           if-no-files-found: error
 
-  # 汇总发布：三个 job 并发往同一个 release 传文件会互相覆盖（release 是同一个对象），
+  # ==========================================================================
+  # macOS
+  # ==========================================================================
+  # Qt 5.15.2 的官方 macOS 安装包只有 x86_64，所以跑 Intel runner、出 Intel 包：
+  # 产物在 Apple Silicon 上靠 Rosetta 2 运行。要出 arm64 原生包得换 Qt 6（官方
+  # 从 6.3 起才是 universal），而 Qt6 桌面路径本仓库还没验证过，不适合顺手带上。
+  build-macos:
+    name: macOS x86_64
+    runs-on: macos-13
+    env:
+      QT_VERSION: '5.15.2'
+      FFMPEG_VER: '6.1.2'
+      ARTIFACT_NAME: QtRemoteDesktop-macos-x86_64.tar.gz
+      APP_BUNDLE: bin/QtRemoteDesktop.app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: macos
+          target: desktop
+          arch: clang_64
+          cache: false
+
+      # 先把「几十分钟后才在链接期暴露」的前提一次性检查掉，失败点越早越好。
+      - name: Preflight
+        shell: bash
+        run: |
+          set -e
+          echo "=== Qt ==="
+          "$QT_ROOT_DIR/bin/qmake" -query QT_VERSION
+          # WebSockets 缺失 → 链接期 -lQt5WebSockets not found
+          test -e "$QT_ROOT_DIR/lib/QtWebSockets.framework/QtWebSockets" \
+            || { echo "::error::Qt WebSockets 框架缺失"; exit 1; }
+          # macdeployqt 只会搬它认识的插件；cocoa/offscreen 少一个就没法起
+          test -d "$QT_ROOT_DIR/plugins/platforms" \
+            || { echo "::error::Qt platforms 插件目录缺失"; exit 1; }
+          echo "=== OpenSSL (brew) ==="
+          # openssl@3 是 keg-only，不会软链到 /usr/local/lib，find_library 默认找不到，
+          # 下面 configure 必须把它并进 CMAKE_PREFIX_PATH
+          OSSLP=$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl)
+          echo "OPENSSL_PREFIX=$OSSLP" | tee -a "$GITHUB_ENV"
+          test -e "$OSSLP/lib/libssl.dylib" || { echo "::error::libssl.dylib 缺失"; exit 1; }
+          echo "=== toolchain ==="
+          cc --version | head -1
+          cmake --version | head -1
+          nasm -v 2>/dev/null || echo "(未装 nasm：CMake 会自动给 openh264 传 USE_ASM=No，编码慢一些但仍可构建)"
+
+      - name: Fetch FFmpeg sources
+        shell: bash
+        run: |
+          set -o pipefail
+          set -e
+          {
+            FFDIR=src/remotedesk/thridparty/ffmpeg
+            mkdir -p "$FFDIR"
+            # Apple 没有 NVIDIA 驱动，nv-codec-headers 用不上；硬编走系统自带的
+            # VideoToolbox（BuildFFmpeg.cmake 里 APPLE 分支已经 --enable-videotoolbox）
+            if [ ! -d "$FFDIR/FFmpeg-n$FFMPEG_VER" ]; then
+              echo "=== downloading FFmpeg $FFMPEG_VER ==="
+              curl -sSfL --retry 3 -o /tmp/ff.tar.gz \
+                "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$FFMPEG_VER.tar.gz"
+              tmp=$(mktemp -d)
+              tar -xzf /tmp/ff.tar.gz -C "$tmp"
+              src=$(find "$tmp" -mindepth 1 -maxdepth 1 -name "FFmpeg-*" | head -1)
+              [ -n "$src" ] || { echo "::error::归档里没有 FFmpeg-* 目录"; exit 1; }
+              mv "$src" "$FFDIR/FFmpeg-n$FFMPEG_VER"
+              rm -rf "$tmp"
+            fi
+            chmod +x "$FFDIR/FFmpeg-n$FFMPEG_VER/configure"
+            ls -l "$FFDIR/FFmpeg-n$FFMPEG_VER/configure"
+          } 2>&1 | tee fetch_sources.log
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S src -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_THIRDPARTY=ON \
+            -DFFMPEG_VERSION="$FFMPEG_VER" \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$OPENSSL_PREFIX" 2>&1 | tee configure.log
+          echo "=== FFmpeg 版本 / 硬编探测 ==="
+          grep -E "FFmpeg 版本|硬件编码器自动探测|videotoolbox|WebRTC|x265" configure.log || true
+
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          # 首次构建要现编 FFmpeg + openh264 + metaRTC + srtp + usrsctp，几十分钟量级
+          cmake --build build --parallel 3 2>&1 | tee build.log
+          ls -la "$APP_BUNDLE/Contents/MacOS/"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            # macdeployqt 把 Qt framework、平台插件、qt.conf 一次性搬进 .app
+            "$QT_ROOT_DIR/bin/macdeployqt" "$APP_BUNDLE" -verbose=2 2>&1 | tee deploy.log
+            # 平台插件没进去的包在目标机上直接起不来（"failed to load cocoa"）
+            ls "$APP_BUNDLE/Contents/PlugIns/platforms/" | tee -a deploy.log
+
+            # 代码签名：TCC（屏幕录制/辅助功能）的授权记录是绑在签名的 Designated
+            # Requirement 上的，未签名的包每次重编都要重新勾一次；x86_64 虽然不签也
+            # 能跑，但授权会反复失效。这里做 ad-hoc 签名（-），不需要开发者证书。
+            # --force 会重签内部所有 framework，--deep 让主程序最后签。
+            codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | tee codesign.log
+            codesign -dv --verbose=2 "$APP_BUNDLE" 2>&1 | head -5
+
+            # 冒烟：跑 --version 证明所有 dylib/framework 真能解析、Qt 能起。
+            # CI 上没有 WindowServer 会话，cocoa 插件起不来，用 offscreen 平台插件。
+            # 这只验链接，不验界面；界面要等真机。
+            export DYLD_FRAMEWORK_PATH="$PWD/$APP_BUNDLE/Contents/Frameworks"
+            set +e
+            QT_QPA_PLATFORM=offscreen "$APP_BUNDLE/Contents/MacOS/QtRemoteDesktop" --version \
+              2>&1 | tee smoke.log
+            rc=${PIPESTATUS[0]}
+            set -e
+            [ "$rc" -eq 0 ] || { echo "::error::打包后冒烟启动失败 (rc=$rc)"; exit 1; }
+            # 冒烟会在工作目录留下 logs/ 与 server_config.json，别打进发布包
+            rm -rf logs server_config.json
+
+            # .app 的符号链接和权限必须原样保留 → 打成 tar（不用 zip）
+            tar -czf "$ARTIFACT_NAME" -C bin QtRemoteDesktop.app
+            ls -la "$ARTIFACT_NAME"
+          } 2>&1 | tee package.log
+
+      - name: Verify artifact exists
+        shell: bash
+        run: |
+          test -f "$ARTIFACT_NAME" || { echo "::error::产物缺失: $ARTIFACT_NAME"; exit 1; }
+          ls -la "$ARTIFACT_NAME"
+
+      - name: Dump logs to logs branch
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          BR="logs-macos-x86_64"
+          git config user.email "ci@remotedesk.local"
+          git config user.name "remotedesk-ci"
+          git fetch origin "$BR" 2>/dev/null || true
+          git checkout -B "$BR" "origin/$BR" 2>/dev/null || git checkout -B "$BR"
+          mkdir -p ci-logs
+          {
+            echo "=== pwd: $(pwd)"
+            for f in fetch_sources.log configure.log build.log deploy.log codesign.log smoke.log package.log; do
+              echo "=== $f ==="
+              cat "$f" 2>/dev/null || echo "(不存在)"
+            done
+            echo "=== 错误摘要 ==="
+            grep -inE "error|undefined|cannot find|No such file|fatal" \
+              build.log configure.log 2>/dev/null | tail -80
+          } > ci-logs/all.log
+          git add -f ci-logs/all.log
+          git commit -m "ci logs: macOS x86_64 run ${{ github.run_id }} $(date -u +%Y%m%d%H%M%S)" || true
+          git push --force origin "$BR"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64
+          path: ${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
+
+  # 汇总发布：各 job 并发往同一个 release 传文件会互相覆盖（release 是同一个对象），
   # 所以改成各 job 只交产物，由这一个 job 一次性上传。
   release:
     name: Publish release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, build-macos]
+    # macOS 刚接入，链接级问题可能还要几轮才能清干净，所以它不参与发布门槛：
+    # Windows/Linux 全绿就照发，macOS 失败时那个 asset 自然不存在（glob 落空不影响发布）。
+    # always() + !cancelled() 是为了让 mac job 跑完（成功或失败）而不是把它当不存在；
+    # 真正的门槛仍然是 needs.build.result == 'success'。
+    if: >-
+      always() && !cancelled() &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.build.result == 'success'
     runs-on: ubuntu-22.04
     steps:
       - name: Download artifacts

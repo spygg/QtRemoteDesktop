@@ -69,8 +69,12 @@ endif()
 # pri: unix:QMAKE_LFLAGS += -z noexecstack
 # pri: unix:QMAKE_CFLAGS += -Wa,--noexecstack
 # pri: unix:QMAKE_CXXFLAGS += -Wa,--noexecstack
+#
+# 仓库里只带了 win/linux 两套 client 源码，qmake 的 unix: 段在 Apple 上其实
+# 编不过（linux_syscall_support.h、ELF reader、breakpad_getcontext.S 都是 x86-Linux
+# 专用）。所以这里排除 APPLE：macOS 只编 crashhandler.cpp（无 handler 的空实现）。
 # ---------------------------------------------------------------
-if(UNIX)
+if(UNIX AND NOT APPLE)
     # breakpad_getcontext.S 为汇编源文件, 需要启用 ASM 语言
     enable_language(ASM)
 

@@ -16,6 +16,10 @@ if(WIN32)
     list(APPEND SOURCES systemsleepblocker_win.cpp)
 elseif(APPLE)
     list(APPEND SOURCES systemsleepblocker_mac.mm)
+    # 顶层 project() 只声明了 C/CXX；.mm 属于 OBJCXX 语言，不显式 enable 的话
+    # CMake 在 generate 阶段报"源文件语言未配置"。声明后 -x objective-c++ 冗余
+    # 但无害（Apple 编译器本来就按扩展名走 ObjC++）。
+    enable_language(OBJCXX)
     set_source_files_properties(systemsleepblocker_mac.mm PROPERTIES
         COMPILE_FLAGS "-x objective-c++"
         LANGUAGE OBJCXX

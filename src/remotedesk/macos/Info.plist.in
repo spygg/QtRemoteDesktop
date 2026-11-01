@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+    <key>CFBundleIdentifier</key>
+    <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+    <key>CFBundleName</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+    <key>CFBundleDisplayName</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+    <key>CFBundleVersion</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- 抓屏 / 键鼠注入的 TCC 授权文案。缺这些键时系统直接拒绝，且连提示都没有，
+         用户端表现为“连上了但画面全黑 / 键盘没反应”，很难排查。 -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>QtRemoteDesktop captures your screen so it can be shared with a remote viewer.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>QtRemoteDesktop needs to control other applications for remote input injection.</string>
+
+    <!-- 远程控制端程序：默认不抢 Dock/菜单栏焦点。 -->
+    <key>LSBackgroundOnly</key>
+    <false/>
+    <key>LSUIElement</key>
+    <true/>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>QtRemoteDesktop</string>
+</dict>
+</plist>

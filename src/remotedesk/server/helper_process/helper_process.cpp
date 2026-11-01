@@ -1112,6 +1112,17 @@ int HelperProcess::run(int argc, char* argv[])
                         // 否则锁屏中切分辨率会留下一条没人关的采集定时器。
                         captureGateOpen = true;
                         applyCaptureGate();
+                        // 单帧读屏耗时基本与像素数成正比（XP 实测 2310x1398→344ms、
+                        // 1024x768→78ms），而采集间隔 = 实测耗时 × paceFactor。上一轮
+                        // 自适应是按旧几何算出的 paceFactor，切小分辨率后若继续沿用，
+                        // 节流间隔仍是 3×344ms 量级 → 帧率被旧几何钉死（实测停在
+                        // ~4fps，新几何本可跑满配置的 10fps）。所以先复位倍数，再按
+                        // 新几何重新评估一次。
+                        capturer.setPaceFactor(2.0);
+                        adaptRounds = 0;
+                        adaptDecided = false;
+                        if (videoActive)
+                            adaptTimer->start();
                     } else {
                         qWarning() << "Helper: capturer restart after resolution change FAILED";
                         QJsonObject err;

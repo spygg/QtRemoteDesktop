@@ -656,12 +656,11 @@ void RDPServer::loadServerConfig(const QString& configPath)
     }
 
     if (root.contains("fps"))
-        configFps_ = qBound(1, root["fps"].toInt(), 60);
+        configFps_ = userFps_ = qBound(1, root["fps"].toInt(), 60);
     if (root.contains("quality"))
         configQuality_ = qBound(10, root["quality"].toInt(), 100);
     if (root.contains("scale")) {
-        configScale_ = qBound(10, root["scale"].toInt(), 100);
-        userScale_ = configScale_;
+        configScale_ = userScale_ = configScaleWish_ = qBound(10, root["scale"].toInt(), 100);
     }
     // [PACE-FACTOR] 采集节流倍数（见 rdpserver.h）。缺省 2 = 保持历史行为。
     if (root.contains("capturePaceFactor"))
@@ -761,7 +760,7 @@ void RDPServer::saveServerConfig(const QString& configPath)
     // 更新 ssl、httpPort、fps、quality 为当前运行值
     root["ssl"] = useSsl_;
     root["httpPort"] = httpPort_;
-    root["fps"] = configFps_;
+    root["fps"] = userFps_;
     root["quality"] = configQuality_;
     // 持久化用户手动选择的缩放（userScale_），而不是生效值 configScale_：
     // high/verylow 画质档位会临时把 configScale_ 改成 100/≤50，若按旧逻辑写
@@ -1201,6 +1200,8 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     qDebug() << "Service: capture msg =" << t;
                 if (t == "screen_info") {
                     lastScreenInfo_ = msg;
+                    // 几何变了（用户切分辨率）：旧几何上算出的降级上限不再成立，松开它。
+                    releaseAdaptCapsForGeometry(msg["width"].toInt(), msg["height"].toInt());
                 } else if (t == "screen_locked") {
                     screenLocked_ = msg["locked"].toBool();
                     // helper 在用户会话里能看到真实输入桌面，服务进程看不到（Session 0 的
@@ -1239,8 +1240,11 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     // 立刻把生效值压到上限：服务端后续给 helper 的 config（sendVideoParams-
                     // ToCaptureSource）和给新客户端的状态报告都取这两个成员。
                     const int prevFps = configFps_, prevScale = configScale_;
-                    configFps_ = cappedFps(configFps_);
-                    configScale_ = cappedScale(configScale_);
+                    configFps_ = cappedFps(userFps_);
+                    configScale_ = cappedScale(configScaleWish_);
+                    // 记下这套上限测于哪个采集几何：几何一变就松开（见成员声明处说明）。
+                    adaptGeomW_ = lastScreenInfo_["width"].toInt();
+                    adaptGeomH_ = lastScreenInfo_["height"].toInt();
                     if (screenCapturer_ && configFps_ != prevFps)
                         screenCapturer_->setFps(configFps_);
                     if (jpegCompressor_ && configScale_ != prevScale)
@@ -4591,20 +4595,24 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         int jpegQ = -1;
         if (qname == "high") {
             jpegQ = 80;
-            configScale_ = cappedScale(100);
+            configScaleWish_ = 100;
+            configScale_ = cappedScale(configScaleWish_);
         } else if (qname == "medium") {
             jpegQ = 60;
-            configScale_ = cappedScale(userScale_);
+            configScaleWish_ = userScale_;
+            configScale_ = cappedScale(configScaleWish_);
         } else if (qname == "low") {
             jpegQ = 35;
-            configScale_ = cappedScale(userScale_);
+            configScaleWish_ = userScale_;
+            configScale_ = cappedScale(configScaleWish_);
         } else if (qname == "verylow") {
             // 极低：在 low 基础上进一步大幅降码率，并强制降分辨率（封顶 50%），
             // 让静止桌面也肉眼可见地变模糊。原因：openh264 在静止内容上会大量
             // 跳 P 帧（仅周期传清晰 I 帧），仅靠降码率（low=0.08）在静态 UI 上几乎
             // 看不出差异，必须叠加降分辨率才能体现“极低”。
             jpegQ = 20;
-            configScale_ = cappedScale(qMin(userScale_, 50));
+            configScaleWish_ = qMin(userScale_, 50);
+            configScale_ = cappedScale(configScaleWish_);
         }
         // 视频码率档位：默认与 JPEG 质量一致；verylow 单独用更低档位（videoBitrateFor
         // 的 case 15 = 0.035 bpp），使“极低”相较“低”有额外可见降级，而非等价。
@@ -4644,7 +4652,14 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         if (newFps > 60) newFps = 60;
         // 慢机自适应上限：机器只能跑 10fps 时，用户设 15 也不必按 15 重建编码器
         // （那是白付一次 shutdown/initialize + 丢 IDR）。
-        if (newFps >= 1) newFps = cappedFps(newFps);
+        if (newFps >= 1) {
+            // 用户意图先原样记住（落盘写 userFps_），生效值再压自适应上限：
+            // 旧写法把压过的值当唯一真相，降级后用户再设 15 也只是"15→10"，
+            // 连切回小分辨率都恢复不了。
+            userFps_ = newFps;
+            scheduleSaveConfig(); // [P2] 去抖落盘（生效值没变时也要记住这次意图）
+            newFps = cappedFps(newFps);
+        }
         // 只在帧率**真的变化**时才处理：前端切画质也顺手带上了当前 fps
         // （index.html 的 quality 分支），无条件重建会让"只改画质"变成
         // shutdown/initialize + 丢 IDR + 客户端等关键帧，画面卡一下。
@@ -4665,6 +4680,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             // 用户意图原样记住（落盘写 userScale_）；实际生效值再压自适应上限，
             // 否则慢机上用户随手选个 100% 就把降档结果冲掉。
             userScale_ = newScale;
+            configScaleWish_ = newScale;
             const int appliedScale = cappedScale(newScale);
             // 仅当生效缩放（configScale_）真实变化才重建：high/verylow 档位可能已把
             // configScale_ 设成相同值，重复重建会丢 IDR 造成画面卡顿。
@@ -5661,6 +5677,61 @@ bool RDPServer::remoteVideoSourceAvailable() const
     return serviceMode_ && !screenCapturer_
         && captureVideoCapable_
         && wsServer_ && wsServer_->isCaptureSourceConnected();
+}
+
+// [ADAPT-GEO] 采集几何（用户切的分辨率）变化时松开自适应上限。
+// 自适应是按"当时那套几何的单帧读屏耗时"定的，而这个耗时基本与像素数成正比
+// （XP 实测 2310x1398→344ms、1024x768→78ms）。上限本身只降不升（设计上是为了不被
+// 一次模式切换冲回用户配置值），代价是切回小几何后仍按旧几何的 fps/缩放/节流跑：
+// 帧率被一套早已不存在的负担钉住（实测 XP 停在 614x460@10fps、pace 3）。
+// 只认几何变化——模式切换、改画质仍然沿用上限，原设计的防抖效果不变。松完后
+// helper 重新武装的 [ADAPT] 会按新几何再评估一次，真慢会重新降下来，不会来回震荡。
+void RDPServer::releaseAdaptCapsForGeometry(int width, int height)
+{
+    if (width < 1 || height < 1)
+        return;
+    if (width == adaptGeomW_ && height == adaptGeomH_)
+        return;
+    const bool hadCaps = adaptFpsCap_ > 0 || adaptScaleCap_ > 0 || adaptPaceFactor_ > 0.0;
+    adaptGeomW_ = width;
+    adaptGeomH_ = height;
+    // 从未降级过：只更新几何记录，不做任何重推（避免每次上报都白重建一次编码器）
+    if (!hadCaps)
+        return;
+
+    qInfo() << "Capture geometry changed to" << width << "x" << height
+            << "- releasing adaptive caps (was fps" << adaptFpsCap_
+            << "scale" << adaptScaleCap_ << "pace" << adaptPaceFactor_ << ")";
+    adaptFpsCap_ = 0;
+    adaptScaleCap_ = 0;
+    adaptPaceFactor_ = 0.0;
+
+    const int prevFps = configFps_, prevScale = configScale_;
+    configFps_ = cappedFps(userFps_);
+    configScale_ = cappedScale(configScaleWish_);
+    const bool paramsChanged = configFps_ != prevFps || configScale_ != prevScale;
+    if (screenCapturer_ && configFps_ != prevFps)
+        screenCapturer_->setFps(configFps_);
+    if (jpegCompressor_ && configScale_ != prevScale)
+        jpegCompressor_->setScalePercent(configScale_);
+#ifdef USE_FFMPEG
+    // 本地编码路径（非服务模式）：生效尺寸/帧率变了要重建，否则编码器仍停在旧档
+    if (paramsChanged && currentMode_ == ServerMode::Video && videoEncoder_)
+        reinitVideoEncoderForScale();
+#endif
+    // 服务模式：helper 里的 captureFps/videoScale/paceFactor 是它自己的副本，
+    // 必须重推一次 config 才回得到用户参数（helper 收到 config 会按新值重建编码器）。
+    if (remoteVideoSourceAvailable())
+        sendVideoParamsToCaptureSource(QStringLiteral("video_on"));
+    // 通知前端把"实际生效"的 fps/缩放标签抬回真实值
+    if (paramsChanged && wsServer_ && wsServer_->clientCount() != 0) {
+        QJsonObject out;
+        out["type"] = "config_adapted";
+        out["avgCapMs"] = 0;
+        out["fps"] = configFps_;
+        out["scale"] = configScale_;
+        wsServer_->broadcastJson(out);
+    }
 }
 
 void RDPServer::sendVideoParamsToCaptureSource(const QString& action)

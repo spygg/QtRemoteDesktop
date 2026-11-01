@@ -108,6 +108,16 @@ if(FFMPEG_FOUND)
             # MinGW 运行时提供 m；iconv 仅在使用 libiconv 的 MinGW 版 FFmpeg 时需要。
             list(APPEND FFMPEG_EXTRA_LIBS iconv m)
         endif()
+    elseif(APPLE)
+        # macOS 没有 libdl（dlopen 在 libSystem 里），`-ldl` 会让链接直接失败。
+        # FFmpeg 以 --enable-videotoolbox 静态编译时，hwcontext_videotoolbox.o
+        # 引用的是系统框架而不是库，所以框架必须出现在最终可执行文件的链接行上。
+        set(FFMPEG_EXTRA_LIBS m pthread
+            "-framework VideoToolbox"
+            "-framework CoreMedia"
+            "-framework CoreVideo"
+            "-framework CoreServices"
+            "-framework Cocoa")
     else()
         set(FFMPEG_EXTRA_LIBS pthread dl m)
         # FFmpeg 以 --enable-vaapi 静态编译时，libavutil/hwcontext_vaapi.o 会引用
@@ -175,8 +185,13 @@ if(FFMPEG_FOUND)
             find_library(FFMPEG_X265_LIBRARY NAMES x265 libx265)
         endif()
         if(FFMPEG_X265_LIBRARY)
-            list(APPEND FFMPEG_EXTRA_LIBS "${FFMPEG_X265_LIBRARY}" stdc++)
-            message(STATUS "FFmpeg 产物含 libx265（H.265 软编）：链接 ${FFMPEG_X265_LIBRARY} + stdc++")
+            # Apple 的 C++ 运行库是 libc++，写死 stdc++ 会链接失败
+            if(APPLE)
+                list(APPEND FFMPEG_EXTRA_LIBS "${FFMPEG_X265_LIBRARY}" c++)
+            else()
+                list(APPEND FFMPEG_EXTRA_LIBS "${FFMPEG_X265_LIBRARY}" stdc++)
+            endif()
+            message(STATUS "FFmpeg 产物含 libx265（H.265 软编）：链接 ${FFMPEG_X265_LIBRARY} + C++ 运行库")
         else()
             message(WARNING
                 "FFmpeg 产物声明需要 -lx265，但链接器找不到 libx265：请在构建机安装 x265 "

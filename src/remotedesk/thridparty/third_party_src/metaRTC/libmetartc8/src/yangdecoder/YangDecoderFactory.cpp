@@ -56,9 +56,10 @@ YangVideoDecoder* YangDecoderFactory::createVideoDecoder(YangVideoCodec vcodec,Y
    }else{
 #if Yang_OS_ANDROID
         return new YangDecoderMediacodec(videoInfo,vcodec);
-#elif Yang_OS_APPLE
-        return new YangVideoDecoderMac();
 #else
+        // Apple 也走这里：YangVideoDecoderMac 依赖的 yang_create_ios_decoder 只在
+        // src/yangmac/YangDecoderMac.mm 里实现，而该 ObjC 源码只由上游 iOS 的 Xcode
+        // 工程编译，本仓库 CMake 从未编过它 → 引用它必然是 undefined symbol。
         return new YangVideoDecoderFfmpeg(videoInfo,vcodec);
 #endif
 

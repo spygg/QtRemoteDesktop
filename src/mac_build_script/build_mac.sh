@@ -1,17 +1,21 @@
 #!/bin/bash
+#!/bin/bash
 # ============================================================================
 # QtRemoteDesktop macOS 一键编译脚本
 #
-# ⚠️ 已知限制（代码审查确认，构建前请知悉）：
-#   macOS 当前存在**链接级缺口**，本脚本大概率在链接阶段失败：
-#     - server/service/CMakeLists.txt 只有 WIN32 / (UNIX AND NOT APPLE) / ANDROID
-#       三个分支，macOS 落入空分支 → Service 目标无源文件；
-#     - server/shell/CMakeLists.txt 无 Apple 分支 → InteractiveShell::create 未定义；
-#     - ScreenCapturer 的 enumerateOutputs/refreshOutputs/switchOutput/
-#       currentOutputIndex 仅 Win/Linux 实现 → macOS 未定义；
-#     - 工程无 Info.plist，缺少 NSScreenCaptureUsageDescription，
-#       即便编译通过也无法获得屏幕录制权限（CGDisplayCreateImage 返回空）。
-#   结论：macOS 目前属于"未验证/不可用"平台，仅 Windows 与 Linux(X11) 可用。
+# 平台现状（2026-11 补齐 Apple 分支后）：
+#   - server/service：service_mac.cpp 提供 platformMain（macOS 无自装后台服务模式，
+#     --install/--service 直接报错退出，程序跑在前台用户会话里）。
+#   - server/rdpserver：rdpserver_mac.cpp 把 secure-input 子进程做成空操作
+#     （macOS 的输入源鉴权模型不同，没有 Windows 那套安全输入桌面）。
+#   - server/shell、server/screencapturer：shell_mac.cpp / screencapturer_mac.cpp。
+#   - QtDBus 只在 Linux 抓屏里用到，Apple 不找该包（官方 macOS Qt 套件不带 QtDBus）。
+#   - breakpad 的 client 源码只有 win/linux 实现，Apple 下 crashhandler 编译为空操作。
+#   - 抓屏与键鼠注入受 TCC 管制：首次运行要在「系统设置 → 隐私与安全性」里勾选
+#     屏幕录制 + 辅助功能，否则画面全黑、按键无反应。.app bundle 的
+#     Info.plist 已带 NSScreenCaptureUsageDescription，构建见 .github/workflows/release.yml。
+#   - 已知限制：日志/配置仍写在 applicationDirPath() 下，打包成 .app 时会落到
+#     QtRemoteDesktop.app/Contents/MacOS/ 里（不影响功能，但不好找）。
 #
 # 与 Linux/Windows 构建对应：FFmpeg（默认 6.1.2，见 FFMPEG_VERSION）+ openh264 源码编译，产物输出到
 #   <repo>/build    (cmake 中间目录)
@@ -244,15 +248,26 @@ cmake_build() {
 # ---------------- 5. 验证 ----------------
 verify() {
     step "5/5 验证产物"
-    local exe="$BIN_DIR/QtRemoteDesktop"
+    # APPLE 目标是 .app bundle（见 remotedesk/CMakeLists.txt 的 MACOSX_BUNDLE）
+    local app="$BIN_DIR/QtRemoteDesktop.app"
+    local exe="$app/Contents/MacOS/QtRemoteDesktop"
     if [ ! -f "$exe" ]; then
         exe=$(find "$BIN_DIR" "$OUT_DIR" -name "QtRemoteDesktop" -type f 2>/dev/null | head -1)
+        app=""
     fi
     if [ -z "$exe" ] || [ ! -f "$exe" ]; then
         echo "错误: 未找到可执行文件" >&2
         exit 1
     fi
     echo "可执行文件: $exe"
+    if [ -n "$app" ]; then
+        # Info.plist 里没有屏幕录制文案时，系统连授权弹窗都不给，画面直接全黑
+        if grep -q "NSScreenCaptureUsageDescription" "$app/Contents/Info.plist"; then
+            echo "[OK] Info.plist 含 NSScreenCaptureUsageDescription"
+        else
+            echo "[警告] Info.plist 缺 NSScreenCaptureUsageDescription，抓屏授权会失效"
+        fi
+    fi
     if strings "$exe" 2>/dev/null | grep -q "Video encoder initialized"; then
         echo "[OK] Video 编码模式已启用"
     else
@@ -261,13 +276,12 @@ verify() {
     if ! otool -L "$exe" 2>/dev/null | grep -q 'libQt5Core\|libQt6Core'; then
         echo "[提醒] 未检测到 Qt 动态库依赖（可能为静态链接或需部署 Qt 框架）"
     fi
+    echo "[提醒] 分发前用 macdeployqt 把 Qt framework 搬进 .app，再 codesign --force --deep --sign -"
 }
 
 echo "=============================================="
-echo " 警告: macOS 构建存在已知链接级缺口"
-echo "  (Service/Shell/ScreenCapturer 缺 Apple 平台实现，且无屏幕录制权限声明)"
-echo "  构建大概率在链接阶段失败，详见脚本头部注释。"
-echo "  当前受支持平台: Windows、Linux(X11)。"
+echo " macOS 构建：产物是 .app bundle（$BIN_DIR/QtRemoteDesktop.app）"
+echo " 首次运行需在「系统设置 → 隐私与安全性」勾选屏幕录制 + 辅助功能。"
 echo "=============================================="
 
 check_tools
@@ -289,5 +303,5 @@ verify
 
 echo ""
 echo "=============================================="
-echo " 一键编译完成！可执行文件: $BIN_DIR/QtRemoteDesktop"
+echo " 一键编译完成！产物: $BIN_DIR/QtRemoteDesktop.app"
 echo "=============================================="

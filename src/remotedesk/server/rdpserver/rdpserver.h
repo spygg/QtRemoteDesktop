@@ -362,6 +362,9 @@ private:
     bool captureHwEncode_ = false;
     QString captureCodecName_ = QStringLiteral("h264");
     int configFps_ = 30;
+    // 用户意图的帧率（与 userScale_ 同理）：configFps_ 是"被自适应上限压过的生效值"，
+    // 落盘与几何变化后的恢复都必须用这个原值，否则一次降级就把用户选的 15fps 永久写成 10。
+    int userFps_ = 30;
     int configQuality_ = 60;
     int configScale_ = 75;
     // [PACE-FACTOR] 慢读回机器（VMware SVGA 无 3D 加速）的采集节流倍数：
@@ -381,6 +384,18 @@ private:
     int cappedFps(int fps) const { return adaptFpsCap_ > 0 ? qMin(fps, adaptFpsCap_) : fps; }
     int cappedScale(int scale) const { return adaptScaleCap_ > 0 ? qMin(scale, adaptScaleCap_) : scale; }
     double cappedPaceFactor() const { return qMax(configPaceFactor_, adaptPaceFactor_); }
+    // 自适应上限绑在"测出它的那套采集几何"上：单帧读屏耗时基本与像素数成正比
+    // （XP 实测 2310x1398→344ms、1024x768→78ms），按大几何降级后切小几何继续沿用，
+    // 帧率就被旧几何钉死。helper 上报的 screen_info 几何一变就松开这三个上限并按
+    // 用户参数重推配置（helper 侧 [ADAPT] 同时重新武装，真慢会再降回去）。
+    int adaptGeomW_ = 0;
+    int adaptGeomH_ = 0;
+    // 缩放意图（未经自适应上限）：由用户手动 scale 与画质档位共同决定 —— high 强制 100、
+    // verylow 封顶 50，其余取 userScale_。configScale_ 是它压过上限后的生效值，
+    // 所以几何变化松开上限时要从这里恢复，不能直接从 userScale_ 重算（会把 verylow
+    // 强制的 50 又抬回用户值）。
+    int configScaleWish_ = 75;
+    void releaseAdaptCapsForGeometry(int width, int height);
     CodecType configCodec_ = CodecType::H264;        // 编码协议（h264/hevc/vp8/vp9/av1）
     // WebRTC 会话会把 configCodec_ 对齐到"编码器实际在产 + 浏览器能收"的类型
     // （编码器只认这个成员）：用户原本的选择单独保存，落盘写回原值、离开视频模式时恢复。

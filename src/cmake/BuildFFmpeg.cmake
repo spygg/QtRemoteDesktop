@@ -97,9 +97,18 @@ include(CheckCSourceCompiles)
 find_path(QTRD_X265_INCLUDE_DIR x265.h)
 find_library(QTRD_X265_LIBRARY NAMES x265 libx265)
 if(QTRD_X265_INCLUDE_DIR AND QTRD_X265_LIBRARY)
-    # x265 是 C++ 库：探测链接必须带上 stdc++/m/pthread/dl，否则"头有、库假可用"
+    # x265 是 C++ 库：探测链接必须带上 C++ 运行库/m/pthread/dl，否则"头有、库假可用"。
+    # Apple 用 libc++ 且 dlopen 在 libSystem 里（没有 libdl），照抄 GNU 的
+    # -lstdc++ -ldl 会让探测假失败，H.265 软编在 macOS 上无声消失。
+    if(APPLE)
+        set(_ff_cxx_lib c++)
+        set(_ff_dl_arg "")
+    else()
+        set(_ff_cxx_lib stdc++)
+        set(_ff_dl_arg "-ldl")
+    endif()
     set(CMAKE_REQUIRED_INCLUDES "${QTRD_X265_INCLUDE_DIR}")
-    set(CMAKE_REQUIRED_LIBRARIES "${QTRD_X265_LIBRARY}" stdc++ m pthread dl)
+    set(CMAKE_REQUIRED_LIBRARIES "${QTRD_X265_LIBRARY}" ${_ff_cxx_lib} m pthread ${_ff_dl_arg})
     check_c_source_compiles(
 "#include <x265.h>
 int main(void) { return x265_api_get(0) != 0; }" QTRD_FF_HAVE_X265)
@@ -108,7 +117,7 @@ int main(void) { return x265_api_get(0) != 0; }" QTRD_FF_HAVE_X265)
     if(QTRD_FF_HAVE_X265)
         set(_ff_x265_inc "${QTRD_X265_INCLUDE_DIR}")
         get_filename_component(_ff_x265_libdir "${QTRD_X265_LIBRARY}" DIRECTORY)
-        set(_ff_x265_libs "-L${_ff_x265_libdir} -lx265 -lstdc++ -lm -lpthread -ldl")
+        set(_ff_x265_libs "-L${_ff_x265_libdir} -lx265 -l${_ff_cxx_lib} -lm -lpthread ${_ff_dl_arg}")
         set(_ff_x265_ver "1.0")
         if(EXISTS "${QTRD_X265_INCLUDE_DIR}/x265.h")
             file(READ "${QTRD_X265_INCLUDE_DIR}/x265.h" _x265_hdr)

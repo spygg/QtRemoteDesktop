@@ -149,10 +149,20 @@ else()
         find_path(SYS_OPENSSL_INCLUDE NAMES openssl/ssl.h REQUIRED)
     endif()
     target_include_directories(${WEBRTC_SESSION} PUBLIC "${SYS_OPENSSL_INCLUDE}")
-    target_link_libraries(${WEBRTC_SESSION} PUBLIC
-        "${SYS_OPENSSL_SSL}"
-        "${SYS_OPENSSL_CRYPTO}"
-        ZLIB::ZLIB
-        m pthread dl
-    )
+    # Apple 没有 libdl（dlopen 在 libSystem），写死 dl 会链接失败
+    if(APPLE)
+        target_link_libraries(${WEBRTC_SESSION} PUBLIC
+            "${SYS_OPENSSL_SSL}"
+            "${SYS_OPENSSL_CRYPTO}"
+            ZLIB::ZLIB
+            m pthread
+        )
+    else()
+        target_link_libraries(${WEBRTC_SESSION} PUBLIC
+            "${SYS_OPENSSL_SSL}"
+            "${SYS_OPENSSL_CRYPTO}"
+            ZLIB::ZLIB
+            m pthread dl
+        )
+    endif()
 endif()

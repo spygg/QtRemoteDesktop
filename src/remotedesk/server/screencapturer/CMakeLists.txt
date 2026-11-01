@@ -30,8 +30,14 @@ endif()
 
 add_library(${SCREEN_CAPTURER} STATIC ${HEADERS} ${SOURCES})
 target_include_directories(${SCREEN_CAPTURER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui DBus)
-target_link_libraries(${SCREEN_CAPTURER} PUBLIC Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::DBus)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui)
+target_link_libraries(${SCREEN_CAPTURER} PUBLIC Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui)
+# QDBus 只在 screencapturer_linux.cpp（login1 会话枚举）里用到。macOS 官方 Qt 包
+# 不发布 QtDBus，无条件 REQUIRED 会在 configure 阶段直接失败，所以按使用者门控。
+if(UNIX AND NOT APPLE)
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS DBus)
+    target_link_libraries(${SCREEN_CAPTURER} PUBLIC Qt${QT_VERSION_MAJOR}::DBus)
+endif()
 
 if(HAVE_PIPEWIRE)
     target_include_directories(${SCREEN_CAPTURER} PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
@@ -58,9 +64,13 @@ endif()
 # XRandR 多屏枚举为可选能力：装有 libXrandr-devel 时启用进程内 XRR 枚举
 # （HAVE_XRANDR=1）；未安装时自动回退到 `xrandr --query` 子进程枚举，
 # 保证缺开发包的系统（如最小化 Anolis/RHEL）也能正常编译与运行。
-find_path(XRANDR_INCLUDE_DIR X11/extensions/Xrandr.h)
-find_library(XRANDR_LIBRARY Xrandr)
-if(XRANDR_INCLUDE_DIR AND XRANDR_LIBRARY)
+# APPLE 门控：macOS 上装了 XQuartz 时这两个 find_* 会真的命中，于是
+# HAVE_XRANDR=1 把 X11 路径打开，而 Xorg 在 Mac 上根本管不到屏幕输出。
+if(NOT APPLE)
+    find_path(XRANDR_INCLUDE_DIR X11/extensions/Xrandr.h)
+    find_library(XRANDR_LIBRARY Xrandr)
+endif()
+if(NOT APPLE AND XRANDR_INCLUDE_DIR AND XRANDR_LIBRARY)
     target_include_directories(${SCREEN_CAPTURER} PRIVATE ${XRANDR_INCLUDE_DIR})
     # PUBLIC：让链接 ScreenCapturer 的主程序传递性获得 Xrandr；
     # 未探测到时这里不加任何链接（配合主 CMakeLists 去掉字面量 Xrandr）。

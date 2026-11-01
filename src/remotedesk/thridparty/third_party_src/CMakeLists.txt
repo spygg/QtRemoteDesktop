@@ -82,6 +82,20 @@ endif()
 if(WIN32)
     list(APPEND _openh264_make_args "CC=${CMAKE_C_COMPILER}" "AR=${CMAKE_AR}")
 endif()
+if(APPLE)
+    # openh264 的 Makefile 在 BUILDTYPE=Release（它的默认目标）时恒置
+    # USE_ASM=Yes，而 darwin 的汇编规则是 nasm + "-f macho64"（build/x86-common.mk、
+    # build/platform-darwin.mk）。macOS 不自带 nasm，且 arm64 根本不走 x86 汇编，
+    # 所以按 auto-probe 处理：找不到 nasm 就关掉汇编，而不是让整个构建死在
+    # ExternalProject 的 assemble 阶段。关掉后只是软编慢一些。
+    find_program(OPENH264_NASM NAMES nasm)
+    if(OPENH264_NASM)
+        message(STATUS "openh264: nasm found (${OPENH264_NASM}), x86 assembly enabled")
+    else()
+        list(APPEND _openh264_make_args "USE_ASM=No")
+        message(STATUS "openh264: nasm not found, building without x86 assembly")
+    endif()
+endif()
 list(APPEND _openh264_make_args "all" "install")
 
 set(_openh264_args_in_script "")
