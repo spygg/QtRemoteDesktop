@@ -1,7 +1,7 @@
 === pwd: /d/a/QtRemoteDesktop/QtRemoteDesktop
 === setup_qt.log ===
 === cache miss: downloading offline installer ===
--rwxr-xr-x 1 runneradmin 197121 1201453136 Oct 31 13:43 qt571.exe
+-rwxr-xr-x 1 runneradmin 197121 1201453136 Nov  1 09:29 qt571.exe
 === layer 1: extract [0] payload container from exe ===
 === layer 2: split numbered component archives ===
 === layer 3: extract components containing mingw53 ===
