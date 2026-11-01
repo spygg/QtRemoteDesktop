@@ -322,10 +322,17 @@ jobs:
           set -o pipefail
           QT=$(cygpath -u "$QT_ROOT_DIR")
           MG=$(cygpath -u "$MINGW_BIN")
+          # 资源编译器必须和编译器同一位宽：runner 的 PATH 上还有别的 windres，
+          # CMake 猜错就会拿 32 位的编 main.rc，链接时报
+          # "i386 architecture of input file main.rc.obj is incompatible with i386:x86-64"
+          RC="$MG/windres.exe"
+          [ -f "$RC" ] || RC=$(ls "$MG"/*-windres.exe | head -1)
+          echo "RC compiler: $RC"
           cmake -G "MinGW Makefiles" -S src -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="$MG/gcc.exe" \
             -DCMAKE_CXX_COMPILER="$MG/g++.exe" \
+            -DCMAKE_RC_COMPILER="$RC" \
             -DCMAKE_MAKE_PROGRAM="$MG/mingw32-make.exe" \
             -DCMAKE_PREFIX_PATH="$QT" \
             -DBUILD_THIRDPARTY=ON \
