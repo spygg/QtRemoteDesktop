@@ -375,14 +375,29 @@ jobs:
           # 不能给 64 位 job 加 --release：那里的插件 DLL 会被判成 debug，
           # --release 会把 platforms/imageformats 整组跳过（实测 Plugins: 为空，
           # 随后报 "Unable to find the platform plugin" 并以 1 退出）。
-          # 32 位（Qt 5.7 + mingw530）相反：MinGW 版按 IMAGE_FILE_DEBUG_STRIPPED
-          # 判 debug，5.3 的 binutils 不置该位，产物被当成 debug 并部署 Qt5Cored.dll，
-          # 必须显式 --release 才能拿到 exe 真正 import 的 release 库。
-          $mode = @()
-          if ($env:QT_ARCH -like 'win32*') { $mode += '--release' }
           & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --no-translations `
-              --no-opengl-sw --no-compiler-runtime @mode "bin\QtRemoteDesktop.exe" 2>&1 | Tee-Object deploy.log
+              --no-opengl-sw --no-compiler-runtime "bin\QtRemoteDesktop.exe" 2>&1 | Tee-Object deploy.log
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::windeployqt 失败"; exit 1 }
+          # 32 位（Qt 5.7 + mingw530）产物被 windeployqt 判成 debug：它对 MinGW 只看
+          # IMAGE_FILE_DEBUG_STRIPPED，而 5.3 的 binutils 不给无调试信息的 exe 置该位。
+          # 于是部署出来的是 Qt5Cored.dll / qwindowsd.dll 这类调试库，可 exe 实际 import
+          # 的是 release 名字。这里逐个换成 Qt 安装目录里的 release 文件（库在 bin，
+          # 插件在 plugins\<组>），换不到的原样保留，交给下面的断言报错。
+          if ($env:QT_ARCH -like 'win32*') {
+            Get-ChildItem bin -Recurse -Filter '*d.dll' | ForEach-Object {
+              $rel = $_.Name -replace 'd\.dll$', '.dll'
+              $cand = Join-Path $env:QT_ROOT_DIR "bin\$rel"
+              if (-not (Test-Path $cand)) {
+                $sub = Split-Path $_.DirectoryName -Leaf
+                $cand = Join-Path $env:QT_ROOT_DIR "plugins\$sub\$rel"
+              }
+              if (Test-Path $cand) {
+                Copy-Item $cand (Join-Path $_.DirectoryName $rel) -Force
+                Remove-Item $_.FullName -Force
+                Write-Output "release 替换: $rel"
+              }
+            }
+          }
           # 缺平台插件/JPEG 插件的包在目标机上起不来或图片模式不工作，直接判失败
           foreach ($req in @('platforms\qwindows.dll', 'imageformats\qjpeg.dll')) {
             if (-not (Test-Path (Join-Path 'bin' $req))) {
