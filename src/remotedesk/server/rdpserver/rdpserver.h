@@ -246,6 +246,22 @@ private:
     std::unique_ptr<SslTcpServer> httpServer_;
     std::unique_ptr<WebSocketServer> wsServer_;
     std::unique_ptr<ScreenCapturer> screenCapturer_;
+    // 这三个函数在没有 FFmpeg 的构建里同样会被调用（server_config 的 quality 字段、
+    // 服务模式转发的 config 处理、图片模式的关键帧回放），声明必须留在
+    // #ifdef USE_FFMPEG 之外；它们内部各自按需引用 FFmpeg 成员，实现里已有守卫。
+    // 把缓存 IDR 回放给单个客户端，返回是否真的发了。
+    // maxAgeMs > 0 时超过该时长就不再发：静止桌面的缓存帧内容仍然正确，但新客户端
+    // 宁可等一次 pumpKeyframe（约一个 RTT）拿当前帧，也不先铺一帧两秒前的画面
+    // 再立刻重绘，还省掉一次几十 KB 的重复关键帧。
+    bool replayCachedKeyframe(const QString& clientId, qint64 maxAgeMs);
+    // [A15] 作废"编码器相关的进程内缓存"（关键帧 / SPS-PPS / 复用基准）。
+    // 服务模式下编码器在 helper 进程里：本进程拿不到"内容变了没"的信号，缓存的
+    // IDR/SPS 一旦与 helper 的新编码器不一致，新接入的浏览器就会先收到一条
+    // 尺寸/参数集都不匹配的旧码流（花屏），直到 helper 的新 IDR 到达。
+    void invalidateCachedIdr();
+    // [A9] 内部画质码率（80/60/35/15）→ 档位名（high/medium/low/verylow）。
+    // 下发给前端与下发给 helper 必须同一口径，否则前端下拉框回落显示"中"。
+    QString qualityName() const;
 #ifdef USE_FFMPEG
     std::unique_ptr<VideoEncoder> videoEncoder_;
     // [N6] 退役编码器墓地：编码线程卡死在驱动调用（shutdownRetire 失败）时，
@@ -262,19 +278,6 @@ private:
     // onEncodedFrame 出口抬到"上一帧 +1"之上（见 replayCachedKeyframe 注释）。
     qint64 lastSentVideoTs_ = 0;
     qint64 lastKeyframeWallMs_ = 0;
-    // 把缓存 IDR 回放给单个客户端，返回是否真的发了。
-    // maxAgeMs > 0 时超过该时长就不再发：静止桌面的缓存帧内容仍然正确，但新客户端
-    // 宁可等一次 pumpKeyframe（约一个 RTT）拿当前帧，也不先铺一帧两秒前的画面
-    // 再立刻重绘，还省掉一次几十 KB 的重复关键帧。
-    bool replayCachedKeyframe(const QString& clientId, qint64 maxAgeMs);
-    // [A15] 作废"编码器相关的进程内缓存"（关键帧 / SPS-PPS / 复用基准）。
-    // 服务模式下编码器在 helper 进程里：本进程拿不到"内容变了没"的信号，缓存的
-    // IDR/SPS 一旦与 helper 的新编码器不一致，新接入的浏览器就会先收到一条
-    // 尺寸/参数集都不匹配的旧码流（花屏），直到 helper 的新 IDR 到达。
-    void invalidateCachedIdr();
-    // [A9] 内部画质码率（80/60/35/15）→ 档位名（high/medium/low/verylow）。
-    // 下发给前端与下发给 helper 必须同一口径，否则前端下拉框回落显示"中"。
-    QString qualityName() const;
     // 编码器尺寸不匹配触发的重建节流时间戳（单调时钟毫秒，避免每帧都尝试重建阻塞主线程）
     qint64 lastSizeReinitMs_ = 0;
     // [PLI-REUSE] 静止桌面下的关键帧请求（PLI）优化状态。
@@ -379,10 +382,14 @@ private:
     int cappedScale(int scale) const { return adaptScaleCap_ > 0 ? qMin(scale, adaptScaleCap_) : scale; }
     double cappedPaceFactor() const { return qMax(configPaceFactor_, adaptPaceFactor_); }
     CodecType configCodec_ = CodecType::H264;        // 编码协议（h264/hevc/vp8/vp9/av1）
-    // WebRTC 固定 H.264，进入会话时临时改写 configCodec_（编码器只认这个成员），
-    // 用户原本的选择单独保存：落盘写回原值，离开视频模式时恢复。
+    // WebRTC 会话会把 configCodec_ 对齐到"编码器实际在产 + 浏览器能收"的类型
+    // （编码器只认这个成员）：用户原本的选择单独保存，落盘写回原值、离开视频模式时恢复。
     CodecType codecBeforeWebRtc_ = CodecType::H264;
     bool codecOverriddenForWebRtc_ = false;
+    // 本进程的 H.265 WebRTC 能力判定（一次失败就不再重试）：浏览器 answer 里没有
+    // H265/90000（典型是 Firefox，或没开 HEVC 硬解的 Chrome）时，重复用 HEVC 建会话
+    // 只会每次都握手失败。置真后 WebRTC 一律回 H.264，软编用户不受影响。
+    bool webrtcHevcBlocked_ = false;
     HwEncodeMode configHwEncodeMode_ = HwEncodeMode::Auto; // 硬件编码开关（auto/on/off）
     int userScale_ = 75;
     bool screenLocked_ = false;

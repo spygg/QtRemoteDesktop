@@ -19,10 +19,21 @@ WebRtcSession::~WebRtcSession()
     close();
 }
 
-bool WebRtcSession::create(const QVector<QString>& iceServers, int fps)
+bool WebRtcSession::create(const QVector<QString>& iceServers, int fps, CodecType codec)
 {
     Q_UNUSED(iceServers)
     Q_UNUSED(fps)  // 时间戳改为单调微秒时钟后不再依赖标称帧率
+
+    // metaRTC 用三处独立的“编码类型”决定发送链路，必须一次设齐、三者一致：
+    //   pushVideo.videoEncoderType → offer SDP 写 H264 还是 H265（YangSdp.c:308-320）
+    //   addVideoTrack(codec)       → RTP 载荷类型字节（YangPush.c 按 videoEncodeCodec
+    //                                取 context.h264/h265PayloadType）
+    //   pacer->initVideo(codec,..) → 选择 H264 还是 H265 的 RTP 分片器
+    //                                （YangPushData.c:182-185，H265 走 YangPushDataH265.c）
+    // 任一处不匹配的后果：SDP 与线上 PT 不一致，或对端按错误的头格式解 NALU
+    //（H.264 1 字节头 &0x1F / HEVC 2 字节头 (b0>>1)&0x3F）→ 黑屏。
+    codec_ = (codec == CodecType::HEVC) ? CodecType::HEVC : CodecType::H264;
+    const YangVideoCodec vCodec = codec_ == CodecType::HEVC ? Yang_VED_H265 : Yang_VED_H264;
 
     // RTP 时间戳基准：单调微秒时钟（见 webrtcsession.h 成员注释）。
     // 只用 delta，起点无意义；90kHz/fps 的帧步进计数器已废弃（单位错误，
@@ -33,6 +44,7 @@ bool WebRtcSession::create(const QVector<QString>& iceServers, int fps)
     peerInfo_.uid = 0;
     peerInfo_.familyType = Yang_IpFamilyType_IPV4;
     peerInfo_.direction = YangSendonly;
+    peerInfo_.pushVideo.videoEncoderType = vCodec;
     // 关键：服务端必须工作在 isControlled=true（被控方）。
     // 浏览器主机候选默认 mDNS 化（xxxx.local），metaRTC 无法解析，向其发送的
     // ICE 连通性检查只会打到 255.255.255.255；若 isControlled=false（主叫方），
@@ -54,14 +66,15 @@ bool WebRtcSession::create(const QVector<QString>& iceServers, int fps)
     if (!pc_)
         return false;
 
-    if (pc_->addVideoTrack(Yang_VED_H264) != 0) {
+    if (pc_->addVideoTrack(vCodec) != 0) {
         qWarning() << "WebRtcSession: addVideoTrack failed";
         return false;
     }
     pc_->addTransceiver(YangMediaVideo, YangSendonly);
 
     pacer_ = std::unique_ptr<YangRtcPacer>(new YangRtcPacer());
-    pacer_->initVideo(Yang_VED_H264, 1024);
+    // 第二参是发送队列深度（pktCount），不是码率（YangPacer.c:89-97）
+    pacer_->initVideo(vCodec, 1024);
 
     char* offer = nullptr;
     if (pc_->createOffer(&offer) != 0 || !offer) {
@@ -92,7 +105,8 @@ bool WebRtcSession::create(const QVector<QString>& iceServers, int fps)
                 l.startsWith(QLatin1String("m=video")) || l.startsWith(QLatin1String("a=mid")))
                 key << l.trimmed();
         }
-        qInfo() << "WebRtcSession offer keylines:" << key.join(" | ");
+        qInfo() << "WebRtcSession offer keylines (codec="
+                << (codec_ == CodecType::HEVC ? "H265" : "H264") << "):" << key.join(" | ");
     }
     emit localOffer(QString::fromUtf8(offer));
     // 与 createOffer 的分配器配对：metaRTC 内部是 yang_calloc(=calloc)，
@@ -112,6 +126,17 @@ void WebRtcSession::handleAnswer(const QString& sdp)
     QByteArray ba = sdp.toUtf8();
     char* ans = ba.data();
     qInfo() << "WebRtcSession: answer received, len =" << sdp.size();
+    // [H265] 本端是 sendonly，offer 的视频轨道只带一种编码（YangSdp.c:296-323
+    // 按 pushVideo.videoEncoderType 只生成一条 H264 或 H265 的 rtpmap），浏览器
+    // 不支持时会在 answer 里拒掉（m=video 行没有该 PT，或直接回 "0"）。
+    // 若照常 setRemoteDescription，结果是 ICE/DTLS 全通、一帧都解不出来（黑屏
+    // 且无报错），所以这里先检出并交给上层回落 H.264 重新建会话。
+    if (codec_ == CodecType::HEVC && !sdp.contains(QLatin1String("H265/90000"))) {
+        qWarning() << "WebRtcSession: answer has no H265 payload -> browser cannot do"
+                      " HEVC over WebRTC (fallback to H.264)";
+        emit hevcRejectedByPeer();
+        return;
+    }
     if (pc_->setRemoteDescription(ans) != 0) {
         qWarning() << "WebRtcSession: setRemoteDescription(answer) failed, len =" << sdp.size();
         emit failed();
@@ -177,11 +202,15 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
     // KEYFRAME（实测一天 5.8 万条 KEYFRAME + 3.2 万条 sendFrame，占日志 85%），
     // 在 sendFrame 热路径上做字符串拼接+落盘，属自伤。
     Q_UNUSED(keyframe);
-    // metaRTC 的 H.264 发送器(yang_push_h264_video)接收“单个 NALU”(无起始码)：
-    // 小 NALU 直接 memcpy 进 RTP Raw 载荷；大 NALU(>kRtpMaxPayloadSize)走 FU-A。
+    // metaRTC 的 H.264/H.265 发送器（yang_push_h264_video / yang_push_h265_video）
+    // 都接收“单个 NALU”(无起始码)：小 NALU 直接 memcpy 进 RTP Raw 载荷；
+    // 大 NALU(>kRtpMaxPayloadSize) 走分片（H.264 FU-A / H.265 RFC7798 FU，
+    // 见 YangPushDataH265.c:157-212 —— 它固定跳过 2 字节 NAL 头，所以起始码
+    // 一旦带上线，解端会把 00 00 00 01 当成 NAL 头解析失败）。
     // 但 pushVideo 的上层（yang_pushVideo_getData）对 I 帧要求完整 Annex-B 帧，
     // 详见下方发送逻辑说明。FFmpeg 软/硬编码器输出是 Annex-B(00 00 00 01 起始码
-    // 包裹 SPS/PPS/IDR 多 NALU)，先拆分 NALU 再按下方策略合成发送。
+    // 包裹 VPS/SPS/PPS/IDR 多 NALU)，先拆分 NALU 再按下方策略合成发送。
+    const bool hevc = (codec_ == CodecType::HEVC);
     // [P2] 去掉每帧无条件 detach 深拷贝（30fps × 8KB-1MB = 纯浪费的带宽/延迟）：
     // QByteArray COW 下 buf(data) 只浅共享；只有真正写 buf（下方 wbase 重写 NALU）
     // 时才会惰性 detach。纯读路径（单 NALU 直发）零拷贝。
@@ -211,8 +240,14 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
                 break;
             ++j;
         }
-        if (j > start) {
-            uint8_t t = base[start] & 0x1F;
+        // HEVC 至少要有 2 字节 NAL 头才能交给分片器（它固定 payload=pdata+2），
+        // 1 字节的残包直接丢弃，避免 nb_left 下溢。
+        if (j - start >= (hevc ? 2 : 1)) {
+            // NAL 头长度按编码不同：H.264 是 1 字节(forbidden|nal_ref_idc|type)，
+            // type = b0 & 0x1F；HEVC 是 2 字节(forbidden|type 6bit|layer)，
+            // type = (b0 >> 1) & 0x3F，长度/偏移仍按“整个 NALU 含 2 字节头”算
+            //（分片器自己跳 2 字节，见上方注释）。
+            uint8_t t = hevc ? uint8_t((base[start] >> 1) & 0x3F) : uint8_t(base[start] & 0x1F);
             nalus.append({start, j - start, t});
         }
         i = j;
@@ -279,6 +314,34 @@ void WebRtcSession::sendFrame(const QByteArray& data, bool keyframe)
         }
         return false;
     };
+
+    if (hevc) {
+        // HEVC（RFC 7798 单 NALU 模式）：VPS(32)/SPS(33)/PPS(34) 与各 slice
+        //（VCL：type≤31，含 IDR_W_RADL 19 / IDR_N_LP 20 / CRA_NUT 21）逐个作为
+        // 独立 NALU 发送并共享同一 RTP 时间戳；AUD(35)/SEI(39,40) 不发——对端解码
+        // 不需要，多发一轮 RTP 只是白付带宽。
+        // 全部按 YANG_Frametype_P 送：metaRTC 的 I 帧分支要求“含起始码的完整
+        // Annex-B 帧”，与本函数“逐 NALU、无起始码”的策略冲突（H.264 侧同理，
+        // 见下方 IDR-FIX 注释）。
+        // 帧边界靠 RTP marker：AU 内最后一个 VCL NALU marker=1，浏览器据此提交整帧。
+        QVector<int> sendIdx;
+        int lastVcl = -1;
+        for (int k = 0; k < nalus.size(); ++k) {
+            const uint8_t t = nalus[k].type;
+            const bool vcl = (t <= 31);
+            if (!vcl && t != 32 && t != 33 && t != 34)
+                continue;
+            sendIdx.append(k);
+            if (vcl)
+                lastVcl = k;
+        }
+        for (int k = 0; k < sendIdx.size(); ++k) {
+            const Nalu& nu = nalus[sendIdx[k]];
+            const bool auTail = (nu.type <= 31 && sendIdx[k] == lastVcl);
+            if (sendNalu(nu, YANG_Frametype_P, auTail ? 1 : 0)) ++sent;
+        }
+        return;
+    }
 
     // 分类 NALU：SPS(7)/PPS(8)/IDR(5)/其他
     int spsIdx = -1, ppsIdx = -1;

@@ -976,7 +976,7 @@
         </div>
         <div class="dropdown-section" id="codec-section">
             <div class="dropdown-title">编码协议</div>
-            <div class="dropdown-note">FFmpeg/WS 视频模式生效；WebRTC 固定 H.264。H.265 需硬件加速；浏览器不支持的解码项自动禁用</div>
+            <div class="dropdown-note">FFmpeg/WS 视频模式生效；WebRTC 也跟着该协议走（服务端真的在用 H.265 且浏览器接受时才推 H.265，否则自动退回 H.264）。H.265 需硬件加速；浏览器不支持的解码项自动禁用</div>
             <div class="dropdown-options" id="codec-options" data-key="codec"></div>
         </div>
         <div class="dropdown-section">
@@ -1445,6 +1445,28 @@
                 webrtcState.videoEl.srcObject = null;
                 msePlayer.stop('webrtcClose');
             }
+        }
+
+        // 服务端用 H.265 发 offer，但我们的 answer 里没有 H265（典型是 Firefox 没有
+        // HEVC over WebRTC；这类浏览器在 MSE 里同样解不了 HEVC，留在 hevc 只会黑屏）。
+        // 服务端已记住"本进程的 WebRTC 不再用 HEVC 协商"，所以这里把本地协议对齐成
+        // H.264 并重试一次 WebRTC —— 用户明确选了 WebRTC 模式时不该直接掉回 WS 流。
+        // 重试至多一次：第二次 offer 必然是 H.264，不会再触发本回调。
+        function onPeerRejectedHevc() {
+            console.warn('RD-WEBRTC peer rejected H265, downgrading codec to h264 and retrying');
+            webrtcClose();
+            if (state.currentConfig.codec !== 'h264') {
+                state.currentConfig.codec = 'h264';
+                try { localStorage.setItem('rd_codec', 'h264'); } catch (e) {}
+                replaceDecoder('h264');
+                send({ type: 'config', codec: 'h264' });
+                updateDropdownActive();
+            }
+            showTransferStatus('当前浏览器不支持 H.265，已改用 H.264', 2500);
+            setTimeout(() => {
+                if (!webrtcState.active && !webrtcState.pc && !webrtcState.intending)
+                    initWebRTC();
+            }, 400);
         }
 
         // ==================== MSE 播放器（无 WebCodecs 时 FFmpeg 视频模式的兜底） ====================
@@ -1986,7 +2008,9 @@
                 // 若 localStorage 残留 hevc 而服务端软编只有 h264，每次切视频模式
                 // 都会触发服务端“hevc 初始化失败→回退 h264→编码器重建”双重重建，
                 // 造成一次额外的流断点（黑屏闪烁）。
-                const mseCfgCodec = state.serverCodec || 'h264';
+                // MSE 通道的 init segment 只构建 avcC（H.264），拿到 HEVC 码流永远解不出画面，
+                // 所以这条路上必须把服务端钉在 h264，不能跟随 serverCodec/currentConfig。
+                const mseCfgCodec = 'h264';
                 if (state.currentConfig.codec !== mseCfgCodec) {
                     state.currentConfig.codec = mseCfgCodec;
                     try { localStorage.setItem('rd_codec', mseCfgCodec); } catch (e) {}
@@ -2103,9 +2127,13 @@
                     state.currentConfig.codec = state.serverCodec;
                     try { localStorage.setItem('rd_codec', state.serverCodec); } catch (e) {}
                 }
+                // 解码器协议必须与即将接收的码流一致：H264Decoder 的 codec 只在实例创建
+                // 时确定，之后光改 currentConfig 不重建，服务端切到 HEVC 后前端仍按 avc1
+                // configure，每帧 decode 抛 DataError → 关键帧请求风暴 + 降级图片。
+                if (state.decoder && state.decoder.codec !== cfgCodec)
+                    replaceDecoder(cfgCodec);
                 send({ type: 'config', codec: cfgCodec, hw_encode: state.currentConfig.hw_encode });
-                send({ type: 'request_keyframe' });
-            } else if (mode === 'image') {
+                send({ type: 'request_keyframe' });            } else if (mode === 'image') {
                 // 图片模式：JPEG 帧
                 // 必须先显式停 MSE：webrtcClose 内部仅在 !msePlayer.using 时才停 MSE/隐藏
                 // video 元素（保护 webrtc→ffmpeg 切换不被异步关闭误杀）。从 ffmpeg(MSE)
@@ -2140,6 +2168,8 @@
                     state.currentConfig.codec = state.serverCodec;
                     try { localStorage.setItem('rd_codec', state.serverCodec); } catch (e) {}
                 }
+                if (state.decoder && state.decoder.codec !== cfgCodec2)
+                    replaceDecoder(cfgCodec2);
                 send({ type: 'config', codec: cfgCodec2, hw_encode: state.currentConfig.hw_encode });
                 if (!webrtcState.active && !webrtcState.pc) {
                     setTimeout(() => { if (!webrtcState.active && !webrtcState.pc) initWebRTC(); }, 400);
@@ -3082,8 +3112,21 @@
                         webrtcClose();
                     }
                     // 记录服务端当前编码协议（供调试/回显；不强制覆盖用户选择）
-                    if (msg.codec && (msg.codec === 'h264' || msg.codec === 'hevc'))
+                    if (msg.codec && (msg.codec === 'h264' || msg.codec === 'hevc')) {
                         state.serverCodec = msg.codec;
+                        // 服务端可能把要求的 hevc 换成实际编得出的协议（如构建里没 hevc
+                        // 编码器时回退 h264）。WS 视频通道的解码器必须跟随实际码流，
+                        // 否则按错误协议 configure，每一帧都报错、画面永远出不来。
+                        if (state.decoder && state.decoder.codec !== msg.codec &&
+                            state.displayStreamMode === 'ffmpeg' && !msePlayer.using) {
+                            replaceDecoder(msg.codec);
+                            if (state.currentConfig.codec !== msg.codec) {
+                                state.currentConfig.codec = msg.codec;
+                                try { localStorage.setItem('rd_codec', msg.codec); } catch (e) {}
+                            }
+                            send({ type: 'request_keyframe' });
+                        }
+                    }
                     // 刷新/重连后按持久化模式恢复一次（服务端重启后默认回到 image）
                     if (!state.modeRestored && state.currentConfig.videomode !== 'auto') {
                         state.modeRestored = true;
@@ -3134,8 +3177,10 @@
                     onWebRtcIce(msg.candidate, msg.mid);
                     break;
                 case 'signal_state':
-                    if (msg.state === 'failed' || msg.state === 'unsupported')
-                        webrtcClose();
+                    if (msg.state === 'failed' || msg.state === 'unsupported') {
+                        if (msg.reason === 'h265_unsupported') onPeerRejectedHevc();
+                        else webrtcClose();
+                    }
                     break;
                 case 'error':
                     // 非阻塞提示：alert 会卡住整个页面事件循环（连续错误时更糟）。
@@ -4014,10 +4059,16 @@
                 send({ type: 'set_output', index: idx });
             } else if (key === 'codec') {
                 if (state.displayStreamMode === 'webrtc') {
-                    showTransferStatus('WebRTC 模式固定 H.264，请先切换到 FFmpeg 模式', 2500);
+                    showTransferStatus('WebRTC 会话期间不能改编码协议，请先切换到 FFmpeg 模式', 2500);
                     return;
                 }
                 if (val !== 'h264' && val !== 'hevc') return;
+                if (val === 'hevc' && (msePlayer.using || !('VideoDecoder' in window))) {
+                    // 没有 WebCodecs 时视频只能走 MSE，而 MSE 只构建了 H.264 的 avcC init
+                    // segment：换成 HEVC 后服务端照常推流，画面却再也解不出来（黑屏）。
+                    showTransferStatus('当前浏览器只能用 MSE 解码 H.264，无法切换到 H.265', 3000);
+                    return;
+                }
                 state.currentConfig.codec = val;
                 try { localStorage.setItem('rd_codec', val); } catch (e) {}
                 // 重建解码器等待新协议的关键帧/codec_config；服务端 reinit 后发新流

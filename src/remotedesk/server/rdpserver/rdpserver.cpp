@@ -4681,7 +4681,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
 #endif
         }
         // 编码协议（h264/hevc/vp8/vp9/av1）与硬件编码开关（auto/on/off）：
-        // 视频/FFmpeg 模式下重建编码器即时生效；WebRTC 会话激活期间忽略（WebRTC 固定 H.264）
+        // 视频/FFmpeg 模式下重建编码器即时生效；WebRTC 会话激活期间忽略（会话按
+        // 已协商的编码类型推流，中途换码流对端解不出来）
 #ifdef USE_WEBRTC
         bool webrtcBusy = !webrtcSessions_.isEmpty();
 #else
@@ -4692,11 +4693,12 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             CodecType c = codecFromString(codecStr);
             if (c != configCodec_) {
                 if (webrtcBusy) {
-                    // WebRTC 固定 H.264，编码器不能切；但用户这次选择仍然有效：
-                    // 记到"用户原值"里供落盘和离开视频模式后恢复，不能把临时的
-                    // H.264 当成用户配置持久化（否则用一次 WebRTC 就永久丢选择）。
-                    qWarning() << "Ignoring codec switch while WebRTC active (WebRTC stays H.264),"
-                               << "remembered for later:" << codecToString(c);
+                    // 会话已按协商好的编码类型推流，编码器不能中途换；但用户这次选择
+                    // 仍然有效：记到"用户原值"里供落盘和离开视频模式后恢复，不能把
+                    // 当前会话临时钉住的编码当成用户配置持久化（否则用一次 WebRTC
+                    // 就永久丢选择）。
+                    qWarning() << "Ignoring codec switch while WebRTC active (session keeps its"
+                               << "negotiated codec), remembered for later:" << codecToString(c);
                     codecBeforeWebRtc_ = c;
                     codecOverriddenForWebRtc_ = true;
                     scheduleSaveConfig(); // [P2] 去抖落盘
@@ -5050,9 +5052,30 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
     auto it = webrtcSessions_.begin();
     while (it != webrtcSessions_.end()) {
         WebRtcSession* s = it.value();
+        const QString sessionId = it.key();
         ++it; // 先推进：sendFrame 可能同步移除当前会话
-        if (s)
-            s->sendFrame(data, isKeyframe);
+        if (!s)
+            continue;
+#ifdef USE_FFMPEG
+        // 会话 offer 的编码类型必须与编码器现在产出的码流一致。共享一个编码器，
+        // 而编码类型可以中途被改（典型：A 端接受 H.265 正在推流，B 端拒收 H265 后
+        // 服务端把 WebRTC 钉回 H.264 并重建编码器）。继续给 HEVC 会话投 H.264 帧，
+        // 浏览器按 2 字节 NAL 头解 1 字节头 → 整条会话解不出任何帧，比断开更糟
+        // （黑屏还没有降级契机）。拆掉这个会话，前端按既定路径降级/重连重新协商。
+        if (videoEncoder_ && s->codec() != videoEncoder_->currentCodec()) {
+            qWarning() << "WebRTC session codec stale:" << codecToString(s->codec())
+                       << "-> " << codecToString(videoEncoder_->currentCodec())
+                       << "; restarting negotiation for" << sessionId;
+            stopWebRtcSession(sessionId);
+            wsServer_->sendJson(sessionId, QJsonObject {
+                { "type", "signal_state" },
+                { "state", "failed" },
+                { "reason", QStringLiteral("codec_changed") },
+            });
+            continue;
+        }
+#endif
+        s->sendFrame(data, isKeyframe);
     }
 #endif
     // WS 客户端（排除列表中的走 RTP，不再收 WS 帧）
@@ -5517,6 +5540,20 @@ void RDPServer::createVideoEncoder()
 void RDPServer::reinitVideoEncoderForScale()
 {
     rebuildVideoEncoder(/*onlyIfIdle=*/false);
+#ifdef USE_FFMPEG
+    // 配置变更触发的重建：把编码器实际跑起来的协议广播出去，客户端据此对齐解码器。
+    // 请求 hevc 而本机没有 hevc 编码器时会静默回退 h264，前端若仍按 hevc 配置解码器，
+    // 收到的每一帧都会报错 → 关键帧请求风暴 → 黑屏。
+    if (currentMode_ == ServerMode::Video && videoEncoder_) {
+        QJsonObject notification;
+        notification["type"] = "mode_changed";
+        notification["mode"] = "video";
+        notification["hwEncode"] = hwEncodeAvailable();
+        notification["videoSupported"] = true;
+        notification["codec"] = codecToString(videoEncoder_->currentCodec());
+        wsServer_->broadcastJson(notification);
+    }
+#endif
 }
 
 // 退役对象只能在线程真正退出后释放：卡死时线程仍在触碰 codecCtx_/mpp_，删除
@@ -5599,6 +5636,9 @@ RDPServer::RebuildResult RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
             switchToImageMode();
         }
     }
+    // 用户请求的 codec 与编码器实际跑起来的 codec 不同时（典型：请求 hevc 但本机
+    // 没有 hevc 编码器，静默回退 h264），必须广播真实协议。否则前端解码器仍按
+    // hevc 配置去收 H.264 码流，每一帧 decode 报错 → 关键帧请求风暴 → 黑屏。
     return RebuildResult::Done;
 }
 #endif
@@ -5721,25 +5761,36 @@ void RDPServer::startWebRtcSession(const QString& clientId)
         return;
     }
 
-    // WebRTC 的轨道与 NAL 解析在 WebRtcSession 内是**固定 H.264** 实现
-    //（addVideoTrack(Yang_VED_H264)、NAL type = byte & 0x1F）。若当前配置是
-    // HEVC/VP9 且编码器初始化成功（典型：开着硬件编码），编码器会产出非 H.264 帧，
-    // 而 sendFrame 永远匹配不到 H.264 的 NAL 类型 → 一帧都发不出去（黑屏）。
-    // 因此进入 WebRTC 时临时改写 configCodec_（用户原值保留在 codecBeforeWebRtc_）。
-    const bool codecForcedToH264 = (configCodec_ != CodecType::H264);
+    // WebRTC 的 RTP 封装与 NAL 解析按会话的编码类型走（见 WebRtcSession::create）：
+    // H.264 走 1 字节 NAL 头 + FU-A，HEVC 走 2 字节头 + RFC7798 分片，两者不能混。
+    // 判定必须用“编码器当前真正在产的编码”，而不是配置值：视频模式刚初始化完编码器，
+    // 若它因硬编不可用回退，configCodec_ 与线上码流就不一致了。
+    // HEVC 目前只在**本地编码**路径开放——服务模式编码在 helper 侧，服务端只有 helper
+    // 上报的布尔 hwEncode 能力、拿不到它实际使用的编码类型，猜错就是整链路黑屏，
+    // 所以服务模式维持既有的 H.264 行为。
+    // webrtcHevcBlocked_：本进程已有浏览器明确拒收 H265（典型 Firefox 无 HEVC over
+    // WebRTC），此后不再用 HEVC 建 WebRTC 会话，避免每台浏览器都先失败一次。
+    CodecType webrtcCodec = CodecType::H264;
+    if (!webrtcHevcBlocked_ && videoEncoder_
+            && videoEncoder_->currentCodec() == CodecType::HEVC)
+        webrtcCodec = CodecType::HEVC;
+    // 其余情况（软编无 x265、用户选 VP9/AV1、浏览器拒收过 H265）临时改写为
+    // webrtcCodec，否则编码器产出 WebRTC 侧没有对应封装的码流，一帧都发不出去（黑屏）。
+    // 用户原值保留在 codecBeforeWebRtc_，WebRTC 结束后恢复。
+    const bool codecForcedToH264 = (configCodec_ != webrtcCodec);
     if (codecForcedToH264) {
         if (!codecOverriddenForWebRtc_) {
             codecBeforeWebRtc_ = configCodec_;
             codecOverriddenForWebRtc_ = true;
         }
-        qWarning() << "WebRTC requires H.264; overriding configured codec"
-                   << codecToString(configCodec_) << "-> h264";
-        configCodec_ = CodecType::H264;
+        qWarning() << "WebRTC cannot carry" << codecToString(configCodec_)
+                   << "; overriding to" << codecToString(webrtcCodec);
+        configCodec_ = webrtcCodec;
     }
 
     // 视频模式刚按用户 codec 初始化过编码器，这里补一次重建：本地编码器直接
     // 重建；服务模式（编码在 helper）重新下发 config+video_on，让 helper 按
-    // H.264 重建编码器。
+    // webrtcCodec 重建编码器。
     if (codecForcedToH264) {
         if (videoEncoder_ && screenCapturer_)
             reinitVideoEncoderForScale();
@@ -5807,12 +5858,27 @@ void RDPServer::startWebRtcSession(const QString& clientId)
     connect(session, &WebRtcSession::closed, this, [this, clientId]() {
         stopWebRtcSession(clientId);
     });
+    connect(session, &WebRtcSession::hevcRejectedByPeer, this, [this, clientId]() {
+        // 浏览器在 answer 里拒收了 H265（HEVC over WebRTC 不是所有浏览器都支持，
+        // 典型是 Firefox）。编码器是所有客户端共享的，不能在这里单独给它换编码，
+        // 否则会打断其它正在收 HEVC 的会话；所以只关掉本会话、告知前端降级，并记住
+        // “本进程的 WebRTC 别再用 HEVC”——下一次 set_mode webrtc 会走正常的
+        // H.264 覆盖路径（含编码器重建），前端那条降级链路本来就支持 H.264。
+        webrtcHevcBlocked_ = true;
+        qWarning() << "WebRTC: peer rejected H265 -> WebRTC pinned to H.264 for this process";
+        stopWebRtcSession(clientId);
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "signal_state" },
+            { "state", "failed" },
+            { "reason", QStringLiteral("h265_unsupported") },
+        });
+    });
 
     // 信令与媒体均走内网（192.168.x），仅用 host 候选即可，无需外网 STUN。
     // 外网 STUN 在内网不可达时会拖长 ICE 收集，导致 12s 回退定时器先触发而误关会话。
     webrtcIceServers_ = QVector<QString>();
 
-    if (!session->create(webrtcIceServers_, configFps_)) {
+    if (!session->create(webrtcIceServers_, configFps_, webrtcCodec)) {
         // 必须显式告知失败：否则客户端停在"等待 offer"，只能等 12s 超时才降级。
         stopWebRtcSession(clientId);
         // WebRTC 未能建立时编码器无需再钉在 H.264：恢复用户 codec，否则

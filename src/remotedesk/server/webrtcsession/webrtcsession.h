@@ -13,9 +13,12 @@
 #include <yangrtc/YangPeerConnection8.h>
 #include <yangrtc/YangPeerInfo.h>
 
+#include "codecdefs.h" // CodecType（与 VideoEncoder 共用同一编码类型词表）
+
 // 一个 WebRTC 会话 = 一个浏览器客户端的 RTCPeerConnection。
-// 服务端作为主叫方创建 offer（SENDONLY H.264 视频轨道），通过现有 WebSocket 通道做信令，
-// 连接建立后把 VideoEncoder 输出的 H.264 帧经 metaRTC 以 RTP/SRTP 发送。
+// 服务端作为主叫方创建 offer（SENDONLY 视频轨道，编码类型由 create() 的 codec
+// 决定：H.264 或 H.265），通过现有 WebSocket 通道做信令，
+// 连接建立后把 VideoEncoder 输出的帧经 metaRTC 以 RTP/SRTP 发送。
 class WebRtcSession : public QObject, public YangCallbackReceive,
         public YangCallbackIce, public YangCallbackRtc, public YangCallbackSslAlert {
     Q_OBJECT
@@ -23,10 +26,12 @@ public:
     explicit WebRtcSession(QObject* parent = nullptr);
     ~WebRtcSession() override;
 
-    // 创建 metaRTC PeerConnection + H.264 视频轨道，并生成 offer（经 localOffer 信号发出）
+    // 创建 metaRTC PeerConnection + 视频轨道，并生成 offer（经 localOffer 信号发出）
     // fps 用于 RTP 时间戳推进（90kHz 时钟）；旧实现硬编码 30fps，
     // 前端把帧率改成 15/60 时时间戳速率对不上，浏览器抖动缓冲会持续 underrun 或堆积。
-    bool create(const QVector<QString>& iceServers, int fps = 30);
+    // codec 只支持 H264/HEVC：其它类型没有对应的 RTP 封装，会被按 H.264 处理。
+    bool create(const QVector<QString>& iceServers, int fps = 30,
+                CodecType codec = CodecType::H264);
     void handleAnswer(const QString& sdp);
     void handleIce(const QString& candidate, const QString& mid);
     void close();
@@ -34,6 +39,8 @@ public:
     // 实际推流状态（answer 已设置）。connected_ 仅反映 metaRTC 状态回调，
     // 纯媒体推流场景它恒为 false，不能用于业务判断。
     bool isConnected() const { return remoteSet_; }
+    // 本会话 offer 出去的编码类型（与 VideoEncoder 当前产出必须一致）
+    CodecType codec() const { return codec_; }
     void sendFrame(const QByteArray& data, bool keyframe);
 
     // YangCallback* 纯虚实现：metaRTC 回调
@@ -56,11 +63,17 @@ signals:
     void closed();
     void keyframeRequested();          // 浏览器请求关键帧（PLI）
     void answerReceived();             // answer 已生效（用于连接后强制产 IDR）
+    // offer 是 H.265，但浏览器 answer 里没有接受 H265（典型：Firefox 无 HEVC
+    // over WebRTC）。此时继续推流对端一帧都解不出来，必须让上层退回 H.264。
+    void hevcRejectedByPeer();
 
 private:
     YangPeerInfo peerInfo_;
     std::unique_ptr<YangPeerConnection8> pc_;
     std::unique_ptr<YangRtcPacer> pacer_;
+    // create() 收到的编码类型（仅 H264/HEVC 两种取值）；sendFrame 据此选择
+    // NAL 头解析方式与参数集类型集合。
+    CodecType codec_ = CodecType::H264;
     // RTP 时间戳源：单调微秒时钟（create() 时 start()）。metaRTC 的 YangTimestamp
     // 期望 frame->pts 是**微秒**：getVideoTimestamp = (pts-base)*9/100 = 90kHz ticks。
     // 此前每帧传 90kHz 步进计数器（+90000/fps），被按 µs 解释后 RTP 时钟只走真实

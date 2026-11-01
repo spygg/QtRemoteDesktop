@@ -3,6 +3,9 @@ set(HEADERS webrtcsession.h)
 set(SOURCES webrtcsession.cpp)
 add_library(${WEBRTC_SESSION} STATIC ${HEADERS} ${SOURCES})
 target_include_directories(${WEBRTC_SESSION} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# codecdefs.h（CodecType）在 videoencoder 目录：会话要按编码类型选择 RTP 封装，
+# 但只需要这个不依赖 FFmpeg 的小头，所以加包含目录而不是链接 VideoEncoder。
+target_include_directories(${WEBRTC_SESSION} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../videoencoder)
 target_include_directories(${WEBRTC_SESSION} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../thridparty/third_party_src/metaRTC/include)
 get_target_property(_qinc Qt${QT_VERSION_MAJOR}::Core INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(${WEBRTC_SESSION} PUBLIC ${_qinc})
