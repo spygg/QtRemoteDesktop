@@ -8,7 +8,15 @@
 build*/
 build_output/
 bin/
+bin64/
 dist/
+dist64/
+
+# 第三方源码自带的 build/ 是源码（makefile/cmake/gyp 脚本），不是构建产物；
+# 缺了它们，全新 clone 与 CI 上 openh264 / mpp / breakpad 直接编不出来。
+!src/remotedesk/thridparty/breakpad/src/build/
+!src/remotedesk/thridparty/mpp/build/
+!src/remotedesk/thridparty/third_party_src/openh264/build/
 
 # Qt 临时文件
 *.user
@@ -87,3 +95,7 @@ src/remotedesk/thridparty/ffmpeg/linux/presets/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 代理/调试工具的临时工作目录（脚本、抓包、构建试验，不进仓库）
+.workbuddy/
+.playwright-cli/

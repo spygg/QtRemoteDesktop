@@ -67,7 +67,8 @@ tmp-orc.c
 #
 # VS
 #
-Build
+# 不要忽略 Build/build：仓库里的 build/ 是源码目录（Windows 大小写不敏感，
+# 一条 Build 会把 build/ 一起吃掉）
 *.user
 *.suo
 *.ipch
@@ -84,7 +85,8 @@ Build
 #
 # Building cache
 #
-/build
+# /build 里是 cmake/脚本源码（构建脚本在 $BUILD_DIR/mpp_build 做外部构建），
+# 不能整目录忽略，否则全新 clone 无法编译 rockchip-mpp。
 /mpp/version.h
 
 #

@@ -87,6 +87,7 @@ src/Makefile
 
 # Ignore directories gclient syncs.
 src/testing
-src/third_party/lss
+# lss 的 linux_syscall_support.h 是 Linux 构建必需源码，取消忽略
+# src/third_party/lss
 src/third_party/protobuf
 src/tools/gyp

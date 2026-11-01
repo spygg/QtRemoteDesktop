@@ -27,6 +27,16 @@ target_include_directories(radiometer_breakpad PUBLIC
 # 链接 Core 保证头文件与依赖可见。
 target_link_libraries(radiometer_breakpad PUBLIC Qt${QT_VERSION_MAJOR}::Core)
 
+# Linux：breakpad 的 guid_creator.cc 等直接调用 pthread_once。静态库不会把
+# libpthread 带上最终链接命令行（新 ld 默认 --no-copy-dt-needed-entries），
+# 表现为 "undefined reference to symbol 'pthread_once@@GLIBC_2.2.5' /
+# DSO missing from command line"。PUBLIC 传播给用到它的三个可执行目标，
+# 不必每个目标各自补 -lpthread。
+if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(radiometer_breakpad PUBLIC Threads::Threads)
+endif()
+
 # ---------------------------------------------------------------
 # Windows
 # pri: win32:HEADERS += ...
