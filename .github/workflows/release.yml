@@ -365,12 +365,16 @@ jobs:
           # windeployqt 负责 Qt DLL 与平台/图像插件；运行库自己拷，
           # 因为 MinGW 运行库按位宽换名（dw2 / seh），按工具链实际文件名取更稳。
           #
-          # 不能加 --release：MinGW 版 Qt 的插件 DLL 会被 windeployqt 判成 debug，
-          # --release 于是把 platforms/imageformats 整组跳过（实测输出 Plugins: 为空，
-          # 随后报 "Unable to find the platform plugin" 并以 1 退出，三平台产物全丢）。
-          # 官方 MinGW 包只带 release 插件，不指定模式时按插件自身类型部署，不会混入 debug。
+          # 不能给 64 位 job 加 --release：那里的插件 DLL 会被判成 debug，
+          # --release 会把 platforms/imageformats 整组跳过（实测 Plugins: 为空，
+          # 随后报 "Unable to find the platform plugin" 并以 1 退出）。
+          # 32 位（Qt 5.7 + mingw530）相反：MinGW 版按 IMAGE_FILE_DEBUG_STRIPPED
+          # 判 debug，5.3 的 binutils 不置该位，产物被当成 debug 并部署 Qt5Cored.dll，
+          # 必须显式 --release 才能拿到 exe 真正 import 的 release 库。
+          $mode = @()
+          if ($env:QT_ARCH -like 'win32*') { $mode += '--release' }
           & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --no-translations `
-              --no-opengl-sw --no-compiler-runtime "bin\QtRemoteDesktop.exe" 2>&1 | Tee-Object deploy.log
+              --no-opengl-sw --no-compiler-runtime @mode "bin\QtRemoteDesktop.exe" 2>&1 | Tee-Object deploy.log
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::windeployqt 失败"; exit 1 }
           # 缺平台插件/JPEG 插件的包在目标机上起不来或图片模式不工作，直接判失败
           foreach ($req in @('platforms\qwindows.dll', 'imageformats\qjpeg.dll')) {
@@ -399,6 +403,11 @@ jobs:
             } finally { $fs.Dispose() }
           }
           if ($bad.Count) { Write-Host "::error::PE 位宽不一致: $($bad -join ', ')"; exit 1 }
+          # 部署结果必须真能启动：缺 Qt 库/平台插件时 --version 就会失败，
+          # 别把坏包发出去（Windows 上加载失败没有 stderr，只能靠退出码）
+          $out = & (Join-Path (Get-Location) 'bin\QtRemoteDesktop.exe') --version 2>&1
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::部署后启动失败: $out"; exit 1 }
+          Write-Host "VERSION: $out"
           Get-ChildItem bin | Select-Object Name, Length
           Compress-Archive -Path bin\* -DestinationPath $env:ARTIFACT_NAME -Force
           Get-Item $env:ARTIFACT_NAME | Select-Object Name, Length
@@ -470,15 +479,18 @@ jobs:
             echo "=== 未解析依赖: ${miss:-none} ==="
             [ -z "$miss" ] || { echo "::error::打包后仍有未解析依赖"; exit 1; }
             # ldd 会顺着系统 Qt 找到库，断链也能「解析成功」，必须单独确认
-            # Qt 相关依赖全部落在 $DIST/lib 里，否则包里跑起来实际用的是宿主 Qt
-            escape=$(ldd "$DIST/QtRemoteDesktop" "$DIST"/imageformats/*.so "$DIST"/platforms/*.so 2>/dev/null \
+            # Qt 相关依赖全部落在 $DIST/lib 里，否则包里跑起来实际用的是宿主 Qt。
+            # 必须清掉 LD_LIBRARY_PATH：install-qt-action 把它设成了宿主 Qt 的 lib，
+            # 不清的话这里永远只能解析到宿主 Qt（误报），冒烟测试也没测到打包内容
+            escape=$(LD_LIBRARY_PATH= ldd "$DIST/QtRemoteDesktop" "$DIST"/imageformats/*.so "$DIST"/platforms/*.so 2>/dev/null \
                      | awk '/Qt[56]/ {print $1, $3}' | grep -v "$DIST" | sort -u || true)
             echo "=== 落到宿主 Qt 的依赖: ${escape:-none} ==="
             [ -z "$escape" ] || { echo "::error::打包缺 Qt 库，运行时会回落到宿主 Qt"; exit 1; }
             # 冒烟：offscreen 平台跑 --version，证明 Qt 运行库 + 平台插件真能被加载
             # 先关 -e 再取 PIPESTATUS，否则失败时直接退出，来不及给出 error 标注
             set +e
-            QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH="$DIST" "$DIST/QtRemoteDesktop" --version 2>&1 | tee smoke.log
+            LD_LIBRARY_PATH= QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH="$DIST" \
+              "$DIST/QtRemoteDesktop" --version 2>&1 | tee smoke.log
             rc=${PIPESTATUS[0]}
             set -e
             [ "$rc" -eq 0 ] || { echo "::error::打包后冒烟启动失败 (rc=$rc)"; exit 1; }
