@@ -3,11 +3,372 @@
 (不存在)
 === fetch_sources.log ===
 === downloading FFmpeg 6.1.2 ===
-mv: cannot stat 'src/remotedesk/thridparty/ffmpeg/FFmpeg-6.1.2': No such file or directory
+-rwxr-xr-x 1 runneradmin 197121 278049 Aug  1  2024 src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/configure
+=== downloading nv-codec-headers n12.2.72.0 ===
+dynlink_cuda.h
+dynlink_cuviddec.h
+dynlink_loader.h
+dynlink_nvcuvid.h
+nvEncodeAPI.h
 === configure.log ===
-(不存在)
+CMake Deprecation Warning at CMakeLists.txt:3 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- The C compiler identification is GNU 8.1.0
+-- The CXX compiler identification is GNU 8.1.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/bin/gcc.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/bin/g++.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- FFmpeg 版本：6.1.2（源码 D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2；产物 D:/a/QtRemoteDesktop/QtRemoteDesktop/src/../build_output/ffmpeg_install-6.1.2）
+-- FFmpeg missing — will be built by CMake (ffmpeg_ep) -> D:/a/QtRemoteDesktop/QtRemoteDesktop/src/../build_output/ffmpeg_install-6.1.2
+-- WebRTC enabled (FFmpeg + bundled metaRTC)
+-- ScreenCapturer: XRandR not found, fallback to xrandr process enumeration
+CMake Deprecation Warning at remotedesk/server/singleapplication/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Deprecation Warning at remotedesk/thridparty/third_party_src/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Looking for arpa/inet.h
+-- Looking for arpa/inet.h - not found
+-- Looking for byteswap.h
+-- Looking for byteswap.h - not found
+-- Looking for inttypes.h
+-- Looking for inttypes.h - found
+-- Looking for machine/types.h
+-- Looking for machine/types.h - not found
+-- Looking for netinet/in.h
+-- Looking for netinet/in.h - not found
+-- Looking for stdint.h
+-- Looking for stdint.h - found
+-- Looking for stdlib.h
+-- Looking for stdlib.h - found
+-- Looking for sys/int_types.h
+-- Looking for sys/int_types.h - not found
+-- Looking for sys/socket.h
+-- Looking for sys/socket.h - not found
+-- Looking for sys/types.h
+-- Looking for sys/types.h - found
+-- Looking for unistd.h
+-- Looking for unistd.h - found
+-- Looking for windows.h
+-- Looking for windows.h - found
+-- Looking for winsock2.h
+-- Looking for winsock2.h - found
+-- Looking for sigaction
+-- Looking for sigaction - not found
+-- Looking for inet_aton
+-- Looking for inet_aton - not found
+-- Looking for inet_pton
+-- Looking for inet_pton - not found
+-- Looking for usleep
+-- Looking for usleep - found
+-- Looking for stddef.h
+-- Looking for stddef.h - found
+-- Check size of uint8_t
+-- Check size of uint8_t - done
+-- Check size of uint16_t
+-- Check size of uint16_t - done
+-- Check size of uint32_t
+-- Check size of uint32_t - done
+-- Check size of uint64_t
+-- Check size of uint64_t - done
+-- Check size of int32_t
+-- Check size of int32_t - done
+-- Check size of unsigned long
+-- Check size of unsigned long - done
+-- Check size of unsigned long long
+-- Check size of unsigned long long - done
+-- Performing Test HAVE_INLINE
+-- Performing Test HAVE_INLINE - Success
+-- Looking for include file sys/queue.h
+-- Looking for include file sys/queue.h - not found
+-- Looking for include files sys/socket.h, linux/if_addr.h
+-- Looking for include files sys/socket.h, linux/if_addr.h - not found
+-- Looking for include files sys/socket.h, linux/rtnetlink.h
+-- Looking for include files sys/socket.h, linux/rtnetlink.h - not found
+-- Looking for 4 include files sys/types.h, ..., netinet/ip_icmp.h
+-- Looking for 4 include files sys/types.h, ..., netinet/ip_icmp.h - not found
+-- Looking for 3 include files sys/types.h, ..., net/route.h
+-- Looking for 3 include files sys/types.h, ..., net/route.h - not found
+-- Looking for include file stdatomic.h
+-- Looking for include file stdatomic.h - found
+-- Looking for usrsctp.h
+-- Looking for usrsctp.h - found
+-- Performing Test have_sa_len
+-- Performing Test have_sa_len - Failed
+-- Performing Test have_sin_len
+-- Performing Test have_sin_len - Failed
+-- Performing Test have_sin6_len
+-- Performing Test have_sin6_len - Failed
+-- Performing Test have_sconn_len
+-- Performing Test have_sconn_len - Failed
+-- Performing Test has_wfloat_equal
+-- Performing Test has_wfloat_equal - Success
+-- Performing Test has_wshadow
+-- Performing Test has_wshadow - Success
+-- Performing Test has_wpointer_aritih
+-- Performing Test has_wpointer_aritih - Success
+-- Performing Test has_wunreachable_code
+-- Performing Test has_wunreachable_code - Success
+-- Performing Test has_winit_self
+-- Performing Test has_winit_self - Success
+-- Performing Test has_wno_unused_function
+-- Performing Test has_wno_unused_function - Success
+-- Performing Test has_wno_unused_parameter
+-- Performing Test has_wno_unused_parameter - Success
+-- Performing Test has_wno_unreachable_code
+-- Performing Test has_wno_unreachable_code - Success
+-- Performing Test has_wstrict_prototypes
+-- Performing Test has_wstrict_prototypes - Success
+-- Compiler flags (CMAKE_C_FLAGS):  -std=c99 -pedantic -Wall -Wextra -Wfloat-equal -Wshadow -Wpointer-arith -Wunreachable-code -Winit-self -Wno-unused-function -Wno-unused-parameter -Wno-unreachable-code -Wstrict-prototypes
+-- Performing Test has_wno_address_of_packed_member
+-- Performing Test has_wno_address_of_packed_member - Success
+-- Performing Test has_wno_deprecated_declarations
+-- Performing Test has_wno_deprecated_declarations - Success
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- link library: ws2_32
+CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- OpenSSL 1.0.2u legacy build skipped (Linux only; macOS uses system OpenSSL 1.1)
+-- Performing Test QTRD_DXGI_DESKTOP_DUP
+-- Performing Test QTRD_DXGI_DESKTOP_DUP - Success
+-- ScreenCapturer: DXGI Desktop Duplication enabled (GNU, native headers)
+-- FFmpeg 6.1.2: NVENC 头来自 D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/nv-codec-headers-n12.2.72.0/include
+-- FFmpeg: 未找到 nasm/yasm，x86 汇编优化关闭（swscale 约慢 3x）
+-- Performing Test QTRD_FF_HAVE_NVENC
+-- Performing Test QTRD_FF_HAVE_NVENC - Success
+-- FFmpeg 6.1.2: 未找到 oneVPL 源码，QSV 关闭
+-- FFmpeg 硬件编码器自动探测：nvenc
+-- Configuring done (15.7s)
+-- Generating done (0.7s)
+-- Build files have been written to: D:/a/QtRemoteDesktop/QtRemoteDesktop/build
 === build.log ===
-(不存在)
+[  0%] [34m[1mCreating directories for 'openh264_ep'[0m
+[  0%] Built target AuthManager_autogen_timestamp_deps
+[  0%] Built target SystemInfo_autogen_timestamp_deps
+[  0%] Built target FileTransferService_autogen_timestamp_deps
+[  0%] Built target InputManager_autogen_timestamp_deps
+[  1%] [34m[1mNo download step for 'openh264_ep'[0m
+[  1%] Built target Clipboardservice_autogen_timestamp_deps
+[  1%] Built target InteractiveShell_autogen_timestamp_deps
+[  1%] [34m[1mNo update step for 'openh264_ep'[0m
+[  1%] Built target ScreenCapturer_autogen_timestamp_deps
+[  1%] Built target WebsocketServer_autogen_timestamp_deps
+[  1%] Built target XdndMonitor_autogen_timestamp_deps
+[  2%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangSrsConnection.c.obj[0m
+[  2%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangWhip.c.obj[0m
+[  3%] [34m[1mNo patch step for 'openh264_ep'[0m
+[  3%] [34m[1mNo configure step for 'openh264_ep'[0m
+[  3%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangZlmConnection.c.obj[0m
+[  3%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/srtp/srtp.c.obj[0m
+[  3%] [34m[1mPerforming build step for 'openh264_ep'[0m
+CMake Deprecation Warning at D:/a/QtRemoteDesktop/QtRemoteDesktop/build/build_openh264.cmake:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+[  4%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libyangwhip8.a[0m
+[  4%] Built target yangwhip8
+[  4%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher.c.obj[0m
+[  5%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_asconf.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[  5%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher_test_cases.c.obj[0m
+[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/null_cipher.c.obj[0m
+Generated codec/common/inc/version_gen.h
+process_begin: CreateProcess(NULL, nasm -DWIN64 -DHAVE_AVX2 -f win64 -I./codec/common/x86/ -o codec/decoder/core/x86/dct.o codec/decoder/core/x86/dct.asm, ...) failed.
+make (e=2): The system cannot find the file specified.
+mingw32-make.exe[3]: *** [codec/decoder/targets.mk:105: codec/decoder/core/x86/dct.o] Error 2
+CMake Error at D:/a/QtRemoteDesktop/QtRemoteDesktop/build/build_openh264.cmake:10 (message):
+  openh264 build failed (exit 2)
+
+
+mingw32-make.exe[2]: *** [remotedesk\thridparty\third_party_src\CMakeFiles\openh264_ep.dir\build.make:85: remotedesk/thridparty/third_party_src/openh264_ep-prefix/src/openh264_ep-stamp/openh264_ep-build] Error 1
+mingw32-make.exe[1]: *** [CMakeFiles\Makefile2:2577: remotedesk/thridparty/third_party_src/CMakeFiles/openh264_ep.dir/all] Error 2
+mingw32-make.exe[1]: *** Waiting for unfinished jobs....
+[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_auth.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes_icm.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_bsd_addr.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_callout.c.obj[0m
+[  7%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[  7%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth_test_cases.c.obj[0m
+[  8%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_cc_functions.c.obj[0m
+[  8%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/null_auth.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/hmac.c.obj[0m
+[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_crc32.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/sha1.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/alloc.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_indata.c.obj[0m
+[ 10%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 10%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/crypto_kernel.c.obj[0m
+[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/err.c.obj[0m
+[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/key.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/math/datatypes.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_pcb.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 12%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdb.c.obj[0m
+[ 12%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdbx.c.obj[0m
+[ 12%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libsrtp2.a[0m
+[ 12%] Built target srtp2
+[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_ss_functions.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sysctl.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_timer.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_userspace.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_usrreq.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctputil.c.obj[0m
+[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet6/sctp6_usrreq.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_environment.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_mbuf.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_recv_thread.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 16%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libusrsctp.a[0m
+[ 16%] Built target usrsctp
+mingw32-make.exe: *** [Makefile:135: all] Error 2
 === build_linux.log ===
 (不存在)
 === deploy.log ===
@@ -17,3 +378,9 @@ mv: cannot stat 'src/remotedesk/thridparty/ffmpeg/FFmpeg-6.1.2': No such file or
 === smoke.log ===
 (不存在)
 === 错误摘要 ===
+build.log:39:make (e=2): The system cannot find the file specified.
+build.log:40:mingw32-make.exe[3]: *** [codec/decoder/targets.mk:105: codec/decoder/core/x86/dct.o] Error 2
+build.log:41:CMake Error at D:/a/QtRemoteDesktop/QtRemoteDesktop/build/build_openh264.cmake:10 (message):
+build.log:45:mingw32-make.exe[2]: *** [remotedesk\thridparty\third_party_src\CMakeFiles\openh264_ep.dir\build.make:85: remotedesk/thridparty/third_party_src/openh264_ep-prefix/src/openh264_ep-stamp/openh264_ep-build] Error 1
+build.log:46:mingw32-make.exe[1]: *** [CMakeFiles\Makefile2:2577: remotedesk/thridparty/third_party_src/CMakeFiles/openh264_ep.dir/all] Error 2
+build.log:155:mingw32-make.exe: *** [Makefile:135: all] Error 2
