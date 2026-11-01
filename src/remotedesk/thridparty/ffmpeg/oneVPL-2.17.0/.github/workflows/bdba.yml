@@ -1,0 +1,66 @@
+---
+name: Vulnerability scan
+
+permissions: read-all
+
+on:
+  workflow_call:
+    inputs:
+      output_prefix:
+        description: 'Prefix to add to output artifacts'
+        required: false
+        default: ''
+        type: string
+      version:
+        description: 'String indicating version of uploaded scan'
+        required: true
+        type: string
+      pattern:
+        description: 'Glob pattern to the artifacts that should be scanned'
+        required: true
+        type: string
+      docker_opts:
+        description: 'extra options for docker build'
+        required: false
+        type: string
+
+jobs:
+  scan:
+    runs-on: [self-hosted, linux]
+    steps:
+
+      - name: Cleanup workspace
+        run: sudo rm -rf ..?* .[!.]* *
+
+      - name: Checkout scripts and dispositions
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Download artifacts to scan
+        uses: actions/download-artifact@v4
+        with:
+          path: bdba
+          pattern: ${{ inputs.pattern }}
+          merge-multiple: true
+
+      - name: Create archive to scan
+        run: |
+          # cp infrastructure/config/.bdba.yaml bdba/
+          pushd bdba
+          zip --symlinks -r ../vpl-${{ inputs.output_prefix }}.zip .
+          popd
+
+      - name: Scan package
+        uses: intel-innersource/frameworks.actions.bdba-scan@v4
+        with:
+          path: '*.zip'
+          artifact-name: ${{ inputs.output_prefix }}bdba-scan
+          version: ${{ inputs.version }}
+          scan-name: vpl-${{ inputs.output_prefix }}
+          ignore-ssl-error: ${{ vars.BDBA_IGNORE_SSL_ERROR }}
+          group: ${{ vars.BDBA_GROUP }}
+          token: ${{ secrets.BDBA_TOKEN }}
+
+      - name: Cleanup workspace
+        run: sudo rm -rf ..?* .[!.]* *

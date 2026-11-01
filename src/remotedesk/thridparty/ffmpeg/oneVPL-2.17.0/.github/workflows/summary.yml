@@ -1,0 +1,181 @@
+---
+name: Release Summary
+
+permissions: read-all
+
+on:
+  workflow_call:
+    inputs:
+      output_prefix:
+        description: 'Prefix to add to output artifacts'
+        required: false
+        default: ''
+        type: string
+
+env:
+  BDBA: ${{ inputs.output_prefix }}bdba-scan
+  HADOLINT: ${{ inputs.output_prefix }}hadolint
+  IPLEAKS: ${{ inputs.output_prefix }}ip-leak-scan
+  TRIVY: ${{ inputs.output_prefix }}trivy
+  COVERITY_L: linux-${{ inputs.output_prefix }}coverity-scan
+  COVERITY_W: windows-${{ inputs.output_prefix }}coverity-scan
+  DIFF_L: linux-${{ inputs.output_prefix }}diff-report
+  DIFF_W: windows-${{ inputs.output_prefix }}diff-report
+  AV_S: source-malware-scan
+  AV_L: linux-release-build-malware-scan
+  AV_W: windows-release-build-malware-scan
+  UTEST_L: linux-release-build-utests
+  UTEST_W: windows-release-build-utests
+  SSCB_L: linux-${{ inputs.output_prefix }}sscb
+  SSCB_W: windows-${{ inputs.output_prefix }}sscb
+  RHEL86: rhel8.6-release-gen12.5-acceptance
+  SLES154: sles15.4-release-gen12.5-acceptance
+  U2204: ubuntu22.04-release-gen12.5-acceptance
+  U2404: ubuntu24.04-release-gen12.5-acceptance
+  WIN11: windows11-release-gen12.5-acceptance
+
+
+jobs:
+  report:
+    runs-on: [self-hosted, Linux, docker]
+    steps:
+
+      - name: Cleanup workspace
+        run: sudo rm -rf ..?* .[!.]* *
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          path: source
+          ref: ${{ github.event.pull_request.head.sha }}
+
+
+      - name: BOM artifacts
+        if: >
+          !cancelled()
+        run: |
+          . source/.github/workflows/summary/tools.sh
+
+          export source_root=artifacts
+          export dest_root=summary/bom/lib
+
+          copy_all_artifacts "$DIFF_L" Linux
+          copy_all_artifacts "$DIFF_W" Windows
+
+      - name: SDL artifacts
+        if: >
+          !cancelled()
+        run: |
+          . source/.github/workflows/summary/tools.sh
+
+          export source_root=artifacts
+          export dest_root=summary/sdl/lib
+
+          copy_artifact "$BDBA" vulns.csv CT7-KnownVulnerabilities
+          copy_artifact "$BDBA" results.pdf CT7-KnownVulnerabilities
+          copy_artifact "$BDBA" components.csv CT36-RegisterComponents
+          copy_artifact "$AV_S" report.txt CT37-MalwareScan source-report.txt
+          copy_artifact "$AV_L" report.txt CT37-MalwareScan linux-report.txt
+          copy_artifact "$AV_W" report.txt CT37-MalwareScan windows-report.txt
+          copy_artifact "$COVERITY_L/json" errors_v9_full.json \
+                        CT39-StaticAnalysis linux-coverity.json
+          copy_artifact "$COVERITY_L" cvss_report.pdf \
+                        CT39-StaticAnalysis linux-cvss_report.pdf
+          copy_artifact "$COVERITY_L" security_report.pdf \
+                        CT39-StaticAnalysis linux-security_report.pdf
+          copy_artifact "$COVERITY_W/json" errors_v9_full.json \
+                        CT39-StaticAnalysis windows-coverity.json
+          copy_artifact "$COVERITY_W" cvss_report.pdf \
+                        CT39-StaticAnalysis windows-cvss_report.pdf
+          copy_artifact "$COVERITY_W" security_report.pdf \
+                        CT39-StaticAnalysis windows-security_report.pdf
+          copy_artifact "$TRIVY" trivy-report.csv CT247-Trivy
+          copy_all_artifacts $SSCB_L CT151-CompilerFlags
+          copy_all_artifacts $SSCB_W CT151-CompilerFlags
+
+      - name: SWLC artifacts
+        run: |
+          . source/.github/workflows/summary/tools.sh
+
+          export source_root=artifacts
+          export dest_root=summary/swlc/lib
+
+          copy_all_artifacts "$IPLEAKS" ip_leaks
+
+      - name: Quality artifacts
+        if: >
+          !cancelled()
+        run: |
+          . source/.github/workflows/summary/tools.sh
+
+          export source_root=artifacts
+          export dest_root=summary/quality
+
+          copy_artifact "$UTEST_L" linux.xml unit/lib linux.xml
+          copy_artifact "$UTEST_W" windows.xml unit/lib windows.xml
+          copy_all_artifacts "$U2204" acceptance/Ubuntu22.04/gen12.5
+          copy_all_artifacts "$U2404" acceptance/Ubuntu24.04/gen12.5
+          copy_all_artifacts "$WIN11" acceptance/Win11/gen12.5
+          copy_all_artifacts "$SLES154" acceptance/SLES15.4/gen12.5
+          copy_all_artifacts "$RHEL86" acceptance/RHEL8.6/gen12.5
+          copy_artifact linux-performance summary.csv \
+                        performance linux-performance-summary.csv
+          copy_artifact linux-performance summary.md \
+                        performance linux-performance-summary.md
+
+      - name: Build Docker image
+        run: >
+          docker build ${{ inputs.docker_opts }}
+          -f "source/.github/workflows/summary/Dockerfile.ubuntu.summary"
+          --build-arg USER_ID=$(id -u)
+          --build-arg GROUP_ID=$(id -g)
+          -t vpl_summary:ubuntu
+          "source/.github/workflows/summary"
+
+      - name: Evaluate Results
+        run: |
+          if [ -d summary/quality ]
+          then
+            docker run --rm -v $(pwd):/tmp/work -w /tmp/work  \
+            vpl_summary:ubuntu \
+            python3 \
+            "/tmp/work/source/.github/workflows/summary/summarize_testing.py" \
+            /tmp/work/summary/quality
+          fi
+
+      - name: Report security related tests
+        run: |
+          if [ -d summary/quality/unit/lib ]
+          then
+            mkdir -p -v summary/sdl/lib/CT40-SecurityValidation
+            docker run --rm -v $(pwd):/tmp/work -w /tmp/work  \
+            vpl_summary:ubuntu \
+            python3 \
+            "/tmp/work/source/.github/workflows/summary/filter_xunit.py" \
+            "/tmp/work/summary/quality/unit/lib/linux.xml" \
+            -o "/tmp/work/summary/sdl/lib/CT40-SecurityValidation/linux.csv" \
+            -i Double Null Unsupported Invalid
+
+            docker run --rm -v $(pwd):/tmp/work -w /tmp/work  \
+            vpl_summary:ubuntu \
+            python3 \
+            "/tmp/work/source/.github/workflows/summary/filter_xunit.py" \
+            "/tmp/work/summary/quality/unit/lib/windows.xml" \
+            -o "/tmp/work/summary/sdl/lib/CT40-SecurityValidation/windows.csv" \
+            -i Double Null Unsupported Invalid
+          fi
+
+      - name: Upload Summary
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.output_prefix }}release-summary
+          path: summary/*
+
+      - name: Cleanup workspace
+        run: sudo rm -rf ..?* .[!.]* *

@@ -12,6 +12,10 @@ bin64/
 dist/
 dist64/
 
+# FFmpeg 源码树内的 install/ 是某次本地构建的安装产物（头文件+pkgconfig），
+# 构建实际用的是 build_output*/ffmpeg_install-*，源码随仓库提供，产物不入库
+src/remotedesk/thridparty/ffmpeg/install/
+
 # 第三方源码自带的 build/ 是源码（makefile/cmake/gyp 脚本），不是构建产物；
 # 缺了它们，全新 clone 与 CI 上 openh264 / mpp / breakpad 直接编不出来。
 !src/remotedesk/thridparty/breakpad/src/build/
@@ -48,7 +52,6 @@ dist64/
 *.app
 
 # FFmpeg 二进制文件(库文件和 DLL),但保留头文件(include)
-src/remotedesk/thridparty/ffmpeg/
 src/remotedesk/thridparty/ffmpeg/windows/bin/
 src/remotedesk/thridparty/ffmpeg/windows/lib/
 src/remotedesk/thridparty/ffmpeg/windows/include/

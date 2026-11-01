@@ -1,0 +1,144 @@
+---
+name: Upload SDL Evidence
+permissions: read-all
+
+on:
+  workflow_dispatch:
+    inputs:
+      summary_artifact:
+        description: 'Summary_Artifact Zip File Name'
+        type: string
+        required: true
+      label:
+        description: 'SDL-E label (tag) for uploads'
+        type: string
+        required: true
+      sdle_project:
+        description: 'SDL-E Project ID'
+        type: string
+        required: true
+      sdle_user:
+        description: 'SDL-E User ID'
+        type: string
+        required: true
+      output_prefix:
+        description: 'Prefix to add to output artifacts'
+        required: true
+        type: string
+      docker_opts:
+        description: 'extra options for docker build'
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      summary_artifact:
+        description: 'Summary_Artifact Zip File Name'
+        type: string
+        required: true
+      label:
+        description: 'SDL-E label (tag) for uploads'
+        type: string
+        required: true
+      sdle_project:
+        description: 'SDL-E Project ID'
+        type: string
+        required: true
+      sdle_user:
+        description: 'SDL-E User ID'
+        type: string
+        required: true
+      output_prefix:
+        description: 'Prefix to add to output artifacts'
+        required: true
+        type: string
+      docker_opts:
+        description: 'extra options for docker build'
+        required: false
+        type: string
+    secrets:
+      SDLE_API_KEY:
+        description: 'SDL-E Api Key for User'
+        required: true
+
+jobs:
+  upload_files:
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Cleanup workspace
+        run: sudo rm -rf ..?* .[!.]* *
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Download Release Summary
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-release-summary
+          path: artifacts
+
+      - name: Move artifacts to target directory
+        run: |
+            mv artifacts/* source/.github/workflows/sdl/
+            ls -al source/.github/workflows/sdl/sdl/lib
+
+      - name: Build Docker image
+        run: >
+          docker build ${{ inputs.docker_opts }}
+          -f "source/.github/workflows/sdl/Dockerfile.ubuntu.sdl"
+          --build-arg USER_ID=$(id -u)
+          --build-arg GROUP_ID=$(id -g)
+          -t vpl_sdl:ubuntu
+          "source/.github/workflows/sdl"
+
+      - name: Upload SDL evidence
+        run: |
+          # note: quotes around 'EOL' prevent bash variable
+          # expansion while writing file.
+          cat <<'EOL' > upload.sh
+          #!/bin/bash
+          ls source/.github/workflows/sdl
+
+          FILE_PATH="source/.github/workflows/sdl/sdl/lib"
+          function publish() {
+            TASK="$1"
+            EVIDENCE="$2"
+            python3 source/.github/workflows/sdl/evidence_upload.py \
+            --api_key "${{ secrets.SDLE_API_KEY }}" \
+            --user_id ${{ inputs.sdle_user }} \
+            --project_id ${{ inputs.sdle_project }} \
+            --task_id ${TASK} \
+            --file_paths ${FILE_PATH}/${EVIDENCE} \
+            --label ${{ inputs.label }} \
+            --output_prefix ${{ inputs.output_prefix }}
+          }
+
+          publish CT7 CT7-KnownVulnerabilities/vulns.csv
+          publish CT7 CT7-KnownVulnerabilities/results.pdf
+          publish CT36 CT36-RegisterComponents/components.csv
+          publish CT37 CT37-MalwareScan/source-report.txt
+          publish CT37 CT37-MalwareScan/windows-report.txt
+          publish CT39 CT39-StaticAnalysis/linux-coverity.json
+          publish CT39 CT39-StaticAnalysis/linux-cvss_report.pdf
+          publish CT39 CT39-StaticAnalysis/linux-security_report.pdf
+          publish CT39 CT39-StaticAnalysis/windows-coverity.json
+          publish CT39 CT39-StaticAnalysis/windows-cvss_report.pdf
+          publish CT39 CT39-StaticAnalysis/windows-security_report.pdf
+          publish CT40 CT40-SecurityValidation/linux.csv
+          publish CT40 CT40-SecurityValidation/windows.csv
+          publish CT151 CT151-CompilerFlags/SSCB_SCAN_results-Windows.html
+          publish CT151 CT151-CompilerFlags/SSCB_SCAN_results-Linux.html
+          publish CT247 CT247-Trivy/trivy-report.csv
+
+          EOL
+          chmod a+x upload.sh
+          ls -l
+          pwd
+
+          docker run --rm -v $(pwd):/tmp/work -w /tmp/work \
+          vpl_sdl:ubuntu ./upload.sh
+
+      - name: Cleanup workspace
+        run: sudo rm -rf ..?* .[!.]* *

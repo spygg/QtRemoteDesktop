@@ -1,0 +1,147 @@
+---
+name: Smoke
+
+permissions: read-all
+
+on:
+  # Run on pull requests
+  pull_request:
+  # Run on user request
+  workflow_dispatch:
+
+concurrency:
+  # Cancel any existing jobs related to the target branch
+  group: draft-ci-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+
+  # This job configures variables that are useful for other jobs. Other jobs
+  # that depend on this one can access the variables via
+  # needs.setup-variables.outputs.<variable-name>
+  setup-variables:
+    if: 'github.event.pull_request.draft'
+    uses: ./.github/workflows/setup-variables.yml
+    secrets: inherit
+
+
+  lint:
+    if: 'github.event.pull_request.draft'
+    uses: ./.github/workflows/lint.yml
+
+  hadolint:
+    if: 'github.event.pull_request.draft'
+    uses: ./.github/workflows/hadolint.yml
+    with:
+      output_prefix: lib-
+
+  trivy:
+    if: 'github.event.pull_request.draft'
+    uses: ./.github/workflows/trivy.yml
+    with:
+      output_prefix: lib-
+
+  linux-build:
+    if: 'github.event.pull_request.draft'
+    uses: ./.github/workflows/cmake.yml
+    with:
+      os: linux
+      build_type: release
+      artifact_name: linux-release-build
+      run_tests: true
+      no_artifacts: false
+      configure_options: -DBUILD_EXAMPLES=ON
+
+  windows-build:
+    if: 'github.event.pull_request.draft'
+    uses: ./.github/workflows/cmake.yml
+    with:
+      os: windows
+      build_type: release
+      artifact_name: windows-release-build
+      run_tests: true
+      no_artifacts: false
+      configure_options: -DBUILD_EXAMPLES=ON
+
+  linux-tools-build:
+    if: 'github.event.pull_request.draft'
+    needs: [linux-build, setup-variables]
+    uses: ./.github/workflows/cmake.yml
+    with:
+      os: linux
+      build_type: release
+      artifact_name: linux-tools-build
+      run_tests: false
+      no_artifacts: false
+      repository: ${{ vars.TOOLS_REPO }}
+      ref: ${{ needs.setup-variables.outputs.tools_ref }}
+      dependent_artifact: linux-release-build
+    secrets:
+      token: ${{ secrets.TOOLS_REPO_TOKEN }}
+
+  windows-tools-build:
+    if: 'github.event.pull_request.draft'
+    needs: [windows-build, setup-variables]
+    uses: ./.github/workflows/cmake.yml
+    with:
+      os: windows
+      build_type: release
+      artifact_name: windows-tools-build
+      run_tests: false
+      no_artifacts: false
+      repository: ${{ vars.TOOLS_REPO }}
+      ref: ${{ needs.setup-variables.outputs.tools_ref }}
+      dependent_artifact: windows-release-build
+    secrets:
+      token: ${{ secrets.TOOLS_REPO_TOKEN }}
+
+  windows-acceptance:
+    if: 'github.event.pull_request.draft'
+    needs: [windows-build, windows-tools-build, setup-variables]
+    strategy:
+      fail-fast: true
+      matrix:
+        gpu:
+          - gen12.5
+        config:
+          - release
+        os:
+          - windows
+    uses: ./.github/workflows/acceptance.yml
+    secrets: inherit
+    with:
+      os: ${{ matrix.os }}
+      build_type: ${{ matrix.config }}
+      lib_artifact: ${{ matrix.os }}-${{ matrix.config }}-build
+      tools_artifact: windows-tools-build
+      gpu: ${{ matrix.gpu }}
+      distro_family: windows
+      distro_version: 11
+      test_ref: ${{ needs.setup-variables.outputs.test_ref }}
+
+  linux-acceptance:
+    if: 'github.event.pull_request.draft'
+    needs: [linux-build, linux-tools-build, setup-variables]
+    strategy:
+      fail-fast: true
+      matrix:
+        gpu:
+          - gen12.5
+        distro:
+          - family: ubuntu
+            version: 24.04
+        config:
+          - release
+        os:
+          - linux
+    uses: ./.github/workflows/acceptance.yml
+    secrets: inherit
+    with:
+      os: ${{ matrix.os }}
+      build_type: ${{ matrix.config }}
+      lib_artifact: ${{ matrix.os }}-${{ matrix.config }}-build
+      tools_artifact: linux-tools-build
+      gpu: ${{ matrix.gpu }}
+      distro_family: ${{ matrix.distro.family }}
+      distro_version: ${{ matrix.distro.version }}
+      test_ref: ${{ needs.setup-variables.outputs.test_ref }}
