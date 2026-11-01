@@ -121,7 +121,7 @@ jobs:
             QMAKE=$(find /d/qt571 -type f -name qmake.exe 2>/dev/null | head -1)
             if [ -z "$QMAKE" ]; then
               echo "=== cache miss: downloading offline installer ==="
-              curl -sL --retry 3 -o qt571.exe \
+              curl -sSfL --retry 3 -o qt571.exe \
                 "https://download.qt.io/archive/qt/5.7/5.7.1/qt-opensource-windows-x86-mingw530-5.7.1.exe"
               ls -la qt571.exe
               mkdir -p stage && cd stage
@@ -148,15 +148,19 @@ jobs:
             # 解包出来的 qmake/windeployqt 仍带着构建机路径 (c:/Users/qt/work/install)，
             # 用 qt.conf 把前缀指回解包目录
             printf '[Paths]\nPrefix=..\n' > "$QTBIN/qt.conf"
-            # cc1plus 等在 libexec 目录，运行时按「程序目录 → PATH」找 libwinpthread-1.dll；
-            # PATH 上 Git 自带的 64 位同名 DLL 会让 32 位 cc1plus 静默加载失败，
-            # 所以把运行库复制进程序目录（搜索优先级最高）
+            # cc1plus 等子程序在 libexec 目录，运行时按「程序目录 → PATH」找 DLL；
+            # PATH 上 Git 自带的 64 位同名 DLL 会让 32 位 cc1plus 起不来，
+            # 且这种加载失败在 Windows 上没有任何 stderr（只留一个非零退出码），
+            # 所以既把运行库复制进子程序目录，也把 32 位工具链放到 PATH 最前面
             for d in "$GCCBIN/../libexec/gcc/i686-w64-mingw32/5.3.0" \
                      "$GCCBIN/../lib/gcc/i686-w64-mingw32/5.3.0"; do
               for f in libwinpthread-1.dll libstdc++-6.dll libgcc_s_dw2-1.dll; do
                 cp "$GCCBIN/$f" "$d/$f" 2>/dev/null && echo "seeded $d/$f"
               done
             done
+            export PATH="$GCCBIN:$PATH"
+            # 后续 cmake 步骤用绝对路径调编译器，但 cc1plus 仍靠 PATH 找 DLL
+            echo "$(cygpath -w "$GCCBIN")" >> "$GITHUB_PATH"
 
             # QT_ROOT_DIR 与 install-qt-action 的变量名对齐，Windows 两个 job 后续的
             # configure/deploy 步骤因此完全共用
@@ -167,7 +171,11 @@ jobs:
             "$QTBIN/qmake.exe" -query QT_INSTALL_PREFIX
             "$QTBIN/qmake.exe" -query QT_VERSION
             echo 'int main(){return 0;}' > smoke.cxx
-            "$GCCBIN/g++.exe" -m32 smoke.cxx -o smoke.exe && ./smoke.exe && echo "COMPILE_OK"
+            "$GCCBIN/g++.exe" -m32 smoke.cxx -o smoke.exe \
+              || { echo "::error::mingw530 g++ 编译冒烟失败"; exit 1; }
+            ./smoke.exe \
+              || { echo "::error::mingw530 生成的 exe 无法运行（缺 32 位运行库？）"; exit 1; }
+            echo "COMPILE_OK"
           } 2>&1 | tee setup_qt.log
 
       # ---------- 定位 MinGW 编译器 ----------
@@ -216,16 +224,34 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # 下载/解包失败必须让整步失败：没有这行，mv 失败会被吞掉，
+          # 构建要等到几十分钟后才在 cmake 里报找不到源码
+          set -e
           {
             FFDIR=src/remotedesk/thridparty/ffmpeg
             mkdir -p "$FFDIR"
+            # GitHub 归档包的根目录名取自 tag（n6.1.2 → FFmpeg-n6.1.2，而不是 FFmpeg-6.1.2），
+            # 与目录约定 FFmpeg-n<版本> 对不上，所以解到临时目录后按实际目录名搬，不靠猜
+            unpack_archive() {  # $1=tar 路径 $2=归一后的目标目录名 $3=归档内根目录前缀
+              local tmp src
+              tmp=$(mktemp -d)
+              tar -xzf "$1" -C "$tmp"
+              src=$(find "$tmp" -mindepth 1 -maxdepth 1 -name "$3*" | head -1)
+              if [ -z "$src" ]; then
+                echo "::error::归档 $(basename "$1") 里没有 $3* 目录"
+                ls -la "$tmp"
+                return 1
+              fi
+              rm -rf "$FFDIR/$2"
+              mv "$src" "$FFDIR/$2"
+              rm -rf "$tmp"
+            }
             # 目录名必须符合 CMake/构建脚本的 FFmpeg-n<版本> 约定
             if [ ! -d "$FFDIR/FFmpeg-n$FFMPEG_VER" ]; then
               echo "=== downloading FFmpeg $FFMPEG_VER ==="
-              curl -sL --retry 3 -o /tmp/ff.tar.gz \
+              curl -sSfL --retry 3 -o /tmp/ff.tar.gz \
                 "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$FFMPEG_VER.tar.gz"
-              tar -xzf /tmp/ff.tar.gz -C "$FFDIR"
-              mv "$FFDIR/FFmpeg-$FFMPEG_VER" "$FFDIR/FFmpeg-n$FFMPEG_VER"
+              unpack_archive /tmp/ff.tar.gz "FFmpeg-n$FFMPEG_VER" "FFmpeg-"
               # Git bash 在 Windows 文件系统上不一定保得住 tar 里的执行位，
               # 而 BuildFFmpeg.cmake 是把 configure 当命令直接执行的
               chmod +x "$FFDIR/FFmpeg-n$FFMPEG_VER/configure"
@@ -234,9 +260,9 @@ jobs:
             # 3.4.8 自带 compat/nvenc，不需要外部头
             if [ -n "$NVCODEC_TAG" ] && [ ! -d "$FFDIR/nv-codec-headers-$NVCODEC_TAG" ]; then
               echo "=== downloading nv-codec-headers $NVCODEC_TAG ==="
-              curl -sL --retry 3 -o /tmp/nv.tar.gz \
+              curl -sSfL --retry 3 -o /tmp/nv.tar.gz \
                 "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/$NVCODEC_TAG.tar.gz"
-              tar -xzf /tmp/nv.tar.gz -C "$FFDIR"
+              unpack_archive /tmp/nv.tar.gz "nv-codec-headers-$NVCODEC_TAG" "nv-codec-headers-"
               ls "$FFDIR/nv-codec-headers-$NVCODEC_TAG/include/ffnvcodec"
             fi
             # Linux 的 metaRTC OpenSSL 兼容层要仓库内的 tarball
