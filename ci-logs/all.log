@@ -205,34 +205,26 @@ CMake Deprecation Warning at remotedesk/thridparty/third_party_src/metaRTC/libya
 -- Performing Test QTRD_DXGI_DESKTOP_DUP - Success
 -- ScreenCapturer: DXGI Desktop Duplication enabled (GNU, native headers)
 -- FFmpeg 6.1.2: NVENC 头来自 D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/nv-codec-headers-n12.2.72.0/include
--- FFmpeg: 未找到 nasm/yasm，x86 汇编优化关闭（swscale 约慢 3x）
+-- FFmpeg: x86asm enabled via C:/Program Files/NASM/nasm.exe (NASM version 3.02 compiled on Jun 28 2026)
 -- Performing Test QTRD_FF_HAVE_NVENC
 -- Performing Test QTRD_FF_HAVE_NVENC - Success
 -- FFmpeg 6.1.2: 未找到 oneVPL 源码，QSV 关闭
 -- FFmpeg 硬件编码器自动探测：nvenc
--- Configuring done (15.7s)
+-- Configuring done (16.5s)
 -- Generating done (0.7s)
 -- Build files have been written to: D:/a/QtRemoteDesktop/QtRemoteDesktop/build
 === build.log ===
-[  0%] [34m[1mCreating directories for 'openh264_ep'[0m
-[  0%] Built target AuthManager_autogen_timestamp_deps
-[  0%] Built target SystemInfo_autogen_timestamp_deps
-[  0%] Built target FileTransferService_autogen_timestamp_deps
-[  0%] Built target InputManager_autogen_timestamp_deps
-[  1%] [34m[1mNo download step for 'openh264_ep'[0m
-[  1%] Built target Clipboardservice_autogen_timestamp_deps
-[  1%] Built target InteractiveShell_autogen_timestamp_deps
-[  1%] [34m[1mNo update step for 'openh264_ep'[0m
-[  1%] Built target ScreenCapturer_autogen_timestamp_deps
-[  1%] Built target WebsocketServer_autogen_timestamp_deps
-[  1%] Built target XdndMonitor_autogen_timestamp_deps
-[  2%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangSrsConnection.c.obj[0m
+[  1%] [34m[1mCreating directories for 'openh264_ep'[0m
+[  1%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/srtp/srtp.c.obj[0m
+[  1%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangSrsConnection.c.obj[0m
+[  2%] [34m[1mNo download step for 'openh264_ep'[0m
 [  2%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangWhip.c.obj[0m
+[  2%] [34m[1mNo update step for 'openh264_ep'[0m
 [  3%] [34m[1mNo patch step for 'openh264_ep'[0m
-[  3%] [34m[1mNo configure step for 'openh264_ep'[0m
 [  3%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangZlmConnection.c.obj[0m
-[  3%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/srtp/srtp.c.obj[0m
+[  3%] [34m[1mNo configure step for 'openh264_ep'[0m
 [  3%] [34m[1mPerforming build step for 'openh264_ep'[0m
+[  4%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libyangwhip8.a[0m
 CMake Deprecation Warning at D:/a/QtRemoteDesktop/QtRemoteDesktop/build/build_openh264.cmake:1 (cmake_minimum_required):
   Compatibility with CMake < 3.10 will be removed from a future version of
   CMake.
@@ -242,132 +234,1772 @@ CMake Deprecation Warning at D:/a/QtRemoteDesktop/QtRemoteDesktop/build/build_op
   to work with policies introduced by <max> or earlier.
 
 
-[  4%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libyangwhip8.a[0m
 [  4%] Built target yangwhip8
 [  4%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher.c.obj[0m
+[  4%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher_test_cases.c.obj[0m
 [  5%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_asconf.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
-[  5%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher_test_cases.c.obj[0m
 [  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/null_cipher.c.obj[0m
 Generated codec/common/inc/version_gen.h
-process_begin: CreateProcess(NULL, nasm -DWIN64 -DHAVE_AVX2 -f win64 -I./codec/common/x86/ -o codec/decoder/core/x86/dct.o codec/decoder/core/x86/dct.asm, ...) failed.
-make (e=2): The system cannot find the file specified.
-mingw32-make.exe[3]: *** [codec/decoder/targets.mk:105: codec/decoder/core/x86/dct.o] Error 2
-CMake Error at D:/a/QtRemoteDesktop/QtRemoteDesktop/build/build_openh264.cmake:10 (message):
-  openh264 build failed (exit 2)
-
-
-mingw32-make.exe[2]: *** [remotedesk\thridparty\third_party_src\CMakeFiles\openh264_ep.dir\build.make:85: remotedesk/thridparty/third_party_src/openh264_ep-prefix/src/openh264_ep-stamp/openh264_ep-build] Error 1
-mingw32-make.exe[1]: *** [CMakeFiles\Makefile2:2577: remotedesk/thridparty/third_party_src/CMakeFiles/openh264_ep.dir/all] Error 2
-mingw32-make.exe[1]: *** Waiting for unfinished jobs....
+[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
 [  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_auth.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
-[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes.c.obj[0m
-cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
 [  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes_icm.c.obj[0m
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
 [  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_bsd_addr.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
-[  6%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_callout.c.obj[0m
 [  7%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth.c.obj[0m
-<command-line>: warning: "_WIN32_WINNT" redefined
-<command-line>: note: this is the location of the previous definition
-cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
 [  7%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth_test_cases.c.obj[0m
-[  8%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_cc_functions.c.obj[0m
-[  8%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/null_auth.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[  7%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_callout.c.obj[0m
+[  7%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/null_auth.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
+[  8%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/hmac.c.obj[0m
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/hmac.c.obj[0m
-[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_crc32.c.obj[0m
+[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_cc_functions.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 [  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/sha1.c.obj[0m
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_crc32.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
 [  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/alloc.c.obj[0m
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
 [  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_indata.c.obj[0m
-[ 10%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.obj[0m
+[  9%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/crypto_kernel.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
-<command-line>: warning: "_WIN32_WINNT" redefined
-<command-line>: note: this is the location of the previous definition
-[ 10%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/crypto_kernel.c.obj[0m
-[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/err.c.obj[0m
-[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/key.c.obj[0m
+[ 10%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/err.c.obj[0m
+[ 10%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/key.c.obj[0m
+[ 10%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/math/datatypes.c.obj[0m
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/math/datatypes.c.obj[0m
-cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.obj[0m
-<command-line>: warning: "_WIN32_WINNT" redefined
-<command-line>: note: this is the location of the previous definition
-[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_pcb.c.obj[0m
+[ 11%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 [ 12%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdb.c.obj[0m
 [ 12%] [32mBuilding C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdbx.c.obj[0m
 [ 12%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libsrtp2.a[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
 [ 12%] Built target srtp2
-[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.obj[0m
+[ 12%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioMix.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioUtil.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangjson/YangJson.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangjson/YangJsonImpl.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangBuffer2.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangMediaBuffer2.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangPacket.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangSortBuffer.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangVideoEncoderBuffer2.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.obj[0m
+[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_pcb.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangAvtype.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangBuffer.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCLog.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCString.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 17%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCTimer.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:16,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangCTimer.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 17%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangEndian.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 17%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangFile.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 18%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangHttp.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_ss_functions.c.obj[0m
+[ 19%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
-[ 13%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sysctl.c.obj[0m
+[ 19%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangIni.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
-cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_timer.c.obj[0m
-<command-line>: warning: "_WIN32_WINNT" redefined
-<command-line>: note: this is the location of the previous definition
-cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_userspace.c.obj[0m
-cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-<command-line>: warning: "_WIN32_WINNT" redefined
-<command-line>: note: this is the location of the previous definition
-[ 14%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_usrreq.c.obj[0m
+[ 19%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangLibHandle.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctputil.c.obj[0m
-[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet6/sctp6_usrreq.c.obj[0m
+[ 19%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangMath.c.obj[0m
+[ 19%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 15%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_environment.c.obj[0m
+[ 19%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_ss_functions.c.obj[0m
+[ 20%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocket.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocket.c: In function 'yang_socket_setNonblock':
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocket.c:198:29: warning: passing argument 3 of 'ioctlsocket' from incompatible pointer type [-Wincompatible-pointer-types]
+   ioctlsocket(fd, FIONBIO,  & iMode);
+                             ^~~~~~~
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocket.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:977:76: note: expected 'u_long *' {aka 'long unsigned int *'} but argument is of type 'int *'
+   WINSOCK_API_LINKAGE int WSAAPI ioctlsocket(SOCKET s,__LONG32 cmd,u_long *argp);
+                                                                    ~~~~~~~~^~~~
+[ 20%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketIP.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_mbuf.c.obj[0m
+[ 20%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sysctl.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 20%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketCompat.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_recv_thread.c.obj[0m
+[ 21%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_timer.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocketCompat.c: In function 'yang_v6_pton':
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocketCompat.c:68:28: warning: passing argument 1 of 'memmove' discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+             memmove(colonp + zeros, colonp, (size_t)n);
+                     ~~~~~~~^~~~~~~
+In file included from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/guiddef.h:149,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winnt.h:635,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/minwindef.h:163,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/windef.h:8,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/windows.h:69,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:23,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocketCompat.h:14,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocketCompat.c:7:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/string.h:66:17: note: expected 'void *' but argument is of type 'const char *'
+   void *__cdecl memmove(void *_Dst,const void *_Src,size_t _Size) __MINGW_ATTRIB_DEPRECATED_SEC_WARN;
+                 ^~~~~~~
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocketCompat.c:69:20: warning: passing argument 1 of 'memset' discards 'const' qualifier from pointer target type [-Wdiscarded-qualifiers]
+             memset(colonp, 0, (size_t)zeros);
+                    ^~~~~~
+In file included from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/guiddef.h:149,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winnt.h:635,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/minwindef.h:163,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/windef.h:8,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/windows.h:69,
+                 from D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:23,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocketCompat.h:14,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libyangutil8\src\yangutil\sys\YangSocketCompat.c:7:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/string.h:53:18: note: expected 'void *' but argument is of type 'const char *'
+   void * __cdecl memset(void *_Dst,int _Val,size_t _Size);
+                  ^~~~~~
+[ 22%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSsrc.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 22%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangThread.c.obj[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 22%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_userspace.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 22%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTime.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 16%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.obj[0m
+[ 22%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_usrreq.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 23%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTimestamp.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 23%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangUrl.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 23%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangVector.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 23%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangMeta.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 24%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangNalu.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 24%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangSpspps.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 24%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libyangutil8.a[0m
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 24%] Built target yangutil8
+[ 25%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctputil.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 25%] Built target AuthManager_autogen_timestamp_deps
+[ 25%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet6/sctp6_usrreq.c.obj[0m
 <command-line>: warning: "_WIN32_WINNT" redefined
 <command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 25%] Built target FileTransferService_autogen_timestamp_deps
+[ 25%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_environment.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 25%] Built target SystemInfo_autogen_timestamp_deps
+[ 26%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_mbuf.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
 cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
-[ 16%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libusrsctp.a[0m
-[ 16%] Built target usrsctp
+[ 26%] Built target Clipboardservice_autogen_timestamp_deps
+[ 26%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_recv_thread.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 26%] Built target ScreenCapturer_autogen_timestamp_deps
+[ 26%] [32mBuilding C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 26%] Built target InputManager_autogen_timestamp_deps
+[ 26%] Built target InteractiveShell_autogen_timestamp_deps
+[ 26%] Built target WebsocketServer_autogen_timestamp_deps
+[ 26%] Built target XdndMonitor_autogen_timestamp_deps
+[ 26%] Built target SingleApp_autogen_timestamp_deps
+[ 26%] Built target radiometer_breakpad_autogen_timestamp_deps
+[ 26%] Built target SystemSleepBlocker_autogen_timestamp_deps
+cc1.exe: warning: unrecognized command line option '-Wno-address-of-packed-member'
+[ 26%] [34m[1mAutomatic MOC for target AuthManager[0m
+[ 26%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libusrsctp.a[0m
+[ 26%] Built target usrsctp
+[ 26%] Built target AuthManager_autogen
+[ 26%] [34m[1mAutomatic MOC for target FileTransferService[0m
+[ 26%] Built target FileTransferService_autogen
+[ 26%] [34m[1mAutomatic MOC for target SystemInfo[0m
+[ 26%] [34m[1mAutomatic MOC for target Clipboardservice[0m
+[ 26%] Built target SystemInfo_autogen
+[ 26%] Built target Clipboardservice_autogen
+[ 26%] [34m[1mAutomatic MOC for target ScreenCapturer[0m
+[ 26%] Built target ScreenCapturer_autogen
+[ 26%] [34m[1mAutomatic MOC for target InputManager[0m
+[ 26%] [34m[1mAutomatic MOC for target InteractiveShell[0m
+[ 26%] Built target InteractiveShell_autogen
+[ 26%] Built target InputManager_autogen
+[ 26%] [34m[1mAutomatic MOC for target WebsocketServer[0m
+[ 26%] Built target WebsocketServer_autogen
+[ 26%] [34m[1mAutomatic MOC for target XdndMonitor[0m
+[ 26%] [34m[1mAutomatic MOC for target SingleApp[0m
+[ 26%] Built target XdndMonitor_autogen
+[ 26%] Built target SingleApp_autogen
+[ 27%] [34m[1mAutomatic MOC for target radiometer_breakpad[0m
+[ 27%] Built target radiometer_breakpad_autogen
+[ 27%] [34m[1mAutomatic MOC for target SystemSleepBlocker[0m
+[ 27%] Built target SystemSleepBlocker_autogen
+[ 27%] [32mBuilding CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/AuthManager_autogen/mocs_compilation.cpp.obj[0m
+[ 27%] [32mBuilding CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/FileTransferService_autogen/mocs_compilation.cpp.obj[0m
+[ 27%] [32mBuilding CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/authmanager.cpp.obj[0m
+[ 27%] [32mBuilding CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/filetransferservice.cpp.obj[0m
+codec/processing/src/x86/downsample_bilinear.asm:135: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:143: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:145: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:296: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:304: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:306: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:408: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:416: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:418: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:507: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:511: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:520: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:582: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:586: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:595: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:1961: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:2132: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/processing/src/x86/downsample_bilinear.asm:2244: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+[ 28%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libAuthManager.a[0m
+[ 28%] Built target AuthManager
+[ 28%] [32mBuilding CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/SystemInfo_autogen/mocs_compilation.cpp.obj[0m
+[ 29%] [32mBuilding CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/systeminfo.cpp.obj[0m
+[ 30%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libFileTransferService.a[0m
+[ 31%] Built target FileTransferService
+[ 32%] [32mBuilding CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/Clipboardservice_autogen/mocs_compilation.cpp.obj[0m
+[ 32%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libSystemInfo.a[0m
+[ 32%] Built target SystemInfo
+[ 32%] [32mBuilding CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/clipboardservice.cpp.obj[0m
+[ 32%] [32mBuilding CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/ScreenCapturer_autogen/mocs_compilation.cpp.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 32%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libClipboardservice.a[0m
+[ 32%] Built target Clipboardservice
+[ 32%] [32mBuilding CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer.cpp.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 32%] [32mBuilding CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/InputManager_autogen/mocs_compilation.cpp.obj[0m
+[ 32%] [32mBuilding CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer_win.cpp.obj[0m
+<command-line>: warning: "_WIN32_WINNT" redefined
+<command-line>: note: this is the location of the previous definition
+[ 32%] [32mBuilding CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager.cpp.obj[0m
+[ 33%] [32mBuilding CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager_win.cpp.obj[0m
+[ 34%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libScreenCapturer.a[0m
+[ 35%] Built target ScreenCapturer
+[ 35%] [32mBuilding CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/InteractiveShell_autogen/mocs_compilation.cpp.obj[0m
+[ 35%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libInputManager.a[0m
+[ 36%] Built target InputManager
+[ 36%] [32mBuilding CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell.cpp.obj[0m
+[ 36%] [32mBuilding CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/WebsocketServer_autogen/mocs_compilation.cpp.obj[0m
+[ 36%] [32mBuilding CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_win.cpp.obj[0m
+[ 37%] [32mBuilding CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/websocketserver.cpp.obj[0m
+codec/common/x86/dct.asm:201: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:169: ... from macro `MMX_DCT' defined here
+codec/common/x86/dct.asm:145: ... from macro `MMX_SumSubMul2' defined here
+codec/common/x86/dct.asm:201: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:169: ... from macro `MMX_DCT' defined here
+codec/common/x86/dct.asm:147: ... from macro `MMX_SumSubMul2' defined here
+codec/common/x86/dct.asm:204: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:169: ... from macro `MMX_DCT' defined here
+codec/common/x86/dct.asm:145: ... from macro `MMX_SumSubMul2' defined here
+codec/common/x86/dct.asm:204: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:169: ... from macro `MMX_DCT' defined here
+codec/common/x86/dct.asm:147: ... from macro `MMX_SumSubMul2' defined here
+codec/common/x86/dct.asm:238: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:174: ... from macro `MMX_IDCT' defined here
+codec/common/x86/dct.asm:153: ... from macro `MMX_SumSubDiv2' defined here
+codec/common/x86/dct.asm:238: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:174: ... from macro `MMX_IDCT' defined here
+codec/common/x86/dct.asm:155: ... from macro `MMX_SumSubDiv2' defined here
+codec/common/x86/dct.asm:240: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:174: ... from macro `MMX_IDCT' defined here
+codec/common/x86/dct.asm:153: ... from macro `MMX_SumSubDiv2' defined here
+codec/common/x86/dct.asm:240: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:174: ... from macro `MMX_IDCT' defined here
+codec/common/x86/dct.asm:155: ... from macro `MMX_SumSubDiv2' defined here
+codec/common/x86/dct.asm:245: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:183: ... from macro `MMX_StoreDiff4P' defined here
+codec/common/x86/dct.asm:246: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:183: ... from macro `MMX_StoreDiff4P' defined here
+codec/common/x86/dct.asm:249: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:183: ... from macro `MMX_StoreDiff4P' defined here
+codec/common/x86/dct.asm:250: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:183: ... from macro `MMX_StoreDiff4P' defined here
+codec/common/x86/dct.asm:536: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:391: ... from macro `SSE2_IDCT' defined here
+codec/common/x86/dct.asm:292: ... from macro `SSE2_SumSubDiv2' defined here
+codec/common/x86/dct.asm:536: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:391: ... from macro `SSE2_IDCT' defined here
+codec/common/x86/dct.asm:293: ... from macro `SSE2_SumSubDiv2' defined here
+codec/common/x86/dct.asm:541: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:300: ... from macro `SSE2_StoreDiff16p' defined here
+codec/common/x86/dct.asm:541: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:305: ... from macro `SSE2_StoreDiff16p' defined here
+codec/common/x86/dct.asm:544: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:300: ... from macro `SSE2_StoreDiff16p' defined here
+codec/common/x86/dct.asm:544: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:305: ... from macro `SSE2_StoreDiff16p' defined here
+codec/common/x86/dct.asm:555: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:391: ... from macro `SSE2_IDCT' defined here
+codec/common/x86/dct.asm:292: ... from macro `SSE2_SumSubDiv2' defined here
+codec/common/x86/dct.asm:555: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:391: ... from macro `SSE2_IDCT' defined here
+codec/common/x86/dct.asm:293: ... from macro `SSE2_SumSubDiv2' defined here
+codec/common/x86/dct.asm:560: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:300: ... from macro `SSE2_StoreDiff16p' defined here
+codec/common/x86/dct.asm:560: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:305: ... from macro `SSE2_StoreDiff16p' defined here
+codec/common/x86/dct.asm:563: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:300: ... from macro `SSE2_StoreDiff16p' defined here
+codec/common/x86/dct.asm:563: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:305: ... from macro `SSE2_StoreDiff16p' defined here
+codec/common/x86/dct.asm:653: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:361: ... from macro `SSE2_Load8DC' defined here
+codec/common/x86/dct.asm:668: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/dct.asm:361: ... from macro `SSE2_Load8DC' defined here
+codec/common/x86/mb_copy.asm:367: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:170: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:175: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:180: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:104: ... from macro `VAA_AVG_BLOCK_SSE2' defined here
+codec/common/x86/vaa.asm:184: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:104: ... from macro `VAA_AVG_BLOCK_SSE2' defined here
+codec/common/x86/vaa.asm:188: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:104: ... from macro `VAA_AVG_BLOCK_SSE2' defined here
+codec/common/x86/vaa.asm:192: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:104: ... from macro `VAA_AVG_BLOCK_SSE2' defined here
+codec/common/x86/vaa.asm:223: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:265: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:270: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:275: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:132: ... from macro `VAA_AVG_BLOCK_SSSE3' defined here
+codec/common/x86/vaa.asm:279: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:132: ... from macro `VAA_AVG_BLOCK_SSSE3' defined here
+codec/common/x86/vaa.asm:284: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:132: ... from macro `VAA_AVG_BLOCK_SSSE3' defined here
+codec/common/x86/vaa.asm:288: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+codec/common/x86/vaa.asm:132: ... from macro `VAA_AVG_BLOCK_SSSE3' defined here
+codec/common/x86/vaa.asm:319: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+[ 38%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libInteractiveShell.a[0m
+[ 39%] Built target InteractiveShell
+[ 39%] [32mBuilding CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/XdndMonitor_autogen/mocs_compilation.cpp.obj[0m
+[ 39%] [32mBuilding CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/xdndmonitor.cpp.obj[0m
+[ 39%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libWebsocketServer.a[0m
+[ 39%] Built target WebsocketServer
+[ 39%] [32mBuilding CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/xdndmonitor_win.cpp.obj[0m
+[ 39%] [32mBuilding CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/SingleApp_autogen/mocs_compilation.cpp.obj[0m
+[ 39%] [32mBuilding CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/singleapplication.cpp.obj[0m
+[ 40%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libXdndMonitor.a[0m
+[ 41%] Built target XdndMonitor
+[ 42%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libSingleApp.a[0m
+[ 43%] Built target SingleApp
+[ 43%] [32mBuilding CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/radiometer_breakpad_autogen/mocs_compilation.cpp.obj[0m
+[ 44%] [32mBuilding CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/crashhandler.cpp.obj[0m
+[ 44%] Built target SecureInputProcess_autogen_timestamp_deps
+[ 44%] [32mBuilding CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/windows/handler/exception_handler.cc.obj[0m
+[ 44%] [32mBuilding CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/common/windows/string_utils.cc.obj[0m
+[ 45%] [32mBuilding CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/common/windows/guid_string.cc.obj[0m
+[ 45%] [32mBuilding CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/SystemSleepBlocker_autogen/mocs_compilation.cpp.obj[0m
+[ 45%] [32mBuilding CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/src/client/windows/crash_generation/crash_generation_client.cc.obj[0m
+[ 45%] [32mBuilding CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker.cpp.obj[0m
+[ 45%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libradiometer_breakpad.a[0m
+[ 45%] Built target radiometer_breakpad
+[ 46%] [32mBuilding CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker_win.cpp.obj[0m
+[ 47%] [34m[1mAutomatic MOC for target SecureInputProcess[0m
+[ 47%] Built target SecureInputProcess_autogen
+[ 48%] [32mBuilding CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/SecureInputProcess_autogen/mocs_compilation.cpp.obj[0m
+[ 48%] [32mBuilding CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/secure_input_process.cpp.obj[0m
+[ 48%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libSystemSleepBlocker.a[0m
+[ 49%] Built target SystemSleepBlocker
+[ 49%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libSecureInputProcess.a[0m
+[ 49%] Built target SecureInputProcess
+[ 49%] [34m[1mNo install step for 'openh264_ep'[0m
+[ 50%] [34m[1mCompleted 'openh264_ep'[0m
+[ 50%] Built target openh264_ep
+[ 50%] [34m[1mCreating directories for 'ffmpeg_ep'[0m
+[ 51%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIce.c.obj[0m
+[ 51%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIceAgent.c.obj[0m
+[ 51%] [34m[1mNo download step for 'ffmpeg_ep'[0m
+[ 51%] [34m[1mNo update step for 'ffmpeg_ep'[0m
+[ 51%] [34m[1mNo patch step for 'ffmpeg_ep'[0m
+[ 51%] [34m[1mNo configure step for 'ffmpeg_ep'[0m
+[ 52%] [34m[1mPerforming build step for 'ffmpeg_ep'[0m
+CMake Deprecation Warning at D:/a/QtRemoteDesktop/QtRemoteDesktop/build/build_ffmpeg.cmake:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcStun.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangIceAgent.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangice\YangIceAgent.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangIce.h:6,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangice\YangIce.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 52%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcSocket.c.obj[0m
+[ 52%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcStun.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangice\YangRtcSocket.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcStun.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangice\YangRtcStun.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 53%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangTurnConnection.c.obj[0m
+[ 53%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpacer/YangPacer.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcStun.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangTurnConnection.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangice\YangTurnConnection.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:16,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangpacer\YangPacer.c:8:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 53%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPacketData.c.obj[0m
+[ 54%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushData.c.obj[0m
+[ 54%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushDataH264.c.obj[0m
+[ 54%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushDataH265.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContext.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcRtcp.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangpush\YangPushDataH264.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContext.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcRtcp.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangpush\YangPushDataH265.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 54%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangBandwidth.c.obj[0m
+[ 55%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangDatachannel.c.obj[0m
+[ 55%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPeerConnection.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangDatachannel.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangDatachannel.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 55%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullStream.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContext.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcSession.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcConnection.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPeerConnection.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 56%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrack.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpSR.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPullStream.c:6:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 56%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackAudio.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContext.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcRtcp.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPullTrack.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 56%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackH264.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:16,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcStream.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPullTrackAudio.h:6,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPullTrackAudio.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 57%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackH265.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContext.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPullTrackH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPullTrackH264.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPullTrackH264.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 57%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackVideo.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContext.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPullTrackH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPullTrackH265.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPullTrackH265.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 57%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPush.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:16,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcStream.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPullTrackVideo.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPullTrackVideo.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 57%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPushAudio.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPush.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 58%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPushStream.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContext.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcSession.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPushAudio.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPushAudio.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 58%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPushVideo.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:16,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcStream.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPushStream.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPushStream.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 58%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcConnection.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContextH.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcContext.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcSession.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangRtcConnection.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtc/YangPushVideo.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangPushVideo.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 59%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcContext.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangRtcConnection.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 59%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcRtcp.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangRtcContext.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 59%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcStats.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangRtcRtcp.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 60%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcTwcc.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:16,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangRtcStats.c:7:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 60%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangReceiveNackBuffer.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpTWCC.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtc\YangRtcTwcc.c:7:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 60%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcp.c.obj[0m
+[ 60%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpApp.c.obj[0m
+[ 61%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpBye.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpApp.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpApp.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 61%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpCommon.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpBye.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpBye.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 61%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpCompound.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpCommon.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 62%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpNack.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCompound.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpCompound.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 62%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpPli.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpNack.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpNack.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 62%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpPsfbCommon.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpPsfbCommon.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpPli.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpPli.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 63%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpRpsi.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpPsfbCommon.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpPsfbCommon.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 63%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpRR.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpPsfbCommon.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpRpsi.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpRpsi.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 63%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpSli.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpRR.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpRR.c:6:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 63%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpSR.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpPsfbCommon.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpSli.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpSli.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 64%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpTWCC.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpSR.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpSR.c:6:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 64%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpXr.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpTWCC.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpTWCC.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 64%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtp.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpXr.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtcpXr.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 65%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpBuffer.c.obj[0m
+In file included from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtp.c:12:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 65%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpFUAPayload.c.obj[0m
+[ 65%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpFUAPayload2.c.obj[0m
+[ 66%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpHeader.c.obj[0m
+[ 66%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpPacket.c.obj[0m
+[ 66%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpRawPayload.c.obj[0m
+[ 66%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpRecvNack.c.obj[0m
+[ 67%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpSTAPPayload.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCommon.h:12,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpNack.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtpRecvNack.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangrtp\YangRtpRecvNack.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 67%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangAudioPayload.c.obj[0m
+[ 67%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangCandidate.c.obj[0m
+[ 68%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangCodecPayload.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangCandidate.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangsdp\YangCandidate.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 68%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangMediaDesc.c.obj[0m
+[ 68%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangMediaPayloadType.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangCandidate.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangMediaDesc.h:11,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangsdp\YangMediaDesc.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 69%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangRedPayload.c.obj[0m
+[ 69%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangRtcSdp.c.obj[0m
+[ 69%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangRtxPayloadDes.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangCandidate.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangMediaDesc.h:11,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangRtcSdp.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangsdp\YangRtcSdp.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 69%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangSdp.c.obj[0m
+[ 70%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangSdpHandle.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangCandidate.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangMediaDesc.h:11,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangRtcSdp.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangsdp\YangSdp.h:6,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangsdp\YangSdp.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 70%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangSSRCInfo.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangCandidate.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangMediaDesc.h:11,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangsdp/YangRtcSdp.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangsdp\YangSdpHandle.c:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 70%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangDtlsMbedtls.c.obj[0m
+[ 71%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangDtlsOpenssl.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangRtcDtls.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangssl\YangDtlsMbedtls.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 71%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangSslMbedtls.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangSocket.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangice/YangRtcSocket.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangRtcDtls.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangssl\YangDtlsOpenssl.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 71%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangSslOpenssl.c.obj[0m
+[ 72%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangstream/YangStreamCapture.c.obj[0m
+[ 72%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangutil/sys/YangSctp.c.obj[0m
+[ 72%] [32mBuilding C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangutil/sys/YangSRtp.c.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/thirdparty/include/usrsctp.h:44,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangutil\sys\YangSctp.h:12,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartccore8\src\yangutil\sys\YangSctp.c:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 72%] [32m[1mLinking C static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libmetartccore8.a[0m
+[ 72%] Built target metartccore8
+install prefix            D:/a/QtRemoteDesktop/QtRemoteDesktop/build_output/ffmpeg_install-6.1.2
+source path               /d/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2
+C compiler                gcc
+C library                 mingw64
+ARCH                      x86 (generic)
+big-endian                no
+runtime cpu detection     yes
+standalone assembly       yes
+x86 assembler             nasm
+MMX enabled               yes
+MMXEXT enabled            yes
+3DNow! enabled            yes
+3DNow! extended enabled   yes
+SSE enabled               yes
+SSSE3 enabled             yes
+AESNI enabled             yes
+AVX enabled               yes
+AVX2 enabled              yes
+AVX-512 enabled           yes
+AVX-512ICL enabled        yes
+XOP enabled               yes
+FMA3 enabled              yes
+FMA4 enabled              yes
+i686 features enabled     yes
+CMOV is fast              yes
+EBX available             yes
+EBP available             yes
+debug symbols             no
+strip symbols             yes
+optimize for size         no
+optimizations             yes
+static                    yes
+shared                    no
+postprocessing support    no
+network support           no
+threading support         w32threads
+safe bitstream reader     yes
+texi2html enabled         no
+perl enabled              yes
+pod2man enabled           no
+makeinfo enabled          no
+makeinfo supports HTML    no
+xmllint enabled           yes
+
+External libraries:
+iconv                   mediafoundation         zlib
+libopenh264             schannel
+
+External libraries providing hardware acceleration:
+cuda                    d3d11va                 nvdec
+cuda_llvm               dxva2                   nvenc
+cuvid                   ffnvcodec
+
+Libraries:
+avcodec                 avutil                  swscale
+
+Programs:
+
+Enabled decoders:
+h263                    mjpeg
+h264                    mpeg4
+
+Enabled encoders:
+h264_nvenc              hevc_nvenc              libopenh264
+
+Enabled hwaccels:
+
+Enabled parsers:
+h263                    mpeg4video
+
+Enabled demuxers:
+
+Enabled muxers:
+
+Enabled protocols:
+
+Enabled filters:
+
+Enabled bsfs:
+
+Enabled indevs:
+
+Enabled outdevs:
+
+License: LGPL version 2.1 or later
+mingw32-make.exe[3]: warning: -jN forced in submake: disabling jobserver mode.
+GEN	libavutil/libavutil.version
+GEN	libswscale/libswscale.version
+GEN	libavcodec/libavcodec.version
+GEN	libavcodec/libavcodec.pc
+GEN	libswscale/libswscale.pc
+GEN	libavutil/libavutil.pc
+CC	libavcodec/ac3_parser.o
+CC	libavcodec/adts_parser.o
+CC	libavcodec/allcodecs.o
+CC	libavcodec/atsc_a53.o
+CC	libavcodec/avcodec.o
+CC	libavcodec/avdct.o
+CC	libavcodec/avfft.o
+CC	libavcodec/avpacket.o
+CC	libavcodec/bitstream.o
+CC	libavcodec/bitstream_filters.o
+CC	libavcodec/blockdsp.o
+CC	libavcodec/bsf.o
+CC	libavcodec/cabac.o
+CC	libavcodec/codec_desc.o
+CC	libavcodec/codec_par.o
+CC	libavcodec/d3d11va.o
+CC	libavcodec/decode.o
+CC	libavcodec/dirac.o
+CC	libavcodec/dv_profile.o
+CC	libavcodec/dxva2.o
+CC	libavcodec/encode.o
+CC	libavcodec/error_resilience.o
+CC	libavcodec/exif.o
+CC	libavcodec/faandct.o
+CC	libavcodec/faanidct.o
+CC	libavcodec/fdctdsp.o
+CC	libavcodec/frame_thread_encoder.o
+CC	libavcodec/get_buffer.o
+CC	libavcodec/golomb.o
+CC	libavcodec/h263.o
+CC	libavcodec/h263_parser.o
+CC	libavcodec/h263data.o
+CC	libavcodec/h263dec.o
+CC	libavcodec/h263dsp.o
+CC	libavcodec/h2645_parse.o
+CC	libavcodec/h2645_sei.o
+CC	libavcodec/h2645_vui.o
+CC	libavcodec/h2645data.o
+CC	libavcodec/h264_cabac.o
+CC	libavcodec/h264_cavlc.o
+CC	libavcodec/h264_direct.o
+CC	libavcodec/h264_loopfilter.o
+CC	libavcodec/h264_mb.o
+CC	libavcodec/h264_parse.o
+CC	libavcodec/h264_picture.o
+CC	libavcodec/h264_ps.o
+CC	libavcodec/h264_refs.o
+CC	libavcodec/h264_sei.o
+CC	libavcodec/h264_slice.o
+CC	libavcodec/h264chroma.o
+CC	libavcodec/h264data.o
+CC	libavcodec/h264dec.o
+CC	libavcodec/h264dsp.o
+CC	libavcodec/h264idct.o
+CC	libavcodec/h264pred.o
+CC	libavcodec/h264qpel.o
+CC	libavcodec/h274.o
+CC	libavcodec/hpeldsp.o
+CC	libavcodec/idctdsp.o
+CC	libavcodec/imgconvert.o
+CC	libavcodec/ituh263dec.o
+CC	libavcodec/jfdctfst.o
+CC	libavcodec/jfdctint.o
+CC	libavcodec/jni.o
+CC	libavcodec/jpegtables.o
+CC	libavcodec/jrevdct.o
+CC	libavcodec/libopenh264.o
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libavcodec/libopenh264.c: In function 'ff_libopenh264_check_version':
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libavcodec/libopenh264.c:55:48: warning: "ARCH_X86_32" is not defined, evaluates to 0 [-Wundef]
+ #if !defined(_WIN32) || !defined(__GNUC__) || !ARCH_X86_32 || AV_GCC_VERSION_AT_LEAST(4, 7)
+                                                ^~~~~~~~~~~
+CC	libavcodec/libopenh264enc.o
+CC	libavcodec/mathtables.o
+CC	libavcodec/me_cmp.o
+CC	libavcodec/mediacodec.o
+CC	libavcodec/mjpegdec.o
+CC	libavcodec/mjpegdec_common.o
+CC	libavcodec/mpeg12framerate.o
+CC	libavcodec/mpeg4video.o
+CC	libavcodec/mpeg4video_parser.o
+CC	libavcodec/mpeg4videodec.o
+CC	libavcodec/mpeg4videodsp.o
+CC	libavcodec/mpeg_er.o
+CC	libavcodec/mpegpicture.o
+CC	libavcodec/mpegutils.o
+CC	libavcodec/mpegvideo.o
+CC	libavcodec/mpegvideo_dec.o
+CC	libavcodec/mpegvideo_motion.o
+CC	libavcodec/mpegvideodata.o
+CC	libavcodec/nvdec.o
+CC	libavcodec/nvenc.o
+CC	libavcodec/nvenc_h264.o
+CC	libavcodec/nvenc_hevc.o
+CC	libavcodec/options.o
+CC	libavcodec/parser.o
+CC	libavcodec/parsers.o
+CC	libavcodec/profiles.o
+CC	libavcodec/pthread.o
+CC	libavcodec/pthread_frame.o
+CC	libavcodec/pthread_slice.o
+CC	libavcodec/qpeldsp.o
+CC	libavcodec/qsv_api.o
+CC	libavcodec/raw.o
+CC	libavcodec/refstruct.o
+CC	libavcodec/rl.o
+CC	libavcodec/simple_idct.o
+CC	libavcodec/startcode.o
+CC	libavcodec/tiff_common.o
+CC	libavcodec/to_upper4.o
+CC	libavcodec/utils.o
+CC	libavcodec/version.o
+CC	libavcodec/videodsp.o
+CC	libavcodec/vlc.o
+CC	libavcodec/vorbis_parser.o
+X86ASM	libavcodec/x86/blockdsp.o
+CC	libavcodec/x86/blockdsp_init.o
+CC	libavcodec/x86/constants.o
+CC	libavcodec/x86/fdct.o
+CC	libavcodec/x86/fdctdsp_init.o
+X86ASM	libavcodec/x86/fpel.o
+STRIP	libavcodec/x86/blockdsp.o
+X86ASM	libavcodec/x86/h263_loopfilter.o
+CC	libavcodec/x86/h263dsp_init.o
+X86ASM	libavcodec/x86/h264_chromamc.o
+STRIP	libavcodec/x86/fpel.o
+X86ASM	libavcodec/x86/h264_chromamc_10bit.o
+STRIP	libavcodec/x86/h263_loopfilter.o
+X86ASM	libavcodec/x86/h264_deblock.o
+STRIP	libavcodec/x86/h264_chromamc_10bit.o
+X86ASM	libavcodec/x86/h264_deblock_10bit.o
+STRIP	libavcodec/x86/h264_chromamc.o
+X86ASM	libavcodec/x86/h264_idct.o
+X86ASM	libavcodec/x86/h264_idct_10bit.o
+STRIP	libavcodec/x86/h264_deblock_10bit.o
+X86ASM	libavcodec/x86/h264_intrapred.o
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libavcodec/x86/h264_idct.asm:770: warning: redefining multi-line macro `STORE_DIFFx2' [-w+pp-macro-redef-multi]
+STRIP	libavcodec/x86/h264_idct.o
+X86ASM	libavcodec/x86/h264_intrapred_10bit.o
+STRIP	libavcodec/x86/h264_deblock.o
+CC	libavcodec/x86/h264_intrapred_init.o
+CC	libavcodec/x86/h264_qpel.o
+X86ASM	libavcodec/x86/h264_qpel_10bit.o
+STRIP	libavcodec/x86/h264_idct_10bit.o
+X86ASM	libavcodec/x86/h264_qpel_8bit.o
+STRIP	libavcodec/x86/h264_intrapred_10bit.o
+X86ASM	libavcodec/x86/h264_weight.o
+STRIP	libavcodec/x86/h264_weight.o
+X86ASM	libavcodec/x86/h264_weight_10bit.o
+STRIP	libavcodec/x86/h264_intrapred.o
+CC	libavcodec/x86/h264chroma_init.o
+CC	libavcodec/x86/h264dsp_init.o
+X86ASM	libavcodec/x86/hpeldsp.o
+STRIP	libavcodec/x86/h264_weight_10bit.o
+CC	libavcodec/x86/hpeldsp_init.o
+X86ASM	libavcodec/x86/idctdsp.o
+STRIP	libavcodec/x86/idctdsp.o
+STRIP	libavcodec/x86/hpeldsp.o
+CC	libavcodec/x86/idctdsp_init.o
+X86ASM	libavcodec/x86/me_cmp.o
+CC	libavcodec/x86/me_cmp_init.o
+STRIP	libavcodec/x86/h264_qpel_8bit.o
+CC	libavcodec/x86/mpeg4videodsp.o
+CC	libavcodec/x86/mpegvideo.o
+X86ASM	libavcodec/x86/qpel.o
+STRIP	libavcodec/x86/h264_qpel_10bit.o
+X86ASM	libavcodec/x86/qpeldsp.o
+CC	libavcodec/x86/qpeldsp_init.o
+STRIP	libavcodec/x86/qpel.o
+X86ASM	libavcodec/x86/simple_idct10.o
+X86ASM	libavcodec/x86/videodsp.o
+STRIP	libavcodec/x86/me_cmp.o
+CC	libavcodec/x86/videodsp_init.o
+X86ASM	libavcodec/x86/xvididct.o
+STRIP	libavcodec/x86/videodsp.o
+CC	libavcodec/x86/xvididct_init.o
+CC	libavcodec/xiph.o
+CC	libavcodec/xvididct.o
+STRIP	libavcodec/x86/qpeldsp.o
+CC	libswscale/alphablend.o
+CC	libswscale/gamma.o
+CC	libswscale/half2float.o
+CC	libswscale/hscale.o
+CC	libswscale/hscale_fast_bilinear.o
+STRIP	libavcodec/x86/xvididct.o
+CC	libswscale/input.o
+CC	libswscale/options.o
+CC	libswscale/output.o
+CC	libswscale/rgb2rgb.o
+CC	libswscale/slice.o
+CC	libswscale/swscale.o
+CC	libswscale/swscale_unscaled.o
+CC	libswscale/utils.o
+STRIP	libavcodec/x86/simple_idct10.o
+CC	libswscale/version.o
+CC	libswscale/vscale.o
+CC	libswscale/x86/hscale_fast_bilinear_simd.o
+X86ASM	libswscale/x86/input.o
+X86ASM	libswscale/x86/output.o
+CC	libswscale/x86/rgb2rgb.o
+X86ASM	libswscale/x86/rgb_2_rgb.o
+X86ASM	libswscale/x86/scale.o
+STRIP	libswscale/x86/rgb_2_rgb.o
+X86ASM	libswscale/x86/scale_avx2.o
+STRIP	libswscale/x86/input.o
+CC	libswscale/x86/swscale.o
+STRIP	libswscale/x86/scale_avx2.o
+CC	libswscale/x86/yuv2rgb.o
+X86ASM	libswscale/x86/yuv2yuvX.o
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:128: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:57: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1282: ... from macro `psrlq' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1257: ... from macro `RUN_AVX_INSTR' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:128: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:58: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1282: ... from macro `psllq' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1257: ... from macro `RUN_AVX_INSTR' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:128: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:97: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1137: ... from macro `add' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:128: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:97: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1140: ... from macro `add' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:130: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:57: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1282: ... from macro `psrlq' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1257: ... from macro `RUN_AVX_INSTR' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:130: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:58: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1282: ... from macro `psllq' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1257: ... from macro `RUN_AVX_INSTR' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:130: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:97: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1137: ... from macro `add' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:130: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:97: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1140: ... from macro `add' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:133: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:57: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1282: ... from macro `psrlq' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1262: ... from macro `RUN_AVX_INSTR' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:133: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:58: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1282: ... from macro `psllq' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1262: ... from macro `RUN_AVX_INSTR' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:133: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:97: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1137: ... from macro `add' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:133: warning: $ prefix for hexadecimal is deprecated [-w+number-deprecated-hex]
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/libswscale/x86/yuv2yuvX.asm:97: ... from macro `YUV2YUVX_FUNC' defined here
+D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2//libavutil/x86/x86inc.asm:1140: ... from macro `add' defined here
+X86ASM	libswscale/x86/yuv_2_rgb.o
+STRIP	libswscale/x86/yuv2yuvX.o
+CC	libswscale/yuv2rgb.o
+STRIP	libswscale/x86/yuv_2_rgb.o
+CC	libavutil/adler32.o
+CC	libavutil/aes.o
+CC	libavutil/aes_ctr.o
+CC	libavutil/ambient_viewing_environment.o
+CC	libavutil/audio_fifo.o
+CC	libavutil/avsscanf.o
+CC	libavutil/avstring.o
+STRIP	libswscale/x86/scale.o
+CC	libavutil/base64.o
+CC	libavutil/blowfish.o
+CC	libavutil/bprint.o
+CC	libavutil/buffer.o
+CC	libavutil/camellia.o
+CC	libavutil/cast5.o
+CC	libavutil/channel_layout.o
+CC	libavutil/cpu.o
+CC	libavutil/crc.o
+CC	libavutil/csp.o
+CC	libavutil/des.o
+CC	libavutil/detection_bbox.o
+CC	libavutil/dict.o
+CC	libavutil/display.o
+CC	libavutil/dovi_meta.o
+CC	libavutil/downmix_info.o
+CC	libavutil/encryption_info.o
+CC	libavutil/error.o
+CC	libavutil/eval.o
+CC	libavutil/executor.o
+CC	libavutil/fifo.o
+CC	libavutil/file.o
+CC	libavutil/file_open.o
+CC	libavutil/film_grain_params.o
+CC	libavutil/fixed_dsp.o
+CC	libavutil/float_dsp.o
+CC	libavutil/frame.o
+CC	libavutil/hash.o
+CC	libavutil/hdr_dynamic_metadata.o
+STRIP	libswscale/x86/output.o
+CC	libavutil/hdr_dynamic_vivid_metadata.o
+CC	libavutil/hmac.o
+CC	libavutil/hwcontext.o
+CC	libavutil/hwcontext_cuda.o
+CC	libavutil/hwcontext_d3d11va.o
+CC	libavutil/hwcontext_dxva2.o
+CC	libavutil/hwcontext_stub.o
+CC	libavutil/imgutils.o
+CC	libavutil/integer.o
+CC	libavutil/intmath.o
+CC	libavutil/lfg.o
+CC	libavutil/lls.o
+CC	libavutil/log.o
+CC	libavutil/log2_tab.o
+CC	libavutil/lzo.o
+CC	libavutil/mastering_display_metadata.o
+CC	libavutil/mathematics.o
+CC	libavutil/md5.o
+CC	libavutil/mem.o
+CC	libavutil/murmur3.o
+CC	libavutil/opt.o
+CC	libavutil/parseutils.o
+CC	libavutil/pixdesc.o
+CC	libavutil/pixelutils.o
+CC	libavutil/random_seed.o
+CC	libavutil/rational.o
+CC	libavutil/rc4.o
+CC	libavutil/reverse.o
+CC	libavutil/ripemd.o
+CC	libavutil/samplefmt.o
+CC	libavutil/sha.o
+CC	libavutil/sha512.o
+CC	libavutil/slicethread.o
+CC	libavutil/spherical.o
+CC	libavutil/stereo3d.o
+CC	libavutil/tea.o
+CC	libavutil/threadmessage.o
+CC	libavutil/time.o
+CC	libavutil/timecode.o
+CC	libavutil/tree.o
+CC	libavutil/twofish.o
+CC	libavutil/tx.o
+CC	libavutil/tx_double.o
+CC	libavutil/tx_float.o
+CC	libavutil/tx_int32.o
+CC	libavutil/utils.o
+CC	libavutil/uuid.o
+CC	libavutil/version.o
+CC	libavutil/video_enc_params.o
+CC	libavutil/video_hint.o
+CC	libavutil/x86/cpu.o
+X86ASM	libavutil/x86/cpuid.o
+STRIP	libavutil/x86/cpuid.o
+X86ASM	libavutil/x86/fixed_dsp.o
+STRIP	libavutil/x86/fixed_dsp.o
+CC	libavutil/x86/fixed_dsp_init.o
+X86ASM	libavutil/x86/float_dsp.o
+STRIP	libavutil/x86/float_dsp.o
+CC	libavutil/x86/float_dsp_init.o
+X86ASM	libavutil/x86/imgutils.o
+CC	libavutil/x86/imgutils_init.o
+X86ASM	libavutil/x86/lls.o
+CC	libavutil/x86/lls_init.o
+X86ASM	libavutil/x86/tx_float.o
+STRIP	libavutil/x86/imgutils.o
+CC	libavutil/x86/tx_float_init.o
+STRIP	libavutil/x86/lls.o
+CC	libavutil/xga_font_data.o
+CC	libavutil/xtea.o
+AR	libavcodec/libavcodec.a
+AR	libswscale/libswscale.a
+STRIP	libavutil/x86/tx_float.o
+AR	libavutil/libavutil.a
+INSTALL	libavcodec/libavcodec.a
+INSTALL	libavutil/libavutil.a
+INSTALL	libswscale/libswscale.a
+-- FFmpeg: 构建完成 (configure 摘要 2986aa13a076cc941c902e781c9021c4a01ad1391b6c8b859688fdf5bc5e4319)
+[ 73%] [34m[1mNo install step for 'ffmpeg_ep'[0m
+[ 73%] [34m[1mCompleted 'ffmpeg_ep'[0m
+[ 73%] Built target ffmpeg_ep
+[ 73%] Built target VideoEncoder_autogen_timestamp_deps
+[ 74%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCapture.cpp.obj[0m
+[ 74%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCaptureData.cpp.obj[0m
+[ 74%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCaptureHandle.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangaudiodev/YangAudioCapture.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangaudiodev\YangAudioCapture.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangaudiodev/YangAudioCaptureHandle.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangaudiodev\YangAudioCaptureHandle.cpp:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 74%] [34m[1mAutomatic MOC for target VideoEncoder[0m
+[ 75%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioPlay.cpp.obj[0m
+[ 75%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioRenderData.cpp.obj[0m
+[ 75%] Built target VideoEncoder_autogen
+[ 75%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangCaptureFactory.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangcapture/YangVideoCapture.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangcapture/YangMultiVideoCapture.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangcapture/YangCaptureFactory.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangcapture\YangCaptureFactory.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 76%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangScreenShare.cpp.obj[0m
+[ 77%] [32mBuilding CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/VideoEncoder_autogen/mocs_compilation.cpp.obj[0m
+[ 77%] [32mBuilding CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/videoencoder.cpp.obj[0m
+[ 77%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangVideoCapture.cpp.obj[0m
+[ 77%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangVideoCaptureHandle.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangcapture/YangVideoCapture.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangcapture\YangVideoCapture.cpp:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangcapture/YangVideoCaptureHandle.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangcapture\YangVideoCaptureHandle.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 77%] [32mBuilding CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/mppencoder.cpp.obj[0m
+[ 77%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoder.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangencoder/YangAudioEncoder.h:8,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangencoder\YangAudioEncoder.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 78%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoderHandle.cpp.obj[0m
+[ 79%] [32mBuilding CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/rgb2yuv_win.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangencoder/YangAudioEncoder.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangencoder/YangAudioEncoderHandle.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangencoder\YangAudioEncoderHandle.cpp:6:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 79%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoderHandleCb.cpp.obj[0m
+[ 79%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoderOpus.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangencoder/YangAudioEncoder.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangencoder/YangAudioEncoderHandleCb.h:11,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangencoder\YangAudioEncoderHandleCb.cpp:6:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 79%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libVideoEncoder.a[0m
+[ 79%] Built target VideoEncoder
+[ 80%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangEncoderFactory.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangencoder/YangAudioEncoder.h:8,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangencoder/YangAudioEncoderOpus.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangencoder\YangAudioEncoderOpus.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 80%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangEncoderMediacodec.cpp.obj[0m
+[ 80%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH264EncoderSoft.cpp.obj[0m
+[ 81%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH265EncoderSoft.cpp.obj[0m
+[ 81%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangOpenH264Encoder.cpp.obj[0m
+[ 81%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoder.cpp.obj[0m
+[ 81%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoderHandle.cpp.obj[0m
+[ 82%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoderMac.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangencoder/YangVideoEncoder.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangencoder/YangVideoEncoderHandle.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangencoder\YangVideoEncoderHandle.cpp:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 82%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangAudioDecoder.cpp.obj[0m
+[ 82%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangAudioDecoderHandle.cpp.obj[0m
+[ 83%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangAudioDecoderHandles.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangAudioDecoder.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangAudioDecoderHandle.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangAudioDecoderHandle.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 83%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangAudioDecoderOpus.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangAudioDecoder.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangAudioDecoderHandles.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangAudioDecoderHandles.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 83%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangDecoderFactory.cpp.obj[0m
+[ 84%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangDecoderMediacodec.cpp.obj[0m
+[ 84%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangH264DecoderSoft.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangAudioDecoder.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangAudioDecoderHandles.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangdecoder/YangDecoderMediacodec.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangDecoderMediacodec.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 84%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangHeaderParseFfmpeg.cpp.obj[0m
+[ 84%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangVideoDecoderFfmpeg.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangAudioDecoder.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangAudioDecoderHandles.h:10,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangdecoder/YangVideoDecoderFfmpeg.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangVideoDecoderFfmpeg.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 85%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangVideoDecoderHandle.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangVideoDecoderHandle.h:11,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangVideoDecoderHandle.cpp:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 85%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangVideoDecoderHandles.cpp.obj[0m
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangVideoDecoderFfmpeg.cpp: In member function 'virtual void YangVideoDecoderFfmpeg::parseHeader(uint8_t*, int32_t, int32_t*, int32_t*, int32_t*)':
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangVideoDecoderFfmpeg.cpp:191:29: warning: 'void av_init_packet(AVPacket*)' is deprecated [-Wdeprecated-declarations]
+  yang_av_init_packet(&packet);
+                             ^
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/build_output/ffmpeg_install-6.1.2/include/libavcodec/avcodec.h:44,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangdecoder/YangVideoDecoderFfmpeg.h:14,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangVideoDecoderFfmpeg.cpp:5:
+D:/a/QtRemoteDesktop/QtRemoteDesktop/build_output/ffmpeg_install-6.1.2/include/libavcodec/packet.h:629:6: note: declared here
+ void av_init_packet(AVPacket *pkt);
+      ^~~~~~~~~~~~~~
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangVideoDecoderFfmpeg.cpp:191:29: warning: 'void av_init_packet(AVPacket*)' is deprecated [-Wdeprecated-declarations]
+  yang_av_init_packet(&packet);
+                             ^
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/build_output/ffmpeg_install-6.1.2/include/libavcodec/avcodec.h:44,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangdecoder/YangVideoDecoderFfmpeg.h:14,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangVideoDecoderFfmpeg.cpp:5:
+D:/a/QtRemoteDesktop/QtRemoteDesktop/build_output/ffmpeg_install-6.1.2/include/libavcodec/packet.h:629:6: note: declared here
+ void av_init_packet(AVPacket *pkt);
+      ^~~~~~~~~~~~~~
+[ 85%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangVideoDecoderMac.cpp.obj[0m
+[ 86%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangAvinfo.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangdecoder/YangVideoDecoderHandles.h:10,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangdecoder\YangVideoDecoderHandles.cpp:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 86%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangLoadLib.cpp.obj[0m
+[ 86%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangString.cpp.obj[0m
+[ 87%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangSysMessageHandle.cpp.obj[0m
+[ 87%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangThread.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangutil\YangSysMessageHandle.cpp:10:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 87%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/YangTimer.cpp.obj[0m
+[ 87%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangAudioBuffer.cpp.obj[0m
+[ 88%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangAudioEncoderBuffer.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangutil\YangTimer.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 88%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangAudioPlayBuffer.cpp.obj[0m
+[ 88%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangMediaBuffer.cpp.obj[0m
+[ 89%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangVideoBuffer.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangutil\buffer\YangMediaBuffer.cpp:6:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 89%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangVideoDecoderBuffer.cpp.obj[0m
+[ 89%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangVideoEncoderBuffer.cpp.obj[0m
+[ 90%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangavutil/YangWave.cpp.obj[0m
+[ 90%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangavutil/YangYuvConvert.cpp.obj[0m
+[ 90%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangstream/YangStreamManager.cpp.obj[0m
+[ 90%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangstream/YangSynBuffer.cpp.obj[0m
+[ 91%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangstream/YangSynBufferManager.cpp.obj[0m
+[ 91%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangrtc/YangPeerConnection8.cpp.obj[0m
+[ 91%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/win/YangDXGIManager.cpp.obj[0m
+[ 92%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/win/YangVideoCaptureWindows.cpp.obj[0m
+[ 92%] [32mBuilding CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/win/YangWinVideoCaptureHandle.cpp.obj[0m
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangcapture/win/YangWinVideoCaptureHandle.h:9,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangcapture/win/YangVideoCaptureWindows.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangcapture\win\YangVideoCaptureWindows.cpp:5:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+In file included from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangCTime.h:19,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/sys/YangTime.h:13,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangSynBuffer.h:6,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangstream/YangStreamManager.h:7,
+                 from D:/a/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/include/yangutil/yangavinfotype.h:21,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangcapture\win\YangWinVideoCaptureHandle.h:9,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\thridparty\third_party_src\metaRTC\libmetartc8\src\yangcapture\win\YangWinVideoCaptureHandle.cpp:4:
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/x86_64-w64-mingw32/include/winsock2.h:15:2: warning: #warning Please include winsock2.h before windows.h [-Wcpp]
+ #warning Please include winsock2.h before windows.h
+  ^~~~~~~
+[ 92%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libmetartc8.a[0m
+[ 92%] Built target metartc8
+[ 92%] Built target WebRtcSession_autogen_timestamp_deps
+[ 93%] [34m[1mAutomatic MOC for target WebRtcSession[0m
+[ 93%] Built target WebRtcSession_autogen
+[ 93%] [32mBuilding CXX object remotedesk/server/webrtcsession/CMakeFiles/WebRtcSession.dir/WebRtcSession_autogen/mocs_compilation.cpp.obj[0m
+[ 93%] [32mBuilding CXX object remotedesk/server/webrtcsession/CMakeFiles/WebRtcSession.dir/webrtcsession.cpp.obj[0m
+[ 93%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libWebRtcSession.a[0m
+[ 94%] Built target WebRtcSession
+[ 94%] Built target Rdpserver_autogen_timestamp_deps
+[ 94%] [34m[1mAutomatic MOC for target Rdpserver[0m
+[ 94%] Built target Rdpserver_autogen
+[ 94%] [32mBuilding CXX object remotedesk/server/rdpserver/CMakeFiles/Rdpserver.dir/Rdpserver_autogen/mocs_compilation.cpp.obj[0m
+[ 94%] [32mBuilding CXX object remotedesk/server/rdpserver/CMakeFiles/Rdpserver.dir/rdpserver.cpp.obj[0m
+[ 95%] [32mBuilding CXX object remotedesk/server/rdpserver/CMakeFiles/Rdpserver.dir/rdpserver_win.cpp.obj[0m
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp: In member function 'void RDPServer::handleIncomingSslConnection(qintptr)':
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:1448:95: warning: 'void QAbstractSocket::error(QAbstractSocket::SocketError)' is deprecated: Use QAbstractSocket::errorOccurred(QAbstractSocket::SocketError) instead [-Wdeprecated-declarations]
+         connect(sslSocket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+                                                                                               ^
+In file included from D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtNetwork/qhostaddress.h:48,
+                 from D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtNetwork/QHostAddress:1,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:2:
+D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtNetwork/qabstractsocket.h:211:10: note: declared here
+     void error(QAbstractSocket::SocketError);
+          ^~~~~
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:1448:95: warning: 'void QAbstractSocket::error(QAbstractSocket::SocketError)' is deprecated: Use QAbstractSocket::errorOccurred(QAbstractSocket::SocketError) instead [-Wdeprecated-declarations]
+         connect(sslSocket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+                                                                                               ^
+In file included from D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtNetwork/qhostaddress.h:48,
+                 from D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtNetwork/QHostAddress:1,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.h:7,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:2:
+D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtNetwork/qabstractsocket.h:211:10: note: declared here
+     void error(QAbstractSocket::SocketError);
+          ^~~~~
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp: In member function 'void RDPServer::handleSystemAction(const QString&, const QString&, const QString&)':
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:3917:58: warning: 'static bool QProcess::startDetached(const QString&)' is deprecated: Use QProcess::startDetached(const QString &program, const QStringList &arguments) instead [-Wdeprecated-declarations]
+         QProcess::startDetached(QStringLiteral("taskmgr"));
+                                                          ^
+In file included from D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtCore/QProcess:1,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:81:
+D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtCore/qprocess.h:280:17: note: declared here
+     static bool startDetached(const QString &command);
+                 ^~~~~~~~~~~~~
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:3917:58: warning: 'static bool QProcess::startDetached(const QString&)' is deprecated: Use QProcess::startDetached(const QString &program, const QStringList &arguments) instead [-Wdeprecated-declarations]
+         QProcess::startDetached(QStringLiteral("taskmgr"));
+                                                          ^
+In file included from D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtCore/QProcess:1,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:81:
+D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtCore/qprocess.h:280:17: note: declared here
+     static bool startDetached(const QString &command);
+                 ^~~~~~~~~~~~~
+[ 95%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libRdpserver.a[0m
+[ 96%] Built target Rdpserver
+[ 96%] Built target HelperProcess_autogen_timestamp_deps
+[ 96%] [34m[1mAutomatic MOC for target HelperProcess[0m
+[ 96%] Built target HelperProcess_autogen
+[ 97%] [32mBuilding CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/HelperProcess_autogen/mocs_compilation.cpp.obj[0m
+[ 97%] [32mBuilding CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/helper_process.cpp.obj[0m
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\helper_process\helper_process.cpp: In lambda function:
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\helper_process\helper_process.cpp:1232:70: warning: 'static bool QProcess::startDetached(const QString&)' is deprecated: Use QProcess::startDetached(const QString &program, const QStringList &arguments) instead [-Wdeprecated-declarations]
+                     QProcess::startDetached(QStringLiteral("taskmgr"));
+                                                                      ^
+In file included from D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtCore/QProcess:1,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\helper_process\helper_process.cpp:28:
+D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtCore/qprocess.h:280:17: note: declared here
+     static bool startDetached(const QString &command);
+                 ^~~~~~~~~~~~~
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\helper_process\helper_process.cpp:1232:70: warning: 'static bool QProcess::startDetached(const QString&)' is deprecated: Use QProcess::startDetached(const QString &program, const QStringList &arguments) instead [-Wdeprecated-declarations]
+                     QProcess::startDetached(QStringLiteral("taskmgr"));
+                                                                      ^
+In file included from D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtCore/QProcess:1,
+                 from D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\helper_process\helper_process.cpp:28:
+D:/a/QtRemoteDesktop/Qt/5.15.2/mingw81_64/include/QtCore/qprocess.h:280:17: note: declared here
+     static bool startDetached(const QString &command);
+                 ^~~~~~~~~~~~~
+[ 97%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libHelperProcess.a[0m
+[ 97%] Built target HelperProcess
+[ 97%] Built target Service_autogen_timestamp_deps
+[ 97%] [34m[1mAutomatic MOC for target Service[0m
+[ 97%] Built target Service_autogen
+[ 97%] [32mBuilding CXX object remotedesk/server/service/CMakeFiles/Service.dir/Service_autogen/mocs_compilation.cpp.obj[0m
+[ 97%] [32mBuilding CXX object remotedesk/server/service/CMakeFiles/Service.dir/service_win.cpp.obj[0m
+[ 98%] [32mBuilding CXX object remotedesk/server/service/CMakeFiles/Service.dir/windows_service.cpp.obj[0m
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\service\windows_service.cpp: In static member function 'static int WindowsService::run(int, char**)':
+D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\service\windows_service.cpp:443:12: warning: cast to pointer from integer of different size [-Wint-to-pointer-cast]
+     (void*)argc;
+            ^~~~
+[ 98%] [32m[1mLinking CXX static library D:\a\QtRemoteDesktop\QtRemoteDesktop\build_output\lib\libService.a[0m
+[ 98%] Built target Service
+[ 98%] Built target QtRemoteDesktop_autogen_timestamp_deps
+[ 98%] [34m[1mAutomatic MOC for target QtRemoteDesktop[0m
+[ 98%] Built target QtRemoteDesktop_autogen
+[ 98%] [34m[1mGenerating qrc_resources.cpp[0m
+[ 98%] [32mBuilding CXX object remotedesk/CMakeFiles/QtRemoteDesktop.dir/QtRemoteDesktop_autogen/mocs_compilation.cpp.obj[0m
+[ 98%] [32mBuilding CXX object remotedesk/CMakeFiles/QtRemoteDesktop.dir/main.cpp.obj[0m
+[ 99%] [32mBuilding RC object remotedesk/CMakeFiles/QtRemoteDesktop.dir/res/main.rc.obj[0m
+[ 99%] [32mBuilding CXX object remotedesk/CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.obj[0m
+[ 99%] [32m[1mLinking CXX executable D:\a\QtRemoteDesktop\QtRemoteDesktop\bin\QtRemoteDesktop.exe[0m
+D:/a/QtRemoteDesktop/Qt/Tools/mingw810_64/bin/../lib/gcc/x86_64-w64-mingw32/8.1.0/../../../../x86_64-w64-mingw32/bin/ld.exe: i386 architecture of input file `CMakeFiles\QtRemoteDesktop.dir/objects.a(main.rc.obj)' is incompatible with i386:x86-64 output
+collect2.exe: error: ld returned 1 exit status
+mingw32-make.exe[2]: *** [remotedesk\CMakeFiles\QtRemoteDesktop.dir\build.make:213: D:/a/QtRemoteDesktop/QtRemoteDesktop/bin/QtRemoteDesktop.exe] Error 1
+mingw32-make.exe[1]: *** [CMakeFiles\Makefile2:838: remotedesk/CMakeFiles/QtRemoteDesktop.dir/all] Error 2
 mingw32-make.exe: *** [Makefile:135: all] Error 2
 === build_linux.log ===
 (不存在)
@@ -378,9 +2010,15 @@ mingw32-make.exe: *** [Makefile:135: all] Error 2
 === smoke.log ===
 (不存在)
 === 错误摘要 ===
-build.log:39:make (e=2): The system cannot find the file specified.
-build.log:40:mingw32-make.exe[3]: *** [codec/decoder/targets.mk:105: codec/decoder/core/x86/dct.o] Error 2
-build.log:41:CMake Error at D:/a/QtRemoteDesktop/QtRemoteDesktop/build/build_openh264.cmake:10 (message):
-build.log:45:mingw32-make.exe[2]: *** [remotedesk\thridparty\third_party_src\CMakeFiles\openh264_ep.dir\build.make:85: remotedesk/thridparty/third_party_src/openh264_ep-prefix/src/openh264_ep-stamp/openh264_ep-build] Error 1
-build.log:46:mingw32-make.exe[1]: *** [CMakeFiles\Makefile2:2577: remotedesk/thridparty/third_party_src/CMakeFiles/openh264_ep.dir/all] Error 2
-build.log:155:mingw32-make.exe: *** [Makefile:135: all] Error 2
+build.log:1032:CC	libavcodec/error_resilience.o
+build.log:1290:CC	libavutil/error.o
+build.log:1699:D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:1448:95: warning: 'void QAbstractSocket::error(QAbstractSocket::SocketError)' is deprecated: Use QAbstractSocket::errorOccurred(QAbstractSocket::SocketError) instead [-Wdeprecated-declarations]
+build.log:1700:         connect(sslSocket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+build.log:1707:     void error(QAbstractSocket::SocketError);
+build.log:1709:D:\a\QtRemoteDesktop\QtRemoteDesktop\src\remotedesk\server\rdpserver\rdpserver.cpp:1448:95: warning: 'void QAbstractSocket::error(QAbstractSocket::SocketError)' is deprecated: Use QAbstractSocket::errorOccurred(QAbstractSocket::SocketError) instead [-Wdeprecated-declarations]
+build.log:1710:         connect(sslSocket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+build.log:1717:     void error(QAbstractSocket::SocketError);
+build.log:1784:collect2.exe: error: ld returned 1 exit status
+build.log:1785:mingw32-make.exe[2]: *** [remotedesk\CMakeFiles\QtRemoteDesktop.dir\build.make:213: D:/a/QtRemoteDesktop/QtRemoteDesktop/bin/QtRemoteDesktop.exe] Error 1
+build.log:1786:mingw32-make.exe[1]: *** [CMakeFiles\Makefile2:838: remotedesk/CMakeFiles/QtRemoteDesktop.dir/all] Error 2
+build.log:1787:mingw32-make.exe: *** [Makefile:135: all] Error 2
