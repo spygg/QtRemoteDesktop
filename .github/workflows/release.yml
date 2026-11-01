@@ -87,6 +87,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ---------- NASM（两个 Windows job 都要）----------
+      # openh264 的 Makefile 直接调 nasm 编 x86 汇编，缺了 Build 阶段直接失败；
+      # FFmpeg 侧缺 nasm 只会静默关掉 swscale 汇编（约慢 3 倍），也不能缺
+      - name: Install NASM (Windows)
+        if: startsWith(matrix.config.os, 'windows')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install nasm -y --no-progress --limit-output
+          $nasm = 'C:\Program Files\NASM\nasm.exe'
+          if (-not (Test-Path $nasm)) {
+            $nasm = (Get-ChildItem 'C:\Program Files\NASM', 'C:\Program Files (x86)\NASM' -Filter nasm.exe -Recurse -ErrorAction SilentlyContinue |
+                     Select-Object -First 1).FullName
+          }
+          if (-not $nasm) { Write-Host "::error::nasm 未安装成功"; exit 1 }
+          Split-Path $nasm -Parent | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $nasm -v
+
       # ---------- Qt（在线仓库覆盖得到的版本）----------
       - name: Install Qt
         if: matrix.config.qt_official == 'true'
@@ -404,9 +422,11 @@ jobs:
             # ldd 对插件给出的路径带 $ORIGIN 展开后的 ..（…/plugins/platforms/../../lib/x），
             # 必须先 realpath 归一，否则前缀匹配整批漏掉（Qt5XcbQpa/Qml/Svg… 收不进包）
             qtlibs() {
+              # 必须返回 0：GitHub Actions 的 bash 带 -e，最后一个库没有 Qt 依赖时
+              # grep 返回 1，整个打包步骤会在这里无声退出（日志文件一行都没有）
               ldd "$@" 2>/dev/null | awk '/=>/ {print $3}' | while read -r p; do
-                [ -e "$p" ] && realpath -e "$p"
-              done | grep -F "$QT_ROOT_DIR/lib/"
+                [ -e "$p" ] && realpath -e "$p" || true
+              done | grep -F "$QT_ROOT_DIR/lib/" || true
             }
             # 按 SONAME 落地：ldd 给的是真实文件（libQt5Core.so.5.15.2），加载器只认
             # SONAME（libQt5Core.so.5），两个名字都得是实体文件
@@ -445,7 +465,7 @@ jobs:
               for f in "$d"/*.so; do patchelf --set-rpath '$ORIGIN/../lib' "$f" 2>/dev/null || true; done
             done
             echo "=== staged ==="
-            du -sh "$DIST"; ls "$DIST"; ls "$DIST/lib" | head -40
+            du -sh "$DIST"; ls "$DIST"; ls "$DIST/lib" | head -40 || true
             miss=$(LD_LIBRARY_PATH= ldd "$DIST/QtRemoteDesktop" | grep 'not found' || true)
             echo "=== 未解析依赖: ${miss:-none} ==="
             [ -z "$miss" ] || { echo "::error::打包后仍有未解析依赖"; exit 1; }
@@ -456,8 +476,12 @@ jobs:
             echo "=== 落到宿主 Qt 的依赖: ${escape:-none} ==="
             [ -z "$escape" ] || { echo "::error::打包缺 Qt 库，运行时会回落到宿主 Qt"; exit 1; }
             # 冒烟：offscreen 平台跑 --version，证明 Qt 运行库 + 平台插件真能被加载
+            # 先关 -e 再取 PIPESTATUS，否则失败时直接退出，来不及给出 error 标注
+            set +e
             QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH="$DIST" "$DIST/QtRemoteDesktop" --version 2>&1 | tee smoke.log
-            [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::打包后冒烟启动失败"; exit 1; }
+            rc=${PIPESTATUS[0]}
+            set -e
+            [ "$rc" -eq 0 ] || { echo "::error::打包后冒烟启动失败 (rc=$rc)"; exit 1; }
             # 冒烟会留下运行期文件，别打进发布包
             rm -rf "$DIST/logs" "$DIST/server_config.json"
             tar -czf "$ARTIFACT_NAME" -C dist .
