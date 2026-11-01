@@ -14,6 +14,20 @@ extern "C" {
 }
 #ifdef Q_OS_LINUX
 #include <QDir>
+#include <QHash>
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+// H.265 的 capture 四字符码在 v4l2 里叫 V4L2_PIX_FMT_HEVC('H','E','V','C')，
+// 不是 'H','2','6','5'（后者只是驱动 ENUM_FMT 返回的描述文本）。老 kernel headers
+// （<4.4）没定义它，按同一 fourcc 补齐，否则探测值与节点上报的格式永远对不上，
+// 表现为"明明有 HEVC 硬编节点却判定不可用"。FFmpeg 的 hevc_v4l2m2m 也用这个宏
+// （libavcodec/v4l2_fmt.c 的 AV_CODEC(HEVC) -> V4L2_FMT(HEVC) 映射）。
+#ifndef V4L2_PIX_FMT_HEVC
+#define V4L2_PIX_FMT_HEVC v4l2_fourcc('H', 'E', 'V', 'C')
+#endif
 #endif
 #if defined(Q_OS_LINUX) && defined(__GLIBC__)
 #include <malloc.h>
@@ -72,7 +86,8 @@ enum HwBackendBit : unsigned {
     HwBitNvenc = 1u << 1,
     HwBitAmf = 1u << 2,
     HwBitVideoToolbox = 1u << 3,
-    HwBitRkMpp = 1u << 4
+    HwBitRkMpp = 1u << 4,
+    HwBitV4l2M2m = 1u << 5
 };
 static std::atomic<unsigned> g_hwBackendBlocked { 0 };
 
@@ -90,6 +105,8 @@ static unsigned hwBackendBit(const char* name)
         return HwBitVideoToolbox;
     if (strstr(name, "rkmpp"))
         return HwBitRkMpp;
+    if (strstr(name, "v4l2m2m"))
+        return HwBitV4l2M2m;
     return 0;
 }
 
@@ -101,6 +118,27 @@ static void blockHwBackend(const char* name)
 static bool hwBackendBlocked(const char* name)
 {
     return (g_hwBackendBlocked.load() & hwBackendBit(name)) != 0;
+}
+
+// 真正的软件编码器。不能直接用 avcodec_find_encoder(id)：它按注册顺序返回第一个，
+// 而注册顺序随 configure 打开了哪些硬编外壳变化（编入 h264_amf/hevc_nvenc 又没编
+// libopenh264/libx265 时，返回的就是那个硬件外壳）。硬件外壳在没有对应 GPU 的机器
+// 上 open 必然失败，而这里已经是"硬件候选全部不可用"之后的兜底，再失败就没画面了。
+// 挑不到任何软编时返回 nullptr（宁可上层报"未编入软编"），也不把硬件外壳当软编用。
+static const AVCodec* findSoftwareEncoder(AVCodecID id)
+{
+    static const char* const swNames[] = {
+        "libopenh264", "libx264", "libx265", "mpeg4", "mjpeg", nullptr
+    };
+    for (int i = 0; swNames[i]; ++i) {
+        const AVCodec* c = avcodec_find_encoder_by_name(swNames[i]);
+        if (c && c->id == id)
+            return c;
+    }
+    const AVCodec* c = avcodec_find_encoder(id);
+    if (c && hwBackendBit(c->name) != 0)
+        return nullptr;
+    return c;
 }
 
 // 依次尝试常见 DRM render node。返回的 AVBufferRef 由调用方释放（或挂到
@@ -175,6 +213,172 @@ static void ensureAvCodecsRegistered()
 
 // 硬件编码器平台可用性粗筛（编码器存在 != 运行时可用；避免假阳性导致每次初始化
 // 都尝试 open 一个必然失败的编码器，从而产生无谓的延迟与告警日志）
+#ifdef Q_OS_LINUX
+// V4L2 M2M（有状态）编码节点探测。
+//
+// 只看 ENUM_FMT 会误报：MTK mt6779 的 mtk-vcodec-enc 在 capture 面正常上报
+// H264/H265，节点看着完全可用，但实测它的 VIDIOC_REQBUFS 只接受 V4L2_MEMORY_DMABUF
+// （MMAP/USERPTR 一律 EINVAL，换缓冲数、先配 capture 再配 output 都一样），而
+// FFmpeg 的 v4l2m2m 封装写死用 MMAP —— 于是 avcodec_open2 必然失败。这里把 FFmpeg
+// 会做的整段协商真跑一遍，只有明确撞上"只认 DMABUF"时才判不可用；其它失败
+// （EBUSY/我们探测参数比 FFmpeg 更严等）保持原来的宽松结论，交给 avcodec_open2
+// 验证并由 blockHwBackend 兜底，避免因为探测太严把别的板子（RK/Amlogic）的硬编丢掉。
+enum class V4l2MmapProbe { Usable, DmabufOnly, Inconclusive, Busy };
+
+static void setFmt(struct v4l2_format& f, unsigned type, unsigned fourcc, bool mplane)
+{
+    std::memset(&f, 0, sizeof(f));
+    f.type = type;
+    if (mplane) {
+        f.fmt.pix_mp.width = 1280;
+        f.fmt.pix_mp.height = 720;
+        f.fmt.pix_mp.pixelformat = fourcc;
+        f.fmt.pix_mp.field = V4L2_FIELD_NONE;
+        f.fmt.pix_mp.num_planes = 1;
+        f.fmt.pix_mp.plane_fmt[0].sizeimage = 1280 * 720 * 3 / 2;
+    } else {
+        f.fmt.pix.width = 1280;
+        f.fmt.pix.height = 720;
+        f.fmt.pix.pixelformat = fourcc;
+        f.fmt.pix.field = V4L2_FIELD_NONE;
+        f.fmt.pix.sizeimage = 1280 * 720 * 3 / 2;
+    }
+}
+
+static bool reqbufs(int fd, unsigned type, unsigned memory, unsigned count)
+{
+    struct v4l2_requestbuffers r;
+    std::memset(&r, 0, sizeof(r));
+    r.count = count;
+    r.type = type;
+    r.memory = memory;
+    return ::ioctl(fd, VIDIOC_REQBUFS, &r) == 0;
+}
+
+// 按 FFmpeg 的顺序：output(NV12) -> capture(码流 fourcc) -> 两侧 REQBUFS(MMAP)
+static V4l2MmapProbe probeV4l2Mmap(int fd, bool mplane, unsigned capFourcc)
+{
+    const unsigned outType = mplane ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE : V4L2_BUF_TYPE_VIDEO_OUTPUT;
+    const unsigned capType = mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    struct v4l2_format f;
+    setFmt(f, outType, V4L2_PIX_FMT_NV12, mplane);
+    if (::ioctl(fd, VIDIOC_S_FMT, &f) != 0)
+        return errno == EBUSY ? V4l2MmapProbe::Busy : V4l2MmapProbe::Inconclusive;
+    setFmt(f, capType, capFourcc, mplane);
+    if (::ioctl(fd, VIDIOC_S_FMT, &f) != 0)
+        return errno == EBUSY ? V4l2MmapProbe::Busy : V4l2MmapProbe::Inconclusive;
+    if (!reqbufs(fd, outType, V4L2_MEMORY_MMAP, 2)) {
+        const int e = errno;
+        // 同参数只把内存类型换成 DMABUF 就能过 → 驱动只吃 dma-buf，FFmpeg 用不了
+        if (e == EINVAL && reqbufs(fd, outType, V4L2_MEMORY_DMABUF, 2))
+            return V4l2MmapProbe::DmabufOnly;
+        return e == EBUSY ? V4l2MmapProbe::Busy : V4l2MmapProbe::Inconclusive;
+    }
+    bool capOk = reqbufs(fd, capType, V4L2_MEMORY_MMAP, 4);
+    const int capErrno = capOk ? 0 : errno;
+    reqbufs(fd, outType, V4L2_MEMORY_MMAP, 0); // 释放，别占着驱动缓冲
+    reqbufs(fd, capType, V4L2_MEMORY_MMAP, 0);
+    if (!capOk)
+        return capErrno == EBUSY ? V4l2MmapProbe::Busy : V4l2MmapProbe::Inconclusive;
+    return V4l2MmapProbe::Usable;
+}
+
+// FFmpeg 的 h264/hevc_v4l2m2m 只认同时具备 V4L2_CAP_VIDEO_M2M(_MPLANE)+STREAMING
+// 的节点——RK/MTK/Amlogic 这类板载 VPU 的编码节点是有状态，纯解码节点是无状态
+// (OUTPUT+CAPTURE) 不能用。再按 CAPTURE 面的 fourcc 确认这台 VPU 真能编该格式
+// （只支持 H.264 的芯片不该在 HEVC 候选里通过）。结果进程内缓存：设备节点在进程
+// 生命周期内不变；EBUSY（别人正在用这个节点）不缓存，下次探测还有机会。
+static bool v4l2StatefulEncodes(unsigned fourcc)
+{
+    static QHash<unsigned, bool> cache;
+    static QMutex cacheMx;
+    QMutexLocker lk(&cacheMx);
+    auto it = cache.constFind(fourcc);
+    if (it != cache.constEnd())
+        return it.value();
+    bool found = false;
+    bool cacheResult = true;
+    const QStringList nodes = QDir(QStringLiteral("/dev")).entryList(
+        QStringList() << QStringLiteral("video*"), QDir::System);
+    for (const QString& node : nodes) {
+        const QByteArray path = "/dev/" + node.toLocal8Bit();
+        const int fd = ::open(path.constData(), O_RDWR | O_NONBLOCK);
+        if (fd < 0)
+            continue;
+        bool okFmt = false;
+        bool mplane = false;
+        struct v4l2_capability cap;
+        std::memset(&cap, 0, sizeof(cap));
+        const unsigned caps = (::ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 && cap.device_caps)
+            ? cap.device_caps : cap.capabilities;
+        if ((caps & V4L2_CAP_STREAMING) && (caps & (V4L2_CAP_VIDEO_M2M | V4L2_CAP_VIDEO_M2M_MPLANE))) {
+            mplane = (caps & V4L2_CAP_VIDEO_M2M_MPLANE) != 0;
+            struct v4l2_fmtdesc fmt;
+            std::memset(&fmt, 0, sizeof(fmt));
+            fmt.type = mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            while (::ioctl(fd, VIDIOC_ENUM_FMT, &fmt) == 0) {
+                if (fmt.pixelformat == fourcc) {
+                    okFmt = true;
+                    break;
+                }
+                ++fmt.index;
+            }
+        }
+        if (okFmt) {
+            const char* tag = reinterpret_cast<const char*>(&fourcc);
+            const QString what = QString::fromLatin1(tag, 4);
+            switch (probeV4l2Mmap(fd, mplane, fourcc)) {
+            case V4l2MmapProbe::Usable:
+                qInfo() << "V4L2 M2M encoder node:" << node << "supports" << what;
+                found = true;
+                break;
+            case V4l2MmapProbe::DmabufOnly:
+                qInfo() << "V4L2 M2M node" << node << "advertises" << what
+                        << "but its REQBUFS only accepts DMABUF (FFmpeg needs MMAP)"
+                        << "- not usable, using software encoder";
+                break;
+            case V4l2MmapProbe::Busy:
+                // 节点被别的进程占着：结论不确定，本次按不可用走软编，但不写缓存
+                qWarning() << "V4L2 M2M node" << node << "busy during probe, not cached";
+                cacheResult = false;
+                break;
+            case V4l2MmapProbe::Inconclusive:
+                // 协商失败但说不出是驱动的锅（可能我们参数比 FFmpeg 严）：
+                // 维持"格式已上报即可用"的旧结论，让 avcodec_open2 来定。
+                qInfo() << "V4L2 M2M encoder node:" << node << "supports" << what
+                        << "(buffer negotiation probe inconclusive)";
+                found = true;
+                break;
+            }
+        }
+        ::close(fd);
+        if (found || !cacheResult)
+            break;
+    }
+    if (cacheResult)
+        cache.insert(fourcc, found);
+    return found;
+}
+#endif
+
+#ifdef Q_OS_WIN
+// 驱动自带的运行时库探测。nvenc/amf 在 FFmpeg 里都是 open 时才 dlopen 驱动库
+// （nvenc: nvEncodeAPI64.dll；amf: amfrt64.dll，名字来自 AMF SDK 的 core/Factory.h
+// 与 libavcodec/amfenc.c:130）。缺库时 open 必然失败，而且失败路径会刷一串
+// COM/CUDA 错误、拖慢编码器重建，所以按文件存在性先挡掉。
+// 32 位进程访问 System32 会被 WOW64 重定向到 SysWOW64，正好是 32 位 DLL 的位置，
+// 因此两个目录都检查一次即可覆盖两种位宽。
+static bool windowsDriverDllExists(const char* name)
+{
+    QByteArray root = qgetenv("SystemRoot");
+    if (root.isEmpty())
+        root = "C:\\Windows";
+    const QString dll = QString::fromLatin1(name);
+    return QFile::exists(QString::fromLocal8Bit(root) + QStringLiteral("\\System32\\") + dll)
+        || QFile::exists(QString::fromLocal8Bit(root) + QStringLiteral("\\SysWOW64\\") + dll);
+}
+#endif
+
 static bool hwPlatformAvailable(const char* encName){
 #ifdef Q_OS_LINUX
     if (strstr(encName, "vaapi")) {
@@ -188,39 +392,38 @@ static bool hwPlatformAvailable(const char* encName){
         // NVIDIA NVENC 需要驱动设备节点；无 NVIDIA 的机器（如 RK3588）直接跳过
         if (!QFile::exists("/dev/nvidiactl"))
             return false;
+    } else if (strstr(encName, "v4l2m2m")) {
+        // 板载 VPU（MTK/RK/Amlogic 等）：要有一个有状态 M2M 节点且它声明能编这个格式
+        const unsigned fcc = strstr(encName, "hevc")
+            ? unsigned(V4L2_PIX_FMT_HEVC) : unsigned(V4L2_PIX_FMT_H264);
+        if (!v4l2StatefulEncodes(fcc))
+            return false;
     }
     // rkmpp：FFmpeg 编译带 rkmpp 即有编码器，可用性由 avcodec_open2 验证并回退
 #endif
 #ifdef Q_OS_WIN
-    // nvenc 在 Windows 上没有设备节点可查，但编码器 open 时会去 LoadLibrary
-    // 驱动自带的 nvEncodeAPI*.dll。缺该 DLL（无 NVIDIA 卡/驱动过旧）时 open 必然
-    // 失败并让 FFmpeg 自己刷一条错误日志，所以在这里按指针大小探测同名 DLL。
-    // 32 位进程访问 System32 会被 WOW64 重定向到 SysWOW64，正好是 32 位 DLL 的
-    // 位置，因此两个候选目录都检查一次即可覆盖。
     if (strstr(encName, "nvenc")) {
-        static const bool hasDriver = [] {
-            const char* names[] = {
+        static const bool hasDriver = windowsDriverDllExists(
 #if defined(Q_OS_WIN64)
-                "nvEncodeAPI64.dll",
+            "nvEncodeAPI64.dll"
 #else
-                "nvEncodeAPI.dll",
+            "nvEncodeAPI.dll"
 #endif
-                nullptr
-            };
-            QByteArray root = qgetenv("SystemRoot");
-            if (root.isEmpty())
-                root = "C:\\Windows";
-            const QStringList dirs { QString::fromLocal8Bit(root) + QStringLiteral("\\System32"),
-                                      QString::fromLocal8Bit(root) + QStringLiteral("\\SysWOW64") };
-            for (const QString& d : dirs) {
-                for (int i = 0; names[i]; ++i) {
-                    if (QFile::exists(d + QStringLiteral("\\") + QString::fromLatin1(names[i])))
-                        return true;
-                }
-            }
-            return false;
-        }();
+            );
         if (!hasDriver)
+            return false;
+    }
+    // amf：AMD 驱动里的 amfrt64.dll。没有 A 卡（或驱动没装全）的机器上它不存在，
+    // 而 AMF 初始化失败会走 COM/dlopen 报一串错，所以和 nvenc 一样按库存在性预判。
+    if (strstr(encName, "amf")) {
+        static const bool hasRuntime = windowsDriverDllExists(
+#if defined(Q_OS_WIN64)
+            "amfrt64.dll"
+#else
+            "amfrt32.dll"
+#endif
+            );
+        if (!hasRuntime)
             return false;
     }
 #endif
@@ -246,9 +449,13 @@ static const char* findHwEncoder(CodecType type, HwEncodeMode mode, QString* dia
     switch (type) {
     case CodecType::H264:
 #ifdef Q_OS_WIN
+        // qsv 排在最后：NVIDIA/AMD 独显机器保持原有选择；只有核显（或独显不可用）
+        // 的机器前面几个会被驱动库存在性/打开失败挡掉，这里才轮到 Intel QSV。
         candidates[0] = "h264_nvenc"; candidates[1] = "h264_amf";
+        candidates[2] = "h264_qsv";
 #elif defined(Q_OS_LINUX)
-        candidates[0] = "h264_rkmpp"; candidates[1] = "h264_vaapi"; candidates[2] = "h264_nvenc";
+        candidates[0] = "h264_rkmpp"; candidates[1] = "h264_vaapi";
+        candidates[2] = "h264_nvenc"; candidates[3] = "h264_v4l2m2m";
 #elif defined(Q_OS_MACOS)
         candidates[0] = "h264_videotoolbox";
 #endif
@@ -256,8 +463,10 @@ static const char* findHwEncoder(CodecType type, HwEncodeMode mode, QString* dia
     case CodecType::HEVC:
 #ifdef Q_OS_WIN
         candidates[0] = "hevc_nvenc"; candidates[1] = "hevc_amf";
+        candidates[2] = "hevc_qsv";
 #elif defined(Q_OS_LINUX)
-        candidates[0] = "hevc_rkmpp"; candidates[1] = "hevc_vaapi"; candidates[2] = "hevc_nvenc";
+        candidates[0] = "hevc_rkmpp"; candidates[1] = "hevc_vaapi";
+        candidates[2] = "hevc_nvenc"; candidates[3] = "hevc_v4l2m2m";
 #elif defined(Q_OS_MACOS)
         candidates[0] = "hevc_videotoolbox";
 #endif
@@ -275,12 +484,27 @@ static const char* findHwEncoder(CodecType type, HwEncodeMode mode, QString* dia
     case CodecType::AV1:
 #ifdef Q_OS_WIN
         candidates[0] = "av1_nvenc"; candidates[1] = "av1_amf";
+        candidates[2] = "av1_qsv";
 #elif defined(Q_OS_LINUX)
         candidates[0] = "av1_vaapi"; candidates[1] = "av1_nvenc";
 #endif
         break;
     default:
         break; // MPEG4/MJPEG 无硬件编码
+    }
+    // 诊断用：QTRD_HW_PREFER=h264_qsv 把候选链里指定的那个提到最前，便于在同一台
+    // 机器（比如 NVIDIA + Intel 核显都有）上对比各硬编的码率/CPU。正常部署不用设。
+    const QByteArray hwPrefer = qgetenv("QTRD_HW_PREFER");
+    if (!hwPrefer.isEmpty()) {
+        for (int i = 0; i < 4 && candidates[i]; ++i) {
+            if (hwPrefer == candidates[i]) {
+                const char* hit = candidates[i];
+                for (int j = i; j > 0; --j)
+                    candidates[j] = candidates[j - 1];
+                candidates[0] = hit;
+                break;
+            }
+        }
     }
     for (int i = 0; i < 4 && candidates[i]; ++i) {
         if (hwBackendBlocked(candidates[i])) {
@@ -328,13 +552,17 @@ static void warnHwRequestedButUnavailable(const QString& why)
 #if defined(Q_OS_LINUX)
     static const char* kFixHint =
         "「FFmpeg 未编入」= 打包的 FFmpeg 没带该硬编：装好 libva-devel/libdrm-devel 后重跑 "
-        "build_linux.sh（探测到就自动加 --enable-vaapi/--enable-nvenc 及对应 encoder）；"
-        "「本机无对应设备/驱动」= 有编码器但没 GPU/驱动，虚机里通常只能软编";
+        "build_linux.sh（探测到就自动加 --enable-vaapi/--enable-nvenc/--enable-v4l2-m2m "
+        "及对应 encoder）；"
+        "「本机无对应设备/驱动」= 有编码器但没 GPU/驱动，虚机里通常只能软编；"
+        "ARM 板卡（MTK/RK/Amlogic）看 /dev/video* 是否有有状态 M2M 编码节点，"
+        "没有 /dev/dri 也不代表不能硬编";
 #elif defined(Q_OS_WIN)
     static const char* kFixHint =
-        "「FFmpeg 未编入」= 打包的 FFmpeg 没带 nvenc（构建机不是 x86，或 NVENC 头编不过；"
-        "3.4.8 要 compat/nvenc、6.x 要仓库里的 nv-codec-headers，缺就自动不启用）；"
-        "「本机无对应设备/驱动」= 系统里没有 nvEncodeAPI 驱动 DLL，即无 NVIDIA 显卡或没装驱动；"
+        "「FFmpeg 未编入」= 打包的 FFmpeg 没带对应硬编（nvenc 需要 nv-codec-headers、"
+        "amf 需要 AMF 头、qsv 需要 oneVPL 源码，缺哪个就自动不启用哪个；3.4.8 只有 nvenc）；"
+        "「本机无对应设备/驱动」= 系统里没有对应驱动 DLL（nvenc: nvEncodeAPI64.dll，"
+        "amf: amfrt64.dll），即没有该厂商的显卡或没装驱动；"
         "「本进程已证明打不开」= 驱动拒绝了这个编码器，上一行 [ffmpeg] 给出的才是真原因"
         "（32 位构建用的是 3.4.8：NVIDIA 不提供 32 位 CUDA，cuInit 先失败，而且新驱动也拒绝 "
         "API 8.0 的预设接口；要硬编请用 64 位构建 build64.bat，它会链 6.1.2）";
@@ -374,10 +602,21 @@ static void applyHwOpts(const QString& hwName, AVDictionary** opts)
         av_dict_set(opts, "preset", "llhp", 0);
 #endif
     } else if (hwName.contains("amf")) {
-        // h264_amf/hevc_amf/av1_amf：无 preset/tune；usage=transcoding 走低延迟实时档
-        av_dict_set(opts, "usage", "transcoding", 0);
+        // usage 选延迟档：默认 transcoding 不带低延迟优化。h264/hevc 有
+        // ultralowlatency（实时桌面用的档位），但 av1 只有 transcoding/lowlatency
+        //（amfenc_av1.c:28-30），给它传 ultralowlatency 会让 avcodec_open2 失败。
+        av_dict_set(opts, "usage",
+                    hwName.startsWith(QStringLiteral("av1"))
+                        ? "lowlatency" : "ultralowlatency", 0);
+    } else if (hwName.contains("qsv")) {
+        // QSV 默认 preset=medium、async_depth=4（编码器内部异步队列）。实时桌面要的
+        // 是"这帧立刻出来"，异步队列会再多压 3 帧滞后，所以取最低档并关掉并行。
+        av_dict_set(opts, "preset", "veryfast", 0);
+        av_dict_set(opts, "async_depth", "1", 0);
     }
-    // videotoolbox / vaapi / rkmpp：默认参数即可，不额外设置
+    // videotoolbox / vaapi / rkmpp / v4l2m2m：默认参数即可，不额外设置
+    //（v4l2m2m 的码率/GOP 由 AVCodecContext 通用字段下发，私有项只有驱动相关的
+    //  控制命令，传不认识的键会让 avcodec_open2 失败）
 }
 
 // 释放 FFmpeg 编码链路资源（幂等，指针置空）。
@@ -468,7 +707,10 @@ bool VideoEncoder::isCodecEncodable(CodecType type)
     if (isHwAcceleratedAvailable(type))
         return true;
     const AVCodecID id = avCodecIdFor(type);
-    return id != AV_CODEC_ID_NONE && avcodec_find_encoder(id) != nullptr;
+    // 用 findSoftwareEncoder 而不是 avcodec_find_encoder：硬件外壳（h264_amf/
+    // hevc_nvenc）只要编进 FFmpeg 就会被后者返回，于是"上面那条硬件探测已经判定
+    // 本机没有可用硬件"之后又在这里被翻案，前端据此放出 HEVC 选项、连上却编不出来。
+    return id != AV_CODEC_ID_NONE && findSoftwareEncoder(id) != nullptr;
 }
 
 int VideoEncoder::estimateBitrate(CodecType codec, int encW, int encH, int fps, int qualityLevel)
@@ -653,13 +895,19 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
     swPixFmt_ = pixFmt_;
 
     if (!codec) {
-        codec = avcodec_find_encoder(codecId);
+        codec = findSoftwareEncoder(codecId);
         if (!codec) {
-            qCritical() << "Encoder" << codecName_ << "not found";
+            qCritical() << "Encoder" << codecName_
+                        << "not found（硬件候选本机都不可用，且没编入软件编码器："
+                        << "h264 需要 libopenh264/libx264，hevc 需要 libx265）";
             return false;
         }
         hwName_.clear();
-        qInfo() << "Using software encoder:" << codecName_;
+        // 打印实际选中的编码器名：同一 AVCodecID 下 FFmpeg 会按注册顺序返回第一个
+        // 编码器（如 hevc 有 libx265/hevc_nvenc/…），只写 "hevc" 分不清到底在用软编
+        // 还是硬件外壳，部署机上"选了 HEVC 却打不开"就无从判断。
+        qInfo() << "Using software encoder:" << codecName_
+                << "(" << QString::fromUtf8(codec->name) << ")";
         if (hwMode == HwEncodeMode::On)
             warnHwRequestedButUnavailable(hwDiag.isEmpty() ? QStringLiteral("无候选编码器") : hwDiag);
     }
@@ -797,9 +1045,10 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
             // 与 createVaapiDevice 同理：open 失败说明该后端在本机/本进程内不可用
             // （驱动缺失、版本不匹配、选项不兼容），后续每次重建都别再试一遍。
             blockHwBackend(hwName_.toUtf8().constData());
-            codec = avcodec_find_encoder(codecId);
+            codec = findSoftwareEncoder(codecId);
             if (!codec) {
-                qCritical() << "Software encoder" << codecName_ << "not found";
+                qCritical() << "Software encoder" << codecName_ << "not found"
+                            << "（硬件后端已证明不可用，且没编入 libopenh264/libx264/libx265）";
                 return false;
             }
             hwName_.clear();
@@ -808,7 +1057,10 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
             codecName_ = QString::fromUtf8(avcodec_get_name(codecId));
             pixFmt_ = AV_PIX_FMT_YUV420P;
             swPixFmt_ = pixFmt_;
-            qInfo() << "Using software encoder:" << codecName_;
+            // 打出真实编码器名：同一 AVCodecID 下 libopenh264/libx264/libx265 都可能，
+            // 只写 "hevc" 看不出到底用的是哪一个。
+            qInfo() << "Using software encoder:" << codecName_
+                    << "(" << QString::fromUtf8(codec->name) << ")";
             if (!openCodec(codec))
                 return false;
         } else {

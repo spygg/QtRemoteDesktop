@@ -50,6 +50,11 @@ public:
     static QString hwEncoderName(CodecType type = CodecType::H264);
     // 当前实际使用的编码器描述（如 "H.264 (h264_nvenc)" 或软编 "h264"），供 mode 通知/日志
     QString activeEncoderName() const;
+    // 当前编码器实际在产的编码类型（initialize 成功后有效）。
+    // WebRTC 侧据此决定 offer 里写 H264 还是 H265：两者必须与码流一致，
+    // 否则 sendFrame 的 NAL 解析按错误的头格式解（H.264 是 1 字节头 & 0x1F，
+    // HEVC 是 2 字节头 (b0>>1)&0x3F），一帧都发不出去。
+    CodecType currentCodec() const { return currentCodec_; }
 
     // WebRTC：浏览器请求关键帧（PLI）时强制下一帧为 IDR
     void requestKeyframe();

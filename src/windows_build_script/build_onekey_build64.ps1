@@ -27,10 +27,14 @@ $binDir    = Join-Path $repoRoot 'bin64'
 
 $ffmpegVersion = if ($env:FFMPEG_VERSION) { $env:FFMPEG_VERSION } else { '6.1.2' }
 $nvHeadersTag  = 'n12.2.72.0'   # NVENC API 12.2 - FFmpeg >= 5 needs "ffnvcodec >= 12.1.14.0"
+$amfVersion    = '1.5.3'        # AMF SDK headers (FFmpeg configure wants >= 1.4.29)
+$oneVplVersion = '2.17.0'       # Intel oneVPL dispatcher source (FFmpeg wants vpl >= 2.6)
 
 $ffmpegDir     = Join-Path $srcDir 'remotedesk/thridparty/ffmpeg'
 $ffmpegSrc     = Join-Path $ffmpegDir "FFmpeg-n$ffmpegVersion"
 $nvHeadersSrc  = Join-Path $ffmpegDir "nv-codec-headers-$nvHeadersTag"
+$amfHeadersSrc = Join-Path $ffmpegDir "amf-sdk-$amfVersion"
+$oneVplSrc     = Join-Path $ffmpegDir "oneVPL-$oneVplVersion"
 
 # ---- Shared helpers (Get-GitBash); does not alter build.bat behaviour ----
 . (Join-Path $scriptDir 'build_common.ps1')
@@ -152,6 +156,74 @@ function Ensure-ExtractedSource([string]$destDir, [string]$url, [string]$label) 
     if ($LASTEXITCODE -ne 0) { throw "$label extraction failed (exit $LASTEXITCODE): $tgz" }
     Remove-Item -LiteralPath $tgz -Force -ErrorAction SilentlyContinue
     return (Test-Path $destDir)
+}
+
+# AMD's AMF repo is hundreds of MB as a tarball (docs + Win32 samples), and a
+# plain download of it stalls on slow links, so fetch only the header subtree:
+# blobless clone + sparse checkout of amf/public/include lands ~1MB. CMake accepts
+# either AMF-*/amf/public/include (what this produces) or amf-sdk-*/include.
+function Find-AmfHeaderRoot {
+    return @(Get-ChildItem $ffmpegDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { (Test-Path (Join-Path $_.FullName 'include/AMF/core/Version.h')) -or
+                       (Test-Path (Join-Path $_.FullName 'amf/public/include/AMF/core/Version.h')) } |
+        Sort-Object Name | Select-Object -Last 1)
+}
+
+function Ensure-AmfHeaders([string]$destDir, [string]$version) {
+    $git = Join-Path (Split-Path (Split-Path $gitBash -Parent) -Parent) 'cmd\git.exe'
+    if (-not (Test-Path $git)) {
+        Write-Host "[src][WARN] git.exe not found next to Git Bash - cannot fetch AMF headers" -ForegroundColor Yellow
+        return $false
+    }
+    Write-Host "[src] fetching AMF SDK $version headers (sparse) -> $destDir"
+    New-Item -ItemType Directory -Path $ffmpegDir -Force | Out-Null
+    try {
+        & $git clone --depth 1 --branch "v$version" --filter=blob:none --no-checkout `
+            'https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git' $destDir 2>&1 | Format-ToolOutput
+        if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE)" }
+        Push-Location $destDir
+        try {
+            & $git sparse-checkout set 'amf/public/include' 2>&1 | Format-ToolOutput
+            if ($LASTEXITCODE -ne 0) { throw "git sparse-checkout set failed (exit $LASTEXITCODE)" }
+            & $git checkout 2>&1 | Format-ToolOutput
+            if ($LASTEXITCODE -ne 0) { throw "git checkout failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    } catch {
+        Write-Host "[src][WARN] AMF header fetch failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Remove-Item -LiteralPath $destDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    return (Test-Path (Join-Path $destDir 'amf/public/include/AMF/core/Version.h'))
+}
+
+# oneVPL is the link-time dependency of FFmpeg's QSV encoders and has no Windows
+# binary developer package, so CMake builds it from source (statically). The whole
+# repo is only ~7MB, so a plain depth-1 clone is enough - no sparse checkout.
+function Find-OneVPLSource {
+    return @(Get-ChildItem $ffmpegDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { (Test-Path (Join-Path $_.FullName 'libvpl/CMakeLists.txt')) -and
+                       (Test-Path (Join-Path $_.FullName 'api/vpl/mfxdispatcher.h')) } |
+        Sort-Object Name | Select-Object -Last 1)
+}
+
+function Ensure-OneVPLSource([string]$destDir, [string]$version) {
+    $git = Join-Path (Split-Path (Split-Path $gitBash -Parent) -Parent) 'cmd\git.exe'
+    if (-not (Test-Path $git)) {
+        Write-Host "[src][WARN] git.exe not found next to Git Bash - cannot fetch oneVPL" -ForegroundColor Yellow
+        return $false
+    }
+    Write-Host "[src] fetching oneVPL $version -> $destDir"
+    New-Item -ItemType Directory -Path $ffmpegDir -Force | Out-Null
+    try {
+        & $git clone --depth 1 --branch "v$version" `
+            'https://github.com/intel/libvpl.git' $destDir 2>&1 | Format-ToolOutput
+        if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE)" }
+    } catch {
+        Write-Host "[src][WARN] oneVPL fetch failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Remove-Item -LiteralPath $destDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    return (Test-Path (Join-Path $destDir 'libvpl/CMakeLists.txt'))
 }
 
 # Stage the 64-bit Qt runtime next to the new exe.
@@ -276,6 +348,22 @@ if (-not $nvOk) {
 }
 if (-not $nvOk) {
     Write-Host "[WARN] nv-codec-headers missing - CMake will build FFmpeg without NVENC (software encode only)" -ForegroundColor Yellow
+}
+
+# AMF is optional like NVENC: CMake enables it only when it can find the SDK
+# headers. A 32-bit build (FFmpeg 3.4.8) has no AMF support at all, so skip.
+if (([Version]$ffmpegVersion -ge [Version]'5') -and (-not (Find-AmfHeaderRoot))) {
+    if (-not (Ensure-AmfHeaders $amfHeadersSrc $amfVersion)) {
+        Write-Host "[WARN] AMF headers missing - FFmpeg will be built without AMD AMF (NVENC/software only)" -ForegroundColor Yellow
+    }
+}
+
+# oneVPL is optional the same way: without its source CMake simply skips QSV and
+# keeps the other hardware encoders.
+if (([Version]$ffmpegVersion -ge [Version]'5') -and (-not (Find-OneVPLSource))) {
+    if (-not (Ensure-OneVPLSource $oneVplSrc $oneVplVersion)) {
+        Write-Host "[WARN] oneVPL source missing - FFmpeg will be built without Intel QSV (NVENC/AMF/software only)" -ForegroundColor Yellow
+    }
 }
 Write-Host ""
 

@@ -151,6 +151,89 @@ if(FFMPEG_FOUND)
             endif()
         endif()
     endif()
+    # libx265（H.265 软编）是外部 C++ 库：静态 FFmpeg 里只有调用它的封装层，
+    # x265_api_get 这些符号必须由最终可执行文件提供，所以产物确实带 libx265 时
+    # 要在链接行补上 x265 + libstdc++，否则链接期 undefined reference。
+    # 判据与 BuildFFmpeg.cmake 的探测保持一致：已安装产物直接看 libavcodec.pc 里
+    # 有没有 -lx265（configure 的最终结论），首次构建还没有 .pc 时用同样的系统探测。
+    set(_ffmpeg_has_x265 FALSE)
+    set(_ffmpeg_avcodec_pc "${FFMPEG_ROOT}/lib/pkgconfig/libavcodec.pc")
+    if(EXISTS "${_ffmpeg_avcodec_pc}")
+        file(READ "${_ffmpeg_avcodec_pc}" _ffmpeg_pc_all_text)
+        if(_ffmpeg_pc_all_text MATCHES "-lx265([ )\n]|$)")
+            set(_ffmpeg_has_x265 TRUE)
+        endif()
+    elseif(FFMPEG_ASSUME_BUILT)
+        find_path(FFMPEG_X265_INCLUDE_DIR x265.h)
+        find_library(FFMPEG_X265_LIBRARY NAMES x265 libx265)
+        if(FFMPEG_X265_INCLUDE_DIR AND FFMPEG_X265_LIBRARY)
+            set(_ffmpeg_has_x265 TRUE)
+        endif()
+    endif()
+    if(_ffmpeg_has_x265)
+        if(NOT FFMPEG_X265_LIBRARY)
+            find_library(FFMPEG_X265_LIBRARY NAMES x265 libx265)
+        endif()
+        if(FFMPEG_X265_LIBRARY)
+            list(APPEND FFMPEG_EXTRA_LIBS "${FFMPEG_X265_LIBRARY}" stdc++)
+            message(STATUS "FFmpeg 产物含 libx265（H.265 软编）：链接 ${FFMPEG_X265_LIBRARY} + stdc++")
+        else()
+            message(WARNING
+                "FFmpeg 产物声明需要 -lx265，但链接器找不到 libx265：请在构建机安装 x265 "
+                "开发包（Ubuntu: libx265-dev / Anolis: x265-devel）后重新配置。")
+        endif()
+    endif()
+
+    # QSV 同理但不是系统库：oneVPL 源码发布、没有 Windows 开发包，产物是本仓库
+    # 自己编的静态调度器 ${BUILD_OUTPUT_DIR}/vpl_install/lib/libvpl.a（由
+    # BuildFFmpeg.cmake 的构建脚本产出）。它是 C++ 实现，所以还要补 stdc++。
+    # 判据与 BuildFFmpeg.cmake 一致：外部产物看 libavcodec.pc 有没有 -lvpl；本仓库
+    # 自编产物看 vpl_install 在不在（Windows 只装库、没有 .pc）；首次构建（两者都
+    # 还没有）时按同样的"oneVPL 源码在不在"判断会不会启用 QSV。
+    set(_ffmpeg_has_vpl FALSE)
+    set(_ffmpeg_vpl_lib "${BUILD_OUTPUT_DIR}/vpl_install/lib/libvpl.a")
+    if(WIN32 AND NOT MSVC AND NOT FFMPEG_VERSION_EFFECTIVE VERSION_LESS 5)
+        set(_ffmpeg_avcodec_pc "${FFMPEG_ROOT}/lib/pkgconfig/libavcodec.pc")
+        if(EXISTS "${_ffmpeg_avcodec_pc}")
+            # 外部自带的产物：只有 .pc 能说明它真的编进了 QSV
+            file(READ "${_ffmpeg_avcodec_pc}" _ffmpeg_pc_vpl_text)
+            if(_ffmpeg_pc_vpl_text MATCHES "-lvpl([ )\n]|$)")
+                set(_ffmpeg_has_vpl TRUE)
+            endif()
+        elseif(EXISTS "${_ffmpeg_vpl_lib}")
+            # 本仓库的 FFmpeg 在 Windows 上只跑 make install-libs（不产 .pc），
+            # 所以判据换成"oneVPL 产物在不在"——它只会在启用 QSV 的 configure 之前编出来。
+            set(_ffmpeg_has_vpl TRUE)
+        elseif(FFMPEG_ASSUME_BUILT)
+            set(_ffmpeg_vpl_candidates "")
+            if(QTRD_VPL_SOURCE_DIR)
+                list(APPEND _ffmpeg_vpl_candidates "${QTRD_VPL_SOURCE_DIR}")
+            endif()
+            if(DEFINED ENV{ONEVPL_SRC} AND NOT "$ENV{ONEVPL_SRC}" STREQUAL "")
+                list(APPEND _ffmpeg_vpl_candidates "$ENV{ONEVPL_SRC}")
+            endif()
+            file(GLOB _ffmpeg_vpl_vendored "${CMAKE_SOURCE_DIR}/remotedesk/thridparty/ffmpeg/oneVPL*")
+            list(APPEND _ffmpeg_vpl_candidates ${_ffmpeg_vpl_vendored})
+            foreach(_ffmpeg_vpl IN LISTS _ffmpeg_vpl_candidates)
+                if(EXISTS "${_ffmpeg_vpl}/libvpl/CMakeLists.txt"
+                   AND EXISTS "${_ffmpeg_vpl}/api/vpl/mfxdispatcher.h")
+                    set(_ffmpeg_has_vpl TRUE)
+                    break()
+                endif()
+            endforeach()
+        endif()
+    endif()
+    if(_ffmpeg_has_vpl)
+        if(EXISTS "${_ffmpeg_vpl_lib}" OR FFMPEG_ASSUME_BUILT)
+            list(APPEND FFMPEG_EXTRA_LIBS "${_ffmpeg_vpl_lib}" gdi32 uuid stdc++)
+            message(STATUS "FFmpeg 产物含 QSV（libvpl）：链接 ${_ffmpeg_vpl_lib} + stdc++")
+        else()
+            message(WARNING
+                "FFmpeg 产物声明需要 -lvpl，但找不到 ${_ffmpeg_vpl_lib}："
+                "保留 oneVPL 构建产物（或重跑构建脚本）后重新配置。")
+        endif()
+    endif()
+
     if(_OPENH264_LIB)
         list(INSERT FFMPEG_EXTRA_LIBS 0 "${_OPENH264_LIB}")
     endif()

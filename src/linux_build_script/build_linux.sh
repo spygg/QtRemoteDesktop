@@ -366,6 +366,15 @@ check_deps() {
         echo "  [可选] NVENC: 不可用（非 x86 平台，或 $FFNV_SEARCH_DIR 下没有 nv-codec-headers-*）"
         echo "           需要硬编时：解压 nv-codec-headers（FFmpeg $FFMPEG_VERSION 用 API >= 12.1.14）到该目录后重新构建"
     fi
+    # --- V4L2 M2M（可选：板载 VPU 硬编，MTK/RK/Amlogic 等 ARM SoC 唯一可用的硬编）---
+    # 构建机与部署机常常不是同一台（交叉/容器内构建），所以这里只判"FFmpeg 能不能
+    # 编出这个编码器"；有没有真正的编码节点由运行时探测决定（videoencoder 的
+    # v4l2StatefulEncodes 扫 /dev/video*）。
+    if ff_v4l2m2m_probe; then
+        echo "  [可选] V4L2 M2M: 可用（FFmpeg 将启用 h264_v4l2m2m/hevc_v4l2m2m，运行时看 /dev/video* 有状态编码节点）"
+    else
+        echo "  [可选] V4L2 M2M: 不可用（缺 linux/videodev2.h 的 M2M 能力位或 sem_timedwait；板载 VPU 硬编需要它）"
+    fi
     # --- XRandR（可选：进程内多显示器枚举）---
     if have_header "$(hdr_for Xrandr)"; then
         echo "  [可选] XRandR: 已找到（进程内多显示器枚举可用）"
@@ -518,6 +527,9 @@ build_mpp() {
 #            ff_write_ffnvcodec_pc 生成 .pc 并加进 PKG_CONFIG_PATH）。
 # 探测方式与 configure 自身的检查保持一致，探测通过才把开关传进 configure，
 # 避免出现"显式 --enable-xxx 但环境不满足 → configure 直接报错中断构建"。
+#   V4L2 M2M —— 板载 VPU（MTK/RK/Amlogic）的有状态编码节点，只要 linux/videodev2.h
+#            有 M2M 能力位 + HEVC/H264 四字符码且 libc 提供 sem_timedwait 就能编；
+#            ARM 板没有 libva/nvenc，这是它们唯一的硬编来源（见 ff_v4l2m2m_probe）。
 ff_nvenc_probe() {
     # 与 FFmpeg configure 自己的门槛一致：x86 家族 + 头文件可编译。
     # 位宽/驱动是否真能用交给运行时（videoencoder 的 findHwEncoder 逐个候选 open，
@@ -557,6 +569,39 @@ EOF
     return $rc
 }
 
+# 板载 VPU（MTK/RK/Amlogic 等）的 V4L2 M2M 硬编：构建期只验"代码编得出"，
+# 与 FFmpeg configure 的 v4l2_m2m_deps + check_cc 完全对齐——
+#   deps = linux_videodev2_h + sem_timedwait（musl < 1.2 无 sem_timedwait，
+#          Android bionic 头里没有这些 M2M 能力位，都会在这里被挡掉）
+#   check_cc = V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_VIDEO_M2M | V4L2_BUF_FLAG_LAST
+#   h264/hevc_v4l2_m2m 还各要一个四字符格式宏（老内核头没有 V4L2_PIX_FMT_HEVC）
+# 是否真有编码器节点由运行时决定（videoencoder 的 v4l2StatefulEncodes 逐个
+# /dev/video* 探 M2M 能力 + ENUM_FMT），因为构建机和部署机经常不是同一台。
+ff_v4l2m2m_probe() {
+    local probe rc
+    probe="$(mktemp "${TMPDIR:-/tmp}/qtrd_v4l2_probe_XXXXXX.c")" || return 1
+    cat > "$probe" <<'EOF'
+#include <linux/videodev2.h>
+#include <semaphore.h>
+#include <time.h>
+int main(void)
+{
+    int caps = V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_VIDEO_M2M | V4L2_BUF_FLAG_LAST;
+    int h264 = V4L2_PIX_FMT_H264;
+    int hevc = V4L2_PIX_FMT_HEVC;
+    sem_t sem;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);      /* 只为强制链接 sem_timedwait */
+    (void)sem_timedwait(&sem, &ts);
+    return caps + h264 + hevc == 0;
+}
+EOF
+    ${CC:-gcc} "$probe" -o /dev/null -lpthread >/dev/null 2>&1
+    rc=$?
+    rm -f "$probe"
+    return $rc
+}
+
 # FFmpeg >= 5 的 configure 认 ffnvcodec 只走 pkg-config（没有 --extra-cflags 的
 # 旁路），所以给它一份 .pc：版本取自目录名，Cflags 指向头目录。
 ff_write_ffnvcodec_pc() {
@@ -587,6 +632,7 @@ build_ffmpeg() {
     local pkgconfig_dir="$BUILD_DIR/ffmpeg_pkgconfig"
     local vaapi_marker="$ffbuild/.vaapi_requested"
     local nvenc_marker="$ffbuild/.nvenc_requested"
+    local v4l2_marker="$ffbuild/.v4l2m2m_requested"
     # libva 是可选依赖：有头文件且有 pkg-config 记录才启用 VAAPI。FFmpeg 的
     # configure 还会用 check_lib(-lva/-lva-drm) 再验证一次，缺库时自动降级。
     local want_vaapi=0
@@ -596,6 +642,14 @@ build_ffmpeg() {
     local want_nvenc=0
     if ff_nvenc_probe; then
         want_nvenc=1
+    fi
+    # 板载 VPU（MTK/RK/Amlogic）：编码节点在 /dev/video*，与构建机是不是同一台设备
+    # 无关，所以只看"头文件与函数能编出 FFmpeg 要的判定"（见 ff_v4l2m2m_probe）。
+    # 3.4.8 整段跳过：libavcodec 的 v4l2m2m 封装是 4.1 才进来的，老 configure 连
+    # --enable-v4l2-m2m 这个选项都不认（给了就报未知选项直接失败）。
+    local want_v4l2=0
+    if ! ff_is_legacy_ffmpeg && ff_v4l2m2m_probe; then
+        want_v4l2=1
     fi
 
     # 增量约定：产物已存在则跳过（configure+make 仅首次执行；如需全量重建用 --clean）。
@@ -609,10 +663,11 @@ build_ffmpeg() {
         exit 1
     fi
     if [ -f "$FFMPEG_INSTALL/lib/libavcodec.a" ]; then
-        local have_vaapi=0 have_nvenc=0
+        local have_vaapi=0 have_nvenc=0 have_v4l2=0
         if [ -f "$ffbuild/config.h" ]; then
             grep -q '^#define CONFIG_H264_VAAPI_ENCODER 1' "$ffbuild/config.h" && have_vaapi=1
             grep -q '^#define CONFIG_H264_NVENC_ENCODER 1' "$ffbuild/config.h" && have_nvenc=1
+            grep -q '^#define CONFIG_H264_V4L2M2M_ENCODER 1' "$ffbuild/config.h" && have_v4l2=1
         fi
         # 任一硬编功能"现在探测得到、但已有产物里没编进去、且上次没失败过"→ 必须
         # 全量重配（config.h、对象文件与 Makefile 都已过时，仅 make 增量可能链接到缺符号的目标）。
@@ -625,6 +680,10 @@ build_ffmpeg() {
             echo ">>> 本机支持 NVENC，但已有 FFmpeg 未启用 NVENC，重新配置并构建"
             need_reconfig=1
         fi
+        if [ $want_v4l2 -eq 1 ] && [ $have_v4l2 -eq 0 ] && [ ! -f "$v4l2_marker" ]; then
+            echo ">>> 本机支持 V4L2 M2M（板载 VPU），但已有 FFmpeg 未启用，重新配置并构建"
+            need_reconfig=1
+        fi
         if [ $need_reconfig -eq 1 ]; then
             rm -rf "$ffbuild"
         else
@@ -632,7 +691,10 @@ build_ffmpeg() {
                 echo ">>> [warn] 已有 FFmpeg 未启用 VAAPI（上次尝试未成功），继续复用产物"
             [ $want_nvenc -eq 1 ] && [ $have_nvenc -eq 0 ] && \
                 echo ">>> [warn] 已有 FFmpeg 未启用 NVENC（上次尝试未成功），继续复用产物"
-            if [ \( $want_vaapi -eq 1 -a $have_vaapi -eq 0 \) -o \( $want_nvenc -eq 1 -a $have_nvenc -eq 0 \) ]; then
+            [ $want_v4l2 -eq 1 ] && [ $have_v4l2 -eq 0 ] && \
+                echo ">>> [warn] 已有 FFmpeg 未启用 V4L2 M2M（上次尝试未成功），继续复用产物"
+            if [ \( $want_vaapi -eq 1 -a $have_vaapi -eq 0 \) -o \( $want_nvenc -eq 1 -a $have_nvenc -eq 0 \) \
+                 -o \( $want_v4l2 -eq 1 -a $have_v4l2 -eq 0 \) ]; then
                 echo "           如需重试：修好依赖后执行 --clean 重新构建"
             else
                 echo ">>> FFmpeg 已存在 ($FFMPEG_INSTALL/lib/libavcodec.a)，跳过（增量构建）"
@@ -671,6 +733,17 @@ build_ffmpeg() {
         echo "[ffmpeg] 非 x86 或 compat/nvenc 头文件不可编译，NVENC 禁用"
     else
         echo "[ffmpeg] 非 x86 或缺 nv-codec-headers（FFmpeg $FFMPEG_VERSION 的外部 NVENC 头），NVENC 禁用"
+    fi
+    # v4l2m2m：--disable-everything 会把 ENCODER_LIST 整个 unset（configure 的
+    # --disable-everything 只清 COMPONENT_LIST 里的各 *_LIST，不清
+    # HWACCEL_AUTODETECT_LIBRARY_LIST，所以 v4l2_m2m 本身能自动检出，但编码器必须点名）
+    if [ $want_v4l2 -eq 1 ]; then
+        ff_hw_flags="$ff_hw_flags --enable-v4l2-m2m --enable-encoder=h264_v4l2m2m --enable-encoder=hevc_v4l2m2m"
+        echo "[ffmpeg] 启用 V4L2 M2M 硬编: h264_v4l2m2m / hevc_v4l2m2m（运行时看 /dev/video* 有状态编码节点）"
+    elif ff_is_legacy_ffmpeg; then
+        echo "[ffmpeg] FFmpeg $FFMPEG_VERSION 无 v4l2m2m 封装（4.1 才引入），V4L2 M2M 硬编禁用"
+    else
+        echo "[ffmpeg] linux/videodev2.h 或 sem_timedwait 不满足 FFmpeg 判定，V4L2 M2M 硬编禁用"
     fi
     # GCC 13+ 兼容补丁：x86/mathops.h 用 "ic" 内联汇编约束会触发
     # "operand type mismatch for shr"（GCC 生成非法 8 位移位操作数）。
@@ -754,6 +827,12 @@ build_ffmpeg() {
        && ! grep -q '^#define CONFIG_H264_NVENC_ENCODER 1' "$cfg" 2>/dev/null; then
         : > "$nvenc_marker"
         echo "[warn] NVENC 探测通过但 FFmpeg 未能启用 h264_nvenc" >&2
+        echo "       继续使用软编；执行 --clean 重新构建可重试" >&2
+    fi
+    if [ $want_v4l2 -eq 1 ] \
+       && ! grep -q '^#define CONFIG_H264_V4L2M2M_ENCODER 1' "$cfg" 2>/dev/null; then
+        : > "$v4l2_marker"
+        echo "[warn] V4L2 M2M 探测通过但 FFmpeg 未能启用 h264_v4l2m2m" >&2
         echo "       继续使用软编；执行 --clean 重新构建可重试" >&2
     fi
     # 头文件补拷（make install 在带版本号源码目录名时可能漏装部分头）
