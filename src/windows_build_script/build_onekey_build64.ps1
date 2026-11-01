@@ -36,6 +36,31 @@ $nvHeadersSrc  = Join-Path $ffmpegDir "nv-codec-headers-$nvHeadersTag"
 $amfHeadersSrc = Join-Path $ffmpegDir "amf-sdk-$amfVersion"
 $oneVplSrc     = Join-Path $ffmpegDir "oneVPL-$oneVplVersion"
 
+# ConvertTo-FfmpegVersion: [Version] throws on a bare "5" ("version string portion
+# is too short or too long") and on the "n6.1.2" tag form, and an env var that
+# happens to be set for another tool must not abort the build.
+function ConvertTo-FfmpegVersion([string]$Text) {
+    $clean = ($Text -replace '^\s*[nN]', '').Trim()
+    if ($clean -match '^\d+$') { $clean = "$clean.0" }
+    if ($clean -notmatch '^\d+(\.\d+){1,3}$') { return $null }
+    return [Version]$clean
+}
+
+$ffmpegVer = ConvertTo-FfmpegVersion $ffmpegVersion
+if ($null -eq $ffmpegVer) {
+    throw "FFMPEG_VERSION='$ffmpegVersion' is not a version number (expected e.g. 6.1.2)"
+}
+
+# A major-only value has no source directory and no valid upstream tag, so fall
+# back to the bundled 6.1.2 instead of downloading something that does not exist.
+if ($ffmpegVersion -notmatch '^\s*[nN]?\d+\.\d+' -and
+    (Test-Path (Join-Path $ffmpegDir 'FFmpeg-n6.1.2/configure'))) {
+    Write-Host "[src][WARN] FFMPEG_VERSION='$ffmpegVersion' has no minor version - using bundled 6.1.2" -ForegroundColor Yellow
+    $ffmpegVersion = '6.1.2'
+    $ffmpegVer = ConvertTo-FfmpegVersion $ffmpegVersion
+    $ffmpegSrc = Join-Path $ffmpegDir "FFmpeg-n$ffmpegVersion"
+}
+
 # ---- Shared helpers (Get-GitBash); does not alter build.bat behaviour ----
 . (Join-Path $scriptDir 'build_common.ps1')
 
@@ -352,7 +377,7 @@ if (-not $nvOk) {
 
 # AMF is optional like NVENC: CMake enables it only when it can find the SDK
 # headers. A 32-bit build (FFmpeg 3.4.8) has no AMF support at all, so skip.
-if (([Version]$ffmpegVersion -ge [Version]'5') -and (-not (Find-AmfHeaderRoot))) {
+if (($ffmpegVer -ge [Version]'5.0') -and (-not (Find-AmfHeaderRoot))) {
     if (-not (Ensure-AmfHeaders $amfHeadersSrc $amfVersion)) {
         Write-Host "[WARN] AMF headers missing - FFmpeg will be built without AMD AMF (NVENC/software only)" -ForegroundColor Yellow
     }
@@ -360,7 +385,7 @@ if (([Version]$ffmpegVersion -ge [Version]'5') -and (-not (Find-AmfHeaderRoot)))
 
 # oneVPL is optional the same way: without its source CMake simply skips QSV and
 # keeps the other hardware encoders.
-if (([Version]$ffmpegVersion -ge [Version]'5') -and (-not (Find-OneVPLSource))) {
+if (($ffmpegVer -ge [Version]'5.0') -and (-not (Find-OneVPLSource))) {
     if (-not (Ensure-OneVPLSource $oneVplSrc $oneVplVersion)) {
         Write-Host "[WARN] oneVPL source missing - FFmpeg will be built without Intel QSV (NVENC/AMF/software only)" -ForegroundColor Yellow
     }
