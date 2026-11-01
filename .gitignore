@@ -75,6 +75,8 @@ src/remotedesk/thridparty/ffmpeg/linux/presets/
 *.7z
 *.tar
 *.tar.gz
+# OpenSSL 1.0.2u 源码包：Linux 构建的硬依赖（missing 即 CMake FATAL_ERROR），必须入库
+!src/remotedesk/thridparty/third_party_src/openssl/openssl-1.0.2u.tar.gz
 
 # 数据库文件
 *.db
