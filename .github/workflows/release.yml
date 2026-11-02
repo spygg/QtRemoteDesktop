@@ -715,8 +715,15 @@ jobs:
         run: |
           set -o pipefail
           # 首次构建要现编 FFmpeg + openh264 + metaRTC + srtp + usrsctp，几十分钟量级
-          cmake --build build --parallel 3 2>&1 | tee build.log
-          ls -la "$APP_BUNDLE/Contents/MacOS/"
+          # -- -k：make 默认撞到第一个错误就收摊，而 Apple 侧上次只编到 38%，后面还有
+          # WebRTC/helper/主程序一大半 targets 从没在 Clang 下编过。用 -k 继续编其它
+          # 目标，一轮就把错误清单全部暴露出来，不用一个错误烧一轮 CI。
+          cmake --build build --parallel 3 -- -k 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          echo "=== 本轮编译错误清单 ==="
+          grep -E "error:" build.log | sed -E 's|^/Users/runner/work/[^/]+/[^/]+/||' | sort -u | head -60 || true
+          ls -la "$APP_BUNDLE/Contents/MacOS/" 2>/dev/null || true
+          [ "$rc" -eq 0 ] || { echo "::error::Build 失败 (rc=$rc)"; exit "$rc"; }
 
       - name: Package
         shell: bash
@@ -821,9 +828,10 @@ jobs:
               echo "=== $f ==="
               cat "$f" 2>/dev/null || echo "(不存在)"
             done
+            # -k 之后一轮可能带出几十条错误，80 行会截掉后面的
             echo "=== 错误摘要 ==="
             grep -inE "error|undefined|cannot find|No such file|fatal" \
-              build.log configure.log 2>/dev/null | tail -80
+              build.log configure.log 2>/dev/null | tail -250
           } > ci-logs/all.log
           git add -f ci-logs/all.log
           git commit -m "ci logs: macOS x86_64 run ${{ github.run_id }} $(date -u +%Y%m%d%H%M%S)" || true
