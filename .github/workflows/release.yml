@@ -113,7 +113,29 @@ jobs:
           $nasm = Locate-Nasm
           if ($nasm) { Write-Host "runner 已有 nasm：$nasm" }
 
-          if (-not $nasm) {
+          # runner 镜像 2026 年年中起自带 NASM 3.02。nasm 3 展开 FFmpeg 3.4.8 的
+          # x86inc.asm 时，simple_idct10.asm 的例程会被整个丢掉，产出的 .o 一个节都没有，
+          # 打到 libavcodec.a 时 strip 报 "the input file ... has no sections"
+          # （v1.2.7 的 XP 腿，同一份代码两小时前的 v1.2.6 还是绿的）。
+          # FFmpeg 5 起才修掉与 nasm 3 的兼容问题，所以只对 3.4.8 这条腿拒收 3.x；
+          # x64 腿用的是 6.1.2，nasm 3 已经验证过，不跟着改。
+          # choco 的 nasm 包如今也是 3.x，所以认出 3.x 就跳过前两条路，直装钉死的 2.16.03；
+          # GITHUB_PATH 写进去的目录排在 PATH 最前，会盖住 C:\Program Files\NASM。
+          $needPinned = $false
+          if ($nasm -and ('${{ matrix.config.ffmpeg }}' -like '3.*')) {
+            $verLine = ((& $nasm -v) | Select-Object -First 1)
+            if ($verLine -match 'NASM version\s+(\d+)') {
+              if ([int]$Matches[1] -ge 3) {
+                Write-Host "FFmpeg 3.4.8 腿遇到 $verLine，nasm 3 编不了它的汇编，改装 2.16.03"
+                $nasm = $null
+                $needPinned = $true
+              }
+            } else {
+              Write-Host "nasm -v 输出解析不了（$verLine），先按可用处理"
+            }
+          }
+
+          if (-not $nasm -and -not $needPinned) {
             Write-Host '=== choco install nasm ==='
             choco install nasm -y --no-progress
             $nasm = Locate-Nasm
@@ -843,13 +865,21 @@ jobs:
             mkdir -p "$FW"
             machos() {
               find "$APP_BUNDLE/Contents" -type f | while read -r f; do
-                file "$f" 2>/dev/null | grep -q 'Mach-O' && printf '%s\n' "$f"
+                # 每轮必须以 true 收尾：GitHub 的 shell: bash 默认就是 -e -o pipefail
+                # （步骤里那行 set -o pipefail 只是重复声明），而 while 的返回状态取最后
+                # 一次迭代。find 列到末尾基本都会撞上非 Mach-O（Info.plist、qml 资源等），
+                # grep -q 的 1 就成了 machos 的 1，pipefail 把整条流水线判失败——
+                # v1.2.7 两条 macOS 腿都在规范化循环跑完后立刻 exit 1，
+                # 一行"外部依赖 pass 1"都没打出来。find 自己失败仍由 pipefail 暴露。
+                file "$f" 2>/dev/null | grep -q 'Mach-O' && printf '%s\n' "$f" || true
               done
             }
             # id 行永远是第一条缩进的条目，但它的值可能是 @rpath/… 开头，
             # 所以判定只看缩进、不看前缀：只认 "/" 会让 @ 开头的 id 不被计数，
             # 结果把第一条真依赖当成 id 跳过（也会让 own_id 读错行）。
-            own_id() { otool -L "$1" 2>/dev/null | awk '/^[[:space:]]+/ {print $1; exit}'; }
+            # 取第一条用 seen 标记而不是 {print; exit}：exit 会提前关读端，写入方
+            # 之后再有输出就吃 SIGPIPE，pipefail 下整条管道 141、set -e 直接杀步骤。
+            own_id() { otool -L "$1" 2>/dev/null | awk '/^[[:space:]]+/ {if (!seen) {print $1; seen=1}}'; }
             # 依赖清单 = 缩进条目去掉第一条（自身 install name），且只要绝对路径形态
             ref_list() { otool -L "$1" 2>/dev/null | awk '/^[[:space:]]+/ {n++; if (n>1 && $1 ~ /^\//) print $1}'; }
             ext_deps() {
