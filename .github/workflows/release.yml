@@ -911,9 +911,64 @@ jobs:
             own_id() { otool -L "$1" 2>/dev/null | awk '/^[[:space:]]+/ {if (!seen) {print $1; seen=1}}'; }
             # 依赖清单 = 缩进条目去掉第一条（自身 install name），且只要绝对路径形态
             ref_list() { otool -L "$1" 2>/dev/null | awk '/^[[:space:]]+/ {n++; if (n>1 && $1 ~ /^\//) print $1}'; }
+            # 全部真引用（含 @rpath/@loader_path/@executable_path 形态），给 rpath 审计用
+            ref_list_all() { otool -L "$1" 2>/dev/null | awk '/^[[:space:]]+/ {n++; if (n>1) print $1}'; }
             ext_deps() {
               machos | while read -r f; do ref_list "$f"; done \
                 | sort -u | grep -vE '^(/usr/lib/|/System/|@rpath/|@executable_path/|@loader_path/)' || true
+            }
+            EXEDIR="$APP_BUNDLE/Contents/MacOS"
+            # brew 的 dylib 之间用 @rpath/兄弟名 互相引用，靠各自的 LC_RPATH 解析。brew 的
+            # 布局是 …/lib/libx.1.dylib + rpath @loader_path/../lib（也就是它自己的目录），
+            # 一旦把裸文件搬进 Contents/Frameworks，@loader_path/../lib 就指向包里的
+            # Contents/lib（不存在），兄弟全断。v1.2.10 的 arm64 产物实测断在这条链上：
+            #   libqcocoa.dylib -> Frameworks/libfreetype.6.dylib
+            #                   -> libbrotlidec.1.dylib -> @rpath/libbrotlicommon.1.dylib（包里没有）
+            # 主程序自己不引用 freetype（brew 的 Qt 用 CoreText 排字），所以进程起得来、Qt
+            # 能打印插件清单，直到 dlopen 平台插件才失败——CI 里那句 'Could not load the Qt
+            # platform plugin ... even though it was found' 和干净 Mac 上双击打不开是同一个原因。
+            # 上面那套绝对路径闭包看不见它：ext_deps 明确过滤掉了 @rpath 形态。
+            # 修法两条：缺的兄弟从构建机搬进 Frameworks，再给引用方补一条
+            # @executable_path/../Frameworks 的 rpath，让 @rpath 在包内就能解析。
+            rpaths_of() {
+              otool -l "$1" 2>/dev/null | awk '$1=="cmd" && $2=="LC_RPATH" {r=1; next}
+                                               r && $1=="path" {print $2; r=0}'
+            }
+            # 只看包内的实际目录：引用方文件 + 它自己的 rpath 能不能落到一个真实文件上
+            rpath_ok() {  # $1=引用方 $2=@rpath/… 引用
+              local name=${2#@rpath/} rp cand
+              for rp in $(rpaths_of "$1"); do
+                case "$rp" in
+                  @executable_path/*) cand="$EXEDIR/${rp#@executable_path/}/$name" ;;
+                  @loader_path/*)     cand="${1%/*}/${rp#@loader_path/}/$name" ;;
+                  /*)                 cand="$rp/$name" ;;
+                  *)                  continue ;;
+                esac
+                if [ -e "$cand" ]; then return 0; fi
+              done
+              return 1
+            }
+            # 输出待补清单，每行 "引用方文件<TAB>@rpath/名字"
+            # 结尾 || true 的理由和 ext_deps 一样：本函数只在 rt=$(rpath_todo) 这种命令
+            # 替换里用，-e 下替换的非零状态会直接杀掉整个 Package 步骤；otool 读个别文件
+            # 失败（非 Mach-O、权限）属于正常噪声，不该让它决定成败。
+            rpath_todo() {
+              machos | while read -r f; do
+                ref_list_all "$f" | while read -r r; do
+                  case "$r" in @rpath/*) ;; *) continue ;; esac
+                  rpath_ok "$f" "$r" || printf '%s\t%s\n' "$f" "$r"
+                done
+              done || true
+            }
+            locate_lib() {  # $1=dylib 文件名，输出构建机上的实际路径
+              local d hit
+              for d in "$QT_ROOT_DIR/lib" "$QT_ROOT_DIR"/share/*/lib /opt/homebrew/opt/*/lib \
+                       /usr/local/opt/*/lib; do
+                if [ -f "$d/$1" ]; then printf '%s\n' "$d/$1"; return 0; fi
+              done
+              hit=$(find /opt/homebrew /usr/local -type f -name "$1" 2>/dev/null | sed -n '1p' || true)
+              if [ -n "$hit" ]; then printf '%s\n' "$hit"; return 0; fi
+              return 1
             }
             # 喂给它的已经是"每行一条纯路径"（ref_list 只 print $1），所以整行精确比对
             refs_dep() { grep -Fxq "$1"; }
@@ -962,10 +1017,40 @@ jobs:
                 rewrite_everywhere "$dep" "@executable_path/../Frameworks/$base"
               done
             done
+            echo "=== 补 @rpath 兄弟依赖 ==="
+            for pass in 1 2 3 4 5; do
+              rt=$(rpath_todo)
+              if [ -z "$rt" ]; then break; fi
+              echo "--- pass $pass：$(printf '%s\n' "$rt" | grep -c . || true) 条 @rpath 引用解析不了"
+              printf '%s\n' "$rt" | sed 's/^/  /'
+              while IFS=$'\t' read -r f ref; do
+                name=${ref#@rpath/}
+                if [ ! -e "$FW/$name" ]; then
+                  src=$(locate_lib "$name") \
+                    || { echo "::error::@rpath 依赖在构建机上找不到，无法打包：$ref（引用方 $f）"; exit 1; }
+                  cp -L "$src" "$FW/$name"
+                  chmod u+w "$FW/$name"
+                  install_name_tool -id "@executable_path/../Frameworks/$name" "$FW/$name"
+                  echo "  搬入 $name（来自 $src）"
+                fi
+                # 已经补过就不再调一次注定失败的 install_name_tool（同一条 rpath 不能重复），
+                # 失败本身由下面的 || true 兜住，但每个 pass 都刷一遍错误会把日志淹掉。
+                if ! rpaths_of "$f" | grep -qx '@executable_path/../Frameworks'; then
+                  install_name_tool -add_rpath "@executable_path/../Frameworks" "$f" 2>&1 \
+                    | sed 's/^/  add_rpath: /' || true
+                fi
+              done <<< "$rt"
+            done
             left=$(ext_deps)
             if [ -n "$left" ]; then
               echo "::error::产物仍依赖包外 dylib（目标机会 dyld 打不开）："
               echo "$left"
+              exit 1
+            fi
+            left_rpath=$(rpath_todo)
+            if [ -n "$left_rpath" ]; then
+              echo "::error::包内仍有解析不了的 @rpath 依赖（目标机 dyld 会打不开）："
+              printf '%s\n' "$left_rpath" | sed 's/^/  /'
               exit 1
             fi
             otool -L "$APP_BUNDLE/Contents/MacOS/QtRemoteDesktop" | tee deps_after.log
