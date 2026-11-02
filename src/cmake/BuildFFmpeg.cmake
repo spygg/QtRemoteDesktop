@@ -185,6 +185,16 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_GREATE
     endif()
 endif()
 
+# Apple 上 clang 拿不到部署下限时，把每个 .o 的 minos 打成它自己的默认值（CI 上就是
+# SDK/主机版本 15.0），而主项目按 CMAKE_OSX_DEPLOYMENT_TARGET 链接 —— 于是链接期对
+# 每个 FFmpeg 对象刷一行 "built for newer 'macOS' version (15.0) than being
+# linked (10.14)"，产物在老系统上还不保证能起。下限跟主项目走，警告和隐患一起去掉。
+set(_ff_macos_min "")
+if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(_ff_macos_min "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    string(APPEND _ff_extra_cflags " ${_ff_macos_min}")
+endif()
+
 # x86 保留 NASM 汇编（swscale 的 RGB->YUV 有 SSE 实现）；无汇编器时退纯 C。
 # find_program 只认 CMake 进程继承的 PATH：从 explorer/快捷方式启动的 cmake 常常
 # 看不到 Git 的 usr/bin（nasm.exe 装在那里），因此显式给出常见位置。
@@ -633,12 +643,16 @@ set(_ff_configure_head
     "--disable-everything --enable-swscale --enable-libopenh264"
     "--enable-encoder=libopenh264"
     "--enable-decoder=h264 --enable-decoder=mjpeg --enable-decoder=mpeg4")
+set(_ff_extra_ldflags "-L${OPENH264_INSTALL_DIR}/lib")
+if(_ff_macos_min)
+    string(APPEND _ff_extra_ldflags " ${_ff_macos_min}")
+endif()
 set(_ff_configure_tail
     "${_ff_asm_flag} --enable-static --disable-shared"
     # 这些值可能含空格（多段 cflags / 带空格的仓库路径），必须整体加引号，
     # 否则被 sh 拆成多个 configure 选项。
     "--extra-cflags='${_ff_extra_cflags}'"
-    "--extra-ldflags='-L${OPENH264_INSTALL_DIR}/lib'"
+    "--extra-ldflags='${_ff_extra_ldflags}'"
     "--extra-libs=-lopenh264"
     "--prefix='${FFMPEG_INSTALL_DIR}'")
 string(REPLACE ";" " " _ff_configure_head "${_ff_configure_head}")
