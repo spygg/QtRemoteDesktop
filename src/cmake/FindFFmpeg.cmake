@@ -112,7 +112,11 @@ if(FFMPEG_FOUND)
         # macOS 没有 libdl（dlopen 在 libSystem 里），`-ldl` 会让链接直接失败。
         # FFmpeg 以 --enable-videotoolbox 静态编译时，hwcontext_videotoolbox.o
         # 引用的是系统框架而不是库，所以框架必须出现在最终可执行文件的链接行上。
-        set(FFMPEG_EXTRA_LIBS m pthread
+        # iconv 是 configure 在 macOS 上自动打开的：libavcodec/decode.c 的
+        # avcodec_decode_subtitle2 引用 _iconv/_iconv_open/_iconv_close，而系统
+        # iconv 不在 libSystem 里，缺 -liconv 就在链接主程序时报
+        # "Undefined symbols for architecture x86_64"（v1.2.4 实测）。
+        set(FFMPEG_EXTRA_LIBS m pthread iconv
             "-framework VideoToolbox"
             "-framework CoreMedia"
             "-framework CoreVideo"
