@@ -150,6 +150,18 @@ else()
 "endforeach()\n")
 endif()
 
+# Apple：把部署下限交给 clang 驱动去读。openh264 的 Makefile 在 BUILDTYPE=Release
+# 里自己 CFLAGS += -O2 -DNDEBUG，命令行传 CFLAGS=… 会把整条赋值覆盖掉（make 的命令行
+# 赋值优先于 Makefile 内的 +=），而它没有 EXTRA_CFLAGS 之类的钩子。
+# clang 在没有 -mmacosx-version-min 时按 MACOSX_DEPLOYMENT_TARGET 定 minos，
+# 用环境变量传就不碰它的编译选项。不传的代价：每个 .o 都打成 runner 的系统版本，
+# 链接期按 CMAKE_OSX_DEPLOYMENT_TARGET 链接 → v1.2.6 arm64 实测 65 条
+# "built for newer 'macOS' version (15.0) than being linked (11.0)"。
+if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
+    file(APPEND "${OPENH264_BUILD_SCRIPT}"
+"set(ENV{MACOSX_DEPLOYMENT_TARGET} \"${CMAKE_OSX_DEPLOYMENT_TARGET}\")\n")
+endif()
+
 file(APPEND "${OPENH264_BUILD_SCRIPT}"
 "execute_process(COMMAND \"${OPENH264_MAKE}\"${_openh264_args_in_script}\n"
 "  WORKING_DIRECTORY \"${OPENH264_BUILD_DIR}\"\n"
