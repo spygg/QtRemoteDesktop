@@ -148,8 +148,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Host '::error::nasm -v 执行失败'; exit 1 }
 
       # ---------- Qt（在线仓库覆盖得到的版本）----------
+      # aqt 从 Qt 官方镜像取包，偶发 HTTP 错误（v1.2.3 的 Linux 腿就是这条：
+      # 同一份输入 20 分钟前刚成功过）。这里失败不让整个矩阵腿陪葬，
+      # 原地重试一次；真的连续两次都失败才判死。
       - name: Install Qt
+        id: qt_official
         if: matrix.config.qt_official == 'true'
+        continue-on-error: true
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ matrix.config.qt }}
@@ -159,6 +164,17 @@ jobs:
           tools: ${{ matrix.config.qt_tools }}
           # 关掉 action 自带的 Qt 缓存：它按输入做 key，出现过恢复出旧版本 Qt 导致链接错乱；
           # Qt 本体解压只有几十秒，不值得冒这个风险
+          cache: false
+
+      - name: Retry Install Qt
+        if: steps.qt_official.outcome == 'failure'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ matrix.config.qt }}
+          host: ${{ matrix.config.qt_host }}
+          target: ${{ matrix.config.qt_target }}
+          arch: ${{ matrix.config.qt_arch }}
+          tools: ${{ matrix.config.qt_tools }}
           cache: false
 
       # ---------- Qt 5.7.1 + MinGW 5.3（XP 目标，只能走离线安装包）----------
@@ -632,12 +648,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Qt
+        id: qt_mac
+        continue-on-error: true
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
           # host 必须是 mac，不是 macos：action v4 校验的枚举是
           # windows | windows_arm64 | mac | linux | linux_arm64 | all_os，
           # 写错会在 Set up job 之后立刻 TypeError 退出（v1.2.1 实测）
+          host: mac
+          target: desktop
+          arch: clang_64
+          cache: false
+
+      # aqt 取包偶发失败重试一次；Apple 腿跑一次成本高，不值得被一次网络抖动废掉
+      - name: Retry Install Qt
+        if: steps.qt_mac.outcome == 'failure'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
           host: mac
           target: desktop
           arch: clang_64
