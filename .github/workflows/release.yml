@@ -94,16 +94,58 @@ jobs:
         if: startsWith(matrix.config.os, 'windows')
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          choco install nasm -y --no-progress --limit-output
-          $nasm = 'C:\Program Files\NASM\nasm.exe'
-          if (-not (Test-Path $nasm)) {
-            $nasm = (Get-ChildItem 'C:\Program Files\NASM', 'C:\Program Files (x86)\NASM' -Filter nasm.exe -Recurse -ErrorAction SilentlyContinue |
-                     Select-Object -First 1).FullName
+          $ErrorActionPreference = 'Continue'
+          function Locate-Nasm {
+            $cmd = Get-Command nasm.exe -ErrorAction SilentlyContinue
+            if ($cmd) { return $cmd.Source }
+            foreach ($d in 'C:\Program Files\NASM', 'C:\Program Files (x86)\NASM', 'C:\tools\nasm') {
+              $f = Join-Path $d 'nasm.exe'
+              if (Test-Path $f) { return $f }
+            }
+            return $null
           }
-          if (-not $nasm) { Write-Host "::error::nasm 未安装成功"; exit 1 }
+
+          # nasm 是 openh264 Makefile 直接调用的外部命令，也是 FFmpeg x86 汇编的前提，
+          # 拿不到就没有可发布的产物，所以依次试三条路，任一打通即停。
+          # 只做单次 choco 是不够的：v1.2.1 两个 Windows job 在同一提交上都比两小时前
+          # 那轮晚 2 小时跑，双双停在「nasm 未安装成功」，而那次改的只有 macOS 分支 ——
+          # 说明是 Chocolatey 源侧抖动，必须留一条不经它的直装路径。
+          $nasm = Locate-Nasm
+          if ($nasm) { Write-Host "runner 已有 nasm：$nasm" }
+
+          if (-not $nasm) {
+            Write-Host '=== choco install nasm ==='
+            choco install nasm -y --no-progress
+            $nasm = Locate-Nasm
+          }
+
+          if (-not $nasm) {
+            Write-Host '=== 直装 nasm.us 官方 zip ==='
+            $zip = Join-Path $env:RUNNER_TEMP 'nasm.zip'
+            $dir = Join-Path $env:RUNNER_TEMP 'nasm-dist'
+            $url = 'https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip'
+            for ($i = 1; $i -le 3 -and -not $nasm; $i++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+                Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+                Expand-Archive -Path $zip -DestinationPath $dir -Force
+                $hit = Get-ChildItem $dir -Filter nasm.exe -Recurse -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+                if ($hit) { $nasm = $hit.FullName }
+              } catch {
+                Write-Host "第 $i 次取包失败：$($_.Exception.Message)"
+                Start-Sleep -Seconds (10 * $i)
+              }
+            }
+          }
+
+          if (-not $nasm) {
+            Write-Host '::error::nasm 三条途径都没拿到（runner 自带 / choco / nasm.us）'
+            exit 1
+          }
           Split-Path $nasm -Parent | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & $nasm -v
+          if ($LASTEXITCODE -ne 0) { Write-Host '::error::nasm -v 执行失败'; exit 1 }
 
       # ---------- Qt（在线仓库覆盖得到的版本）----------
       - name: Install Qt
@@ -593,7 +635,10 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
-          host: macos
+          # host 必须是 mac，不是 macos：action v4 校验的枚举是
+          # windows | windows_arm64 | mac | linux | linux_arm64 | all_os，
+          # 写错会在 Set up job 之后立刻 TypeError 退出（v1.2.1 实测）
+          host: mac
           target: desktop
           arch: clang_64
           cache: false
