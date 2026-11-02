@@ -846,6 +846,26 @@ jobs:
             # 架构必须是本腿目标架构：混进 x86_64/arm64 就说明 Qt 来源和 runner 不匹配
             lipo -archs "$APP_BUNDLE/Contents/MacOS/QtRemoteDesktop" | tee -a deploy.log
 
+            # 冒烟要一个不需要 WindowServer 的 platform 插件。macdeployqt 只搬 cocoa，
+            # 它写的 qt.conf 又把插件搜索限制在包内，所以包外的 offscreen 根本不会被找到
+            # （v1.2.8 arm64：'Could not find the Qt platform plugin "offscreen"' +
+            #  'Available platform plugins are: cocoa' → Abort trap 6 / rc=134）。
+            # 从构建机 Qt 取一份塞进包内，让它跟其他 Mach-O 走同一套 id 规范化、依赖闭包
+            # 改写和签名，冒完烟删掉——发布包只带 cocoa。
+            SMOKE_DIR="$APP_BUNDLE/Contents/PlugIns/platforms"
+            SMOKE_QPA=""
+            SMOKE_FILE=""
+            for want in offscreen minimal; do
+              src=$(find "$QT_ROOT_DIR" -type f -name "libq${want}.dylib" 2>/dev/null | sed -n '1p')
+              [ -n "$src" ] || continue
+              SMOKE_FILE="$SMOKE_DIR/libq${want}.dylib"
+              SMOKE_QPA="$want"
+              cp -L "$src" "$SMOKE_FILE"
+              chmod u+w "$SMOKE_FILE"
+              echo "冒烟用平台插件：$src -> $SMOKE_FILE"
+              break
+            done
+
             # ---- 把包外 dylib 搬进 .app（brew 的 OpenSSL 等）----
             # macdeployqt 只搬 Qt 自己的 framework；libssl/libcrypto 来自 brew，
             # 链接期记的是 /usr/local/opt/... 绝对路径，用户机没装 brew 就
@@ -949,15 +969,27 @@ jobs:
             codesign -dv --verbose=2 "$APP_BUNDLE" 2>&1 | head -5
 
             # 冒烟：跑 --version 证明所有 dylib/framework 真能解析、Qt 能起。
-            # CI 上没有 WindowServer 会话，cocoa 插件起不来，用 offscreen 平台插件。
+            # CI 上没有 WindowServer 会话，cocoa 插件起不来，用上面塞进来的无窗口插件。
             # 这只验链接，不验界面；界面要等真机。
             export DYLD_FRAMEWORK_PATH="$PWD/$APP_BUNDLE/Contents/Frameworks"
-            set +e
-            QT_QPA_PLATFORM=offscreen "$APP_BUNDLE/Contents/MacOS/QtRemoteDesktop" --version \
-              2>&1 | tee smoke.log
-            rc=${PIPESTATUS[0]}
-            set -e
-            [ "$rc" -eq 0 ] || { echo "::error::打包后冒烟启动失败 (rc=$rc)"; exit 1; }
+            if [ -n "$SMOKE_QPA" ]; then
+              set +e
+              QT_QPA_PLATFORM="$SMOKE_QPA" "$APP_BUNDLE/Contents/MacOS/QtRemoteDesktop" --version \
+                2>&1 | tee smoke.log
+              rc=${PIPESTATUS[0]}
+              set -e
+              [ "$rc" -eq 0 ] || { echo "::error::打包后冒烟启动失败 (rc=$rc)"; exit 1; }
+            else
+              echo "::warning::构建机 Qt 里没有 offscreen/minimal 平台插件，跳过冒烟" \
+                "（依赖闭包断言已通过；界面与 dyld 实载等真机）"
+            fi
+            # 冒烟插件不进发布包（目标机只需要 cocoa）。注意必须在删完之后再签一次：
+            # --deep 会把 PlugIns 里的每个 Mach-O 封进外层 CodeResources，先签后删会让
+            # 外层签名指向一个已不存在的嵌套内容（codesign -v 报 missing/invalid）。
+            if [ -n "$SMOKE_QPA" ]; then
+              rm -f "$SMOKE_FILE"
+              codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | tee -a codesign.log
+            fi
             # 冒烟会在工作目录留下 logs/ 与 server_config.json，别打进发布包
             rm -rf logs server_config.json
 
