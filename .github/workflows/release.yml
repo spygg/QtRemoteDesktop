@@ -626,21 +626,36 @@ jobs:
           if-no-files-found: error
 
   # ==========================================================================
-  # macOS
+  # macOS（x86_64 + arm64 两条腿）
   # ==========================================================================
-  # Qt 5.15.2 的官方 macOS 安装包只有 x86_64，所以跑 Intel runner、出 Intel 包：
-  # 产物在 Apple Silicon 上靠 Rosetta 2 运行。要出 arm64 原生包得换 Qt 6（官方
-  # 从 6.3 起才是 universal），而 Qt6 桌面路径本仓库还没验证过，不适合顺手带上。
-  # 标签必须带 -intel：macos-13 已于 2025-12-04 下线，任务会一直卡在 queued
-  # （release 通过 needs 等它，等于整个发布不产出），Intel/x86_64 现在只有
-  # macos-15-intel / macos-26-intel 两档。
+  # Qt 5.15 的官方在线安装包在 macOS 上只有 x86_64，所以 Intel 腿走 aqt。arm64 腿
+  # 只能用 Homebrew 的 qt@5：它的源就是官方 qt-everywhere-opensource-src-5.15.19 整包，
+  # configure 只 -skip qtwebengine（qtwebsockets 照常构建），而且 arm64_sonoma /
+  # arm64_sequoia 有现成 bottle，不用在 CI 上现编 Qt。
+  # 两条腿只差 Qt 来源和部署下限：arm64 二进制的 macOS 下限只能是 11.0（Big Sur 是
+  # 第一个 arm64 版本），写 10.14 会被 clang 直接拒。
+  # Intel 标签必须带 -intel：macos-13 已于 2025-12-04 下线，任务会一直卡在 queued
+  # （release 通过 needs 等它，等于整个发布不产出）。
   build-macos:
-    name: macOS x86_64
-    runs-on: macos-15-intel
+    name: macOS ${{ matrix.cfg.arch }}
+    runs-on: ${{ matrix.cfg.runner }}
+    strategy:
+      # arm64 是新接入的腿，它挂了不能把已经验证过的 x86_64 包一起带走
+      fail-fast: false
+      matrix:
+        cfg:
+          - arch: x86_64
+            runner: macos-15-intel
+            qt_from: aqt
+            deploy: '10.14'
+          - arch: arm64
+            runner: macos-15
+            qt_from: brew
+            deploy: '11.0'
     env:
       QT_VERSION: '5.15.2'
       FFMPEG_VER: '6.1.2'
-      ARTIFACT_NAME: QtRemoteDesktop-macos-x86_64.tar.gz
+      ARTIFACT_NAME: QtRemoteDesktop-macos-${{ matrix.cfg.arch }}.tar.gz
       APP_BUNDLE: bin/QtRemoteDesktop.app
 
     steps:
@@ -649,6 +664,7 @@ jobs:
 
       - name: Install Qt
         id: qt_mac
+        if: matrix.cfg.qt_from == 'aqt'
         continue-on-error: true
         uses: jurplel/install-qt-action@v4
         with:
@@ -663,7 +679,7 @@ jobs:
 
       # aqt 取包偶发失败重试一次；Apple 腿跑一次成本高，不值得被一次网络抖动废掉
       - name: Retry Install Qt
-        if: steps.qt_mac.outcome == 'failure'
+        if: matrix.cfg.qt_from == 'aqt' && steps.qt_mac.outcome == 'failure'
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
@@ -672,29 +688,67 @@ jobs:
           arch: clang_64
           cache: false
 
+      # keg-only：不会被 link 进 PATH，所以手动把前缀导出成 QT_ROOT_DIR，
+      # 让后面每一步拿到和 aqt 腿同名的变量。
+      # 必须换成物理路径：brew --prefix 给的是 .../opt/qt@5，它本身是个指向
+      # Cellar/<版本> 的软链接，而 find 默认（-P）连命令行起点是软链接都不跟进，
+      # 后面按名字找 framework 会全部空手而归。
+      - name: Install Qt 5 (Homebrew, arm64)
+        if: matrix.cfg.qt_from == 'brew'
+        shell: bash
+        run: |
+          set -eo pipefail
+          brew install qt@5 2>&1 | tee brew_qt.log
+          P=$(brew --prefix qt@5)
+          [ -n "$P" ] && [ -d "$P" ] || { echo "::error::brew 没给出 qt@5 前缀（得到 '$P'）"; exit 1; }
+          P=$(cd "$P" && pwd -P)
+          echo "qt@5 前缀: $P" | tee -a brew_qt.log
+          echo "QT_ROOT_DIR=$P" | tee -a "$GITHUB_ENV"
+
       # 先把「几十分钟后才在链接期暴露」的前提一次性检查掉，失败点越早越好。
+      # aqt 和 brew 的目录布局不完全一样（brew 把 framework 留在 lib/，另在
+      # include/ 和 HOMEBREW_PREFIX/Frameworks 建软链），所以关键文件按名字找，
+      # 不写死相对路径。
+      # pipefail 不能省：整段是 `{ …; } | tee`，没有它的话组里 exit 1 会被
+      # tee 的 0 覆盖，"检查"变成纯打印，缺件照样往下跑几十分钟。
+      # 同理所有截断一律用 sed -n '1p'（读完整个流）而不是 head（提前关管道，
+      # clang --version 有 4 行，被 SIGPIPE 打成 141 会误报失败）。
       - name: Preflight
         shell: bash
         run: |
-          set -e
-          echo "=== Qt ==="
-          "$QT_ROOT_DIR/bin/qmake" -query QT_VERSION
-          # WebSockets 缺失 → 链接期 -lQt5WebSockets not found
-          test -e "$QT_ROOT_DIR/lib/QtWebSockets.framework/QtWebSockets" \
-            || { echo "::error::Qt WebSockets 框架缺失"; exit 1; }
-          # macdeployqt 只会搬它认识的插件；cocoa/offscreen 少一个就没法起
-          test -d "$QT_ROOT_DIR/plugins/platforms" \
-            || { echo "::error::Qt platforms 插件目录缺失"; exit 1; }
-          echo "=== OpenSSL (brew) ==="
-          # openssl@3 是 keg-only，不会软链到 /usr/local/lib，find_library 默认找不到，
-          # 下面 configure 必须把它并进 CMAKE_PREFIX_PATH
-          OSSLP=$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl)
-          echo "OPENSSL_PREFIX=$OSSLP" | tee -a "$GITHUB_ENV"
-          test -e "$OSSLP/lib/libssl.dylib" || { echo "::error::libssl.dylib 缺失"; exit 1; }
-          echo "=== toolchain ==="
-          cc --version | head -1
-          cmake --version | head -1
-          nasm -v 2>/dev/null || echo "(未装 nasm：CMake 会自动给 openh264 传 USE_ASM=No，编码慢一些但仍可构建)"
+          set -eo pipefail
+          {
+            echo "=== arch / Qt (${QT_ROOT_DIR:-未设置}) ==="
+            uname -m
+            [ -n "$QT_ROOT_DIR" ] || { echo "::error::QT_ROOT_DIR 未设置：Qt 安装步骤没成功"; exit 1; }
+            test -x "$QT_ROOT_DIR/bin/qmake" \
+              || { echo "::error::qmake 不在 $QT_ROOT_DIR/bin"; exit 1; }
+            "$QT_ROOT_DIR/bin/qmake" -query QT_VERSION
+            lipo -archs "$QT_ROOT_DIR/bin/qmake" | sed 's/^/qmake arch: /'
+            # WebSockets 缺失 → 链接期 -lQt5WebSockets not found
+            WS=$(find "$QT_ROOT_DIR" -maxdepth 3 -type d -name 'QtWebSockets.framework' | sed -n '1p')
+            [ -n "$WS" ] || { echo "::error::QtWebSockets.framework 未找到"; exit 1; }
+            echo "QtWebSockets: $WS"
+            lipo -archs "$WS/QtWebSockets" | sed 's/^/  arch: /'
+            # macdeployqt 只会搬它认识的插件；cocoa 少一个就没法起
+            COCOA=$(find "$QT_ROOT_DIR" -type f -name 'libqcocoa.dylib' | sed -n '1p')
+            [ -n "$COCOA" ] || { echo "::error::cocoa 平台插件未找到"; exit 1; }
+            echo "cocoa plugin: $COCOA"
+            MDQ=$(find "$QT_ROOT_DIR" -type f -name 'macdeployqt' | sed -n '1p')
+            [ -n "$MDQ" ] || { echo "::error::macdeployqt 未找到"; exit 1; }
+            echo "MACDEPLOYQT=$MDQ" >> "$GITHUB_ENV"
+            echo "macdeployqt: $MDQ"
+            echo "=== OpenSSL (brew) ==="
+            # openssl@3 是 keg-only，不会软链到系统 lib，find_library 默认找不到，
+            # 下面 configure 必须把它并进 CMAKE_PREFIX_PATH
+            OSSLP=$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl)
+            echo "OPENSSL_PREFIX=$OSSLP" | tee -a "$GITHUB_ENV"
+            test -e "$OSSLP/lib/libssl.dylib" || { echo "::error::libssl.dylib 缺失"; exit 1; }
+            echo "=== toolchain ==="
+            cc --version | sed -n '1p'
+            cmake --version | sed -n '1p'
+            nasm -v 2>/dev/null || echo "(未装 nasm：CMake 会自动给 openh264 传 USE_ASM=No，编码慢一些但仍可构建)"
+          } 2>&1 | tee preflight.log
 
       - name: Fetch FFmpeg sources
         shell: bash
@@ -726,13 +780,17 @@ jobs:
         run: |
           set -o pipefail
           # 显式钉部署下限：不写的话 clang 把 minos 打成 runner 自己的系统版本
-          # （macos-15-intel 就是 15.0），等于产物只有最新系统能用。这里用到的
+          # （macos-15 就是 15.0），等于产物只有最新系统能用。这里用到的
           # API 都远低于此（CGDisplayCreateImage 10.6+、CGEventPost 10.5+，
           # 10.15 的 CGPreflightScreenCaptureAccess 是 dlsym 运行期取的），
-          # Qt 5.15.2 官方要求 10.13+，取 10.14 留余量。
+          # Qt 5.15.2 官方要求 10.13+，x86_64 取 10.14 留余量；
+          # arm64 的下限由矩阵给（11.0），因为 arm64 macOS 只从 Big Sur 起存在。
+          # BuildFFmpeg.cmake 会把同一个下限透传给 FFmpeg 的 configure，
+          # 否则它的 .o 会按 SDK 版本打 minos，链接期刷一片
+          # "built for newer 'macOS' version than being linked"。
           cmake -S src -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.14 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ matrix.cfg.deploy }}" \
             -DBUILD_THIRDPARTY=ON \
             -DFFMPEG_VERSION="$FFMPEG_VER" \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$OPENSSL_PREFIX" 2>&1 | tee configure.log
@@ -760,9 +818,11 @@ jobs:
           set -o pipefail
           {
             # macdeployqt 把 Qt framework、平台插件、qt.conf 一次性搬进 .app
-            "$QT_ROOT_DIR/bin/macdeployqt" "$APP_BUNDLE" -verbose=2 2>&1 | tee deploy.log
+            "$MACDEPLOYQT" "$APP_BUNDLE" -verbose=2 2>&1 | tee deploy.log
             # 平台插件没进去的包在目标机上直接起不来（"failed to load cocoa"）
             ls "$APP_BUNDLE/Contents/PlugIns/platforms/" | tee -a deploy.log
+            # 架构必须是本腿目标架构：混进 x86_64/arm64 就说明 Qt 来源和 runner 不匹配
+            lipo -archs "$APP_BUNDLE/Contents/MacOS/QtRemoteDesktop" | tee -a deploy.log
 
             # ---- 把包外 dylib 搬进 .app（brew 的 OpenSSL 等）----
             # macdeployqt 只搬 Qt 自己的 framework；libssl/libcrypto 来自 brew，
@@ -845,7 +905,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          BR="logs-macos-x86_64"
+          BR="logs-macos-${{ matrix.cfg.arch }}"
           git config user.email "ci@remotedesk.local"
           git config user.name "remotedesk-ci"
           git fetch origin "$BR" 2>/dev/null || true
@@ -853,7 +913,7 @@ jobs:
           mkdir -p ci-logs
           {
             echo "=== pwd: $(pwd)"
-            for f in fetch_sources.log configure.log build.log deploy.log codesign.log smoke.log package.log; do
+            for f in preflight.log brew_qt.log fetch_sources.log configure.log build.log deploy.log codesign.log smoke.log package.log; do
               echo "=== $f ==="
               cat "$f" 2>/dev/null || echo "(不存在)"
             done
@@ -863,13 +923,13 @@ jobs:
               build.log configure.log 2>/dev/null | tail -250
           } > ci-logs/all.log
           git add -f ci-logs/all.log
-          git commit -m "ci logs: macOS x86_64 run ${{ github.run_id }} $(date -u +%Y%m%d%H%M%S)" || true
+          git commit -m "ci logs: macOS ${{ matrix.cfg.arch }} run ${{ github.run_id }} $(date -u +%Y%m%d%H%M%S)" || true
           git push --force origin "$BR"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-x86_64
+          name: macos-${{ matrix.cfg.arch }}
           path: ${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
 
