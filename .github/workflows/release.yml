@@ -830,17 +830,53 @@ jobs:
             # "dyld: Library not loaded" 直接起不来（在构建机上冒烟照样通过，
             # 所以这一步不能靠冒烟发现）。递归到依赖闭包，最后断言包内 Mach-O
             # 不再引用任何包外绝对路径。必须在 codesign 之前做完。
+            # brew 的 Qt 还要多两招（v1.2.6 arm64 实测，aqt 腿的 @rpath 布局不走这两招）：
+            #   1) otool -L 的第一条缩进行是文件自己的 install name，不是依赖。brew 把
+            #      插件的 id 打成 /opt/homebrew/opt/qt@5/plugins/…，于是这十几个插件永远
+            #      排在"待搬清单"里，5 趟都不收敛，断言必挂（把它们当依赖搬也没意义）。
+            #      → 先把包内 Mach-O 的绝对 id 规范化成 @executable_path/…，再从依赖
+            #      清单里排除 id 行，只看真引用。
+            #   2) framework 的二进制 macdeployqt 已经搬进 Contents/Frameworks 了，再按
+            #      整条绝对路径 cp 一次会得到 Frameworks/QtCore 这种裸文件副本，和
+            #      framework 里的正本同时被装载。→ .framework 引用优先改写到包内已有正本。
             FW="$APP_BUNDLE/Contents/Frameworks"
             mkdir -p "$FW"
-            ext_deps() {
+            machos() {
               find "$APP_BUNDLE/Contents" -type f | while read -r f; do
-                file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
-                otool -L "$f" 2>/dev/null | awk '/^[[:space:]]+\// {print $1}'
-              done | sort -u | grep -vE '^(/usr/lib/|/System/|@rpath/|@executable_path/|@loader_path/)' || true
+                file "$f" 2>/dev/null | grep -q 'Mach-O' && printf '%s\n' "$f"
+              done
             }
-            refs_dep() {
-              awk -v d="$1" '/^[[:space:]]+\// && $1 == d {found = 1} END {exit !found}'
+            # id 行永远是第一条缩进的条目，但它的值可能是 @rpath/… 开头，
+            # 所以判定只看缩进、不看前缀：只认 "/" 会让 @ 开头的 id 不被计数，
+            # 结果把第一条真依赖当成 id 跳过（也会让 own_id 读错行）。
+            own_id() { otool -L "$1" 2>/dev/null | awk '/^[[:space:]]+/ {print $1; exit}'; }
+            # 依赖清单 = 缩进条目去掉第一条（自身 install name），且只要绝对路径形态
+            ref_list() { otool -L "$1" 2>/dev/null | awk '/^[[:space:]]+/ {n++; if (n>1 && $1 ~ /^\//) print $1}'; }
+            ext_deps() {
+              machos | while read -r f; do ref_list "$f"; done \
+                | sort -u | grep -vE '^(/usr/lib/|/System/|@rpath/|@executable_path/|@loader_path/)' || true
             }
+            # 喂给它的已经是"每行一条纯路径"（ref_list 只 print $1），所以整行精确比对
+            refs_dep() { grep -Fxq "$1"; }
+            rewrite_everywhere() {  # $1=旧路径 $2=新引用
+              machos | while read -r f; do
+                ref_list "$f" | refs_dep "$1" || continue
+                install_name_tool -change "$1" "$2" "$f"
+              done
+            }
+            echo "=== 规范化包内 install name ==="
+            machos | while read -r f; do
+              # 主程序自己的 id 按惯例就是它的构建机路径，不参与 dyld 解析，别动
+              [ "$f" = "$APP_BUNDLE/Contents/MacOS/QtRemoteDesktop" ] && continue
+              id=$(own_id "$f")
+              case "$id" in
+                /*) ;;
+                *) continue ;;
+              esac
+              rel=${f#"$APP_BUNDLE"/Contents/}
+              echo "  $id -> @executable_path/../$rel"
+              install_name_tool -id "@executable_path/../$rel" "$f"
+            done
             for pass in 1 2 3 4 5; do
               todo=$(ext_deps)
               [ -z "$todo" ] && break
@@ -848,17 +884,23 @@ jobs:
               echo "$todo"
               for dep in $todo; do
                 [ -e "$dep" ] || { echo "::error::外部依赖在构建机上不存在，无法打包：$dep"; exit 1; }
+                case "$dep" in
+                  *.framework/*)
+                    fwname=$(basename "${dep%%.framework/*}")
+                    tail=${dep#*.framework/}
+                    if [ -e "$FW/$fwname.framework/$tail" ]; then
+                      rewrite_everywhere "$dep" "@executable_path/../Frameworks/$fwname.framework/$tail"
+                      continue
+                    fi
+                    ;;
+                esac
                 base=$(basename "$dep")
                 if [ ! -e "$FW/$base" ]; then
                   cp -L "$dep" "$FW/$base"
                   chmod u+w "$FW/$base"
                   install_name_tool -id "@executable_path/../Frameworks/$base" "$FW/$base"
                 fi
-                find "$APP_BUNDLE/Contents" -type f | while read -r f; do
-                  file "$f" 2>/dev/null | grep -q 'Mach-O' || continue
-                  otool -L "$f" 2>/dev/null | refs_dep "$dep" || continue
-                  install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" "$f"
-                done
+                rewrite_everywhere "$dep" "@executable_path/../Frameworks/$base"
               done
             done
             left=$(ext_deps)
