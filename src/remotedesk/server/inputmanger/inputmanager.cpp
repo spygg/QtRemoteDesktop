@@ -43,6 +43,8 @@ InputManager::~InputManager()
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     destroyUinput();
     if (xDisplay_) {
+        // 键盘映射改动是全局且持久的：连接一断就还不回去了，先归还借用的 keycode。
+        restoreUnicodeKeycode();
         XCloseDisplay(static_cast<Display*>(xDisplay_));
         xDisplay_ = nullptr;
     }

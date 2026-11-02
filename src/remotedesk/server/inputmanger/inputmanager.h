@@ -13,6 +13,7 @@ typedef unsigned long X11KeySym;
 #include <QByteArray>
 #include <QDBusPendingCall>
 #include <QDBusMessage>
+#include <QVector>
 #endif
 
 class InputManager : public QObject {
@@ -121,6 +122,26 @@ private:
     void initWaylandPortal();
     QString portalConnectResponse(const QString &token);
     void sendPortalKey(unsigned int linuxKeycode, bool isDown);
+
+    // ── Unicode 上屏字符注入（中文等，仅 X11/XTest 路径）──────────────────
+    // X11 没有"直接送一个字符"的入口：字符由 keycode → 键盘映射 → keysym →
+    // 客户端查表得到。输入法上屏的汉字在远端没有对应实体键，且远端往往没装中文
+    // 输入法，字母注入也组不出词。做法是借一枚空闲 keycode（映射行全为
+    // NoSymbol、且不是修饰键），用 XChangeKeyboardMapping 把它的 keysym 临时
+    // 指向 0x01000000+码点 的 Unicode keysym，再 XTEST 按下/抬起 —— 客户端
+    // 收到的就是那个汉字。ASCII/字母一律不走这里，远端装了输入法时仍由远端组词。
+    // 时序约束见 inputmanager_linux.cpp 里的 kUnicodeSettleMs / kUnicodeHoldMs：
+    // 接收端用自己缓存的键表解 keysym，所以刚借来的键要先预热绑定，字符之间还要留间隔。
+    bool sendUnicodeChar(unsigned int codePoint, bool isDown);
+    bool borrowUnicodeKeycode();      // 惰性借用并记录原始映射行；失败会被记住
+    void restoreUnicodeKeycode();     // 还原映射行（换 X 连接 / 析构时）
+    int unicodeKeycode_ = 0;          // 借来的 keycode（0 = 未借用）
+    unsigned long unicodeBound_ = 0;  // 当前绑定在该 keycode 上的 keysym（相同则免改）
+    qint64 unicodeBoundMs_ = 0;       // 上一次改映射的时刻（保持期判据）
+    int unicodeRowLen_ = 0;           // 借用时的 keysyms-per-keycode
+    QVector<X11KeySym> unicodeOriginalRow_;  // 原始行，用于精确还原
+    void* unicodeDisplay_ = nullptr;  // 借用属于哪个 X 连接（连接变了必须重新借）
+    bool unicodeScanFailed_ = false;  // 借不到 keycode：不再逐字符重复扫描/刷日志
 
 private slots:
     // Wayland 门户的 D-Bus 回调。必须放在 slots 区：QDBusConnection::connect 的

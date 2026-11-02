@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QThread>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -256,9 +257,14 @@ bool InputManager::ensureXDisplay()
     if (xDisplay_ && (curDpy != openedDisplay_ || curAuth != openedXauth_)) {
         qInfo() << "InputManager: DISPLAY/XAUTHORITY changed ("
                 << openedDisplay_ << "->" << curDpy << "), reopening X display";
+        // 键盘映射是**服务器全局**的，连接一关就再也还不回去：必须在下一次
+        // XCloseDisplay 之前归还借用的 keycode。
+        restoreUnicodeKeycode();
         XCloseDisplay(xdisp(xDisplay_));
         xDisplay_ = nullptr;
         lastXOpenFailMs_ = 0;   // 新环境值立刻重试，不要等 1.5s 限流
+        // 旧屏的空闲键不代表新屏也空闲，借用状态与"借不到"的结论一起作废。
+        unicodeScanFailed_ = false;
     }
     if (xDisplay_)
         return true;
@@ -292,6 +298,195 @@ bool InputManager::ensureXDisplay()
         // 保持 uinput 通道：Xorg 与 mutter 都从内核 evdev 读取，Wayland/X11 通吃。
         qInfo() << "InputManager: X display is XWayland on a Wayland desktop; staying on uinput input";
     }
+    return true;
+}
+
+// ── Unicode 上屏字符注入（中文等）──────────────────────────────────────────
+// X11 里没有"直接送一个字符"的入口：字符是 keycode → 服务器键盘映射 → keysym →
+// 客户端查表得来的。输入法上屏的汉字在远端没有对应实体键，远端往往也没装中文
+// 输入法（注入字母也组不出词）。这里借一枚空闲 keycode 当"临时汉字键"：
+// XChangeKeyboardMapping 把它的映射行指向 Unicode keysym（0x01000000 + 码点），
+// 再 XTEST 按下/抬起，焦点窗口解出的就是这个汉字。
+// 实测结论（Xvfb 1.21 + 自建接收窗口 + xterm 落盘双验证）：
+//   · 改 core 键盘映射在开着 XKB 的 Xorg 上同样生效，XKeysymToKeycode 立刻可查；
+//   · 连续改 60 次再还原，整张 keymap 逐字节与改动前一致，不影响远端真实键盘；
+//   · xterm 收到的是 UTF-8 三字节（E4 B8 AD = 中），中文能直接上屏。
+// ASCII/字母绝不走这条路：仍按逐个按键注入，远端装了中文输入法时由远端自己组词。
+//
+// 竞态出在接收端的键表缓存上：按下事件一定到（日志里 keycode 有），但接收端是用
+// 自己缓存的键表解 keysym 的，缓存只在它处理到 MappingNotify 时才刷新。于是有：
+//   ① 借来的键**第一次**从 NoSymbol 变成有值：实测 5/10 次解成 keysym=0x0（丢字），
+//      而且把按下前的等待从 5 ms 加到 15 ms 也压不下去（4/10）—— 多等不等于对端
+//      真的刷了缓存。改用在借用时先绑一枚不产出文本的 F24 预热（见 borrow 里那段），
+//      把"刷新"这次走完之后，20/20、12/12 全对。
+//   ② 下一个字符改映射太早：本次按键被解成**下一个**字符（实测整串错位一位：
+//      "中文你好测试一下é" → "文你好测试一下éé"）。所以一枚字符的映射要在它的
+//      down/up 之后继续挂 kUnicodeHoldMs 才允许再改。
+// 保持期只在字符之间生效：同一字符的抬起不改映射，也就不额外花时间。
+//
+// kUnicodeHoldMs 是扫描出来的（Xvfb + xterm 落盘，12 字符连打 ×5 轮，期望串由码点算出）：
+//   · 间隔 0 ms：只有最后一个字符对（整串错位）；加到 5 ms 仍有丢字，15 ms 起 5/5 全对。
+//   · 把同样的时间花在"按下前等"（settle=5 / hold=0）几乎无效 —— 决定性的量是字符之间
+//     的间隔，不是按下前的等待，所以预算主要给 hold。
+//   · 空闲机上 2 ms 就够；把 24 核全部吃满（模拟远端正在采集+编码）后 5/10 ms 会偶发
+//     丢字，15 ms 起才稳。取 20 ms 留余量。慢打字时上一次绑定早就过了保持期，
+//     waitUnicodeHoldMs 不会真的睡。kUnicodeSettleMs 藏在 hold 里，不额外花时间。
+static const int kUnicodeSettleMs = 5;
+static const qint64 kUnicodeHoldMs = 20;
+static const unsigned long F24KeySym = 0xffbe;   // 借用时预热用：功能键，不产出文本
+
+// 距 sinceMs 不足保持期就补足等待。
+static void waitUnicodeHoldMs(qint64 sinceMs)
+{
+    const qint64 remain = kUnicodeHoldMs - (QDateTime::currentMSecsSinceEpoch() - sinceMs);
+    if (remain > 0)
+        QThread::msleep(static_cast<unsigned long>(remain));
+}
+
+bool InputManager::borrowUnicodeKeycode()
+{
+    if (unicodeKeycode_ != 0 && unicodeDisplay_ == xDisplay_)
+        return true;                       // 同一 X 连接上已借好，直接用
+    if (unicodeScanFailed_ || !xDisplay_)
+        return false;
+
+    // 连接换过了（旧屏 → 新屏）：旧记录一律作废，重新找空闲键。
+    unicodeKeycode_ = 0;
+    unicodeBound_ = 0;
+    unicodeOriginalRow_.clear();
+    unicodeRowLen_ = 0;
+    unicodeDisplay_ = nullptr;
+
+    Display *dpy = xdisp(xDisplay_);
+    int minKc = 0, maxKc = 0, nsyms = 0;
+    XDisplayKeycodes(dpy, &minKc, &maxKc);
+    KeySym *map = XGetKeyboardMapping(dpy, minKc, maxKc - minKc + 1, &nsyms);
+    if (!map || nsyms <= 0 || maxKc < minKc) {
+        if (map) XFree(map);
+        unicodeScanFailed_ = true;
+        qWarning() << "InputManager: 读取键盘映射失败，非 ASCII 字符无法注入";
+        return false;
+    }
+
+    // 被登记成修饰键的 keycode 不能借：改了它们，远端的 Ctrl/Shift/Lock 行为会变。
+    QVector<char> used;
+    used.resize(maxKc + 1);
+    for (int i = 0; i <= maxKc; ++i) used[i] = 0;
+    XModifierKeymap *mod = XGetModifierMapping(dpy);
+    if (mod) {
+        for (int i = 0; i < 8 * mod->max_keypermod; ++i) {
+            KeyCode kc = mod->modifiermap[i];
+            if (kc > 0 && kc <= maxKc) used[kc] = 1;
+        }
+        XFreeModifiermap(mod);
+    }
+
+    // 从大到小找：真实键盘的键集中在小编号，尾部整段留空，挑编号最大的那枚最安全。
+    int chosen = 0;
+    for (int kc = maxKc; kc >= minKc; --kc) {
+        if (kc <= 9 || used[kc]) continue;         // Esc/Tab 等一律不动
+        bool empty = true;
+        for (int i = 0; i < nsyms; ++i) {
+            if (map[(kc - minKc) * nsyms + i] != NoSymbol) { empty = false; break; }
+        }
+        if (empty) { chosen = kc; break; }
+    }
+    if (chosen == 0) {
+        XFree(map);
+        unicodeScanFailed_ = true;
+        qWarning() << "InputManager: 键盘映射里没有空闲 keycode，非 ASCII 字符无法注入";
+        return false;
+    }
+
+    unicodeOriginalRow_.resize(nsyms);
+    for (int i = 0; i < nsyms; ++i)
+        unicodeOriginalRow_[i] = map[(chosen - minKc) * nsyms + i];
+    XFree(map);
+    unicodeRowLen_ = nsyms;
+    unicodeKeycode_ = chosen;
+    unicodeDisplay_ = xDisplay_;
+
+    // 预热一次映射：接收端是在处理 MappingNotify 时才回头刷新自己的键表缓存，
+    // 而"刚借来的键第一次由 NoSymbol 变成有值"这一步实测最容易踩到缓存还没刷新
+    // 的窗口（按下事件确实到了，解出来却是 keysym=0x0，字符直接丢）。这里先把它
+    // 绑成一枚不产生文本的功能键，让接收端先把刷新走一遍；F24 不产出文本，
+    // 万一真被按下也只是个没人用的功能键。
+    {
+        Display *dpy = xdisp(xDisplay_);
+        QVector<KeySym> prime(unicodeRowLen_, static_cast<KeySym>(F24KeySym));
+        XChangeKeyboardMapping(dpy, unicodeKeycode_, unicodeRowLen_, prime.data(), 1);
+        XFlush(dpy);
+        XSync(dpy, False);
+        unicodeBound_ = F24KeySym;      // 非 0：下一个真实字符会正常走改映射流程
+        unicodeBoundMs_ = QDateTime::currentMSecsSinceEpoch();
+    }
+
+    qInfo() << "InputManager: 借用 keycode" << chosen << "注入非 ASCII 字符（每键"
+            << nsyms << "个 keysym）";
+    return true;
+}
+
+void InputManager::restoreUnicodeKeycode()
+{
+    if (unicodeKeycode_ == 0)
+        return;
+    if (xDisplay_ && unicodeDisplay_ == xDisplay_ && unicodeRowLen_ > 0) {
+        Display *dpy = xdisp(xDisplay_);
+        // 原始行全为 NoSymbol（只借整行空白的键），还原后那个字符就再也解不出来了：
+        // 最后一个字符可能还没被接收端读走，先等满保持期再还原。
+        if (unicodeBound_ != 0)
+            waitUnicodeHoldMs(unicodeBoundMs_);
+        XChangeKeyboardMapping(dpy, unicodeKeycode_, unicodeRowLen_,
+                               unicodeOriginalRow_.data(), 1);
+        XFlush(dpy);
+    }
+    unicodeKeycode_ = 0;
+    unicodeBound_ = 0;
+    unicodeBoundMs_ = 0;
+    unicodeRowLen_ = 0;
+    unicodeOriginalRow_.clear();
+    unicodeDisplay_ = nullptr;
+}
+
+bool InputManager::sendUnicodeChar(unsigned int codePoint, bool isDown)
+{
+    if (!ensureXDisplay())
+        return false;
+    if (!borrowUnicodeKeycode())
+        return false;
+    Display *dpy = xdisp(xDisplay_);
+
+    // Latin-1 以内沿用 X11 的老规矩（keysym == 码点），其余加 Unicode 前缀。
+    const unsigned long want = codePoint < 0x100
+        ? codePoint
+        : 0x01000000UL + codePoint;
+    if (want != unicodeBound_) {
+        // 先等够上一枚字符的保持期，再改映射（见下方注释）。
+        if (unicodeBound_ != 0)
+            waitUnicodeHoldMs(unicodeBoundMs_);
+        // 整行原样写回、只改前两槽：[0]=不按 Shift、[1]=按 Shift。两槽都填同一个
+        // keysym，远端恰好按着 Shift 时也能出这个字符；长度用原始 keysyms-per-keycode，
+        // 避免把服务器的映射行宽改成 1 而波及整张键盘表。
+        QVector<KeySym> row(unicodeRowLen_);
+        for (int i = 0; i < unicodeRowLen_; ++i)
+            row[i] = static_cast<KeySym>(unicodeOriginalRow_[i]);
+        row[0] = static_cast<KeySym>(want);
+        if (unicodeRowLen_ > 1)
+            row[1] = static_cast<KeySym>(want);
+        XChangeKeyboardMapping(dpy, unicodeKeycode_, unicodeRowLen_, row.data(), 1);
+        // 同步一次：确保服务器已应用新映射，再发按键。
+        XFlush(dpy);
+        XSync(dpy, False);
+        unicodeBound_ = want;
+        unicodeBoundMs_ = QDateTime::currentMSecsSinceEpoch();
+        QThread::msleep(kUnicodeSettleMs);
+    }
+
+    focusLockScreenWindow(dpy);
+    XTestGrabControl(dpy, True);
+    XTestFakeKeyEvent(dpy, static_cast<KeyCode>(unicodeKeycode_), isDown, CurrentTime);
+    XTestGrabControl(dpy, False);
+    XFlush(dpy);
     return true;
 }
 
@@ -928,6 +1123,7 @@ unsigned short InputManager::keysymToLinuxKeycode(unsigned long ks)
 
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar, bool meta) {
     Q_UNUSED(useVkFallback);
+    unsigned int unicodeCp = 0;   // 非 ASCII 上屏字符的码点（0 = 没走 Unicode 路）
 
     // Wayland 门户模式：通过 D-Bus 注入键盘
     if (waylandPortalMode_ && portalReady_) {
@@ -998,8 +1194,13 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         // 此前这里被 Q_UNUSED 丢弃，导致密码字符全部丢失、只有末尾回车生效。
         keySym = static_cast<KeySym>(asciiToKeysym(keycode, &charShift));
         if (keySym == NoSymbol) {
-            qWarning() << "InputManager: unmapped char keycode:" << keycode;
-            return;
+            // 不是 ASCII：输入法上屏的汉字/其它非拉丁字符。记下码点，等修饰键
+            // 同步完成后走"借 keycode + Unicode keysym"的注入路。
+            // ASCII 永远进不到这里，英文仍逐键注入字母，远端装了中文输入法时
+            // 由远端自己组词。码点来自客户端，超出 Unicode 范围的不绑（绑了也
+            // 解不出字符，只会白占保持期）。
+            if (keycode <= 0x10FFFF)
+                unicodeCp = static_cast<unsigned int>(keycode);
         }
     }
     else if (code == "Delete")      keySym = XK_Delete;
@@ -1097,6 +1298,23 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         code == "ShiftLeft" || code == "ShiftRight" ||
         code == "AltLeft" || code == "AltRight" ||
         code == "MetaLeft" || code == "MetaRight") {
+        return;
+    }
+
+    // 非 ASCII 上屏字符：必须在上面的修饰键同步之后注入 —— isChar 消息里
+    // ctrl/alt/shift 恒为 false，先跑一遍才能把远端残留的 Shift/Ctrl 抬起来，
+    // 否则同一枚键会按上档层解析（实测会丢字或出错的字符）。
+    if (unicodeCp != 0) {
+        // 只有 XTest 通道能注入字符：内核 uinput 送的是按键，没有"送一个字符"的
+        // 入口；Wayland 合成器也看不到 XWayland 键盘映射的改动。判据用"当前实际
+        // 在用的通道"（uinput 已建立）而不是 waylandMode_ —— 后者会被残留的
+        // wayland socket 误判，而那种机器上 XTest 才是真正在工作的路。
+        if (uinputFd_ >= 0) {
+            qWarning() << "InputManager: uinput 通道无法注入非 ASCII 字符, 码点:" << unicodeCp;
+            return;
+        }
+        if (!sendUnicodeChar(unicodeCp, isDown))
+            qWarning() << "InputManager: 非 ASCII 字符注入失败, 码点:" << unicodeCp;
         return;
     }
 
