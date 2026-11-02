@@ -45,7 +45,7 @@ pressing "Choose..." and selecting as the Qt installation path:
 QtWebEngine is no longer included as its Chromium has unfixed vulnerabilities.
 qt@5 前缀: /opt/homebrew/Cellar/qt@5/5.15.19
 === fetch_sources.log ===
--rwxr-xr-x  1 runner  staff  278049 Nov  2 04:48 src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/configure
+-rwxr-xr-x  1 runner  staff  278049 Nov  2 05:31 src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/configure
 === configure.log ===
 CMake Warning (deprecated) at CMakeLists.txt:3 (cmake_minimum_required):
   Compatibility with CMake < 3.10 will be removed from a future version of
@@ -257,23 +257,23 @@ to suppress it.
 -- Found ZLIB: /Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libz.tbd (found version "1.2.12")
 -- FFmpeg 6.1.2: NVENC 头来自 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/nv-codec-headers-n12.2.72.0/include
 -- FFmpeg 硬件编码器自动探测：videotoolbox
--- Configuring done (14.3s)
+-- Configuring done (18.6s)
 -- Generating done (0.3s)
 -- Build files have been written to: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build
 === build.log ===
 [  0%] Built target FileTransferService_autogen_timestamp_deps
+[  0%] Built target AuthManager_autogen_timestamp_deps
 [  1%] Creating directories for 'openh264_ep'
-[  1%] Built target AuthManager_autogen_timestamp_deps
 [  1%] Built target InputManager_autogen_timestamp_deps
-[  1%] No download step for 'openh264_ep'
 [  1%] Built target SystemInfo_autogen_timestamp_deps
-[  1%] Built target Clipboardservice_autogen_timestamp_deps
+[  1%] No download step for 'openh264_ep'
 [  1%] Built target ScreenCapturer_autogen_timestamp_deps
+[  1%] Built target Clipboardservice_autogen_timestamp_deps
 [  1%] No update step for 'openh264_ep'
 [  1%] Built target InteractiveShell_autogen_timestamp_deps
 [  1%] Built target WebsocketServer_autogen_timestamp_deps
-[  1%] Built target XdndMonitor_autogen_timestamp_deps
 [  1%] No patch step for 'openh264_ep'
+[  1%] Built target XdndMonitor_autogen_timestamp_deps
 [  2%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangSrsConnection.c.o
 [  2%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/srtp/srtp.c.o
 [  3%] No configure step for 'openh264_ep'
@@ -293,8 +293,8 @@ to suppress it.
 [  4%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangwhip8.a
 [  4%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher.c.o
 [  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher_test_cases.c.o
-make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule.
 [  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/null_cipher.c.o
+make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule.
 [  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes.c.o
 [  6%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes_icm.c.o
 [  6%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth.c.o
@@ -306,15 +306,15 @@ make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule
 [  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/crypto_kernel.c.o
 [  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/err.c.o
 [  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/key.c.o
+[  8%] Built target yangwhip8
 [  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/math/datatypes.c.o
-[  9%] Built target yangwhip8
 [  9%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_asconf.c.o
 [  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdb.c.o
 [  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdbx.c.o
 [ 10%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libsrtp2.a
 [ 10%] Built target srtp2
-[ 10%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_auth.c.o
 [ 10%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioMix.c.o
+[ 10%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_auth.c.o
 [ 11%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioUtil.c.o
 [ 11%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangjson/YangJson.c.o
 [ 12%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_bsd_addr.c.o
@@ -333,18 +333,18 @@ make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule
 [ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCLog.c.o
 [ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCString.c.o
 [ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCTimer.c.o
-[ 16%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.o
 [ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangEndian.c.o
 [ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangFile.c.o
 [ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangHttp.c.o
 [ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangIni.c.o
+[ 18%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.o
 [ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangLibHandle.c.o
 [ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangMath.c.o
-[ 18%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.o
 [ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocket.c.o
 [ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketIP.c.o
 [ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketCompat.c.o
 [ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSsrc.c.o
+[ 19%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.o
 [ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangThread.c.o
 [ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTime.c.o
 [ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTimestamp.c.o
@@ -353,81 +353,82 @@ make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule
 [ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangMeta.c.o
 [ 22%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangNalu.c.o
 [ 22%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangSpspps.c.o
+[ 22%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a
+[ 22%] Built target yangutil8
 [ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_pcb.c.o
-[ 23%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a
-[ 23%] Built target yangutil8
 [ 23%] Built target SingleApp_autogen_timestamp_deps
+[ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.o
 [ 23%] Built target Service_autogen_timestamp_deps
 [ 23%] Built target SystemSleepBlocker_autogen_timestamp_deps
-[ 23%] Built target radiometer_breakpad_autogen_timestamp_deps
-[ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.o
 [ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.o
+[ 23%] Built target radiometer_breakpad_autogen_timestamp_deps
 [ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_ss_functions.c.o
 [ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sysctl.c.o
 [ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_timer.c.o
+[ 24%] Automatic MOC for target AuthManager
 [ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_userspace.c.o
 [ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_usrreq.c.o
+[ 25%] Built target AuthManager_autogen
+[ 25%] Automatic MOC for target FileTransferService
 [ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctputil.c.o
-[ 25%] Automatic MOC for target AuthManager
+[ 25%] Built target FileTransferService_autogen
 [ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet6/sctp6_usrreq.c.o
-[ 26%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_environment.c.o
-[ 26%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_mbuf.c.o
-[ 26%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_recv_thread.c.o
-[ 27%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.o
-[ 27%] Built target AuthManager_autogen
-[ 27%] Automatic MOC for target FileTransferService
-[ 27%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libusrsctp.a
-[ 27%] Built target usrsctp
-[ 28%] Automatic MOC for target InputManager
-[ 28%] Built target FileTransferService_autogen
-[ 28%] Automatic MOC for target SystemInfo
-[ 28%] Built target SystemInfo_autogen
-[ 29%] Automatic MOC for target Clipboardservice
-[ 29%] Built target InputManager_autogen
-[ 29%] Automatic MOC for target ScreenCapturer
-[ 29%] Built target Clipboardservice_autogen
-[ 29%] Automatic MOC for target InteractiveShell
+[ 26%] Automatic MOC for target InputManager
+[ 26%] Built target InputManager_autogen
+[ 26%] Automatic MOC for target SystemInfo
+[ 26%] Built target SystemInfo_autogen
+[ 27%] Automatic MOC for target Clipboardservice
+[ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_environment.c.o
+[ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_mbuf.c.o
+[ 28%] Built target Clipboardservice_autogen
+[ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_recv_thread.c.o
+[ 28%] Automatic MOC for target ScreenCapturer
+[ 29%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.o
+[ 29%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libusrsctp.a
 [ 29%] Built target ScreenCapturer_autogen
+[ 29%] Automatic MOC for target InteractiveShell
+[ 29%] Built target usrsctp
 [ 29%] Automatic MOC for target WebsocketServer
 [ 29%] Built target InteractiveShell_autogen
 [ 29%] Automatic MOC for target XdndMonitor
-Generated codec/common/inc/version_gen.h
 [ 29%] Built target WebsocketServer_autogen
 [ 29%] Automatic MOC for target SingleApp
 [ 29%] Built target XdndMonitor_autogen
 [ 29%] Automatic MOC for target Service
 [ 29%] Built target Service_autogen
-[ 29%] Automatic MOC for target SystemSleepBlocker
 [ 29%] Built target SingleApp_autogen
+[ 29%] Automatic MOC for target SystemSleepBlocker
 [ 30%] Automatic MOC for target radiometer_breakpad
+Generated codec/common/inc/version_gen.h
 [ 30%] Built target radiometer_breakpad_autogen
 [ 30%] Building CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/AuthManager_autogen/mocs_compilation.cpp.o
 [ 30%] Built target SystemSleepBlocker_autogen
-[ 30%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/FileTransferService_autogen/mocs_compilation.cpp.o
 [ 30%] Building CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/authmanager.cpp.o
-[ 31%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/filetransferservice.cpp.o
-[ 32%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libAuthManager.a
-[ 32%] Built target AuthManager
-[ 32%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/InputManager_autogen/mocs_compilation.cpp.o
+[ 30%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/FileTransferService_autogen/mocs_compilation.cpp.o
+[ 31%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libAuthManager.a
+[ 31%] Built target AuthManager
+[ 31%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/InputManager_autogen/mocs_compilation.cpp.o
+[ 32%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/filetransferservice.cpp.o
 [ 33%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager.cpp.o
+[ 33%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager_mac.cpp.o
 [ 33%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libFileTransferService.a
 [ 33%] Built target FileTransferService
-[ 33%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager_mac.cpp.o
 [ 34%] Building CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/SystemInfo_autogen/mocs_compilation.cpp.o
 [ 34%] Building CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/systeminfo.cpp.o
 [ 34%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInputManager.a
-[ 34%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemInfo.a
 [ 34%] Built target InputManager
 [ 35%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/Clipboardservice_autogen/mocs_compilation.cpp.o
+[ 35%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemInfo.a
 [ 35%] Built target SystemInfo
-[ 35%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/clipboardservice.cpp.o
 [ 35%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/ScreenCapturer_autogen/mocs_compilation.cpp.o
+[ 35%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/clipboardservice.cpp.o
+[ 35%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer.cpp.o
 [ 35%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libClipboardservice.a
 [ 35%] Built target Clipboardservice
-[ 35%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer.cpp.o
+[ 35%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/InteractiveShell_autogen/mocs_compilation.cpp.o
 [ 36%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer_mac.cpp.o
-[ 36%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/InteractiveShell_autogen/mocs_compilation.cpp.o
 [ 36%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell.cpp.o
+[ 37%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_mac.cpp.o
 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/screencapturer/screencapturer_mac.cpp:108:9: warning: 'width' overrides a member function but is not marked 'override' [-Winconsistent-missing-override]
   108 |     int width() const { return width_; }
       |         ^
@@ -441,9 +442,8 @@ Generated codec/common/inc/version_gen.h
    75 |     virtual int height() const { return 0; }
       |                 ^
 2 warnings generated.
-[ 36%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libScreenCapturer.a
-[ 37%] Built target ScreenCapturer
-[ 38%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_mac.cpp.o
+[ 37%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libScreenCapturer.a
+[ 38%] Built target ScreenCapturer
 [ 38%] Building CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/WebsocketServer_autogen/mocs_compilation.cpp.o
 [ 38%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInteractiveShell.a
 [ 38%] Built target InteractiveShell
@@ -451,35 +451,31 @@ Generated codec/common/inc/version_gen.h
 [ 39%] Building CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/websocketserver.cpp.o
 [ 39%] Building CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/xdndmonitor.cpp.o
 [ 40%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libXdndMonitor.a
-[ 40%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libWebsocketServer.a
 [ 41%] Built target XdndMonitor
-[ 41%] No install step for 'openh264_ep'
 [ 41%] Building CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/SingleApp_autogen/mocs_compilation.cpp.o
+[ 41%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libWebsocketServer.a
 [ 41%] Built target WebsocketServer
-[ 41%] Completed 'openh264_ep'
 [ 41%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/Service_autogen/mocs_compilation.cpp.o
-[ 41%] Built target openh264_ep
 [ 42%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/service_mac.cpp.o
-[ 42%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/SystemSleepBlocker_autogen/mocs_compilation.cpp.o
+[ 42%] Building CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/singleapplication.cpp.o
 [ 42%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libService.a
 [ 42%] Built target Service
-[ 43%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/radiometer_breakpad_autogen/mocs_compilation.cpp.o
-[ 43%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker.cpp.o
-[ 43%] Building CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/singleapplication.cpp.o
-[ 43%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/crashhandler.cpp.o
-[ 44%] Building OBJCXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker_mac.mm.o
-[ 44%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libradiometer_breakpad.a
-[ 44%] Built target radiometer_breakpad
-[ 44%] Built target SecureInputProcess_autogen_timestamp_deps
-[ 45%] Creating directories for 'ffmpeg_ep'
-[ 46%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSingleApp.a
+[ 42%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/SystemSleepBlocker_autogen/mocs_compilation.cpp.o
+[ 42%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker.cpp.o
+[ 43%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSingleApp.a
+[ 43%] No install step for 'openh264_ep'
+[ 44%] Built target SingleApp
+[ 44%] Completed 'openh264_ep'
+[ 45%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/radiometer_breakpad_autogen/mocs_compilation.cpp.o
+[ 45%] Built target openh264_ep
+[ 45%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/crashhandler.cpp.o
+[ 45%] Built target SecureInputProcess_autogen_timestamp_deps
+[ 46%] Creating directories for 'ffmpeg_ep'
 [ 46%] No download step for 'ffmpeg_ep'
 [ 46%] No update step for 'ffmpeg_ep'
-[ 47%] Built target SingleApp
-[ 47%] No patch step for 'ffmpeg_ep'
-[ 48%] No configure step for 'ffmpeg_ep'
-[ 48%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIce.c.o
-[ 48%] Performing build step for 'ffmpeg_ep'
+[ 46%] No patch step for 'ffmpeg_ep'
+[ 47%] No configure step for 'ffmpeg_ep'
+[ 47%] Performing build step for 'ffmpeg_ep'
 CMake Warning (deprecated) at /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build/build_ffmpeg.cmake:1 (cmake_minimum_required):
   Compatibility with CMake < 3.10 will be removed from a future version of
   CMake.
@@ -490,26 +486,30 @@ CMake Warning (deprecated) at /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop
 This warning is for project developers.  Use -Wno-author or -Wno-deprecated
 to suppress it.
 
+[ 48%] Building OBJCXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker_mac.mm.o
+[ 48%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libradiometer_breakpad.a
+[ 48%] Built target radiometer_breakpad
+[ 48%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIce.c.o
 [ 48%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIceAgent.c.o
 [ 48%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemSleepBlocker.a
-[ 49%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcSocket.c.o
-[ 50%] Built target SystemSleepBlocker
-[ 50%] Automatic MOC for target SecureInputProcess
+[ 49%] Built target SystemSleepBlocker
+[ 49%] Automatic MOC for target SecureInputProcess
+[ 50%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcSocket.c.o
 [ 50%] Built target SecureInputProcess_autogen
-[ 50%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcStun.c.o
-[ 50%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangTurnConnection.c.o
 [ 50%] Building CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/SecureInputProcess_autogen/mocs_compilation.cpp.o
 [ 50%] Building CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/secure_input_process.cpp.o
+[ 50%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcStun.c.o
+[ 50%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangTurnConnection.c.o
 [ 51%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpacer/YangPacer.c.o
 [ 51%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPacketData.c.o
 [ 51%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushData.c.o
 [ 52%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushDataH264.c.o
 [ 52%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushDataH265.c.o
-[ 52%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangBandwidth.c.o
-[ 52%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangDatachannel.c.o
-[ 53%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPeerConnection.c.o
-[ 54%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSecureInputProcess.a
-[ 55%] Built target SecureInputProcess
+[ 53%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSecureInputProcess.a
+[ 53%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangBandwidth.c.o
+[ 54%] Built target SecureInputProcess
+[ 54%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangDatachannel.c.o
+[ 55%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPeerConnection.c.o
 [ 55%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullStream.c.o
 [ 55%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrack.c.o
 [ 56%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackAudio.c.o
@@ -570,7 +570,6 @@ In file included from /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/rem
 [ 70%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangSSRCInfo.c.o
 [ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangDtlsMbedtls.c.o
 [ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangDtlsOpenssl.c.o
-[ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangSslMbedtls.c.o
 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangDtlsOpenssl.c:237:27: warning: 'DTLSv1_2_client_method' is deprecated [-Wdeprecated-declarations]
   237 |                         dtls_ctx = SSL_CTX_new(DTLSv1_2_client_method());
       |                                                ^
@@ -607,10 +606,10 @@ In file included from /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/rem
 /opt/homebrew/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
    61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
       |                                               ^
+[ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangSslMbedtls.c.o
 3 warnings generated.
 [ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangSslOpenssl.c.o
 [ 72%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangstream/YangStreamCapture.c.o
-[ 72%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangutil/sys/YangSctp.c.o
 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:68:18: warning: 'HMAC_CTX_new' is deprecated [-Wdeprecated-declarations]
    68 |         HMAC_CTX *ctx = HMAC_CTX_new();
       |                         ^
@@ -827,6 +826,7 @@ In file included from /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/rem
 /opt/homebrew/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
    61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
       |                                               ^
+[ 72%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangutil/sys/YangSctp.c.o
 18 warnings generated.
 [ 72%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangutil/sys/YangSRtp.c.o
 [ 73%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a
@@ -906,12 +906,12 @@ make[3]: warning: -jN forced in submake: disabling jobserver mode.
 GEN	libavcodec/libavcodec.pc
 GEN	libswscale/libswscale.pc
 GEN	libavutil/libavutil.pc
-CC	libavcodec/aarch64/h264chroma_init_aarch64.o
-CC	libavcodec/aarch64/h264dsp_init_aarch64.o
 AS	libavcodec/aarch64/h264cmc_neon.o
+CC	libavcodec/aarch64/h264dsp_init_aarch64.o
+CC	libavcodec/aarch64/h264chroma_init_aarch64.o
+AS	libavcodec/aarch64/h264idct_neon.o
 AS	libavcodec/aarch64/h264dsp_neon.o
 CC	libavcodec/aarch64/h264pred_init.o
-AS	libavcodec/aarch64/h264idct_neon.o
 AS	libavcodec/aarch64/h264pred_neon.o
 CC	libavcodec/aarch64/h264qpel_init_aarch64.o
 AS	libavcodec/aarch64/h264qpel_neon.o
@@ -931,8 +931,8 @@ CC	libavcodec/atsc_a53.o
 CC	libavcodec/avcodec.o
 CC	libavcodec/avdct.o
 CC	libavcodec/avfft.o
-CC	libavcodec/bitstream.o
 CC	libavcodec/avpacket.o
+CC	libavcodec/bitstream.o
 CC	libavcodec/bitstream_filters.o
 CC	libavcodec/blockdsp.o
 CC	libavcodec/bsf.o
@@ -955,9 +955,9 @@ CC	libavcodec/golomb.o
 CC	libavcodec/h263.o
 CC	libavcodec/h263_parser.o
 CC	libavcodec/h263data.o
-CC	libavcodec/h263dsp.o
 CC	libavcodec/h263dec.o
 CC	libavcodec/h2645_parse.o
+CC	libavcodec/h263dsp.o
 CC	libavcodec/h2645_sei.o
 CC	libavcodec/h2645_vui.o
 CC	libavcodec/h2645data.o
@@ -974,10 +974,10 @@ CC	libavcodec/h264_sei.o
 CC	libavcodec/h264_slice.o
 CC	libavcodec/h264chroma.o
 CC	libavcodec/h264data.o
-CC	libavcodec/h264dsp.o
 CC	libavcodec/h264dec.o
-CC	libavcodec/h264idct.o
+CC	libavcodec/h264dsp.o
 CC	libavcodec/h264pred.o
+CC	libavcodec/h264idct.o
 CC	libavcodec/h264qpel.o
 CC	libavcodec/h274.o
 CC	libavcodec/hpeldsp.o
@@ -1008,8 +1008,8 @@ CC	libavcodec/mpeg_er.o
 CC	libavcodec/mpegpicture.o
 CC	libavcodec/mpegutils.o
 CC	libavcodec/mpegvideo.o
-CC	libavcodec/mpegvideo_dec.o
 1 warning generated.
+CC	libavcodec/mpegvideo_dec.o
 CC	libavcodec/mpegvideo_motion.o
 CC	libavcodec/mpegvideodata.o
 CC	libavcodec/neon/mpegvideo.o
@@ -1088,8 +1088,8 @@ CC	libavutil/detection_bbox.o
 CC	libavutil/dict.o
 CC	libavutil/display.o
 CC	libavutil/dovi_meta.o
-CC	libavutil/downmix_info.o
 CC	libavutil/encryption_info.o
+CC	libavutil/downmix_info.o
 CC	libavutil/error.o
 CC	libavutil/eval.o
 CC	libavutil/executor.o
@@ -1134,8 +1134,8 @@ CC	libavutil/sha.o
 CC	libavutil/sha512.o
 CC	libavutil/slicethread.o
 CC	libavutil/spherical.o
-CC	libavutil/stereo3d.o
 CC	libavutil/tea.o
+CC	libavutil/stereo3d.o
 CC	libavutil/threadmessage.o
 CC	libavutil/time.o
 CC	libavutil/timecode.o
@@ -1343,26 +1343,29 @@ INSTALL	libavutil/libavutil.pc
 [ 73%] Built target VideoEncoder_autogen_timestamp_deps
 [ 74%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCapture.cpp.o
 [ 74%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCaptureData.cpp.o
-[ 74%] Automatic MOC for target VideoEncoder
 [ 74%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioCaptureHandle.cpp.o
 [ 75%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioPlay.cpp.o
+[ 75%] Automatic MOC for target VideoEncoder
 [ 75%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangaudiodev/YangAudioRenderData.cpp.o
-[ 75%] Built target VideoEncoder_autogen
-[ 75%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/VideoEncoder_autogen/mocs_compilation.cpp.o
 [ 75%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangCaptureFactory.cpp.o
+[ 75%] Built target VideoEncoder_autogen
 [ 75%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangScreenShare.cpp.o
+[ 75%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/VideoEncoder_autogen/mocs_compilation.cpp.o
 [ 76%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangVideoCapture.cpp.o
 [ 76%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangcapture/YangVideoCaptureHandle.cpp.o
-[ 76%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/videoencoder.cpp.o
 [ 76%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoder.cpp.o
 [ 77%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoderHandle.cpp.o
+[ 77%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/videoencoder.cpp.o
 [ 77%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoderHandleCb.cpp.o
 [ 77%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangAudioEncoderOpus.cpp.o
 [ 78%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangEncoderFactory.cpp.o
-[ 78%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangEncoderMediacodec.cpp.o
-[ 78%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH264EncoderSoft.cpp.o
-[ 79%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH265EncoderSoft.cpp.o
-[ 80%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/mppencoder.cpp.o
+[ 79%] Building CXX object remotedesk/server/videoencoder/CMakeFiles/VideoEncoder.dir/mppencoder.cpp.o
+[ 79%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangEncoderMediacodec.cpp.o
+[ 79%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH264EncoderSoft.cpp.o
+[ 80%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangH265EncoderSoft.cpp.o
+[ 80%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libVideoEncoder.a
+[ 81%] Built target VideoEncoder
+[ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangOpenH264Encoder.cpp.o
 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangencoder/YangH264EncoderSoft.cpp:36:2: warning: 'sprintf' is deprecated: This function is provided for compatibility reasons only.  Due to security concerns inherent in the design of sprintf(3), it is highly recommended that you use snprintf(3) instead. [-Wdeprecated-declarations]
    36 |         sprintf(s, "x264_encoder_open_%d", X264_BUILD);
       |         ^
@@ -1373,7 +1376,6 @@ INSTALL	libavutil/libavutil.pc
   218 |         #define __deprecated_msg(_msg) __attribute__((__deprecated__(_msg)))
       |                                                       ^
 1 warning generated.
-[ 80%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangOpenH264Encoder.cpp.o
 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/src/yangencoder/YangH265EncoderSoft.cpp:35:2: warning: 'sprintf' is deprecated: This function is provided for compatibility reasons only.  Due to security concerns inherent in the design of sprintf(3), it is highly recommended that you use snprintf(3) instead. [-Wdeprecated-declarations]
    35 |         sprintf(s,"x265_encoder_open_%d",X265_BUILD);
       |         ^
@@ -1383,12 +1385,10 @@ INSTALL	libavutil/libavutil.pc
 /Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/cdefs.h:218:48: note: expanded from macro '__deprecated_msg'
   218 |         #define __deprecated_msg(_msg) __attribute__((__deprecated__(_msg)))
       |                                                       ^
+[ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoder.cpp.o
 1 warning generated.
-[ 80%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoder.cpp.o
-[ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoderHandle.cpp.o
-[ 81%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoderMac.cpp.o
-[ 81%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libVideoEncoder.a
-[ 82%] Built target VideoEncoder
+[ 82%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoderHandle.cpp.o
+[ 82%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangencoder/YangVideoEncoderMac.cpp.o
 [ 82%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangAudioDecoder.cpp.o
 [ 82%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangAudioDecoderHandle.cpp.o
 [ 83%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangdecoder/YangAudioDecoderHandles.cpp.o
@@ -1436,10 +1436,10 @@ INSTALL	libavutil/libavutil.pc
 [ 89%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangMediaBuffer.cpp.o
 [ 89%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangVideoBuffer.cpp.o
 [ 89%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangVideoDecoderBuffer.cpp.o
-[ 90%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangavutil/YangWave.cpp.o
 [ 90%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangutil/buffer/YangVideoEncoderBuffer.cpp.o
-[ 90%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangavutil/YangYuvConvert.cpp.o
+[ 90%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangavutil/YangWave.cpp.o
 [ 90%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangstream/YangStreamManager.cpp.o
+[ 90%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangavutil/YangYuvConvert.cpp.o
 [ 91%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangstream/YangSynBuffer.cpp.o
 [ 91%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangstream/YangSynBufferManager.cpp.o
 [ 91%] Building CXX object remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeFiles/metartc8.dir/src/yangrtc/YangPeerConnection8.cpp.o
@@ -1448,16 +1448,16 @@ INSTALL	libavutil/libavutil.pc
 [ 92%] Built target WebRtcSession_autogen_timestamp_deps
 [ 93%] Automatic MOC for target WebRtcSession
 [ 93%] Built target WebRtcSession_autogen
-[ 93%] Building CXX object remotedesk/server/webrtcsession/CMakeFiles/WebRtcSession.dir/webrtcsession.cpp.o
 [ 93%] Building CXX object remotedesk/server/webrtcsession/CMakeFiles/WebRtcSession.dir/WebRtcSession_autogen/mocs_compilation.cpp.o
+[ 93%] Building CXX object remotedesk/server/webrtcsession/CMakeFiles/WebRtcSession.dir/webrtcsession.cpp.o
 [ 93%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libWebRtcSession.a
 [ 94%] Built target WebRtcSession
 [ 94%] Built target Rdpserver_autogen_timestamp_deps
 [ 94%] Automatic MOC for target Rdpserver
 [ 94%] Built target Rdpserver_autogen
 [ 94%] Building CXX object remotedesk/server/rdpserver/CMakeFiles/Rdpserver.dir/rdpserver_mac.cpp.o
+[ 94%] Building CXX object remotedesk/server/rdpserver/CMakeFiles/Rdpserver.dir/Rdpserver_autogen/mocs_compilation.cpp.o
 [ 95%] Building CXX object remotedesk/server/rdpserver/CMakeFiles/Rdpserver.dir/rdpserver.cpp.o
-[ 95%] Building CXX object remotedesk/server/rdpserver/CMakeFiles/Rdpserver.dir/Rdpserver_autogen/mocs_compilation.cpp.o
 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/rdpserver/rdpserver.cpp:1452:72: warning: 'error' is deprecated: Use QAbstractSocket::errorOccurred(QAbstractSocket::SocketError) instead [-Wdeprecated-declarations]
  1452 |         connect(sslSocket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
       |                                                                        ^
@@ -1479,15 +1479,15 @@ INSTALL	libavutil/libavutil.pc
 1 warning generated.
 [ 95%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libRdpserver.a
 [ 95%] Built target Rdpserver
-[ 95%] Built target HelperProcess_autogen_timestamp_deps
 [ 95%] Built target QtRemoteDesktop_autogen_timestamp_deps
-[ 96%] Automatic MOC for target HelperProcess
-[ 97%] Automatic MOC for target QtRemoteDesktop
-[ 97%] Built target HelperProcess_autogen
+[ 95%] Built target HelperProcess_autogen_timestamp_deps
+[ 96%] Automatic MOC for target QtRemoteDesktop
+[ 97%] Automatic MOC for target HelperProcess
 [ 97%] Built target QtRemoteDesktop_autogen
+[ 97%] Built target HelperProcess_autogen
 [ 98%] Generating qrc_resources.cpp
-[ 98%] Building CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/helper_process.cpp.o
 [ 99%] Building CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/HelperProcess_autogen/mocs_compilation.cpp.o
+[ 99%] Building CXX object remotedesk/server/helper_process/CMakeFiles/HelperProcess.dir/helper_process.cpp.o
 [ 99%] Building CXX object remotedesk/CMakeFiles/QtRemoteDesktop.dir/QtRemoteDesktop_autogen/mocs_compilation.cpp.o
 [100%] Building CXX object remotedesk/CMakeFiles/QtRemoteDesktop.dir/main.cpp.o
 [100%] Building CXX object remotedesk/CMakeFiles/QtRemoteDesktop.dir/qrc_resources.cpp.o
@@ -1495,71 +1495,6 @@ INSTALL	libavutil/libavutil.pc
 [100%] Built target HelperProcess
 [100%] Linking CXX executable /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/bin/QtRemoteDesktop.app/Contents/MacOS/QtRemoteDesktop
 ld: warning: ignoring duplicate libraries: '-lm', '-lpthread', '/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libAuthManager.a', '/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libFileTransferService.a', '/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInputManager.a', '/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInteractiveShell.a', '/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/../build_output/openh264_install/lib/libopenh264.a'
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[2](au_set.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[3](deblocking.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[4](decode_mb_aux.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[5](encode_mb_aux.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[6](encoder.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[7](encoder_data_tables.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[8](encoder_ext.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[9](get_intra_predictor.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[10](md.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[11](mv_pred.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[12](nal_encap.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[13](paraset_strategy.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[14](picture_handle.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[15](ratectl.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[16](ref_list_mgr_svc.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[17](sample.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[18](set_mb_syn_cabac.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[19](set_mb_syn_cavlc.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[20](slice_multi_threading.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[21](svc_base_layer_md.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[22](svc_enc_slice_segment.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[23](svc_encode_mb.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[24](svc_encode_slice.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[25](svc_mode_decision.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[26](svc_motion_estimate.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[27](svc_set_mb_syn_cabac.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[28](svc_set_mb_syn_cavlc.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[29](wels_preprocess.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[30](wels_task_base.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[31](wels_task_encoder.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[32](wels_task_management.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[33](welsEncoderExt.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[55](AdaptiveQuantization.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[56](BackgroundDetection.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[57](memory.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[58](WelsFrameWork.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[59](WelsFrameWorkEx.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[60](ComplexityAnalysis.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[61](denoise.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[62](denoise_filter.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[63](downsample.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[64](downsamplefuncs.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[65](imagerotate.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[66](imagerotatefuncs.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[67](SceneChangeDetection.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[68](ScrollDetection.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[69](ScrollDetectionFuncs.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[70](vaacalcfuncs.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[71](vaacalculation.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[72](common_tables.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[73](copy_mb.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[74](cpu.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[75](crt_util_safe_x.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[76](deblocking_common.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[77](expand_pic.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[78](intra_pred_common.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[79](mc.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[80](memory_align.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[81](sad_common.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[82](utils.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[83](welsCodecTrace.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[84](WelsTaskThread.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[85](WelsThread.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[86](WelsThreadLib.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
-ld: warning: object file (/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/openh264_install/lib/libopenh264.a[87](WelsThreadPool.o)) was built for newer 'macOS' version (15.0) than being linked (11.0)
 [100%] Built target QtRemoteDesktop
 === deploy.log ===
 Log:
@@ -2135,425 +2070,49 @@ Log: Created configuration file: "bin/QtRemoteDesktop.app/Contents/Resources/qt.
 Log: This file sets the plugin search path to "bin/QtRemoteDesktop.app/Contents/PlugIns"
 libqcocoa.dylib
 arm64
-=== 外部依赖 pass 1 ===
-/opt/homebrew/opt/qt@5/plugins/bearer/libqgenericbearer.dylib
-/opt/homebrew/opt/qt@5/plugins/iconengines/libqsvgicon.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqgif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqicns.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqico.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqjpeg.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacheif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacjp2.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtga.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtiff.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwbmp.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwebp.dylib
-/opt/homebrew/opt/qt@5/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/opt/homebrew/opt/qt@5/plugins/platforms/libqcocoa.dylib
-/opt/homebrew/opt/qt@5/plugins/printsupport/libcocoaprintersupport.dylib
-/opt/homebrew/opt/qt@5/plugins/styles/libqmacstyle.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqgenericbearer.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/bearer/libqgenericbearer.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/iconengines/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqgif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqgif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqicns.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqicns.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqico.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqico.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqjpeg.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqjpeg.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacheif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacheif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacjp2.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacjp2.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtga.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtga.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtiff.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtiff.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwbmp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwbmp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboardplugin.dylib
+=== 规范化包内 install name ===
+  /opt/homebrew/opt/qt@5/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib -> @executable_path/../PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqcocoa.dylib
+  /opt/homebrew/opt/qt@5/plugins/platforms/libqcocoa.dylib -> @executable_path/../PlugIns/platforms/libqcocoa.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforms/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libcocoaprintersupport.dylib
+  /opt/homebrew/opt/qt@5/plugins/printsupport/libcocoaprintersupport.dylib -> @executable_path/../PlugIns/printsupport/libcocoaprintersupport.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/printsupport/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacstyle.dylib
+  /opt/homebrew/opt/qt@5/plugins/styles/libqmacstyle.dylib -> @executable_path/../PlugIns/styles/libqmacstyle.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/styles/libqmacstyle.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-=== 外部依赖 pass 2 ===
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtCore.framework/Versions/5/QtCore
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtDBus.framework/Versions/5/QtDBus
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtGui.framework/Versions/5/QtGui
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtNetwork.framework/Versions/5/QtNetwork
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtPrintSupport.framework/Versions/5/QtPrintSupport
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtQml.framework/Versions/5/QtQml
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtQmlModels.framework/Versions/5/QtQmlModels
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtQuick.framework/Versions/5/QtQuick
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtSvg.framework/Versions/5/QtSvg
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtVirtualKeyboard.framework/Versions/5/QtVirtualKeyboard
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtWidgets.framework/Versions/5/QtWidgets
-/opt/homebrew/opt/freetype/lib/libfreetype.6.dylib
-/opt/homebrew/opt/jpeg-turbo/lib/libjpeg.8.dylib
-/opt/homebrew/opt/libtiff/lib/libtiff.6.dylib
-/opt/homebrew/opt/qt@5/plugins/bearer/libqgenericbearer.dylib
-/opt/homebrew/opt/qt@5/plugins/iconengines/libqsvgicon.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqgif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqicns.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqico.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqjpeg.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacheif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacjp2.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtga.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtiff.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwbmp.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwebp.dylib
-/opt/homebrew/opt/qt@5/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/opt/homebrew/opt/qt@5/plugins/platforms/libqcocoa.dylib
-/opt/homebrew/opt/qt@5/plugins/printsupport/libcocoaprintersupport.dylib
-/opt/homebrew/opt/qt@5/plugins/styles/libqmacstyle.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-/opt/homebrew/opt/webp/lib/libwebp.7.dylib
-/opt/homebrew/opt/webp/lib/libwebpdemux.2.dylib
-/opt/homebrew/opt/webp/lib/libwebpmux.3.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtCore
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqgif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwbmp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqico.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacheif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacstyle.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqjpeg.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtiff.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqgenericbearer.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqicns.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtga.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacjp2.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtDBus
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtGui
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqgif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwbmp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqico.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacheif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacstyle.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqjpeg.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtiff.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqicns.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtga.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacjp2.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtNetwork
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqgenericbearer.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtPrintSupport
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQml
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQmlModels
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQuick
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtSvg
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtVirtualKeyboard
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtWidgets
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtPrintSupport
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtSvg
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqmacstyle.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqjpeg.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqtiff.dylib
+  /opt/homebrew/opt/qt@5/plugins/bearer/libqgenericbearer.dylib -> @executable_path/../PlugIns/bearer/libqgenericbearer.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/bearer/libqgenericbearer.dylib
+  /opt/homebrew/opt/qt@5/plugins/iconengines/libqsvgicon.dylib -> @executable_path/../PlugIns/iconengines/libqsvgicon.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/iconengines/libqsvgicon.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqgif.dylib -> @executable_path/../PlugIns/imageformats/libqgif.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqgif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqicns.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqico.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqjpeg.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacheif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacjp2.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtga.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtiff.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqwbmp.dylib -> @executable_path/../PlugIns/imageformats/libqwbmp.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwbmp.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqwebp.dylib -> @executable_path/../PlugIns/imageformats/libqwebp.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforms/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/printsupport/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/styles/libqmacstyle.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/libqwebp.dylib
-=== 外部依赖 pass 3 ===
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtCore.framework/Versions/5/QtCore
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtGui.framework/Versions/5/QtGui
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtNetwork.framework/Versions/5/QtNetwork
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtQml.framework/Versions/5/QtQml
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtQmlModels.framework/Versions/5/QtQmlModels
-/opt/homebrew/Cellar/qt@5/5.15.19/lib/QtQuick.framework/Versions/5/QtQuick
-/opt/homebrew/opt/gettext/lib/libintl.8.dylib
-/opt/homebrew/opt/glib/lib/libglib-2.0.0.dylib
-/opt/homebrew/opt/glib/lib/libgthread-2.0.0.dylib
-/opt/homebrew/opt/libpng/lib/libpng16.16.dylib
-/opt/homebrew/opt/md4c/lib/libmd4c.0.dylib
-/opt/homebrew/opt/pcre2/lib/libpcre2-16.0.dylib
-/opt/homebrew/opt/qt@5/plugins/bearer/libqgenericbearer.dylib
-/opt/homebrew/opt/qt@5/plugins/iconengines/libqsvgicon.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqgif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqicns.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqico.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqjpeg.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacheif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacjp2.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtga.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtiff.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwbmp.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwebp.dylib
-/opt/homebrew/opt/qt@5/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/opt/homebrew/opt/qt@5/plugins/platforms/libqcocoa.dylib
-/opt/homebrew/opt/qt@5/plugins/printsupport/libcocoaprintersupport.dylib
-/opt/homebrew/opt/qt@5/plugins/styles/libqmacstyle.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-/opt/homebrew/opt/zstd/lib/libzstd.1.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQmlModels
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtPrintSupport
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQml
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtNetwork
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtSvg
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtGui
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtVirtualKeyboard
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQuick
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtDBus
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtWidgets
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtPrintSupport
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtSvg
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtVirtualKeyboard
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQuick
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtWidgets
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQmlModels
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQml
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtVirtualKeyboard
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQuick
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQmlModels
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtVirtualKeyboard
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQuick
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtVirtualKeyboard
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtQuick
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtVirtualKeyboard
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtCore
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtCore
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtCore
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtGui
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtGui
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtCore
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/bearer/libqgenericbearer.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/iconengines/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqgif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqicns.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqico.dylib -> @executable_path/../PlugIns/imageformats/libqico.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqico.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqjpeg.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqmacheif.dylib -> @executable_path/../PlugIns/imageformats/libqmacheif.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacheif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacjp2.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtga.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqjpeg.dylib -> @executable_path/../PlugIns/imageformats/libqjpeg.dylib
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqjpeg.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqtiff.dylib -> @executable_path/../PlugIns/imageformats/libqtiff.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtiff.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwbmp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforms/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/printsupport/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/styles/libqmacstyle.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/Frameworks/QtCore
-=== 外部依赖 pass 4 ===
-/opt/homebrew/opt/qt@5/plugins/bearer/libqgenericbearer.dylib
-/opt/homebrew/opt/qt@5/plugins/iconengines/libqsvgicon.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqgif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqicns.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqico.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqjpeg.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacheif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacjp2.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtga.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtiff.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwbmp.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwebp.dylib
-/opt/homebrew/opt/qt@5/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/opt/homebrew/opt/qt@5/plugins/platforms/libqcocoa.dylib
-/opt/homebrew/opt/qt@5/plugins/printsupport/libcocoaprintersupport.dylib
-/opt/homebrew/opt/qt@5/plugins/styles/libqmacstyle.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/bearer/libqgenericbearer.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/iconengines/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqgif.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqicns.dylib -> @executable_path/../PlugIns/imageformats/libqicns.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqicns.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqico.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqjpeg.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacheif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacjp2.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqtga.dylib -> @executable_path/../PlugIns/imageformats/libqtga.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtga.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtiff.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwbmp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforms/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/printsupport/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/styles/libqmacstyle.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-=== 外部依赖 pass 5 ===
-/opt/homebrew/opt/qt@5/plugins/bearer/libqgenericbearer.dylib
-/opt/homebrew/opt/qt@5/plugins/iconengines/libqsvgicon.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqgif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqicns.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqico.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqjpeg.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacheif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacjp2.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtga.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtiff.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwbmp.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwebp.dylib
-/opt/homebrew/opt/qt@5/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/opt/homebrew/opt/qt@5/plugins/platforms/libqcocoa.dylib
-/opt/homebrew/opt/qt@5/plugins/printsupport/libcocoaprintersupport.dylib
-/opt/homebrew/opt/qt@5/plugins/styles/libqmacstyle.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/bearer/libqgenericbearer.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/iconengines/libqsvgicon.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqgif.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqicns.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqico.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqjpeg.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacheif.dylib
+  /opt/homebrew/opt/qt@5/plugins/imageformats/libqmacjp2.dylib -> @executable_path/../PlugIns/imageformats/libqmacjp2.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqmacjp2.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtga.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqtiff.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwbmp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/imageformats/libqwebp.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/platforms/libqcocoa.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/printsupport/libcocoaprintersupport.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/styles/libqmacstyle.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
+  /opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_thai.dylib -> @executable_path/../PlugIns/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
-::error::产物仍依赖包外 dylib（目标机会 dyld 打不开）：
-/opt/homebrew/opt/qt@5/plugins/bearer/libqgenericbearer.dylib
-/opt/homebrew/opt/qt@5/plugins/iconengines/libqsvgicon.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqgif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqicns.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqico.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqjpeg.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacheif.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqmacjp2.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtga.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqtiff.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwbmp.dylib
-/opt/homebrew/opt/qt@5/plugins/imageformats/libqwebp.dylib
-/opt/homebrew/opt/qt@5/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib
-/opt/homebrew/opt/qt@5/plugins/platforms/libqcocoa.dylib
-/opt/homebrew/opt/qt@5/plugins/printsupport/libcocoaprintersupport.dylib
-/opt/homebrew/opt/qt@5/plugins/styles/libqmacstyle.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
-/opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_thai.dylib
+  /opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib -> @executable_path/../PlugIns/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_openwnn.dylib
+  /opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib -> @executable_path/../PlugIns/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_hangul.dylib
+  /opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib -> @executable_path/../PlugIns/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_pinyin.dylib
+  /opt/homebrew/opt/qt@5/plugins/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib -> @executable_path/../PlugIns/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: bin/QtRemoteDesktop.app/Contents/PlugIns/virtualkeyboard/libqtvirtualkeyboard_tcime.dylib
 === 错误摘要 ===
 build.log:684:CC	libavcodec/error_resilience.o
 build.log:830:CC	libavutil/error.o
