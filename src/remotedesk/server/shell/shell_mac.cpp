@@ -3,6 +3,7 @@
 #include <QWebSocket>
 #include <QDebug>
 #include <util.h>
+#include <crt_externs.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -53,7 +54,10 @@ void MacInteractiveShell::start()
         tcsetattr(slaveFd, TCSANOW, &tios);
     }
     std::vector<std::string> envStrings;
-    for (char** e = environ; e && *e; ++e) {
+    // Apple 的 <unistd.h> 不声明 environ（符号本身在 libSystem 里），拿它的官方入口
+    // 是 crt_externs.h 的 _NSGetEnviron()；直接写 environ 在 Clang 下是
+    // "use of undeclared identifier"，Linux 那份 shell_linux.cpp 才能那么写。
+    for (char** e = *_NSGetEnviron(); e && *e; ++e) {
         const std::string s(*e);
         if (s.compare(0, 5, "TERM=") == 0 || s.compare(0, 5, "LANG=") == 0
             || s.compare(0, 7, "LC_ALL=") == 0)
@@ -61,9 +65,11 @@ void MacInteractiveShell::start()
         envStrings.push_back(s);
     }
     envStrings.push_back("TERM=xterm-256color");
-    // 强制 UTF-8，保证 PTY 输出字节与前端 xterm 的 UTF-8 解码一致，避免中文乱码
-    envStrings.push_back("LANG=C.UTF-8");
-    envStrings.push_back("LC_ALL=C.UTF-8");
+    // 强制 UTF-8，保证 PTY 输出字节与前端 xterm 的 UTF-8 解码一致，避免中文乱码。
+    // macOS 没有 glibc 那个 C.UTF-8 locale（也不给 locale-gen），写 C.UTF-8 会让
+    // setlocale 失败退回 C=ASCII，正好把这里想防的乱码又请回来。
+    envStrings.push_back("LANG=en_US.UTF-8");
+    envStrings.push_back("LC_ALL=en_US.UTF-8");
     std::vector<char*> envp;
     envp.reserve(envStrings.size() + 1);
     for (std::string& s : envStrings)
