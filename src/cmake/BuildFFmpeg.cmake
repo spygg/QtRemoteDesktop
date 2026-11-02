@@ -711,6 +711,20 @@ else()
 endif()
 string(APPEND _ff_script
     "execute_process(COMMAND \"${FFMPEG_SH}\" -c \"chmod +x '${FFMPEG_PKGCONFIG_DIR}/pkg-config' 2>/dev/null || true\")\n")
+if(NOT WIN32)
+    # 入库的 FFmpeg 树整体是 100644：在 Windows 上 commit 不保留可执行位。它的
+    # Makefile 把 ffbuild/version.sh、libversion.sh、pkgconfig_generate.sh 当
+    # 可执行文件直接调，缺位就报 "Permission denied" → make Error 126，
+    # 表现成"configure 全绿、一进 Build 就死"。Linux 一直在
+    # build_linux.sh:47 用全局 chmod 掩盖了这点，所以只有纯 CMake 路径
+    # （macOS CI、以及任何直接 cmake 构建的人）会撞上。
+    string(APPEND _ff_script
+        "file(GLOB_RECURSE _ff_exec_scripts \"${FFMPEG_SRC_DIR}/*.sh\")\n"
+        "list(APPEND _ff_exec_scripts \"${FFMPEG_SRC_DIR}/configure\")\n"
+        "list(REMOVE_DUPLICATES _ff_exec_scripts)\n"
+        # 一次 chmod 收下整张表：逐个调用要给几百个文件各起一个进程
+        "execute_process(COMMAND chmod +x \${_ff_exec_scripts} ERROR_QUIET OUTPUT_QUIET)\n")
+endif()
 # ---- oneVPL（QSV 的链接期依赖）----
 # 必须在 FFmpeg configure 之前产出 libvpl.a：configure 的 check_pkg_config 会真的
 # 拿 -lvpl 去链接一个测试程序。已存在就跳过；编不出来只回退到"去掉 QSV"的
