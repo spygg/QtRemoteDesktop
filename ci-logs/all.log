@@ -1,10 +1,420 @@
 === pwd: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop
 === fetch_sources.log ===
-(不存在)
+-rwxr-xr-x  1 runner  staff  278049 Nov  2 02:27 src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/configure
 === configure.log ===
-(不存在)
+CMake Warning (deprecated) at CMakeLists.txt:3 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+-- The C compiler identification is AppleClang 17.0.0.17000013
+-- The CXX compiler identification is AppleClang 17.0.0.17000013
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- FFmpeg 版本：6.1.2（源码 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2；产物 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/../build_output/ffmpeg_install-6.1.2）
+-- FFmpeg missing — will be built by CMake (ffmpeg_ep) -> /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/../build_output/ffmpeg_install-6.1.2
+-- WebRTC enabled (FFmpeg + bundled metaRTC)
+-- ScreenCapturer: XRandR not found, fallback to xrandr process enumeration
+CMake Warning (deprecated) at remotedesk/server/singleapplication/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+-- The OBJCXX compiler identification is AppleClang 17.0.0.17000013
+-- Detecting OBJCXX compiler ABI info
+-- Detecting OBJCXX compiler ABI info - done
+-- Check for working OBJCXX compiler: /usr/bin/c++ - skipped
+CMake Warning (deprecated) at remotedesk/thridparty/third_party_src/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+-- Looking for arpa/inet.h
+-- Looking for arpa/inet.h - found
+-- Looking for byteswap.h
+-- Looking for byteswap.h - not found
+-- Looking for inttypes.h
+-- Looking for inttypes.h - found
+-- Looking for machine/types.h
+-- Looking for machine/types.h - found
+-- Looking for netinet/in.h
+-- Looking for netinet/in.h - found
+-- Looking for stdint.h
+-- Looking for stdint.h - found
+-- Looking for stdlib.h
+-- Looking for stdlib.h - found
+-- Looking for sys/int_types.h
+-- Looking for sys/int_types.h - not found
+-- Looking for sys/socket.h
+-- Looking for sys/socket.h - found
+-- Looking for sys/types.h
+-- Looking for sys/types.h - found
+-- Looking for unistd.h
+-- Looking for unistd.h - found
+-- Looking for windows.h
+-- Looking for windows.h - not found
+-- Looking for winsock2.h
+-- Looking for winsock2.h - not found
+-- Looking for sigaction
+-- Looking for sigaction - found
+-- Looking for inet_aton
+-- Looking for inet_aton - found
+-- Looking for inet_pton
+-- Looking for inet_pton - found
+-- Looking for usleep
+-- Looking for usleep - found
+-- Looking for stddef.h
+-- Looking for stddef.h - found
+-- Check size of uint8_t
+-- Check size of uint8_t - done
+-- Check size of uint16_t
+-- Check size of uint16_t - done
+-- Check size of uint32_t
+-- Check size of uint32_t - done
+-- Check size of uint64_t
+-- Check size of uint64_t - done
+-- Check size of int32_t
+-- Check size of int32_t - done
+-- Check size of unsigned long
+-- Check size of unsigned long - done
+-- Check size of unsigned long long
+-- Check size of unsigned long long - done
+-- Performing Test HAVE_INLINE
+-- Performing Test HAVE_INLINE - Success
+-- Looking for include file sys/queue.h
+-- Looking for include file sys/queue.h - found
+-- Looking for include files sys/socket.h, linux/if_addr.h
+-- Looking for include files sys/socket.h, linux/if_addr.h - not found
+-- Looking for include files sys/socket.h, linux/rtnetlink.h
+-- Looking for include files sys/socket.h, linux/rtnetlink.h - not found
+-- Looking for 4 include files sys/types.h, ..., netinet/ip_icmp.h
+-- Looking for 4 include files sys/types.h, ..., netinet/ip_icmp.h - found
+-- Looking for 3 include files sys/types.h, ..., net/route.h
+-- Looking for 3 include files sys/types.h, ..., net/route.h - found
+-- Looking for include file stdatomic.h
+-- Looking for include file stdatomic.h - found
+-- Looking for usrsctp.h
+-- Looking for usrsctp.h - found
+-- Performing Test have_sa_len
+-- Performing Test have_sa_len - Success
+-- have_sa_len
+-- Performing Test have_sin_len
+-- Performing Test have_sin_len - Success
+-- have_sin_len
+-- Performing Test have_sin6_len
+-- Performing Test have_sin6_len - Success
+-- have_sin6_len
+-- Performing Test have_sconn_len
+-- Performing Test have_sconn_len - Success
+-- HAVE_SCONN_LEN
+-- Performing Test has_wfloat_equal
+-- Performing Test has_wfloat_equal - Success
+-- Performing Test has_wshadow
+-- Performing Test has_wshadow - Success
+-- Performing Test has_wpointer_aritih
+-- Performing Test has_wpointer_aritih - Success
+-- Performing Test has_wunreachable_code
+-- Performing Test has_wunreachable_code - Success
+-- Performing Test has_winit_self
+-- Performing Test has_winit_self - Success
+-- Performing Test has_wno_unused_function
+-- Performing Test has_wno_unused_function - Success
+-- Performing Test has_wno_unused_parameter
+-- Performing Test has_wno_unused_parameter - Success
+-- Performing Test has_wno_unreachable_code
+-- Performing Test has_wno_unreachable_code - Success
+-- Performing Test has_wstrict_prototypes
+-- Performing Test has_wstrict_prototypes - Success
+-- Compiler flags (CMAKE_C_FLAGS):  -std=c99 -pedantic -Wall -Wextra -Wfloat-equal -Wshadow -Wpointer-arith -Wunreachable-code -Winit-self -Wno-unused-function -Wno-unused-parameter -Wno-unreachable-code -Wstrict-prototypes
+-- Performing Test has_wno_address_of_packed_member
+-- Performing Test has_wno_address_of_packed_member - Success
+-- Performing Test has_wno_deprecated_declarations
+-- Performing Test has_wno_deprecated_declarations - Success
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- openh264: nasm not found, building without x86 assembly
+CMake Warning (deprecated) at remotedesk/thridparty/third_party_src/metaRTC/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+CMake Warning (deprecated) at remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+CMake Warning (deprecated) at remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+-- Found OpenSSL: /usr/local/opt/openssl@3/lib/libcrypto.dylib (found version "3.6.3")
+CMake Warning (deprecated) at remotedesk/thridparty/third_party_src/metaRTC/libmetartc8/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+CMake Warning (deprecated) at remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+-- OpenSSL 1.0.2u legacy build skipped (Linux only; macOS uses system OpenSSL 1.1)
+-- Found ZLIB: /Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libz.tbd (found version "1.2.12")
+-- FFmpeg 6.1.2: NVENC 头来自 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/nv-codec-headers-n12.2.72.0/include
+-- FFmpeg: 未找到 nasm/yasm，x86 汇编优化关闭（swscale 约慢 3x）
+-- FFmpeg 硬件编码器自动探测：videotoolbox
+-- Configuring done (24.5s)
+-- Generating done (0.5s)
+-- Build files have been written to: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build
 === build.log ===
-(不存在)
+[  0%] Built target FileTransferService_autogen_timestamp_deps
+[  0%] Built target AuthManager_autogen_timestamp_deps
+[  1%] Creating directories for 'openh264_ep'
+[  1%] Built target InputManager_autogen_timestamp_deps
+[  1%] Built target SystemInfo_autogen_timestamp_deps
+[  1%] No download step for 'openh264_ep'
+[  1%] Built target ScreenCapturer_autogen_timestamp_deps
+[  1%] Built target Clipboardservice_autogen_timestamp_deps
+[  1%] No update step for 'openh264_ep'
+[  1%] Built target WebsocketServer_autogen_timestamp_deps
+[  1%] Built target InteractiveShell_autogen_timestamp_deps
+[  1%] No patch step for 'openh264_ep'
+[  2%] Built target XdndMonitor_autogen_timestamp_deps
+[  2%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangSrsConnection.c.o
+[  2%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/srtp/srtp.c.o
+[  3%] No configure step for 'openh264_ep'
+[  3%] Performing build step for 'openh264_ep'
+CMake Warning (deprecated) at /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build/build_openh264.cmake:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+[  3%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangWhip.c.o
+[  3%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangZlmConnection.c.o
+[  4%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangwhip8.a
+[  4%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher.c.o
+[  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/cipher_test_cases.c.o
+[  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/null_cipher.c.o
+make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule.
+[  5%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes.c.o
+[  6%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/cipher/aes_icm.c.o
+[  6%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth.c.o
+[  6%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/auth_test_cases.c.o
+[  7%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/null_auth.c.o
+[  7%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/hmac.c.o
+[  7%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/sha1.c.o
+[  7%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/alloc.c.o
+[  7%] Built target yangwhip8
+[  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/crypto_kernel.c.o
+[  8%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_asconf.c.o
+[  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/err.c.o
+[  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/key.c.o
+[  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/math/datatypes.c.o
+[  9%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_auth.c.o
+[  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdb.c.o
+[  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdbx.c.o
+[ 10%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libsrtp2.a
+[ 10%] Built target srtp2
+[ 11%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_bsd_addr.c.o
+[ 11%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioMix.c.o
+[ 11%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_callout.c.o
+[ 12%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioUtil.c.o
+[ 12%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_cc_functions.c.o
+[ 12%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangjson/YangJson.c.o
+[ 12%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangjson/YangJsonImpl.c.o
+[ 12%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_crc32.c.o
+[ 13%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_indata.c.o
+[ 14%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangBuffer2.c.o
+[ 14%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangMediaBuffer2.c.o
+[ 14%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangPacket.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangSortBuffer.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangVideoEncoderBuffer2.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangAvtype.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangBuffer.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.o
+[ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCLog.c.o
+[ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCString.c.o
+[ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCTimer.c.o
+[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangEndian.c.o
+[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangFile.c.o
+[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangHttp.c.o
+[ 17%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.o
+[ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangIni.c.o
+[ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangLibHandle.c.o
+[ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangMath.c.o
+[ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocket.c.o
+[ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketIP.c.o
+[ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSocketCompat.c.o
+[ 19%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangSsrc.c.o
+[ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangThread.c.o
+[ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTime.c.o
+[ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTimestamp.c.o
+[ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangUrl.c.o
+[ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangVector.c.o
+[ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangMeta.c.o
+[ 22%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_pcb.c.o
+[ 23%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangNalu.c.o
+[ 23%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangSpspps.c.o
+[ 23%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a(YangThread.c.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a(YangThread.c.o) has no symbols
+[ 23%] Built target yangutil8
+[ 23%] Built target SingleApp_autogen_timestamp_deps
+[ 23%] Built target Service_autogen_timestamp_deps
+[ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.o
+[ 23%] Built target SystemSleepBlocker_autogen_timestamp_deps
+[ 23%] Built target radiometer_breakpad_autogen_timestamp_deps
+[ 23%] Automatic MOC for target AuthManager
+[ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.o
+[ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_ss_functions.c.o
+[ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sysctl.c.o
+[ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_timer.c.o
+[ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_userspace.c.o
+[ 25%] Built target AuthManager_autogen
+[ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_usrreq.c.o
+[ 25%] Automatic MOC for target FileTransferService
+[ 25%] Built target FileTransferService_autogen
+[ 26%] Automatic MOC for target InputManager
+[ 26%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctputil.c.o
+[ 26%] Built target InputManager_autogen
+[ 26%] Automatic MOC for target SystemInfo
+[ 26%] Built target SystemInfo_autogen
+[ 27%] Automatic MOC for target Clipboardservice
+[ 27%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet6/sctp6_usrreq.c.o
+[ 27%] Built target Clipboardservice_autogen
+[ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_environment.c.o
+[ 28%] Automatic MOC for target ScreenCapturer
+[ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_mbuf.c.o
+[ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_recv_thread.c.o
+[ 28%] Built target ScreenCapturer_autogen
+[ 28%] Automatic MOC for target InteractiveShell
+[ 29%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.o
+[ 29%] Built target InteractiveShell_autogen
+[ 29%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libusrsctp.a
+[ 29%] Automatic MOC for target WebsocketServer
+[ 29%] Built target usrsctp
+[ 29%] Automatic MOC for target XdndMonitor
+[ 29%] Built target WebsocketServer_autogen
+[ 29%] Automatic MOC for target SingleApp
+Generated codec/common/inc/version_gen.h
+[ 29%] Built target XdndMonitor_autogen
+[ 29%] Automatic MOC for target Service
+[ 29%] Built target Service_autogen
+[ 29%] Automatic MOC for target SystemSleepBlocker
+[ 29%] Built target SingleApp_autogen
+[ 30%] Automatic MOC for target radiometer_breakpad
+[ 30%] Built target radiometer_breakpad_autogen
+[ 30%] Built target SystemSleepBlocker_autogen
+[ 30%] Building CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/AuthManager_autogen/mocs_compilation.cpp.o
+[ 30%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/FileTransferService_autogen/mocs_compilation.cpp.o
+[ 30%] Building CXX object remotedesk/server/authmanager/CMakeFiles/AuthManager.dir/authmanager.cpp.o
+[ 31%] Building CXX object remotedesk/server/filetransferservice/CMakeFiles/FileTransferService.dir/filetransferservice.cpp.o
+[ 32%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libAuthManager.a
+[ 32%] Built target AuthManager
+[ 32%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/InputManager_autogen/mocs_compilation.cpp.o
+[ 32%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libFileTransferService.a
+[ 32%] Built target FileTransferService
+[ 33%] Building CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/SystemInfo_autogen/mocs_compilation.cpp.o
+[ 33%] Building CXX object remotedesk/server/systeminfo/CMakeFiles/SystemInfo.dir/systeminfo.cpp.o
+[ 34%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager.cpp.o
+[ 34%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemInfo.a
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemInfo.a(mocs_compilation.cpp.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemInfo.a(mocs_compilation.cpp.o) has no symbols
+[ 34%] Built target SystemInfo
+[ 35%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/Clipboardservice_autogen/mocs_compilation.cpp.o
+[ 35%] Building CXX object remotedesk/server/inputmanger/CMakeFiles/InputManager.dir/inputmanager_mac.cpp.o
+[ 35%] Building CXX object remotedesk/server/clipboardservice/CMakeFiles/Clipboardservice.dir/clipboardservice.cpp.o
+[ 35%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInputManager.a
+[ 35%] Built target InputManager
+[ 35%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/ScreenCapturer_autogen/mocs_compilation.cpp.o
+[ 35%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libClipboardservice.a
+[ 35%] Built target Clipboardservice
+[ 35%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/InteractiveShell_autogen/mocs_compilation.cpp.o
+[ 35%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer.cpp.o
+[ 35%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell.cpp.o
+[ 36%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_mac.cpp.o
+[ 37%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer_mac.cpp.o
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/shell/shell_mac.cpp:56:21: error: use of undeclared identifier 'environ'
+   56 |     for (char** e = environ; e && *e; ++e) {
+      |                     ^
+1 error generated.
+make[2]: *** [remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_mac.cpp.o] Error 1
+make[1]: *** [remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/all] Error 2
+make[1]: *** Waiting for unfinished jobs....
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/screencapturer/screencapturer_mac.cpp:108:9: warning: 'width' overrides a member function but is not marked 'override' [-Winconsistent-missing-override]
+  108 |     int width() const { return width_; }
+      |         ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/screencapturer/screencapturer.h:74:17: note: overridden virtual function is here
+   74 |     virtual int width() const { return 0; }
+      |                 ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/screencapturer/screencapturer_mac.cpp:109:9: warning: 'height' overrides a member function but is not marked 'override' [-Winconsistent-missing-override]
+  109 |     int height() const { return height_; }
+      |         ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/screencapturer/screencapturer.h:75:17: note: overridden virtual function is here
+   75 |     virtual int height() const { return 0; }
+      |                 ^
+2 warnings generated.
+[ 37%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libScreenCapturer.a
+[ 38%] Built target ScreenCapturer
+[ 38%] No install step for 'openh264_ep'
+[ 38%] Completed 'openh264_ep'
+[ 38%] Built target openh264_ep
+make: *** [all] Error 2
 === deploy.log ===
 (不存在)
 === codesign.log ===
@@ -14,3 +424,8 @@
 === package.log ===
 (不存在)
 === 错误摘要 ===
+build.log:173:/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/shell/shell_mac.cpp:56:21: error: use of undeclared identifier 'environ'
+build.log:176:1 error generated.
+build.log:177:make[2]: *** [remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_mac.cpp.o] Error 1
+build.log:178:make[1]: *** [remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/all] Error 2
+build.log:198:make: *** [all] Error 2
