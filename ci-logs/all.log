@@ -1,6 +1,6 @@
 === pwd: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop
 === fetch_sources.log ===
--rwxr-xr-x  1 runner  staff  278049 Nov  2 02:27 src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/configure
+-rwxr-xr-x  1 runner  staff  278049 Nov  2 02:45 src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/configure
 === configure.log ===
 CMake Warning (deprecated) at CMakeLists.txt:3 (cmake_minimum_required):
   Compatibility with CMake < 3.10 will be removed from a future version of
@@ -213,23 +213,23 @@ to suppress it.
 -- FFmpeg 6.1.2: NVENC 头来自 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/nv-codec-headers-n12.2.72.0/include
 -- FFmpeg: 未找到 nasm/yasm，x86 汇编优化关闭（swscale 约慢 3x）
 -- FFmpeg 硬件编码器自动探测：videotoolbox
--- Configuring done (24.5s)
+-- Configuring done (30.3s)
 -- Generating done (0.5s)
 -- Build files have been written to: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build
 === build.log ===
 [  0%] Built target FileTransferService_autogen_timestamp_deps
-[  0%] Built target AuthManager_autogen_timestamp_deps
+[  1%] Built target AuthManager_autogen_timestamp_deps
 [  1%] Creating directories for 'openh264_ep'
-[  1%] Built target InputManager_autogen_timestamp_deps
 [  1%] Built target SystemInfo_autogen_timestamp_deps
+[  1%] Built target InputManager_autogen_timestamp_deps
 [  1%] No download step for 'openh264_ep'
 [  1%] Built target ScreenCapturer_autogen_timestamp_deps
 [  1%] Built target Clipboardservice_autogen_timestamp_deps
 [  1%] No update step for 'openh264_ep'
-[  1%] Built target WebsocketServer_autogen_timestamp_deps
 [  1%] Built target InteractiveShell_autogen_timestamp_deps
+[  1%] Built target WebsocketServer_autogen_timestamp_deps
 [  1%] No patch step for 'openh264_ep'
-[  2%] Built target XdndMonitor_autogen_timestamp_deps
+[  1%] Built target XdndMonitor_autogen_timestamp_deps
 [  2%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangwhip8/CMakeFiles/yangwhip8.dir/src/yangwhip/YangSrsConnection.c.o
 [  2%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/srtp/srtp.c.o
 [  3%] No configure step for 'openh264_ep'
@@ -260,8 +260,8 @@ make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule
 [  7%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/hash/sha1.c.o
 [  7%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/alloc.c.o
 [  7%] Built target yangwhip8
+[  7%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_asconf.c.o
 [  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/crypto_kernel.c.o
-[  8%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_asconf.c.o
 [  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/err.c.o
 [  8%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/kernel/key.c.o
 [  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/math/datatypes.c.o
@@ -269,8 +269,8 @@ make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule
 [  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdb.c.o
 [  9%] Building C object remotedesk/thridparty/third_party_src/libsrtp/CMakeFiles/srtp2.dir/crypto/replay/rdbx.c.o
 [ 10%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libsrtp2.a
-[ 10%] Built target srtp2
 [ 11%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_bsd_addr.c.o
+[ 11%] Built target srtp2
 [ 11%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioMix.c.o
 [ 11%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_callout.c.o
 [ 12%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangaudio/YangAudioUtil.c.o
@@ -285,15 +285,15 @@ make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule
 [ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangSortBuffer.c.o
 [ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/buffer2/YangVideoEncoderBuffer2.c.o
 [ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangAvtype.c.o
-[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangBuffer.c.o
 [ 15%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_input.c.o
+[ 15%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangBuffer.c.o
 [ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCLog.c.o
 [ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCString.c.o
 [ 16%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangCTimer.c.o
 [ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangEndian.c.o
 [ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangFile.c.o
-[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangHttp.c.o
 [ 17%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_output.c.o
+[ 17%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangHttp.c.o
 [ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangIni.c.o
 [ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangLibHandle.c.o
 [ 18%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangMath.c.o
@@ -306,27 +306,27 @@ make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule
 [ 20%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangTimestamp.c.o
 [ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangUrl.c.o
 [ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangutil/sys/YangVector.c.o
-[ 21%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangMeta.c.o
 [ 22%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_pcb.c.o
+[ 22%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangMeta.c.o
 [ 23%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangNalu.c.o
 [ 23%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libyangutil8/CMakeFiles/yangutil8.dir/src/yangvideo/YangSpspps.c.o
 [ 23%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a(YangThread.c.o) has no symbols
 /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libyangutil8.a(YangThread.c.o) has no symbols
 [ 23%] Built target yangutil8
+[ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.o
 [ 23%] Built target SingleApp_autogen_timestamp_deps
 [ 23%] Built target Service_autogen_timestamp_deps
-[ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_peeloff.c.o
+[ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.o
 [ 23%] Built target SystemSleepBlocker_autogen_timestamp_deps
 [ 23%] Built target radiometer_breakpad_autogen_timestamp_deps
-[ 23%] Automatic MOC for target AuthManager
-[ 23%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sha1.c.o
 [ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_ss_functions.c.o
+[ 24%] Automatic MOC for target AuthManager
 [ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_sysctl.c.o
 [ 24%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_timer.c.o
 [ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_userspace.c.o
-[ 25%] Built target AuthManager_autogen
 [ 25%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet/sctp_usrreq.c.o
+[ 25%] Built target AuthManager_autogen
 [ 25%] Automatic MOC for target FileTransferService
 [ 25%] Built target FileTransferService_autogen
 [ 26%] Automatic MOC for target InputManager
@@ -336,23 +336,23 @@ make[3]: warning: jobserver unavailable: using -j1.  Add `+' to parent make rule
 [ 26%] Built target SystemInfo_autogen
 [ 27%] Automatic MOC for target Clipboardservice
 [ 27%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/netinet6/sctp6_usrreq.c.o
-[ 27%] Built target Clipboardservice_autogen
 [ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_environment.c.o
-[ 28%] Automatic MOC for target ScreenCapturer
 [ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_mbuf.c.o
+[ 28%] Built target Clipboardservice_autogen
+[ 28%] Automatic MOC for target ScreenCapturer
 [ 28%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_recv_thread.c.o
-[ 28%] Built target ScreenCapturer_autogen
-[ 28%] Automatic MOC for target InteractiveShell
 [ 29%] Building C object remotedesk/thridparty/third_party_src/usrsctp/usrsctplib/CMakeFiles/usrsctp.dir/user_socket.c.o
-[ 29%] Built target InteractiveShell_autogen
+[ 29%] Built target ScreenCapturer_autogen
+[ 29%] Automatic MOC for target InteractiveShell
 [ 29%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libusrsctp.a
-[ 29%] Automatic MOC for target WebsocketServer
+[ 29%] Built target InteractiveShell_autogen
 [ 29%] Built target usrsctp
+[ 29%] Automatic MOC for target WebsocketServer
 [ 29%] Automatic MOC for target XdndMonitor
-[ 29%] Built target WebsocketServer_autogen
-[ 29%] Automatic MOC for target SingleApp
 Generated codec/common/inc/version_gen.h
 [ 29%] Built target XdndMonitor_autogen
+[ 29%] Built target WebsocketServer_autogen
+[ 29%] Automatic MOC for target SingleApp
 [ 29%] Automatic MOC for target Service
 [ 29%] Built target Service_autogen
 [ 29%] Automatic MOC for target SystemSleepBlocker
@@ -389,13 +389,6 @@ Generated codec/common/inc/version_gen.h
 [ 35%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell.cpp.o
 [ 36%] Building CXX object remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_mac.cpp.o
 [ 37%] Building CXX object remotedesk/server/screencapturer/CMakeFiles/ScreenCapturer.dir/screencapturer_mac.cpp.o
-/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/shell/shell_mac.cpp:56:21: error: use of undeclared identifier 'environ'
-   56 |     for (char** e = environ; e && *e; ++e) {
-      |                     ^
-1 error generated.
-make[2]: *** [remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_mac.cpp.o] Error 1
-make[1]: *** [remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/all] Error 2
-make[1]: *** Waiting for unfinished jobs....
 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/screencapturer/screencapturer_mac.cpp:108:9: warning: 'width' overrides a member function but is not marked 'override' [-Winconsistent-missing-override]
   108 |     int width() const { return width_; }
       |         ^
@@ -408,13 +401,762 @@ make[1]: *** Waiting for unfinished jobs....
 /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/screencapturer/screencapturer.h:75:17: note: overridden virtual function is here
    75 |     virtual int height() const { return 0; }
       |                 ^
+[ 37%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libInteractiveShell.a
+[ 37%] Built target InteractiveShell
+[ 37%] Building CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/WebsocketServer_autogen/mocs_compilation.cpp.o
 2 warnings generated.
 [ 37%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libScreenCapturer.a
 [ 38%] Built target ScreenCapturer
-[ 38%] No install step for 'openh264_ep'
-[ 38%] Completed 'openh264_ep'
-[ 38%] Built target openh264_ep
+[ 38%] Building CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/XdndMonitor_autogen/mocs_compilation.cpp.o
+[ 38%] Building CXX object remotedesk/server/xdndmonitor/CMakeFiles/XdndMonitor.dir/xdndmonitor.cpp.o
+[ 39%] Building CXX object remotedesk/server/websocketserver/CMakeFiles/WebsocketServer.dir/websocketserver.cpp.o
+[ 39%] No install step for 'openh264_ep'
+[ 39%] Completed 'openh264_ep'
+[ 39%] Built target openh264_ep
+[ 40%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libXdndMonitor.a
+[ 40%] Building CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/SingleApp_autogen/mocs_compilation.cpp.o
+[ 41%] Built target XdndMonitor
+[ 41%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/Service_autogen/mocs_compilation.cpp.o
+[ 42%] Building CXX object remotedesk/server/service/CMakeFiles/Service.dir/service_mac.cpp.o
+[ 42%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libService.a
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libService.a(mocs_compilation.cpp.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libService.a(mocs_compilation.cpp.o) has no symbols
+[ 42%] Built target Service
+[ 42%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libWebsocketServer.a
+[ 42%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/SystemSleepBlocker_autogen/mocs_compilation.cpp.o
+[ 42%] Built target WebsocketServer
+[ 42%] Building CXX object remotedesk/server/singleapplication/CMakeFiles/SingleApp.dir/singleapplication.cpp.o
+[ 43%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/radiometer_breakpad_autogen/mocs_compilation.cpp.o
+[ 43%] Building CXX object remotedesk/thridparty/breakpad/CMakeFiles/radiometer_breakpad.dir/crashhandler.cpp.o
+[ 43%] Building CXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker.cpp.o
+[ 43%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libradiometer_breakpad.a
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libradiometer_breakpad.a(mocs_compilation.cpp.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libradiometer_breakpad.a(mocs_compilation.cpp.o) has no symbols
+[ 43%] Built target radiometer_breakpad
+[ 43%] Built target SecureInputProcess_autogen_timestamp_deps
+[ 44%] Building OBJCXX object remotedesk/thridparty/systemsleepblocker/CMakeFiles/SystemSleepBlocker.dir/systemsleepblocker_mac.mm.o
+[ 45%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSingleApp.a
+[ 46%] Built target SingleApp
+[ 47%] Creating directories for 'ffmpeg_ep'
+[ 47%] No download step for 'ffmpeg_ep'
+[ 47%] No update step for 'ffmpeg_ep'
+[ 47%] No patch step for 'ffmpeg_ep'
+[ 48%] No configure step for 'ffmpeg_ep'
+[ 48%] Performing build step for 'ffmpeg_ep'
+CMake Warning (deprecated) at /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build/build_ffmpeg.cmake:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+[ 48%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIce.c.o
+[ 48%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangIceAgent.c.o
+[ 49%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcSocket.c.o
+[ 49%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSystemSleepBlocker.a
+[ 50%] Built target SystemSleepBlocker
+[ 50%] Automatic MOC for target SecureInputProcess
+[ 50%] Built target SecureInputProcess_autogen
+[ 50%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangRtcStun.c.o
+[ 50%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangice/YangTurnConnection.c.o
+[ 51%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpacer/YangPacer.c.o
+[ 51%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPacketData.c.o
+[ 51%] Building CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/SecureInputProcess_autogen/mocs_compilation.cpp.o
+[ 51%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushData.c.o
+[ 51%] Building CXX object remotedesk/server/secure_input_process/CMakeFiles/SecureInputProcess.dir/secure_input_process.cpp.o
+[ 52%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushDataH264.c.o
+[ 52%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangpush/YangPushDataH265.c.o
+[ 52%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangBandwidth.c.o
+[ 52%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangDatachannel.c.o
+[ 53%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPeerConnection.c.o
+[ 53%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullStream.c.o
+[ 53%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrack.c.o
+[ 54%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackAudio.c.o
+[ 54%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackH264.c.o
+[ 55%] Linking CXX static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSecureInputProcess.a
+[ 55%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackH265.c.o
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSecureInputProcess.a(mocs_compilation.cpp.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libSecureInputProcess.a(mocs_compilation.cpp.o) has no symbols
+[ 56%] Built target SecureInputProcess
+[ 57%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPullTrackVideo.c.o
+[ 57%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPush.c.o
+[ 57%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPushAudio.c.o
+[ 58%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPushStream.c.o
+[ 58%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangPushVideo.c.o
+[ 58%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcConnection.c.o
+[ 58%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcContext.c.o
+[ 59%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcRtcp.c.o
+[ 59%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcStats.c.o
+[ 59%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtc/YangRtcTwcc.c.o
+[ 60%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangReceiveNackBuffer.c.o
+[ 60%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcp.c.o
+[ 60%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpApp.c.o
+[ 61%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpBye.c.o
+[ 61%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpCommon.c.o
+[ 61%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpCompound.c.o
+[ 62%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpNack.c.o
+In file included from /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCompound.c:4:
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCompound.h:26:10: warning: a function declaration without a prototype is deprecated in all versions of C and is treated as a zero-parameter prototype in C23, conflicting with a subsequent definition [-Wdeprecated-non-prototype]
+   26 | uint64_t yang_rtcpCompound_nb_bytes();
+      |          ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangrtp/YangRtcpCompound.c:174:10: note: conflicting prototype is here
+  174 | uint64_t yang_rtcpCompound_nb_bytes(YangRtcpCompound *rtcps){
+      |          ^
+1 warning generated.
+[ 62%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpPli.c.o
+[ 62%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpPsfbCommon.c.o
+[ 62%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpRpsi.c.o
+[ 63%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpRR.c.o
+[ 63%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpSli.c.o
+[ 63%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpSR.c.o
+[ 64%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpTWCC.c.o
+[ 64%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtcpXr.c.o
+[ 64%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtp.c.o
+[ 65%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpBuffer.c.o
+[ 65%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpFUAPayload.c.o
+[ 65%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpFUAPayload2.c.o
+[ 66%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpHeader.c.o
+[ 66%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpPacket.c.o
+[ 66%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpRawPayload.c.o
+[ 67%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpRecvNack.c.o
+[ 67%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangrtp/YangRtpSTAPPayload.c.o
+[ 67%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangAudioPayload.c.o
+[ 67%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangCandidate.c.o
+[ 68%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangCodecPayload.c.o
+[ 68%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangMediaDesc.c.o
+[ 68%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangMediaPayloadType.c.o
+[ 69%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangRedPayload.c.o
+[ 69%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangRtcSdp.c.o
+[ 69%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangRtxPayloadDes.c.o
+[ 70%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangSdp.c.o
+[ 70%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangSdpHandle.c.o
+[ 70%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangsdp/YangSSRCInfo.c.o
+[ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangDtlsMbedtls.c.o
+[ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangDtlsOpenssl.c.o
+[ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangSslMbedtls.c.o
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangDtlsOpenssl.c:237:27: warning: 'DTLSv1_2_client_method' is deprecated [-Wdeprecated-declarations]
+  237 |                         dtls_ctx = SSL_CTX_new(DTLSv1_2_client_method());
+      |                                                ^
+/usr/local/opt/openssl@3/include/openssl/ssl.h:2105:1: note: 'DTLSv1_2_client_method' has been explicitly marked deprecated here
+ 2105 | OSSL_DEPRECATEDIN_1_1_0 __owur const SSL_METHOD *DTLSv1_2_client_method(void);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:251:33: note: expanded from macro 'OSSL_DEPRECATEDIN_1_1_0'
+  251 | #define OSSL_DEPRECATEDIN_1_1_0 OSSL_DEPRECATED(1.1.0)
+      |                                 ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangDtlsOpenssl.c:239:27: warning: 'DTLSv1_2_server_method' is deprecated [-Wdeprecated-declarations]
+  239 |                         dtls_ctx = SSL_CTX_new(DTLSv1_2_server_method());
+      |                                                ^
+/usr/local/opt/openssl@3/include/openssl/ssl.h:2104:1: note: 'DTLSv1_2_server_method' has been explicitly marked deprecated here
+ 2104 | OSSL_DEPRECATEDIN_1_1_0 __owur const SSL_METHOD *DTLSv1_2_server_method(void);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:251:33: note: expanded from macro 'OSSL_DEPRECATEDIN_1_1_0'
+  251 | #define OSSL_DEPRECATEDIN_1_1_0 OSSL_DEPRECATED(1.1.0)
+      |                                 ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangDtlsOpenssl.c:243:26: warning: 'DTLSv1_2_method' is deprecated [-Wdeprecated-declarations]
+  243 |                 dtls_ctx = SSL_CTX_new(DTLSv1_2_method());
+      |                                        ^
+/usr/local/opt/openssl@3/include/openssl/ssl.h:2103:1: note: 'DTLSv1_2_method' has been explicitly marked deprecated here
+ 2103 | OSSL_DEPRECATEDIN_1_1_0 __owur const SSL_METHOD *DTLSv1_2_method(void);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:251:33: note: expanded from macro 'OSSL_DEPRECATEDIN_1_1_0'
+  251 | #define OSSL_DEPRECATEDIN_1_1_0 OSSL_DEPRECATED(1.1.0)
+      |                                 ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+[ 71%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangssl/YangSslOpenssl.c.o
+3 warnings generated.
+[ 72%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangstream/YangStreamCapture.c.o
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:68:18: warning: 'HMAC_CTX_new' is deprecated [-Wdeprecated-declarations]
+   68 |         HMAC_CTX *ctx = HMAC_CTX_new();
+      |                         ^
+/usr/local/opt/openssl@3/include/openssl/hmac.h:33:1: note: 'HMAC_CTX_new' has been explicitly marked deprecated here
+   33 | OSSL_DEPRECATEDIN_3_0 HMAC_CTX *HMAC_CTX_new(void);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:75:6: warning: 'HMAC_Init_ex' is deprecated [-Wdeprecated-declarations]
+   75 |         if (HMAC_Init_ex(ctx, key, key_length, engine, NULL) <= 0) {
+      |             ^
+/usr/local/opt/openssl@3/include/openssl/hmac.h:43:1: note: 'HMAC_Init_ex' has been explicitly marked deprecated here
+   43 | OSSL_DEPRECATEDIN_3_0 int HMAC_Init_ex(HMAC_CTX *ctx, const void *key, int len,
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:76:3: warning: 'HMAC_CTX_free' is deprecated [-Wdeprecated-declarations]
+   76 |                 HMAC_CTX_free(ctx);
+      |                 ^
+/usr/local/opt/openssl@3/include/openssl/hmac.h:35:1: note: 'HMAC_CTX_free' has been explicitly marked deprecated here
+   35 | OSSL_DEPRECATEDIN_3_0 void HMAC_CTX_free(HMAC_CTX *ctx);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:80:6: warning: 'HMAC_Update' is deprecated [-Wdeprecated-declarations]
+   80 |         if (HMAC_Update(ctx, (const uint8_t*) input, input_length) <= 0) {
+      |             ^
+/usr/local/opt/openssl@3/include/openssl/hmac.h:45:1: note: 'HMAC_Update' has been explicitly marked deprecated here
+   45 | OSSL_DEPRECATEDIN_3_0 int HMAC_Update(HMAC_CTX *ctx, const unsigned char *data,
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:81:3: warning: 'HMAC_CTX_free' is deprecated [-Wdeprecated-declarations]
+   81 |                 HMAC_CTX_free(ctx);
+      |                 ^
+/usr/local/opt/openssl@3/include/openssl/hmac.h:35:1: note: 'HMAC_CTX_free' has been explicitly marked deprecated here
+   35 | OSSL_DEPRECATEDIN_3_0 void HMAC_CTX_free(HMAC_CTX *ctx);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:85:6: warning: 'HMAC_Final' is deprecated [-Wdeprecated-declarations]
+   85 |         if (HMAC_Final(ctx, (uint8_t*) output, output_length) <= 0) {
+      |             ^
+/usr/local/opt/openssl@3/include/openssl/hmac.h:47:1: note: 'HMAC_Final' has been explicitly marked deprecated here
+   47 | OSSL_DEPRECATEDIN_3_0 int HMAC_Final(HMAC_CTX *ctx, unsigned char *md,
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:86:3: warning: 'HMAC_CTX_free' is deprecated [-Wdeprecated-declarations]
+   86 |                 HMAC_CTX_free(ctx);
+      |                 ^
+/usr/local/opt/openssl@3/include/openssl/hmac.h:35:1: note: 'HMAC_CTX_free' has been explicitly marked deprecated here
+   35 | OSSL_DEPRECATEDIN_3_0 void HMAC_CTX_free(HMAC_CTX *ctx);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:90:2: warning: 'HMAC_CTX_free' is deprecated [-Wdeprecated-declarations]
+   90 |         HMAC_CTX_free(ctx);
+      |         ^
+/usr/local/opt/openssl@3/include/openssl/hmac.h:35:1: note: 'HMAC_CTX_free' has been explicitly marked deprecated here
+   35 | OSSL_DEPRECATEDIN_3_0 void HMAC_CTX_free(HMAC_CTX *ctx);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:97:2: warning: 'MD5' is deprecated [-Wdeprecated-declarations]
+   97 |         MD5(keystr, keystrLen, key);
+      |         ^
+/usr/local/opt/openssl@3/include/openssl/md5.h:52:1: note: 'MD5' has been explicitly marked deprecated here
+   52 | OSSL_DEPRECATEDIN_3_0 unsigned char *MD5(const unsigned char *d, size_t n,
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:105:3: warning: 'EC_KEY_free' is deprecated [-Wdeprecated-declarations]
+  105 |                 EC_KEY_free(cert->eckey);
+      |                 ^
+/usr/local/opt/openssl@3/include/openssl/ec.h:1014:1: note: 'EC_KEY_free' has been explicitly marked deprecated here
+ 1014 | OSSL_DEPRECATEDIN_3_0 void EC_KEY_free(EC_KEY *key);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:141:14: warning: 'RSA_new' is deprecated [-Wdeprecated-declarations]
+  141 |                 RSA *rsa = RSA_new();
+      |                            ^
+/usr/local/opt/openssl@3/include/openssl/rsa.h:212:1: note: 'RSA_new' has been explicitly marked deprecated here
+  212 | OSSL_DEPRECATEDIN_3_0 RSA *RSA_new(void);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:151:3: warning: 'RSA_generate_key_ex' is deprecated [-Wdeprecated-declarations]
+  151 |                 RSA_generate_key_ex(rsa, key_bits, exponent, NULL);
+      |                 ^
+/usr/local/opt/openssl@3/include/openssl/rsa.h:270:1: note: 'RSA_generate_key_ex' has been explicitly marked deprecated here
+  270 | OSSL_DEPRECATEDIN_3_0 int RSA_generate_key_ex(RSA *rsa, int bits, BIGNUM *e,
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:152:7: warning: 'EVP_PKEY_set1_RSA' is deprecated [-Wdeprecated-declarations]
+  152 |                 if (EVP_PKEY_set1_RSA(cert->pkey, rsa) != 1)
+      |                     ^
+/usr/local/opt/openssl@3/include/openssl/evp.h:1402:1: note: 'EVP_PKEY_set1_RSA' has been explicitly marked deprecated here
+ 1402 | OSSL_DEPRECATEDIN_3_0
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:155:3: warning: 'RSA_free' is deprecated [-Wdeprecated-declarations]
+  155 |                 RSA_free(rsa);
+      |                 ^
+/usr/local/opt/openssl@3/include/openssl/rsa.h:303:1: note: 'RSA_free' has been explicitly marked deprecated here
+  303 | OSSL_DEPRECATEDIN_3_0 void RSA_free(RSA *r);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:159:17: warning: 'EC_KEY_new' is deprecated [-Wdeprecated-declarations]
+  159 |                 cert->eckey = EC_KEY_new();
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/ec.h:979:1: note: 'EC_KEY_new' has been explicitly marked deprecated here
+  979 | OSSL_DEPRECATEDIN_3_0 EC_KEY *EC_KEY_new(void);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:168:7: warning: 'EC_KEY_set_group' is deprecated [-Wdeprecated-declarations]
+  168 |                 if (EC_KEY_set_group(cert->eckey, ecgroup) != 1)
+      |                     ^
+/usr/local/opt/openssl@3/include/openssl/ec.h:1053:1: note: 'EC_KEY_set_group' has been explicitly marked deprecated here
+ 1053 | OSSL_DEPRECATEDIN_3_0 int EC_KEY_set_group(EC_KEY *key, const EC_GROUP *group);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:170:7: warning: 'EC_KEY_generate_key' is deprecated [-Wdeprecated-declarations]
+  170 |                 if (EC_KEY_generate_key(cert->eckey) != 1)
+      |                     ^
+/usr/local/opt/openssl@3/include/openssl/ec.h:1112:1: note: 'EC_KEY_generate_key' has been explicitly marked deprecated here
+ 1112 | OSSL_DEPRECATEDIN_3_0 int EC_KEY_generate_key(EC_KEY *key);
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/src/yangssl/YangSslOpenssl.c:172:7: warning: 'EVP_PKEY_set1_EC_KEY' is deprecated [-Wdeprecated-declarations]
+  172 |                 if (EVP_PKEY_set1_EC_KEY(cert->pkey, cert->eckey) != 1)
+      |                     ^
+/usr/local/opt/openssl@3/include/openssl/evp.h:1428:1: note: 'EVP_PKEY_set1_EC_KEY' has been explicitly marked deprecated here
+ 1428 | OSSL_DEPRECATEDIN_3_0
+      | ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:229:31: note: expanded from macro 'OSSL_DEPRECATEDIN_3_0'
+  229 | #define OSSL_DEPRECATEDIN_3_0 OSSL_DEPRECATED(3.0)
+      |                               ^
+/usr/local/opt/openssl@3/include/openssl/macros.h:61:47: note: expanded from macro 'OSSL_DEPRECATED'
+   61 | #define OSSL_DEPRECATED(since) __attribute__((deprecated))
+      |                                               ^
+[ 72%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangutil/sys/YangSctp.c.o
+18 warnings generated.
+[ 72%] Building C object remotedesk/thridparty/third_party_src/metaRTC/libmetartccore8/CMakeFiles/metartccore8.dir/src/yangutil/sys/YangSRtp.c.o
+[ 73%] Linking C static library /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a(YangRtpFUAPayload.c.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a(YangDtlsMbedtls.c.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a(YangSslMbedtls.c.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a(YangRtpFUAPayload.c.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a(YangDtlsMbedtls.c.o) has no symbols
+/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib: file: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/lib/libmetartccore8.a(YangSslMbedtls.c.o) has no symbols
+[ 73%] Built target metartccore8
+install prefix            /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build_output/ffmpeg_install-6.1.2
+source path               /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2
+C compiler                /usr/bin/cc
+C library                 
+ARCH                      x86 (generic)
+big-endian                no
+runtime cpu detection     yes
+standalone assembly       no
+x86 assembler             nasm
+MMX enabled               yes
+MMXEXT enabled            yes
+3DNow! enabled            yes
+3DNow! extended enabled   yes
+SSE enabled               yes
+SSSE3 enabled             yes
+AESNI enabled             yes
+AVX enabled               yes
+AVX2 enabled              yes
+AVX-512 enabled           yes
+AVX-512ICL enabled        yes
+XOP enabled               yes
+FMA3 enabled              yes
+FMA4 enabled              yes
+i686 features enabled     yes
+CMOV is fast              yes
+EBX available             yes
+EBP available             yes
+debug symbols             no
+strip symbols             yes
+optimize for size         no
+optimizations             yes
+static                    yes
+shared                    no
+postprocessing support    no
+network support           no
+threading support         pthreads
+safe bitstream reader     yes
+texi2html enabled         no
+perl enabled              yes
+pod2man enabled           yes
+makeinfo enabled          no
+makeinfo supports HTML    no
+xmllint enabled           yes
+
+External libraries:
+appkit                  iconv                   securetransport
+avfoundation            libopenh264             zlib
+bzlib                   lzma
+coreimage               metal
+
+External libraries providing hardware acceleration:
+audiotoolbox            videotoolbox
+
+Libraries:
+avcodec                 avutil                  swscale
+
+Programs:
+
+Enabled decoders:
+h263                    mjpeg
+h264                    mpeg4
+
+Enabled encoders:
+h264_videotoolbox       hevc_videotoolbox       libopenh264
+
+Enabled hwaccels:
+
+Enabled parsers:
+h263                    mpeg4video
+
+Enabled demuxers:
+
+Enabled muxers:
+
+Enabled protocols:
+
+Enabled filters:
+
+Enabled bsfs:
+
+Enabled indevs:
+
+Enabled outdevs:
+
+License: LGPL version 2.1 or later
+make[3]: warning: -jN forced in submake: disabling jobserver mode.
+make[3]: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/ffbuild/version.sh: Permission denied
+GEN	libavutil/libavutil.version
+/bin/sh: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/ffbuild/libversion.sh: Permission denied
+GEN	libswscale/libswscale.version
+/bin/sh: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/ffbuild/libversion.sh: Permission denied
+GEN	libavcodec/libavcodec.version
+/bin/sh: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/ffbuild/libversion.sh: Permission denied
+GEN	libavutil/ffversion.h
+/bin/sh: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/ffbuild/version.sh: Permission denied
+make[3]: *** [libavutil/ffversion.h] Error 126
+CC	libavcodec/videodsp.o
+CC	libavcodec/videotoolbox.o
+CC	libavcodec/videotoolboxenc.o
+CC	libavcodec/vlc.o
+CC	libavcodec/vorbis_parser.o
+CC	libavcodec/x86/blockdsp_init.o
+CC	libavcodec/x86/constants.o
+CC	libavcodec/x86/fdct.o
+CC	libavcodec/x86/fdctdsp_init.o
+CC	libavcodec/x86/h263dsp_init.o
+CC	libavcodec/x86/h264_intrapred_init.o
+CC	libavcodec/x86/h264_qpel.o
+CC	libavcodec/x86/h264chroma_init.o
+CC	libavcodec/x86/h264dsp_init.o
+CC	libavcodec/x86/hpeldsp_init.o
+CC	libavcodec/x86/idctdsp_init.o
+CC	libavcodec/x86/me_cmp_init.o
+CC	libavcodec/x86/mpeg4videodsp.o
+CC	libavcodec/x86/mpegvideo.o
+CC	libavcodec/x86/qpeldsp_init.o
+CC	libavcodec/x86/videodsp_init.o
+CC	libavcodec/x86/xvididct_init.o
+CC	libavcodec/xiph.o
+CC	libavcodec/xvididct.o
+GEN	libavcodec/libavcodec.pc
+/bin/sh: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/ffbuild/pkgconfig_generate.sh: Permission denied
+make[3]: *** [libavcodec/libavcodec.pc] Error 126
+GEN	libswscale/libswscale.pc
+/bin/sh: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/ffbuild/pkgconfig_generate.sh: Permission denied
+make[3]: *** [libswscale/libswscale.pc] Error 126
+GEN	libavutil/libavutil.pc
+/bin/sh: /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/ffbuild/pkgconfig_generate.sh: Permission denied
+make[3]: *** [libavutil/libavutil.pc] Error 126
+CC	libavcodec/ac3_parser.o
+CC	libavcodec/adts_parser.o
+CC	libavcodec/allcodecs.o
+CC	libavcodec/atsc_a53.o
+CC	libavcodec/avcodec.o
+CC	libavcodec/avdct.o
+CC	libavcodec/avfft.o
+CC	libavcodec/avpacket.o
+CC	libavcodec/bitstream.o
+CC	libavcodec/blockdsp.o
+CC	libavcodec/bitstream_filters.o
+CC	libavcodec/bsf.o
+CC	libavcodec/cabac.o
+CC	libavcodec/codec_desc.o
+CC	libavcodec/codec_par.o
+CC	libavcodec/d3d11va.o
+CC	libavcodec/decode.o
+CC	libavcodec/dirac.o
+CC	libavcodec/dv_profile.o
+CC	libavcodec/encode.o
+CC	libavcodec/error_resilience.o
+CC	libavcodec/exif.o
+CC	libavcodec/faandct.o
+CC	libavcodec/faanidct.o
+CC	libavcodec/fdctdsp.o
+CC	libavcodec/get_buffer.o
+CC	libavcodec/frame_thread_encoder.o
+CC	libavcodec/golomb.o
+CC	libavcodec/h263.o
+CC	libavcodec/h263_parser.o
+CC	libavcodec/h263data.o
+CC	libavcodec/h263dec.o
+CC	libavcodec/h263dsp.o
+CC	libavcodec/h2645_parse.o
+CC	libavcodec/h2645_sei.o
+CC	libavcodec/h2645_vui.o
+CC	libavcodec/h2645data.o
+CC	libavcodec/h264_cabac.o
+CC	libavcodec/h264_cavlc.o
+CC	libavcodec/h264_direct.o
+CC	libavcodec/h264_loopfilter.o
+CC	libavcodec/h264_mb.o
+CC	libavcodec/h264_parse.o
+CC	libavcodec/h264_picture.o
+CC	libavcodec/h264_ps.o
+CC	libavcodec/h264_refs.o
+CC	libavcodec/h264_sei.o
+CC	libavcodec/h264_slice.o
+CC	libavcodec/h264chroma.o
+CC	libavcodec/h264data.o
+CC	libavcodec/h264dec.o
+CC	libavcodec/h264dsp.o
+CC	libavcodec/h264idct.o
+CC	libavcodec/h264pred.o
+CC	libavcodec/h264qpel.o
+CC	libavcodec/h274.o
+CC	libavcodec/hpeldsp.o
+CC	libavcodec/idctdsp.o
+CC	libavcodec/imgconvert.o
+CC	libavcodec/ituh263dec.o
+CC	libavcodec/jfdctfst.o
+CC	libavcodec/jfdctint.o
+CC	libavcodec/jni.o
+CC	libavcodec/jpegtables.o
+CC	libavcodec/jrevdct.o
+CC	libavcodec/libopenh264.o
+CC	libavcodec/libopenh264enc.o
+CC	libavcodec/mathtables.o
+CC	libavcodec/me_cmp.o
+CC	libavcodec/mediacodec.o
+CC	libavcodec/mjpegdec.o
+CC	libavcodec/mjpegdec_common.o
+CC	libavcodec/mpeg12framerate.o
+CC	libavcodec/mpeg4video.o
+CC	libavcodec/mpeg4video_parser.o
+CC	libavcodec/mpeg4videodec.o
+src/libavcodec/mpeg4videodec.c:740:13: warning: variable 'time_incr' set but not used [-Wunused-but-set-variable]
+  740 |         int time_incr = 0;
+      |             ^
+CC	libavcodec/mpeg4videodsp.o
+CC	libavcodec/mpeg_er.o
+CC	libavcodec/mpegpicture.o
+CC	libavcodec/mpegutils.o
+CC	libavcodec/mpegvideo.o
+CC	libavcodec/mpegvideo_dec.o
+1 warning generated.
+CC	libavcodec/mpegvideo_motion.o
+CC	libavcodec/mpegvideodata.o
+CC	libavcodec/options.o
+CC	libavcodec/parser.o
+CC	libavcodec/parsers.o
+CC	libavcodec/profiles.o
+CC	libavcodec/pthread.o
+CC	libavcodec/pthread_frame.o
+CC	libavcodec/pthread_slice.o
+CC	libavcodec/qpeldsp.o
+CC	libavcodec/qsv_api.o
+CC	libavcodec/raw.o
+CC	libavcodec/refstruct.o
+CC	libavcodec/rl.o
+CC	libavcodec/simple_idct.o
+CC	libavcodec/startcode.o
+CC	libavcodec/tiff_common.o
+CC	libavcodec/to_upper4.o
+CC	libavcodec/utils.o
+CC	libswscale/alphablend.o
+CC	libswscale/gamma.o
+CC	libswscale/half2float.o
+CC	libswscale/hscale.o
+CC	libswscale/hscale_fast_bilinear.o
+CC	libswscale/input.o
+CC	libswscale/options.o
+CC	libswscale/output.o
+CC	libswscale/rgb2rgb.o
+CC	libswscale/slice.o
+CC	libswscale/swscale.o
+CC	libswscale/swscale_unscaled.o
+CC	libswscale/utils.o
+CC	libswscale/vscale.o
+CC	libswscale/x86/hscale_fast_bilinear_simd.o
+CC	libswscale/x86/rgb2rgb.o
+CC	libswscale/x86/swscale.o
+CC	libswscale/x86/yuv2rgb.o
+CC	libswscale/yuv2rgb.o
+CC	libavutil/adler32.o
+CC	libavutil/aes.o
+CC	libavutil/aes_ctr.o
+CC	libavutil/ambient_viewing_environment.o
+CC	libavutil/audio_fifo.o
+CC	libavutil/avsscanf.o
+CC	libavutil/avstring.o
+CC	libavutil/base64.o
+CC	libavutil/blowfish.o
+CC	libavutil/bprint.o
+CC	libavutil/buffer.o
+CC	libavutil/camellia.o
+CC	libavutil/cast5.o
+CC	libavutil/channel_layout.o
+CC	libavutil/cpu.o
+CC	libavutil/crc.o
+CC	libavutil/csp.o
+CC	libavutil/des.o
+CC	libavutil/detection_bbox.o
+CC	libavutil/dict.o
+CC	libavutil/display.o
+CC	libavutil/dovi_meta.o
+CC	libavutil/downmix_info.o
+CC	libavutil/encryption_info.o
+CC	libavutil/error.o
+CC	libavutil/executor.o
+CC	libavutil/eval.o
+CC	libavutil/fifo.o
+CC	libavutil/file.o
+CC	libavutil/file_open.o
+CC	libavutil/film_grain_params.o
+CC	libavutil/fixed_dsp.o
+CC	libavutil/float_dsp.o
+CC	libavutil/frame.o
+CC	libavutil/hash.o
+CC	libavutil/hdr_dynamic_metadata.o
+CC	libavutil/hdr_dynamic_vivid_metadata.o
+CC	libavutil/hmac.o
+CC	libavutil/hwcontext.o
+CC	libavutil/hwcontext_stub.o
+CC	libavutil/hwcontext_videotoolbox.o
+CC	libavutil/imgutils.o
+CC	libavutil/integer.o
+CC	libavutil/intmath.o
+CC	libavutil/lfg.o
+CC	libavutil/lls.o
+CC	libavutil/log.o
+CC	libavutil/log2_tab.o
+CC	libavutil/lzo.o
+CC	libavutil/mastering_display_metadata.o
+CC	libavutil/mathematics.o
+CC	libavutil/md5.o
+CC	libavutil/mem.o
+CC	libavutil/murmur3.o
+CC	libavutil/opt.o
+CC	libavutil/parseutils.o
+CC	libavutil/pixdesc.o
+CC	libavutil/pixelutils.o
+CC	libavutil/random_seed.o
+CC	libavutil/rational.o
+CC	libavutil/rc4.o
+CC	libavutil/reverse.o
+CC	libavutil/ripemd.o
+CC	libavutil/samplefmt.o
+CC	libavutil/sha.o
+CC	libavutil/sha512.o
+CC	libavutil/slicethread.o
+CC	libavutil/spherical.o
+CC	libavutil/stereo3d.o
+CC	libavutil/tea.o
+CC	libavutil/threadmessage.o
+CC	libavutil/time.o
+CC	libavutil/timecode.o
+CC	libavutil/tree.o
+CC	libavutil/twofish.o
+CC	libavutil/tx.o
+CC	libavutil/tx_double.o
+CC	libavutil/tx_float.o
+CC	libavutil/tx_int32.o
+CC	libavutil/utils.o
+CC	libavutil/uuid.o
+CC	libavutil/video_enc_params.o
+CC	libavutil/video_hint.o
+CC	libavutil/x86/cpu.o
+CC	libavutil/x86/fixed_dsp_init.o
+CC	libavutil/x86/float_dsp_init.o
+CC	libavutil/x86/imgutils_init.o
+CC	libavutil/x86/lls_init.o
+CC	libavutil/xga_font_data.o
+CC	libavutil/xtea.o
+make[3]: Target `all' not remade because of errors.
+CMake Error at /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build/build_ffmpeg.cmake:60 (message):
+  FFmpeg make failed (exit 2)
+
+
+make[2]: *** [ffmpeg_ep-prefix/src/ffmpeg_ep-stamp/ffmpeg_ep-build] Error 1
+make[2]: Target `CMakeFiles/ffmpeg_ep.dir/build' not remade because of errors.
+make[1]: *** [CMakeFiles/ffmpeg_ep.dir/all] Error 2
+make[1]: Target `all' not remade because of errors.
 make: *** [all] Error 2
+make: Target `default_target' not remade because of errors.
 === deploy.log ===
 (不存在)
 === codesign.log ===
@@ -424,8 +1166,17 @@ make: *** [all] Error 2
 === package.log ===
 (不存在)
 === 错误摘要 ===
-build.log:173:/Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/src/remotedesk/server/shell/shell_mac.cpp:56:21: error: use of undeclared identifier 'environ'
-build.log:176:1 error generated.
-build.log:177:make[2]: *** [remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/shell_mac.cpp.o] Error 1
-build.log:178:make[1]: *** [remotedesk/server/shell/CMakeFiles/InteractiveShell.dir/all] Error 2
-build.log:198:make: *** [all] Error 2
+build.log:682:make[3]: *** [libavutil/ffversion.h] Error 126
+build.log:709:make[3]: *** [libavcodec/libavcodec.pc] Error 126
+build.log:712:make[3]: *** [libswscale/libswscale.pc] Error 126
+build.log:715:make[3]: *** [libavutil/libavutil.pc] Error 126
+build.log:736:CC	libavcodec/error_resilience.o
+build.log:864:CC	libavutil/error.o
+build.log:930:make[3]: Target `all' not remade because of errors.
+build.log:931:CMake Error at /Users/runner/work/QtRemoteDesktop/QtRemoteDesktop/build/build_ffmpeg.cmake:60 (message):
+build.log:935:make[2]: *** [ffmpeg_ep-prefix/src/ffmpeg_ep-stamp/ffmpeg_ep-build] Error 1
+build.log:936:make[2]: Target `CMakeFiles/ffmpeg_ep.dir/build' not remade because of errors.
+build.log:937:make[1]: *** [CMakeFiles/ffmpeg_ep.dir/all] Error 2
+build.log:938:make[1]: Target `all' not remade because of errors.
+build.log:939:make: *** [all] Error 2
+build.log:940:make: Target `default_target' not remade because of errors.
