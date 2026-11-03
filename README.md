@@ -203,7 +203,7 @@ QtRemoteDesktop 是一款可自托管的开源远程桌面软件：**控制端�
 | **Linux X11** | ✅ 完整支持（XDamage/XComposite 捕获、XTest 输入） |
 | **Linux Wayland** | ✅ 输入三通道自动切换（uinput / XDG Desktop Portal / XTest）；PipeWire 捕获 |
 | **Linux ARM（如 RK3588）** | ✅ 已实际部署验证；Rockchip MPP 硬件 H.264 编码 |
-| **macOS** | 🧪 实验骨架（捕获与输入已实现，未实测） |
+| **macOS** | 🧪 实验版：CI 产出 Intel 与 Apple Silicon 两个 `.app`（签名 + 无头冒烟通过），真机交互未实测。下限 **Intel 10.14+ / Apple Silicon 15+** |
 | **Android** | 🧪 实验骨架 |
 | **浏览器作为控制端** | ✅ 任意现代浏览器 |
 
@@ -394,6 +394,9 @@ A: 局域网内 WebRTC 模式接近实时。设计上（图片模式最新帧优
 
 **Q: 支持 Windows XP 吗？**
 A: 支持——Windows 构建保持 XP 兼容（无 `AcquireSRWLockExclusive`/`inet_ntop` 依赖问题，WTS API 动态加载）。
+
+**Q: Apple Silicon 为什么要 macOS 15 起？**
+A: 不是代码限制，是依赖来源限制：arm64 腿的 Qt 及其传递依赖（freetype/openssl/glib/webp…）直接取 Homebrew bottle，这些 dylib 的 `minos` 全是 15.0。Intel 腿用 aqt 官方 Qt，产物里除 openssl 外都是 10.13/10.14。要把 arm64 下探到 11.0 就得在 CI 上自编译 Qt 和整条依赖链。
 
 **Q: 被控端锁屏后为什么黑屏？**
 A: 锁屏后仍可操作：浏览器显示锁屏 UI，可输入密码或一键解锁。部分 Linux 环境（light-locker 无 greeter）捕获会黑屏——`pkill light-locker` 或使用「解锁屏幕」即可。
