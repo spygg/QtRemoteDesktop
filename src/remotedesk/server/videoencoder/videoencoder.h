@@ -43,6 +43,10 @@ public:
     // [N6] 重建路径专用：停线程并释放资源；线程卡死在驱动调用时返回 false
     // （绝不 qFatal——调用方必须退役本对象、新建编码器继续服务）。
     bool shutdownRetire();
+    // [ASYNC-RETIRE] 非阻塞退役：只在锁内置 abort_ 并唤醒编码线程，不等待线程退出、
+    // 不释放资源（调用方仍需把对象留在墓地，等 threadStopped() 后才能析构）。
+    // onlyIfIdle 时若有在飞帧则返回 false 且不做任何改动（供"空闲才重建"路径用）。
+    bool beginRetire(bool onlyIfIdle = false);
 
     // 探测当前系统是否可对指定编码使用硬件编码（用于前端 auto 模式选路/模式通知）
     static bool isHwAcceleratedAvailable(CodecType type = CodecType::H264);
@@ -95,6 +99,13 @@ public:
     // 卡死时线程仍可能触碰 codecCtx_/mpp_，此时析构是 UB；线程退出后才能安全回收，
     // 析构会走 shutdown()（isRunning()==false，直接释放资源，不再等待）。
     bool threadStopped() const;
+    // 限时等编码线程退出（不释放资源，由析构/shutdown 统一释放）。线程已停返回 true。
+    // 用于硬编重建前等旧实例线程释放驱动调用；超时返回 false，调用方必须把对象
+    // 留在墓地（线程仍可能触碰 codecCtx_/mpp_），不得析构。
+    bool waitStopped(int timeoutMs);
+    // 当前实例实际选中的是否是硬件编码器（MPP/NVENC/VAAPI/QSV/AMF/VideoToolbox）。
+    // 硬编重建需要等旧实例真正释放设备，软编没有这个约束。
+    bool isHardwareEncoder() const { return !hwName_.isEmpty(); }
 
     // 本进程中 MPP 是否被证明不可用（初始化成功但 encode 恒 null）。
     // 上层据此在前端展示"硬件编码实际未生效"，避免用户以为开着硬编。

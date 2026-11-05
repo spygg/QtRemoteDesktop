@@ -33,28 +33,29 @@ extern "C" {
 #include <malloc.h>
 #endif
 
-// [FIX-B2] 编码时间戳基准必须是进程级单调值。
-// 浏览器（WebCodecs / MSE）按 timestamp 排序，任何一次编码器重建（切分辨率/
-// 画质/帧率/缩放/编码协议、MPP 回退、PLI 兜底）若把基准归零，时间戳就会回退，
-// 新帧被判为"过期"直接丢弃 —— 表现为重建后画面冻结直到下一个自然 IDR。
-// 用函数内 static 保证整个进程只取一次，所有实例/所有重建共享同一基准。
-static qint64 encoderEpochMs()
-{
-    static const qint64 epoch = QDateTime::currentMSecsSinceEpoch();
-    return epoch;
-}
-
 // [CLOCK] 时长测量必须用单调时钟（steady_clock）：
 // busyForMs()/initAgeMs() 的读数直接决定"是否重建编码器"。若用墙钟，NTP 校时或
 // 用户改时间会让差值瞬间变大/变小——向前跳会误判"编码线程卡了 30s"而强杀重建，
 // 向后跳则会让"从未产 IDR"永远不成立，客户端长期黑屏。
-// 只用于内部时长；码流时间戳仍由 encoderEpochMs()（墙钟）提供，两者互不影响。
 // +1 保证返回值恒 > 0（0 是"无在飞帧"的哨兵值）。
 static qint64 monotonicMs()
 {
     static const auto origin = std::chrono::steady_clock::now();
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - origin).count() + 1;
+}
+
+// [FIX-B2] 编码时间戳基准必须是进程级单调值。
+// 浏览器（WebCodecs / MSE）按 timestamp 排序，任何一次编码器重建（切分辨率/
+// 画质/帧率/缩放/编码协议、MPP 回退、PLI 兜底）若把基准归零，时间戳就会回退，
+// 新帧被判为"过期"直接丢弃 —— 表现为重建后画面冻结直到下一个自然 IDR。
+// 墙钟还会因 NTP 校时/用户改时间回退，同样会让新帧"过期"。这里改成与
+// monotonicMs() 同源的进程级单调基准（函数内 static，整个进程只取一次，
+// 所有实例/所有重建共享）；墙钟只保留在日志里。
+static qint64 encoderEpochMs()
+{
+    static const qint64 epoch = monotonicMs();
+    return epoch;
 }
 
 VideoEncoder::VideoEncoder(QObject*)
@@ -73,6 +74,25 @@ VideoEncoder::VideoEncoder(QObject*)
 // （日志表现为 "Using MPP encoder" / "Using software encoder" 反复切换），
 // 每次切换都要 shutdown+initialize（含线程停止/启动），画面长时间中断且 CPU 空转。
 static std::atomic<bool> g_mppDisabled{ false };
+// MPP 失败"击打"计数：同一进程内第一次失败只允许重试一次（不永久禁用），
+// 第二次仍失败才置 g_mppDisabled。避免把"旧实例还没让出硬编设备"导致的瞬时
+// open 失败误判成永久不可用（重建路径现在会先等旧线程退出，但不保证驱动侧
+// 设备在几百毫秒内就绪）。
+static std::atomic<int> g_mppFailureStrikes{ 0 };
+static constexpr int kMppStrikesBeforeDisable = 2;
+
+// 记一次 MPP 失败，返回 true 表示"已重试过一次仍失败"，应永久禁用 MPP。
+// 计数在进程内单调递增：一次成功运行不会清零，保证不会与软编无限交替
+// （这正是原 g_mppDisabled 的设计目标）；代价是同一进程最多只重试一次。
+static bool noteMppFailure()
+{
+    const int strikes = g_mppFailureStrikes.fetch_add(1) + 1;
+    if (strikes >= kMppStrikesBeforeDisable) {
+        g_mppDisabled.store(true);
+        return true;
+    }
+    return false;
+}
 
 // 硬编后端的进程级"已证明打不开"黑名单（每个后端一位）。
 //
@@ -564,8 +584,9 @@ static void warnHwRequestedButUnavailable(const QString& why)
         "「本机无对应设备/驱动」= 系统里没有对应驱动 DLL（nvenc: nvEncodeAPI64.dll，"
         "amf: amfrt64.dll），即没有该厂商的显卡或没装驱动；"
         "「本进程已证明打不开」= 驱动拒绝了这个编码器，上一行 [ffmpeg] 给出的才是真原因"
-        "（32 位构建用的是 3.4.8：NVIDIA 不提供 32 位 CUDA，cuInit 先失败，而且新驱动也拒绝 "
-        "API 8.0 的预设接口；要硬编请用 64 位构建 build64.bat，它会链 6.1.2）";
+        "（仅 Windows XP 兼容构建用 3.4.8：NVIDIA 不提供 32 位 CUDA，cuInit 先失败，"
+        "而且新驱动也拒绝 API 8.0 的预设接口；Win7 32 位及其余平台都用 6.1.2，要硬编请用 "
+        "64 位构建 build64.bat，或在 32 位构建显式传 -DFFMPEG_VERSION=6.1.2）";
 #else
     static const char* kFixHint = "";
 #endif
@@ -829,10 +850,15 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         }
         delete mpp_;
         mpp_ = nullptr;
-        // MPP 初始化失败（如 mpp_venc_kcfg_init 失败）：置全局禁用标志，
-        // 本进程后续重建不再尝试。重复 init/free mpp 库在部分固件上会崩
-        // （曾见连续重建时 Segmentation fault）。
-        g_mppDisabled.store(true);
+        // MPP 初始化失败（如 mpp_venc_kcfg_init 失败）：第一次只记击打并回退软编，
+        // 下一次重建再试一次 MPP；第二次仍失败才永久禁用。重复 init/free mpp 库
+        // 在部分固件上会崩（曾见连续重建时 Segmentation fault），所以仍严格限次。
+        if (noteMppFailure()) {
+            qWarning() << "MPP encoder init failed twice, disabling it for this process";
+        } else {
+            qWarning() << "MPP encoder init failed, falling back to software encoder"
+                       << "(will retry MPP once on the next rebuild)";
+        }
         if (hwMode == HwEncodeMode::On) {
             // 强制硬编但 MPP 不可用：仍回退 FFmpeg 软编保证画面可用
             // （本设备 MPP 1.1.0 初始化成功但 encode 恒 null，强制 on 若直接失败
@@ -919,6 +945,13 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
         AVCodecContext* ctx = avcodec_alloc_context3(c);
         if (!ctx)
             return false;
+        // [LEAK-FIX] 中途任何失败都必须释放已分配的 ctx。VAAPI 的 hwframe 分配/
+        // 初始化失败两处旧代码直接 return，每次重建都泄漏一个 AVCodecContext
+        // 及其内部缓冲。所有权只在末尾成功时转移给 codecCtx_。
+        struct CtxReleaser {
+            AVCodecContext*& p;
+            ~CtxReleaser() { if (p) avcodec_free_context(&p); }
+        } ctxReleaser{ctx};
         ctx->width = encW;
         ctx->height = encH;
         ctx->time_base = { 1, fps };
@@ -1035,6 +1068,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
             return false;
         }
         codecCtx_ = ctx;
+        ctx = nullptr; // 所有权已转移，CtxReleaser 不再释放
         return true;
     };
 
@@ -1705,7 +1739,7 @@ void VideoEncoder::encodingLoop()
                 // MPP 反复 init/free 有固件崩溃风险）。
                 if (key)
                     hasIdr_.store(true);
-                qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
+                qint64 timestamp = monotonicMs() - startTime_;
                 {
                     // [DIAG] 每输出帧计时（静止期稀疏，开销可忽略）
                     static int s_encSeq = 0;
@@ -1728,11 +1762,16 @@ void VideoEncoder::encodingLoop()
             // 且重新入参丢了缩放档位与用户码率（pendingBitrate_ 刚被 exchange(0) 清零，
             // 只能取硬编码兜底值）。正确做法是置标志 + 通知主线程重建。
             if (++mppFailCount_ >= 3) {
-                g_mppDisabled.store(true);   // 本进程不再尝试 MPP，避免与软编无限交替
                 mppBroken_.store(true);
                 mppFailCount_ = 0;
-                qWarning() << "MPP encoder failing continuously, disabling it for this process"
-                           << "and requesting software reinit";
+                // 第一次连续失败只请求重建（允许 MPP 重试一次）；重建后仍连续失败
+                // 才永久禁用，避免"旧实例未释放设备"造成的瞬时失败直接判死刑。
+                if (noteMppFailure()) {
+                    qWarning() << "MPP encoder failing continuously after a retry, disabling it for this process"
+                               << "and requesting software reinit";
+                } else {
+                    qWarning() << "MPP encoder failing continuously, rebuilding once before giving up";
+                }
                 emit reinitRequired();
             }
         }
@@ -1869,7 +1908,7 @@ void VideoEncoder::encodingLoop()
             if (isKeyframe)
                 hasIdr_.store(true);
             QByteArray data(reinterpret_cast<char*>(pkt->data), pkt->size);
-            qint64 timestamp = QDateTime::currentMSecsSinceEpoch() - startTime_;
+            qint64 timestamp = monotonicMs() - startTime_;
 
             emit encodedFrame(data, isKeyframe, timestamp);
 
@@ -1960,6 +1999,17 @@ bool VideoEncoder::threadStopped() const
     return !encoderThread_.isRunning();
 }
 
+bool VideoEncoder::waitStopped(int timeoutMs)
+{
+    if (!encoderThread_.isRunning())
+        return true;
+    if (timeoutMs <= 0)
+        return false;
+    // 只等线程退出，不在此释放资源：线程可能仍在驱动调用里触碰 codecCtx_/mpp_。
+    // releaseStoppedResources() 由调用方在确认退出后经析构/shutdown 触发。
+    return encoderThread_.wait(static_cast<unsigned long>(timeoutMs));
+}
+
 void VideoEncoder::shutdown()
 {
     if (shutdownRetire())
@@ -1998,6 +2048,19 @@ VideoEncoder::RetireState VideoEncoder::retireIfIdle()
         condition_.wakeAll();
     }
     return stopEncoderThread(8000) ? RetireState::Retired : RetireState::Wedged;
+}
+
+bool VideoEncoder::beginRetire(bool onlyIfIdle)
+{
+    // 与 retireIfIdle 相同的锁契约，但完全不等待线程：主线程切换模式/重建时
+    // 不再被卡死的驱动调用拖住最长 8s。线程退出后由调用方（墓地 + 回收定时器）
+    // 通过 threadStopped() 判断何时安全析构。
+    QMutexLocker locker(&mutex_);
+    if (onlyIfIdle && inFlightStartMs_.load(std::memory_order_relaxed) != 0)
+        return false;
+    abort_ = true;
+    condition_.wakeAll();
+    return true;
 }
 
 bool VideoEncoder::stopEncoderThread(int timeoutMs)
