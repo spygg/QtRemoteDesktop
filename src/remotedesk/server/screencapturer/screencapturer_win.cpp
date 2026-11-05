@@ -43,6 +43,32 @@ static PfnD3D11CreateDevice winD3D11CreateDevice()
     return fn;
 }
 
+// 真实锁屏证据：锁屏后输入桌面由 Winlogon/Welcome 等安全桌面接管，不再是
+// "Default"；OpenInputDesktop 失败（ACCESS_DENIED）同样是安全桌面的典型表现。
+// 黑帧本身（深色壁纸、全屏黑视频、显示器休眠）绝不等于锁屏，只能在已判定
+// 黑帧时用本函数补证据。桌面切换存在瞬时窗口，连续两次都指向安全桌面才认定锁屏。
+static bool winScreenIsLocked()
+{
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        HDESK desk = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+        if (desk) {
+            wchar_t name[256] = {};
+            DWORD needed = 0;
+            bool secure = false;
+            if (GetUserObjectInformationW(desk, UOI_NAME, name, sizeof(name), &needed)) {
+                secure = (QString::fromWCharArray(name).compare(
+                    QStringLiteral("Default"), Qt::CaseInsensitive) != 0);
+            }
+            CloseDesktop(desk);
+            return secure;
+        }
+        if (attempt == 0)
+            Sleep(20);
+    }
+    // 连续两次都拿不到输入桌面：安全桌面正在接管（锁屏/UAC/登录界面）。
+    return true;
+}
+
 // ======================= [WIN-DIAG] 采集循环诊断 =======================
 // 背景（2026-10-10 218 Win7 实测）：视频模式长期只有 ~2.7fps，且**与画面变化
 // 快慢完全无关**——用滚轮连续滚动页面 119 次/4s（客户端哈希证实远端画面确实在
@@ -1116,12 +1142,17 @@ void ScreenCapturer::captureFrameBody()
         gdiFailStreak_ = 0;
         gdiRebuilds_ = 0;
         if (isFrameBlack(frame)) {
-            // 锁屏/黑屏内容静态：不要全速（33ms）抓屏发黑帧——XP 单核实测锁屏时
-            // ~18fps 黑帧可吃掉约一半 CPU。连续黑帧按 idle 阈值降频（读回快的机器
-            // 到 250ms；慢读回机器由 pace 放大，见 applyCaptureInterval）。
-            if (!screenLocked_) {
+            // 黑帧不等于锁屏：只有输入桌面确实被安全桌面接管时才置锁屏；
+            // 深色壁纸/全屏黑视频/显示器休眠只降频，不误报锁屏。
+            const bool lockedNow = winScreenIsLocked();
+            if (lockedNow && !screenLocked_) {
                 screenLocked_ = true;
                 emit screenLocked(true);
+            } else if (!lockedNow && screenLocked_) {
+                // 已解锁但画面仍是黑的（黑屏视频/深色壁纸）：必须清掉锁屏状态，
+                // 否则解锁后前端一直显示"远程已锁屏"。
+                screenLocked_ = false;
+                emit screenLocked(false);
             }
             // 黑帧仍发给前端，确保 canvas 尺寸正确
             g_gdiDiag.emits++;
@@ -1237,10 +1268,14 @@ void ScreenCapturer::captureFrameBody()
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
     if (isFrameBlack(frame)) {
-        // 同 GDI 黑帧路径：锁屏时降频，避免全速发无意义黑帧。
-        if (!screenLocked_) {
+        // 同 GDI 黑帧路径：先确认真实锁屏，黑帧只降频、不误报锁屏。
+        const bool lockedNow = winScreenIsLocked();
+        if (lockedNow && !screenLocked_) {
             screenLocked_ = true;
             emit screenLocked(true);
+        } else if (!lockedNow && screenLocked_) {
+            screenLocked_ = false;
+            emit screenLocked(false);
         }
         // 黑帧仍发给前端
         emitCapturedFrame(frame);

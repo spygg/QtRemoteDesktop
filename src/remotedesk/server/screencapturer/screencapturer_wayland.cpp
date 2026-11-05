@@ -144,7 +144,8 @@ void WaylandCapturer::onStreamStateChanged(int oldState, int newState, const cha
         : (newState >= 0 && newState <= 3) ? stateNames[newState] : "UNKNOWN";
     qInfo() << "WaylandCapturer:" << oldName << "->" << newName
             << "error:" << (error ? error : "none")
-            << "activated:" << activated_ << "frameCount:" << frameCount_;
+            << "activated:" << activated_.load()
+            << "frameCount:" << frameCount_.load();
 
     if (newState == 2 /*PAUSED*/ && !activated_) {
         activated_ = true;
@@ -201,8 +202,7 @@ bool WaylandCapturer::initialize()
     if (setupMutterScreenCast()) {
         initialized_ = true;
         // offscreen 平台下 QGuiApplication 拿不到真实分辨率，共享给 InputManager 做坐标映射
-        qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
-        qputenv("QTRD_WAYLAND_HEIGHT", QByteArray::number(height_));
+        syncEnvSize();
         return true;
     }
 
@@ -215,8 +215,7 @@ bool WaylandCapturer::initialize()
     closeSession();
     if (setupPortalScreenCast()) {
         initialized_ = true;
-        qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
-        qputenv("QTRD_WAYLAND_HEIGHT", QByteArray::number(height_));
+        syncEnvSize();
         return true;
     }
 
@@ -281,7 +280,7 @@ bool WaylandCapturer::setupMutterScreenCast()
         if (size.size() == 2) {
             width_ = size.at(0).toInt();
             height_ = size.at(1).toInt();
-            qInfo() << "WaylandCapturer: monitor size from props" << width_ << "x" << height_;
+            qInfo() << "WaylandCapturer: monitor size from props" << width_.load() << "x" << height_.load();
         }
     }
 
@@ -321,11 +320,11 @@ bool WaylandCapturer::setupMutterScreenCast()
     // 尺寸兜底：优先用 QScreen（xcb 平台可拿到真实分辨率）；
     // 若仍拿不到则用 1080p 默认值。协商完成后 parseFormatParam 会用
     // 实际尺寸覆盖并同步 QTRD_WAYLAND_* 环境变量，因此这里只是初始值。
-    if (width_ <= 0 || height_ <= 0) {
+    if (width_.load() <= 0 || height_.load() <= 0) {
         if (QGuiApplication::primaryScreen()) {
             width_ = QGuiApplication::primaryScreen()->size().width();
             height_ = QGuiApplication::primaryScreen()->size().height();
-            qInfo() << "WaylandCapturer: using QScreen size" << width_ << "x" << height_;
+            qInfo() << "WaylandCapturer: using QScreen size" << width_.load() << "x" << height_.load();
         } else {
             width_ = 1920;
             height_ = 1080;
@@ -374,7 +373,7 @@ bool WaylandCapturer::setupPipewireMutter()
     }
 
     qInfo() << "WaylandCapturer: PipeWire capture started (mutter), node" << nodeId_
-            << "size" << width_ << "x" << height_;
+            << "size" << width_.load() << "x" << height_.load();
     return true;
 }
 
@@ -474,7 +473,7 @@ bool WaylandCapturer::setupPortalScreenCast()
         width_ = size.at(0).toInt();
         height_ = size.at(1).toInt();
     }
-    if (width_ <= 0 || height_ <= 0) {
+    if (width_.load() <= 0 || height_.load() <= 0) {
         // 兜底：用主屏幕尺寸
         if (QGuiApplication::primaryScreen()) {
             width_ = QGuiApplication::primaryScreen()->size().width();
@@ -554,7 +553,7 @@ bool WaylandCapturer::setupPipewire(int fd, uint32_t nodeId)
     }
 
     qInfo() << "WaylandCapturer: PipeWire capture started, node" << nodeId_
-            << "size" << width_ << "x" << height_;
+            << "size" << width_.load() << "x" << height_.load();
     return true;
 }
 
@@ -716,7 +715,11 @@ void WaylandCapturer::streamProcess()
     if (!stream_)
         return;
 
-    if (width_ <= 0 || height_ <= 0)
+    // 取一次快照：width_/height_ 是原子字段，避免在多处表达式里反复隐式转换，
+    // 也保证本帧的几何计算用同一组宽高。
+    const int cfgW = width_.load(std::memory_order_relaxed);
+    const int cfgH = height_.load(std::memory_order_relaxed);
+    if (cfgW <= 0 || cfgH <= 0)
         return;
     pw_buffer* buf = pw_stream_dequeue_buffer(stream_);
     if (!buf)
@@ -724,19 +727,19 @@ void WaylandCapturer::streamProcess()
     struct spa_buffer* sbuf = buf->buffer;
     struct spa_data* d = &sbuf->datas[0];
     if (d && d->data) {
-        int stride = (d->chunk && d->chunk->stride > 0) ? d->chunk->stride : width_ * 4;
+        int stride = (d->chunk && d->chunk->stride > 0) ? d->chunk->stride : cfgW * 4;
         // [B5] 协商尺寸（parseFormatParam 设置的 width_/height_）是权威值，QImage 允许
         // bytesPerLine 大于 width*4（stride 对齐填充无害）。不得用 stride/4 反推宽度——
         // mutter 对某些缓冲做行对齐填充时会把 padding 当像素，画面错位且污染
         // InputManager 依赖的 QTRD_WAYLAND_WIDTH。只有两种不一致才降级推导：
         //   a) stride < width_*4：真实行宽比协商窄（mutter 分数缩放，buffer 小于协商）；
         //   b) chunk->size < stride*height_：真实行数比协商少。
-        int realW = width_;
-        int realH = height_;
-        if (stride < width_ * 4 && stride > 0 && (stride % 4) == 0)
+        int realW = cfgW;
+        int realH = cfgH;
+        if (stride < cfgW * 4 && stride > 0 && (stride % 4) == 0)
             realW = stride / 4;
         const qint64 bufSize = (d->chunk && d->chunk->size > 0) ? (qint64)d->chunk->size : 0;
-        if (bufSize > 0 && stride > 0 && bufSize < qint64(stride) * height_) {
+        if (bufSize > 0 && stride > 0 && bufSize < qint64(stride) * cfgH) {
             int h = (int)(bufSize / stride);
             if (h > 0 && h <= 8192)
                 realH = h;
@@ -748,13 +751,13 @@ void WaylandCapturer::streamProcess()
             return;
         }
         // 尺寸变化时同步内部宽高与共享环境变量（供 InputManager 坐标映射）
-        if (realW != width_ || realH != height_) {
+        if (realW != cfgW || realH != cfgH) {
             qInfo() << "WaylandCapturer: adopt actual size" << realW << "x" << realH
-                    << "(was" << width_ << "x" << height_ << ") stride" << stride;
+                    << "(was" << cfgW << "x" << cfgH << ") stride" << stride;
             width_ = realW;
             height_ = realH;
-            qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
-            qputenv("QTRD_WAYLAND_HEIGHT", QByteArray::number(height_));
+            // 环境变量由主线程在 captureFrame 里通过 syncEnvSize() 同步：
+            // 本函数运行在 PipeWire 线程，qputenv 写进程环境块不是线程安全的。
         }
         // [R1] 无人观看时把整帧拷贝从"每帧"降到 1fps。PipeWire 的帧生产在
         // 本线程持续运行（光标闪烁/面板刷新会不断出帧），1920x1200 RGBA 每帧
@@ -783,10 +786,10 @@ void WaylandCapturer::streamProcess()
         QMutexLocker lk(&frameMutex_);
         frame_ = img.copy();
         hasFrame_ = true;
-        frameCount_++;
+        const uint64_t fc = frameCount_.fetch_add(1) + 1;
         // 周期性打印（每 300 帧一次），避免高频日志刷爆日志文件
-        if (frameCount_ <= 3 || (frameCount_ % 300) == 1) {
-            qInfo() << "WaylandCapturer: frame" << frameCount_
+        if (fc <= 3 || (fc % 300) == 1) {
+            qInfo() << "WaylandCapturer: frame" << fc
                     << "size" << realW << "x" << realH
                     << "stride" << stride
                     << "state" << pw_stream_get_state(stream_, nullptr);
@@ -812,12 +815,14 @@ void WaylandCapturer::parseFormatParam(const struct spa_pod* param)
     if (spa_format_video_raw_parse(param, &raw) < 0)
         return;
     if (raw.size.width > 0 && raw.size.height > 0) {
-        width_ = static_cast<int>(raw.size.width);
-        height_ = static_cast<int>(raw.size.height);
-        qInfo() << "WaylandCapturer: negotiated format" << width_ << "x" << height_;
-        // 协商后的实际尺寸同步给 InputManager 做坐标映射（offscreen 平台无 QScreen）
-        qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(width_));
-        qputenv("QTRD_WAYLAND_HEIGHT", QByteArray::number(height_));
+        const int w = static_cast<int>(raw.size.width);
+        const int h = static_cast<int>(raw.size.height);
+        width_ = w;
+        height_ = h;
+        qInfo() << "WaylandCapturer: negotiated format" << w << "x" << h;
+        // 协商后的实际尺寸同步给 InputManager 做坐标映射（offscreen 平台无 QScreen）。
+        // 这里在 PipeWire 线程执行，不能调 qputenv（环境块非线程安全），
+        // 由主线程在 captureFrame 里 syncEnvSize() 落盘。
     }
 }
 
@@ -835,6 +840,20 @@ void WaylandCapturer::abortPipewireSetup()
     if (loop_) { pw_thread_loop_destroy(loop_); loop_ = nullptr; }
 }
 
+void WaylandCapturer::syncEnvSize()
+{
+    // 只在主线程调用：qputenv 写的是进程级环境块，PipeWire 线程并发写会破坏
+    // 环境变量的链表/字符串（glibc setenv 非线程安全）。
+    const int w = width_.load(std::memory_order_relaxed);
+    const int h = height_.load(std::memory_order_relaxed);
+    if (w == lastEnvWidth_ && h == lastEnvHeight_)
+        return;
+    lastEnvWidth_ = w;
+    lastEnvHeight_ = h;
+    qputenv("QTRD_WAYLAND_WIDTH", QByteArray::number(w));
+    qputenv("QTRD_WAYLAND_HEIGHT", QByteArray::number(h));
+}
+
 void WaylandCapturer::setPaused(bool paused)
 {
     // 只置标志：帧丢弃/降频由 PipeWire 线程在 streamProcess 里执行，
@@ -844,6 +863,10 @@ void WaylandCapturer::setPaused(bool paused)
 
 bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
 {
+    // PipeWire 线程只更新 width_/height_，这里（主线程）把变化同步到
+    // QTRD_WAYLAND_* 环境变量，供 InputManager 做坐标映射。
+    syncEnvSize();
+
     // PipeWire 流已进入 ERROR（compositor 撤销共享 / 会话失效 / 设备错误）：
     // 如实报失败，让上层走"采集失败"路径（计数、必要时重建），而不是继续
     // 返回 true，让画面永久冻结在最后一帧而看不出任何异常。
@@ -880,23 +903,24 @@ bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
         static int dbg = 0;
         if (dbg < 10) {
             dbg++;
-            qWarning() << "WaylandCapturer::captureFrame FAIL hasFrame_=" << hasFrame_
+            qWarning() << "WaylandCapturer::captureFrame FAIL hasFrame_=" << hasFrame_.load()
                        << "isNull=" << frame_.isNull()
                        << "w=" << frame_.width() << "h=" << frame_.height()
                        << "streamReady_=" << streamReady_
-                       << "activated_=" << activated_
-                       << "frameCount_=" << frameCount_;
+                       << "activated_=" << activated_.load()
+                       << "frameCount_=" << frameCount_.load();
         }
         if (updated) *updated = false;
         return false;
     }
     // [P1 perf] 帧未更新时直接返回：静止桌面 PipeWire 不产新帧，旧逻辑每 tick
     // 仍 outImage = frame_.copy() 白拷一整帧 8.3MB（30fps ≈ +250MB/s 带宽）。
-    if (frameCount_ == lastDeliveredFrame_) {
+    const uint64_t fc = frameCount_.load(std::memory_order_relaxed);
+    if (fc == lastDeliveredFrame_) {
         if (updated) *updated = false;
         return true; // 采集通道正常，仅无新帧（与 X11 damage 空帧语义一致）
     }
-    lastDeliveredFrame_ = frameCount_;
+    lastDeliveredFrame_ = fc;
     // QImage 是 COW 浅共享：这里不发生深拷贝；仅当消费方写像素时才在写侧触发 detach。
     // streamProcess 写 frame_ 是整块替换（不写共享数据），不会强制消费方 detach。
     outImage = frame_;

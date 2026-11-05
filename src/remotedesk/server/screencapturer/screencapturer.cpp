@@ -87,20 +87,27 @@ void ScreenCapturer::teardownGrabThread()
 {
     if (!grabThread_)
         return;
-    // 等最后一次抓取返回（最多一帧耗时，慢机 ~350ms），否则 worker 可能在对象析构后
-    // 继续访问 dxgiCapturer_/gdiCapturer_。
-    for (int i = 0; i < 300 && grabBusy_.loadAcquire() != 0; ++i)
-        QThread::msleep(10);
+    // stop() 已经通过 captureResMutex_ 等到了 worker 的最后一次平台抓取返回，
+    // 所以这里不需要再等 grabBusy_。该标志只能由主线程的 onCaptureDone 清零，
+    // 在析构里忙等只会固定卡满超时，且等不到结果。
+    if (grabWorker_)
+        QObject::disconnect(grabWorker_, nullptr, this, nullptr);
     grabThread_->quit();
-    if (!grabThread_->wait(3000))
-        qWarning() << "ScreenCapturer: capture thread did not stop in 3s";
-    // [N9] 用 deleteLater 而不是 delete：grabWorker_ 的 affinity 在 qtrd-capture，
-    // 线程退出后由主线程直接 delete 属于跨线程析构（实践中线程已停所以安全，
-    // 但不是 Qt 的推荐口径）。事件循环已停，这里仍走 delete：deleteLater 在
-    // 无事件循环的线程里不会被执行，反而泄漏。改为先 wait 完再 delete 并留注释。
-    delete grabWorker_;
+    if (grabThread_->wait(1000)) {
+        // 线程已停：此时 delete worker/thread 是安全的。
+        delete grabWorker_;
+        grabWorker_ = nullptr;
+        delete grabThread_;
+        grabThread_ = nullptr;
+        return;
+    }
+    // 线程仍未退出：绝不 delete 运行中的 QThread（Qt 会直接 abort）。平台对象
+    // 已在 stop() 里删掉，worker 不会再有新的平台访问；把线程对象从 this 摘掉
+    // 后故意泄漏，避免 QThread 析构 abort 和跨线程 delete。worker 没有 parent，
+    // 会随线程一起泄漏。
+    qCritical() << "ScreenCapturer: capture thread did not stop in 1s; leaking thread/worker to avoid QThread abort";
+    grabThread_->setParent(nullptr);
     grabWorker_ = nullptr;
-    delete grabThread_;
     grabThread_ = nullptr;
 }
 

@@ -32,15 +32,8 @@ void XdndMonitor::start()
 {
     if (timer_)
         return;
-#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
-    // 关键：本进程多线程使用 Xlib（采集线程/输入线程/本线程各自持独立
-    // Display 连接），必须先 XInitThreads 初始化 Xlib 的全局锁结构，否则
-    // 本线程 XOpenDisplay 与采集线程的 display 重建并发时会在 Xlib 内部
-    // 全局状态上竞争 → 段错误（243 实测 8 秒一次重启循环）。本线程启动于
-    // RDPServer::initialize、早于采集 display 的惰性打开，这里是进程内
-    // 第一个 Xlib 调用点，时机满足 XInitThreads 的"先于一切 Xlib 调用"要求。
-    XInitThreads();
-#endif
+    // XInitThreads 已在 main() 里、创建任何线程之前调用一次（见 main.cpp）。
+    // 本模块是运行期才启动的，不能再承担"第一个 Xlib 调用点"的初始化职责。
     // 平台资源（X display / COM）由各平台 ensurePlatform() 在 poll() 里
     // 惰性打开：服务模式下 DISPLAY/XAUTHORITY 等环境常在 RDPServer
     // 初始化之后才就绪，过早打开必然失败。

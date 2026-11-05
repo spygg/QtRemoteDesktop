@@ -208,6 +208,52 @@ static int x11ErrorHandler(Display* d, XErrorEvent* e)
     return 0;
 }
 
+// 从掩码位域取通道值并归一化到 0..255（掩码宽度可能不是 8 位，如 5/6 位色深）
+static inline unsigned channelFromMask(unsigned long v, unsigned long mask)
+{
+    if (!mask)
+        return 0;
+    unsigned shift = 0;
+    while (shift < 32 && (mask & (1UL << shift)) == 0)
+        ++shift;
+    const unsigned long maxv = mask >> shift;
+    if (!maxv)
+        return 0;
+    const unsigned long raw = (v & mask) >> shift;
+    return static_cast<unsigned>((raw * 255 + maxv / 2) / maxv);
+}
+
+// 单个 XImage 像素 → QRgb。
+// 不能假定"24bpp 小端就是 B,G,R"：像素内字节顺序由 img->byte_order 决定，
+// 通道位域由 visual 掩码（red_mask/green_mask/blue_mask）决定，两者都可能与
+// 常见 x86 Xorg 不同（大端服务器、非 BGR 掩码）。p 指向该像素首字节。
+static inline QRgb ximagePixelToRgb(const XImage* img, const uchar* p)
+{
+    const int bytes = img->bits_per_pixel / 8;
+    unsigned long v = 0;
+    if (img->byte_order == LSBFirst) {
+        for (int i = bytes - 1; i >= 0; --i)
+            v = (v << 8) | p[i];
+    } else {
+        for (int i = 0; i < bytes; ++i)
+            v = (v << 8) | p[i];
+    }
+    return qRgb(channelFromMask(v, img->red_mask),
+                channelFromMask(v, img->green_mask),
+                channelFromMask(v, img->blue_mask));
+}
+
+// 32bpp 是否可以按 QImage::Format_RGB32 的内存布局（小端 B,G,R,X）直接 memcpy。
+// 只看 bits_per_pixel==32 不够：大端服务器或非标准 visual 掩码直接拷贝会红蓝互换。
+static inline bool ximageIsNativeBgra32(const XImage* img)
+{
+    return img->bits_per_pixel == 32
+        && img->byte_order == LSBFirst
+        && img->red_mask == 0x00ff0000UL
+        && img->green_mask == 0x0000ff00UL
+        && img->blue_mask == 0x000000ffUL;
+}
+
 class X11Capturer : public PlatformCapturer {
     Display* display_ = nullptr;
     Window rootWindow_;
@@ -575,7 +621,8 @@ public:
                         cw, ch, AllPlanes, ZPixmap);
                     if (!ximage)
                         continue;
-                    if (ximage->bits_per_pixel == 32) {
+                    if (ximageIsNativeBgra32(ximage)) {
+                        // 标准 32bpp 小端 BGRX：与 Format_RGB32 布局一致，整行 memcpy
                         const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
                         int srcStride = ximage->bytes_per_line;
                         for (int yy = 0; yy < ch; ++yy) {
@@ -583,27 +630,30 @@ public:
                                    src + yy * srcStride,
                                    static_cast<size_t>(cw) * 4);
                         }
-                    } else if (ximage->bits_per_pixel == 24) {
-                        // 24bpp 整行转换（3 字节连续像素）
+                    } else if (ximage->bits_per_pixel == 32 || ximage->bits_per_pixel == 24) {
+                        // 非标准 32bpp / 24bpp：按 byte_order + visual masks 逐像素转换。
+                        // 旧实现 32bpp 无条件 memcpy（大端/非 BGR 掩码会红蓝互换），
+                        // 必须与全量路径用同一转换，否则局部更新区颜色不对。
+                        const int bytesPerPixel = ximage->bits_per_pixel / 8;
                         const uchar* src = reinterpret_cast<const uchar*>(ximage->data);
                         int srcStride = ximage->bytes_per_line;
                         for (int yy = 0; yy < ch; ++yy) {
                             const uchar* s = src + yy * srcStride;
                             QRgb* d = reinterpret_cast<QRgb*>(buf.scanLine(dstY + yy)) + dstX;
-                            for (int xx = 0; xx < cw; ++xx) {
-                                // ZPixmap 24bpp 在 little-endian 下是 B,G,R；qRgb 要 R,G,B，
-                                // 与全量路径（Format_RGB888 + rgbSwapped）保持一致，否则
-                                // damage 局部更新区相对全量区红蓝互换。
-                                d[xx] = qRgb(s[xx * 3 + 2], s[xx * 3 + 1], s[xx * 3]);
-                            }
+                            for (int xx = 0; xx < cw; ++xx)
+                                d[xx] = ximagePixelToRgb(ximage, s + xx * bytesPerPixel);
                         }
                     } else {
-                        // 其他 bpp（如 16bpp）：用 XGetPixel 逐像素转换（安全，兜底慢路径）
+                        // 其他 bpp（典型 16bpp/RGB565）：XGetPixel 取原始像素值后按掩码
+                        // 取通道。旧实现写死 (px>>16)>>8/&0xFF（按 24 位真彩处理），
+                        // RGB565 会被算成近黑，且大端/非标准掩码同样出错。
                         for (int yy = 0; yy < ch; ++yy) {
                             QRgb* d = reinterpret_cast<QRgb*>(buf.scanLine(dstY + yy)) + dstX;
                             for (int xx = 0; xx < cw; ++xx) {
-                                unsigned long px = XGetPixel(ximage, xx, yy);
-                                d[xx] = qRgb((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+                                const unsigned long px = XGetPixel(ximage, xx, yy);
+                                d[xx] = qRgb(channelFromMask(px, ximage->red_mask),
+                                             channelFromMask(px, ximage->green_mask),
+                                             channelFromMask(px, ximage->blue_mask));
                             }
                         }
                     }
@@ -688,18 +738,43 @@ public:
         // 全量抓取：输出由 emitFullFrame 统一处理（图片模式不交换缓冲，视频模式
         // 同步另一块后交换，保证后续 damage 增量有正确基准）。
         QImage full;
-        if (ximage->bits_per_pixel == 32) {
+        // 32bpp 快速路径要求"小端 + 标准 BGRX 掩码"（QImage::Format_RGB32 的
+        // 内存布局就是 B,G,R,X）。大端服务器或非标准掩码一律走下面的掩码转换，
+        // 否则颜色通道会错位。
+        if (ximageIsNativeBgra32(ximage)) {
             QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
                           primaryW_, primaryH_, ximage->bytes_per_line,
                           QImage::Format_RGB32);
             // 直接输出 RGB32（小端=BGRA），不再转换到 RGB888。
             // 视频编码线程的 sws_scale 直接以 BGRA 为输入。
             full = rawImg.copy();
+        } else if (ximage->bits_per_pixel == 32 || ximage->bits_per_pixel == 24) {
+            // 24bpp 或非标准 32bpp：按 XImage 的 byte_order + visual 掩码逐像素
+            // 转换，不再 Format_RGB888 + rgbSwapped（后者写死"小端 B,G,R"）。
+            // 与 damage 局部路径共用同一转换，保证全量/增量颜色一致。
+            const int bytesPerPixel = ximage->bits_per_pixel / 8;
+            QImage dst(primaryW_, primaryH_, QImage::Format_RGB32);
+            for (int yy = 0; yy < primaryH_; ++yy) {
+                const uchar* s = reinterpret_cast<const uchar*>(ximage->data)
+                               + static_cast<size_t>(yy) * ximage->bytes_per_line;
+                QRgb* d = reinterpret_cast<QRgb*>(dst.scanLine(yy));
+                for (int xx = 0; xx < primaryW_; ++xx)
+                    d[xx] = ximagePixelToRgb(ximage, s + xx * bytesPerPixel);
+            }
+            full = dst;
         } else {
-            QImage rawImg(reinterpret_cast<const uchar*>(ximage->data),
-                          primaryW_, primaryH_, ximage->bytes_per_line,
-                          QImage::Format_RGB888);
-            full = rawImg.rgbSwapped().convertToFormat(QImage::Format_RGB32);
+            // 其他 bpp（16bpp/调色板等）：XGetPixel 兜底，保证颜色正确（慢路径）
+            QImage dst(primaryW_, primaryH_, QImage::Format_RGB32);
+            for (int yy = 0; yy < primaryH_; ++yy) {
+                QRgb* d = reinterpret_cast<QRgb*>(dst.scanLine(yy));
+                for (int xx = 0; xx < primaryW_; ++xx) {
+                    const unsigned long px = XGetPixel(ximage, xx, yy);
+                    d[xx] = qRgb(channelFromMask(px, ximage->red_mask),
+                                 channelFromMask(px, ximage->green_mask),
+                                 channelFromMask(px, ximage->blue_mask));
+                }
+            }
+            full = dst;
         }
 
         if (!fromShm)

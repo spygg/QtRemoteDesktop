@@ -27,6 +27,7 @@
 
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 #include <csignal>
+#include <X11/Xlib.h>
 #endif
 
 // 默认级别：debug 构建全量记录，release 构建只记 info 及以上
@@ -221,6 +222,13 @@ static void verifyJpegSupport()
 
 int main(int argc, char* argv[])
 {
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+    // [X11-THREADS] 必须在创建任何线程（QApplication/QThread/采集线程）之前调用。
+    // 采集/输入/XDND 各自持独立 Display 连接，但 Xlib 的全局锁结构是进程级的；
+    // 晚初始化会让并发 XOpenDisplay/协议调用在内部全局状态上竞争 → 段错误。
+    // XInitThreads 幂等，散落在各模块里的补充调用不会重复初始化。
+    XInitThreads();
+#endif
 
     ensureQtPluginPath(argc, argv);
 

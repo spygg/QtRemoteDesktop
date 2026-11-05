@@ -2,7 +2,12 @@
 #include <QDebug>
 #include <QPixmap>
 #include <CoreGraphics/CoreGraphics.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+
+// CGSessionCopyCurrentDictionary 由 CoreGraphics 提供；显式声明以避免
+// 不同 SDK 头文件包含关系差异（CoreGraphics.h 并不总是带出 CGSession.h）。
+extern "C" CFDictionaryRef CGSessionCopyCurrentDictionary(void);
 
 // macOS 10.15+ 屏幕录制权限检测（动态加载以兼容旧系统）
 static bool macScreenCaptureAuthorized()
@@ -17,6 +22,22 @@ static bool macScreenCaptureAuthorized()
     return fn();
 }
 
+// 真实锁屏状态：读当前登录会话字典的 CGSSessionScreenIsLocked。
+// 黑帧只能说明画面是黑的（深色壁纸、全屏黑视频、无权限、显示器休眠都会全黑），
+// 不能作为锁屏证据。
+static bool macScreenIsLocked()
+{
+    CFDictionaryRef session = CGSessionCopyCurrentDictionary();
+    if (!session)
+        return false;
+    bool locked = false;
+    CFTypeRef value = CFDictionaryGetValue(session, CFSTR("CGSSessionScreenIsLocked"));
+    if (value && CFGetTypeID(value) == CFBooleanGetTypeID())
+        locked = CFBooleanGetValue(static_cast<CFBooleanRef>(value));
+    CFRelease(session);
+    return locked;
+}
+
 static bool isFrameBlack(const QImage& frame)
 {
     if (frame.isNull() || frame.width() < 10 || frame.height() < 10)
@@ -25,10 +46,14 @@ static bool isFrameBlack(const QImage& frame)
     int darkCount = 0;
     int step = qMax(1, qMin(frame.width(), frame.height()) / 10);
     for (int y = 0; y < frame.height(); y += step) {
-        const uchar* line = frame.constScanLine(y);
         for (int x = 0; x < frame.width(); x += step) {
             sampleCount++;
-            if (line[x * 3] + line[x * 3 + 1] + line[x * 3 + 2] < 18)
+            // 用 QImage::pixel() 解码成 QRgb：交付帧现在是 Format_RGB32（4 字节/像素），
+            // 旧实现按 3 字节/像素直接索引 scanLine，step 为奇数时每 4 个采样点有
+            // 1 个落在 alpha 通道上，暗像素比例最多 75%，过不了 >90% 阈值 ——
+            // 黑帧被判成非黑，锁屏状态永远不上报。这里不再假设像素布局。
+            const QRgb c = frame.pixel(x, y);
+            if (qRed(c) + qGreen(c) + qBlue(c) < 18)
                 darkCount++;
         }
     }
@@ -55,12 +80,16 @@ public:
 
     bool initialize() override
     {
+        // 权限失败不能只告警后照常启动：没有权限时 CGDisplayCreateImage 只会
+        // 返回空/黑帧，启动成功反而让上层误以为采集可用。
+        if (!macScreenCaptureAuthorized()) {
+            qWarning() << "macOS: 无屏幕录制权限，画面将无法捕获。"
+                          "请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权本应用";
+            return false;
+        }
         displayID_ = CGMainDisplayID();
         width_ = static_cast<int>(CGDisplayPixelsWide(displayID_));
         height_ = static_cast<int>(CGDisplayPixelsHigh(displayID_));
-        if (!macScreenCaptureAuthorized())
-            qWarning() << "macOS: 无屏幕录制权限，画面将无法捕获。"
-                          "请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权本应用";
         return displayID_ != 0;
     }
 
@@ -94,14 +123,17 @@ public:
         CGContextDrawImage(drawCtx_, CGRectMake(0, 0, w, h), cgImage);
         CGImageRelease(cgImage);
 
-        // BGRA -> RGB888 (使用 Qt 内置 SIMD 优化转换)
         QImage rawImg(static_cast<uchar*>(CGBitmapContextGetData(drawCtx_)),
                       static_cast<int>(w), static_cast<int>(h),
                       static_cast<int>(CGBitmapContextGetBytesPerRow(drawCtx_)),
                       QImage::Format_RGB32);
-        // [P1 perf] convertToFormat 产出的独立缓冲即为交付帧，不存在与绘制缓冲
-        // 的别名问题，可在下一帧绘制前安全消费。
-        outImage = rawImg.convertToFormat(QImage::Format_RGB888);
+        // CGBitmapContext 是 kCGBitmapByteOrder32Little|PremultipliedFirst，
+        // 内存布局即 QImage::Format_RGB32（BGRA），与 videoencoder 的 sws 输入
+        // （AV_PIX_FMT_RGB32）以及 Windows/Linux 采集输出一致。
+        // 直接深拷贝即可交付：旧实现转成 RGB888、编码线程再转回 RGB32，
+        // 每帧白白做两次全画面格式转换。拷贝是为了脱离会被下一帧覆盖的绘制缓冲。
+        // [P1 perf] copy 产出的独立缓冲即为交付帧，可在下一帧绘制前安全消费。
+        outImage = rawImg.copy();
         return true;
     }
 
@@ -116,7 +148,12 @@ bool ScreenCapturer::start(int fps)
     fps_ = fps;
     if (!g_macCapturer) {
         g_macCapturer = new MacCapturer();
-        g_macCapturer->initialize();
+        if (!g_macCapturer->initialize()) {
+            delete g_macCapturer;
+            g_macCapturer = nullptr;
+            qCritical() << "Screen capture start failed (macOS): permission or display unavailable";
+            return false;
+        }
     }
     captureTimer_->start(1000 / fps);
     qInfo() << "Screen capture started (macOS):" << width() << "x" << height() << "@" << fps << "fps";
@@ -131,21 +168,34 @@ void ScreenCapturer::captureFrameBody()
         // success
     } else {
         QPixmap pixmap = screen_->grabWindow(0);
-        frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
+        // 统一交付 RGB32（编码器 sws 输入），避免编码线程再做一次全画面转换
+        frame = pixmap.toImage().convertToFormat(QImage::Format_RGB32);
     }
 
-    if (isFrameBlack(frame)) {
-        idleCount_ = 0;
-        leaveIdleThrottle();
-        if (!screenLocked_) {
-            screenLocked_ = true;
-            emit screenLocked(true);
-        }
-        return;
+    // 黑帧不等于锁屏：深色壁纸、全屏黑视频、权限被拒、显示器休眠都会全黑。
+    // 只有会话字典确认 CGSSessionScreenIsLocked 时才置锁屏；并且无论是否锁屏，
+    // 都继续走下面的校验和/去重/发送，客户端至少能看到真实黑屏而不是冻结。
+    const bool black = isFrameBlack(frame);
+    const bool lockedNow = (black || screenLocked_) ? macScreenIsLocked() : false;
+    if (lockedNow != screenLocked_) {
+        screenLocked_ = lockedNow;
+        emit screenLocked(lockedNow);
     }
-    if (screenLocked_) {
-        screenLocked_ = false;
-        emit screenLocked(false);
+
+    // 空帧不是"黑色画面"：CG 抓帧与 grabWindow 都失败（权限被拒/显示器休眠）时
+    // 没有任何有效像素，投给下游 JPEG/编码器会拿到无效 QImage。
+    // 但也不能只更新锁屏状态就静默 return —— 上层收不到任何帧，前端会停在最后
+    // 一帧，看不出"当前无画面"。这里按采集区尺寸合成一张黑帧，继续走下面的
+    // 校验和/去重/发送（至少让客户端看到黑屏），并用限频告警避免刷日志。
+    if (frame.isNull() || frame.width() <= 0 || frame.height() <= 0) {
+        const int fw = qMax(1, g_macCapturer ? g_macCapturer->width() : width());
+        const int fh = qMax(1, g_macCapturer ? g_macCapturer->height() : height());
+        static int failLogCount = 0;
+        if ((failLogCount++ % 100) == 0)
+            qWarning() << "macOS: capture produced no image, sending synthesized black frame"
+                       << fw << "x" << fh;
+        frame = QImage(fw, fh, QImage::Format_RGB32);
+        frame.fill(Qt::black);
     }
 
     quint16 checksum = quickFrameChecksum(frame);

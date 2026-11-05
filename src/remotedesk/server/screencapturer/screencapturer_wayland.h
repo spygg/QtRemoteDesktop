@@ -57,10 +57,13 @@ private:
     bool createLink(uint32_t outputNode, uint32_t outputPort, uint32_t inputNode, uint32_t inputPort);
     void teardownPipewire();
 
-    int width_ = 0;
-    int height_ = 0;
+    // 宽高由 PipeWire 线程（parseFormatParam / streamProcess）写入、主线程
+    // （InputManager 坐标映射、captureFrame）读取，跨线程裸字段属数据竞争，
+    // 统一改为原子访问。
+    std::atomic<int> width_ { 0 };
+    std::atomic<int> height_ { 0 };
     bool initialized_ = false;
-    uint64_t frameCount_ = 0;
+    std::atomic<uint64_t> frameCount_ { 0 };
     uint64_t lastDeliveredFrame_ = 0; // 已交付给上层的帧序号（静止桌面去重，避免空拷贝）
 
     // 无客户端观看（上层 suspend）时置位：streamProcess 把整帧拷贝降到 1fps。
@@ -71,7 +74,15 @@ private:
     // 最新帧（PipeWire 线程写入，capture 线程读取）
     QImage frame_;
     QMutex frameMutex_;
-    bool hasFrame_ = false;
+    // frame_ 本身由 frameMutex_ 保护；hasFrame_ 在 onStreamStateChanged 里由
+    // PipeWire 线程单独清位，故用原子避免与主线程读取竞争。
+    std::atomic<bool> hasFrame_ { false };
+
+    // 已同步到 QTRD_WAYLAND_* 环境变量的尺寸快照。qputenv 写进程环境块不是
+    // 线程安全的，只能由主线程调用（syncEnvSize），PipeWire 线程仅更新
+    // width_/height_。以下两个字段只在主线程读写。
+    int lastEnvWidth_ = -1;
+    int lastEnvHeight_ = -1;
 
     // 会话句柄（用于关闭）
     QString sessionPath_;   // mutter 或 portal 的 session object path
@@ -89,19 +100,23 @@ private:
     uint32_t sourceNodeId_ = 0;
     uint32_t inputPortId_ = 0;
     bool linkCreated_ = false;
-    bool activated_ = false;
+    // 只由 PipeWire 线程（state_changed 回调）置位，主线程在日志/诊断中读取。
+    std::atomic<bool> activated_ { false };
     bool streamReady_ = false;
     bool mutterMode_ = false;
     bool loopStarted_ = false;   // pw_thread_loop_start 是否成功（失败路径不能 stop 未启动的 loop）
     // PipeWire 流进入 ERROR 状态：captureFrame 必须如实报失败，否则上层永远
     // 以为采集正常（画面冻结却无任何重连），表现为"永久卡住最后一帧"。
-    bool streamError_ = false;
+    std::atomic<bool> streamError_ { false };
     // 上次尝试重建 PipeWire 流的时刻（ms）：ERROR 是终态，若不重建，共享被
     // compositor 撤销后画面会永久停在最后一帧；重建按 5s 节流，避免失败时忙转。
     qint64 streamErrorRetryMs_ = 0;
     // 部分初始化资源的清理：只销毁已创建的对象（区别于 teardownPipewire 的
     // 无条件 stop loop），用于 setup 各失败分支，避免泄漏常驻线程/会话。
     void abortPipewireSetup();
+    // 主线程专用：把 width_/height_ 的最新值同步到 QTRD_WAYLAND_* 环境变量。
+    // 只做变化检测，无变化时不写环境块。
+    void syncEnvSize();
 };
 
 #endif // SCREENCAPTURER_WAYLAND_H
