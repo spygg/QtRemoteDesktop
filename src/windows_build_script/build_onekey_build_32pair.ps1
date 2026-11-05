@@ -218,6 +218,54 @@ function Reset-SharedArchives([string]$LibDir) {
     Write-Host "[purge] removed $removed shared archive(s) from $LibDir (R2/R3)"
 }
 
+# Serialise concurrent pair-builds. Two invocations writing the same
+# build_output_win32/lib/*.a at once hold/rename each other's archive and fail
+# with `ar/ranlib: Permission denied` (2026-11-05: an entire paired run failed
+# 3/3 retries that way). An exclusive lock on a file in the shared dir makes the
+# second invocation wait instead of corrupting the archive set.
+function Enter-BuildLock([string]$Dir, [int]$TimeoutMinutes = 10) {
+    $lockPath = Join-Path $Dir '.build_32pair.lock'
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $warned = $false
+    while ($true) {
+        try {
+            return [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate,
+                                   [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        } catch [System.IO.IOException] {
+            if (-not $warned) {
+                Write-Host "[lock] another 32-bit build holds $lockPath - waiting..." -ForegroundColor Yellow
+                $warned = $true
+            }
+            if ((Get-Date) -gt $deadline) {
+                throw "another 32-bit build is still running after $TimeoutMinutes min (lock: $lockPath)"
+            }
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+
+function Exit-BuildLock($Stream) {
+    if ($null -ne $Stream) { try { $Stream.Dispose() } catch { } }
+}
+
+# A failed make can return while ar/ranlib/ld children are still finishing (or
+# still holding the .a they just wrote). Re-linking immediately reproduces the
+# same "Permission denied". Wait for those children to exit before purging and
+# retrying; anything not belonging to this repo is ignored.
+function Wait-ArchiveToolchainIdle([string]$RepoRoot, [int]$TimeoutSec = 30) {
+    $names = @('ar', 'ranlib', 'ld', 'mingw32-make', 'cc1plus', 'collect2')
+    for ($i = 0; $i -lt $TimeoutSec; $i++) {
+        $busy = @(Get-Process -Name $names -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -and $_.Path.StartsWith($RepoRoot, [StringComparison]::OrdinalIgnoreCase) }
+            catch { $false }
+        })
+        if (-not $busy) { return }
+        if ($i -eq 0) { Write-Host "[wait] archive toolchain still running, waiting for it to exit..." -ForegroundColor Yellow }
+        Start-Sleep -Seconds 1
+    }
+    Write-Host "[warn] archive toolchain still running after ${TimeoutSec}s" -ForegroundColor Yellow
+}
+
 # R4: prove the package linked the FFmpeg build that belongs to this target.
 function Assert-FFmpegLink([string]$Exe, [string]$NmExe, [string]$Label,
                            [string]$MustHave, [string]$MustNotHave) {
@@ -294,6 +342,9 @@ $env:PATH = "$mingwBin;$(Join-Path $gitRoot 'bin');$(Join-Path $gitRoot 'usr\bin
 # everything else -> ffmpeg_install-<version>).
 $result = @()
 
+# Held for the whole run; if this process dies the OS closes the handle.
+$buildLock = Enter-BuildLock $sharedOut
+
 foreach ($t in $targets) {
     $buildDir  = Join-Path $repoRoot $t.BuildDir
     $binDir    = Join-Path $repoRoot $t.BinDir
@@ -335,7 +386,12 @@ foreach ($t in $targets) {
     Write-Host "[2/3] Building..."
     Invoke-BuildChecked "CMake build ($($t.Name))" {
         & $cmakeExe --build $buildDir -j $Jobs 2>&1
-    } 3 { Reset-SharedArchives $sharedLib }
+    } 3 {
+        # let the failed attempt's ar/ranlib children release the archives, then
+        # start the retry from a clean (and verified-purged) archive set
+        Wait-ArchiveToolchainIdle $repoRoot
+        Reset-SharedArchives $sharedLib
+    }
 
     Write-Host "[3/3] Verify package..."
     Assert-FFmpegLink $exe $nmExe $t.Label $t.MustHave $t.MustNotHave
@@ -349,6 +405,8 @@ foreach ($t in $targets) {
         Sha256 = Get-FileSha256 $exe
     }
 }
+
+Exit-BuildLock $buildLock
 
 Write-Host ""
 Write-Host "=============================================="
