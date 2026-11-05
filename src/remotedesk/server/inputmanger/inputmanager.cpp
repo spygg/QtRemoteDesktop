@@ -45,6 +45,9 @@ InputManager::~InputManager()
     if (xDisplay_) {
         // 键盘映射改动是全局且持久的：连接一断就还不回去了，先归还借用的 keycode。
         restoreUnicodeKeycode();
+        // 逐键 auto-repeat 同理：进程退出前把自己置为"不重复"的键全部恢复默认，
+        // 否则本机物理键盘上那几颗键会永久失去自动重复。
+        restoreAutoRepeatKeycodes();
         XCloseDisplay(static_cast<Display*>(xDisplay_));
         xDisplay_ = nullptr;
     }

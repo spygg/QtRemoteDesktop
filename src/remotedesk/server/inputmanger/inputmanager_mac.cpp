@@ -123,20 +123,51 @@ static int domCodeToMacKeycode(const QString& code)
     return -1;
 }
 
+// 采集端固定只采主屏（MacCapturer::initialize 里 displayID_ = CGMainDisplayID()），
+// 因此输入也必须固定映射到主屏 —— 尺寸不能当成屏身份。
+// 旧实现先按"点尺寸"遍历所有活动屏：Retina 主屏 1920×1080 点 + 4K@1x 外接屏时，
+// 前端上报 3840×2160 会先命中点尺寸恰好为 3840×2160 的外接屏（那其实是主屏的
+// 物理像素），鼠标/点击被送到根本没在采集的那块屏。
+// 这里直接返回主屏；坐标仍由 capturePointToGlobal 用 bounds(点)/上报尺寸缩放，
+// 所以前端按点或按像素上报都能落回主屏的正确位置。
+static CGDirectDisplayID captureDisplayForSize(int w, int h)
+{
+    (void)w;   // 形参保留，调用方语义不变（未来若采集多屏再按尺寸匹配）
+    (void)h;
+    return CGMainDisplayID();
+}
+
+// 把“捕获区相对坐标”换算成 CGEvent 需要的全局点坐标。
+// 比例必须用 bounds(点)/前端尺寸，而不是拿像素当点：Retina 下 2x 屏的
+// 像素尺寸是点尺寸的两倍，直接传像素会落到一半位置。
+static CGPoint capturePointToGlobal(CGDirectDisplayID display, int x, int y,
+                                    int srcW, int srcH)
+{
+    const CGRect b = CGDisplayBounds(display);
+    // 尺寸缺失时退回该屏的点尺寸（与 b 同一坐标系），绝不要把像素尺寸与点混用。
+    const CGFloat w = srcW > 0 ? srcW : b.size.width;
+    const CGFloat h = srcH > 0 ? srcH : b.size.height;
+    const CGFloat sx = w > 0 ? b.size.width / w : 1.0;
+    const CGFloat sy = h > 0 ? b.size.height / h : 1.0;
+    // 前端与 Linux/Windows 注入统一为左上角原点、y 向下；CGDisplayBounds 的全局
+    // 坐标同样是左上角原点、y 向下，因此两轴都直接按比例映射（旧实现 h - y 会把
+    // 指针上下镜像）。
+    return CGPointMake(b.origin.x + x * sx, b.origin.y + y * sy);
+}
+
 void InputManager::injectMouseMove(int x, int y)
 {
-    CGDirectDisplayID display = CGMainDisplayID();
-    CGFloat h = CGDisplayPixelsHigh(display);
+    const CGDirectDisplayID display = captureDisplayForSize(screenW_, screenH_);
     CGEventRef event = CGEventCreateMouseEvent(
         nullptr, kCGEventMouseMoved,
-        CGPointMake(x, h - y), kCGMouseButtonLeft);
+        capturePointToGlobal(display, x, y, screenW_, screenH_),
+        kCGMouseButtonLeft);
     postEventAndRelease(event, "mouse");
 }
 
 void InputManager::injectMouseButton(int x, int y, int button, bool isDown)
 {
-    CGDirectDisplayID display = CGMainDisplayID();
-    CGFloat h = CGDisplayPixelsHigh(display);
+    const CGDirectDisplayID display = captureDisplayForSize(screenW_, screenH_);
 
     CGMouseButton btn;
     switch (button) {
@@ -157,7 +188,8 @@ void InputManager::injectMouseButton(int x, int y, int button, bool isDown)
     else
         type = isDown ? kCGEventLeftMouseDown : kCGEventLeftMouseUp;
     CGEventRef event = CGEventCreateMouseEvent(
-        nullptr, type, CGPointMake(x, h - y), btn);
+        nullptr, type,
+        capturePointToGlobal(display, x, y, screenW_, screenH_), btn);
     postEventAndRelease(event, "mouse");
 }
 

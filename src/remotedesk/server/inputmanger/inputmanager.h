@@ -13,6 +13,8 @@ typedef unsigned long X11KeySym;
 #include <QByteArray>
 #include <QDBusPendingCall>
 #include <QDBusMessage>
+#include <QHash>
+#include <QQueue>
 #include <QVector>
 #endif
 
@@ -60,6 +62,19 @@ public:
     // 屏保/锁屏状态开关：只有锁屏（或安全输入）会话才允许 focusLockScreenWindow
     // 强设焦点到全屏/置顶窗口；普通桌面不得抢走当前活动窗口的焦点。
     void setScreenLocked(bool locked) { screenLocked_ = locked; }
+    // ── 中文输入（IME 上屏）的队列入口（实现在 inputmanager_linux.cpp）──────
+    // 中文输入开关打开时，该连接的**所有**键都走同一条 FIFO（含 ASCII/Enter）：
+    // 字符注入要等映射保持期，同步注入的 ASCII 会"超车"，把 "中a" 落成 "a中"。
+    // 关闭态（默认）rdpserver 直接调 injectKeyboard，这两个函数不会被用到。
+    bool enqueueKeyboard(int keycode, const QString &code, bool isDown, bool ctrl,
+                         bool alt, bool shift, bool isChar, bool meta);
+    // 断线/析构：丢弃尚未注入的输入，并把借用的键码还原成原始映射
+    //（否则断开后本机按那颗键会继续出中文）。
+    void flushPendingInput();
+    // 兜底恢复：把"本对象置为不重复"的所有 keycode 写回抑制前记录的原值。
+    // 只在确定没有其它客户端还按着键时调用（如 clientCount()==0），否则短暂
+    // 放开别人按住的键会重新引入 X 的 typematic 重复。
+    void restoreAutoRepeatKeycodes();
 #endif
 
 private:
@@ -130,11 +145,28 @@ private:
     // NoSymbol、且不是修饰键），用 XChangeKeyboardMapping 把它的 keysym 临时
     // 指向 0x01000000+码点 的 Unicode keysym，再 XTEST 按下/抬起 —— 客户端
     // 收到的就是那个汉字。ASCII/字母一律不走这里，远端装了输入法时仍由远端组词。
-    // 时序约束见 inputmanager_linux.cpp 里的 kUnicodeSettleMs / kUnicodeHoldMs：
+    // 时序约束见 inputmanager_linux.cpp 里的 unicodeHoldMs()/unicodeSettleMs()：
     // 接收端用自己缓存的键表解 keysym，所以刚借来的键要先预热绑定，字符之间还要留间隔。
+    // 这两个时长可用 QTRD_UNICODE_HOLD_MS / QTRD_UNICODE_SETTLE_MS 覆盖。
     bool sendUnicodeChar(unsigned int codePoint, bool isDown);
     bool borrowUnicodeKeycode();      // 惰性借用并记录原始映射行；失败会被记住
     void restoreUnicodeKeycode();     // 还原映射行（换 X 连接 / 析构时）
+    // 非阻塞注入队列：sendUnicodeChar/enqueueKeyboard 只入队，实际改映射/按键由
+    // QTimer 在保持期、稳定期到达后执行 —— 主线程不再为每个字符阻塞几十毫秒。
+    struct PendingUnicodeKey {
+        unsigned int codePoint = 0;
+        bool isDown = false;
+        bool isChar = true;      // true = Unicode 上屏字符；false = 普通键码
+        int keycode = 0;
+        QString code;
+        bool ctrl = false, alt = false, shift = false, meta = false;
+    };
+    QQueue<PendingUnicodeKey> unicodePending_;
+    bool enqueueUnicode(const PendingUnicodeKey &pending);   // 入队 + 上限裁剪
+    qint64 unicodeMappingReadyMs_ = 0;  // 映射落地(+稳定期)后才允许按键的时刻（ms）
+    bool unicodePumpScheduled_ = false; // 已挂 QTimer::singleShot，避免重复排队
+    void scheduleUnicodePump();         // 按当前队首的等待需求挂下一次 pump
+    void pumpUnicodeQueue();            // 执行至多一步（改映射 或 按下/抬起）
     int unicodeKeycode_ = 0;          // 借来的 keycode（0 = 未借用）
     unsigned long unicodeBound_ = 0;  // 当前绑定在该 keycode 上的 keysym（相同则免改）
     qint64 unicodeBoundMs_ = 0;       // 上一次改映射的时刻（保持期判据）
@@ -142,6 +174,32 @@ private:
     QVector<X11KeySym> unicodeOriginalRow_;  // 原始行，用于精确还原
     void* unicodeDisplay_ = nullptr;  // 借用属于哪个 X 连接（连接变了必须重新借）
     bool unicodeScanFailed_ = false;  // 借不到 keycode：不再逐字符重复扫描/刷日志
+
+    // ── 逐键 auto-repeat 抑制（长按不与 X 的 typematic 叠加）────────────────
+    // 远端长按的重复完全由服务端产生（rdpserver 把浏览器 repeat keydown 翻译成
+    // keyup+keydown）。但注入的初始 keydown 会让 X 认为该键一直按着，X 的
+    // typematic 可能在首个 repeat 到达前就开始（默认 delay 500ms 与浏览器首重复
+    // 延迟≈500ms 正好重叠），多灌出 1~2 个字符。
+    //
+    // 这里只对「本服务端刚按下、尚未抬起」的那枚 keycode 用
+    // XChangeKeyboardControl(KBKey|KBAutoRepeatMode) 单独关闭自动重复，keyup 立即
+    // 恢复为服务器默认值。**不碰显示级全局 auto repeat**（XAutoRepeatOff 会把本机
+    // 物理键盘一起改掉，且是跨进程持久的服务器状态），因此 `xset q` 不受影响。
+    // 集合里的每个 keycode 都是"本对象欠一次恢复"的债：keyup、断线、换连接、
+    // 析构都必须还清，否则那颗键会永久失去自动重复（本机物理键盘同受影响）。
+    bool setKeyAutoRepeat(unsigned int keycode, bool suppress);
+    void reconcileAutoRepeatKeycodes();        // 惰性对账：X 侧已抬起的键立即恢复
+    // keycode → 最近一次「按下」注入时刻。集合本身就是"本对象欠一次恢复"的账；
+    // 时间戳只用于对账：仍在被按住（repeat 翻译不断刷新）的键不能被误判为丢失。
+    QHash<int, qint64> autoRepeatSuppressed_;
+    // keycode → 抑制前该键的原值（AutoRepeatModeOn/Off，来自 XGetKeyboardControl
+    // 的 auto_repeats 位图）。恢复时按原值写回，不能用 AutoRepeatModeDefault：
+    // 空闲 keycode 上没有"默认重复行为"可继承，部分服务器把它解析成 off。
+    QHash<int, int> autoRepeatOriginal_;
+    void* autoRepeatDisplay_ = nullptr;        // 这批 keycode 属于哪个 X 连接
+    qint64 lastRepeatReconcileMs_ = 0;         // 对账节流（每 2s 最多一次）
+    bool repeatControlProbed_ = false;         // 已探测过逐键 API 是否被服务器支持
+    bool keyRepeatControlUnsupported_ = false; // 服务器不支持：只告警一次，后续照常注入
 
 private slots:
     // Wayland 门户的 D-Bus 回调。必须放在 slots 区：QDBusConnection::connect 的

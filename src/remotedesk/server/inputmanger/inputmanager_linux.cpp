@@ -6,6 +6,7 @@
 #include <QGuiApplication>
 #include <QScreen>
 #include <QThread>
+#include <QTimer>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -16,6 +17,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <cstring>
 
 #include <QDBusConnection>
 #include <QDBusMessage>
@@ -260,8 +262,13 @@ bool InputManager::ensureXDisplay()
         // 键盘映射是**服务器全局**的，连接一关就再也还不回去：必须在下一次
         // XCloseDisplay 之前归还借用的 keycode。
         restoreUnicodeKeycode();
+        // 逐键 auto-repeat 同样是服务器端持久状态：换连接前必须把这批 keycode
+        // 恢复成默认（旧连接还活着，还能发请求），否则新连接上再也没机会还。
+        restoreAutoRepeatKeycodes();
         XCloseDisplay(xdisp(xDisplay_));
         xDisplay_ = nullptr;
+        autoRepeatDisplay_ = nullptr;
+        repeatControlProbed_ = false;
         lastXOpenFailMs_ = 0;   // 新环境值立刻重试，不要等 1.5s 限流
         // 旧屏的空闲键不代表新屏也空闲，借用状态与"借不到"的结论一起作废。
         unicodeScanFailed_ = false;
@@ -287,6 +294,18 @@ bool InputManager::ensureXDisplay()
     xDisplay_ = d;
     openedDisplay_ = curDpy;
     openedXauth_ = curAuth;
+    // [自动重复] 这里**从不**调用 XAutoRepeatOff / XAutoRepeatOn。
+    // 旧实现为了压住"某键 keyup 丢失后 X 自动重复灌出一串字母"（实测
+    // "cccc测试"/"zzzzz中文"）关掉了整个 X 服务器的自动重复 —— 但那是**全局**
+    // 设置：本机物理键盘会被一起改成不重复，且没有恢复路径（进程退出、断开连接
+    // 都不还原）。现在卡键的根因已在别处消除，而且本进程也不再依赖 X 的自动重复：
+    //   · 中文输入开关打开时，拼音首字母根本不发往远端（index.html 先挂起，
+    //     compositionstart 到点整条丢弃），组合期间不会留下按住的键；
+    //   · 连接断开/失焦/观看模式切换时 releaseHeldRemoteInput() 会补发 keyup；
+    //   · 长按的重复由服务端产生：rdpserver 把浏览器 repeat keydown 统一翻译成
+    //     "先松再按"，不丢弃 repeat。因此 X 的 auto-repeat 开着或关着
+    //     （`xset r off`）长按行为都一样。
+    // 生命周期：本进程从不修改服务器的自动重复设置，也就没有"恢复"义务。
     if (waylandMode_ && !desktopSessionIsWayland()) {
         // 真正的 X11 桌面（无 Wayland 合成器 socket）：优先 X11 输入（XTest），
         // 不再尝试 uinput/Wayland portal。
@@ -299,6 +318,215 @@ bool InputManager::ensureXDisplay()
         qInfo() << "InputManager: X display is XWayland on a Wayland desktop; staying on uinput input";
     }
     return true;
+}
+
+// ── 逐键 auto-repeat 抑制 ───────────────────────────────────────────────────
+// 为什么是"逐键"而不是整显示 XAutoRepeatOff：
+//   · X 的 auto-repeat 是**显示级全局状态**，XAutoRepeatOff 会把本机物理键盘一起
+//     改成不重复；本服务端要负责恢复，而进程被杀（kill -9）时没有任何收尾机会，
+//     全局状态会永久停在 off —— 这正是旧版遗留问题。
+//   · 我们要解决的只是「远端按住的那颗键不该由 X 再重复一次」：远端长按的重复
+//     完全由服务端产生（rdpserver 把浏览器 repeat keydown 翻译成 keyup+keydown）。
+//     影响面天然就是"某一枚 keycode"，用逐键 API 正好对应。
+//   · 恢复值必须是**该 keycode 抑制前的原值**（抑制前用 XGetKeyboardControl 的
+//     auto_repeats 位图记录），不能统一写 AutoRepeatModeDefault：Default 只是
+//     "跟随服务器全局设置"，对空闲 keycode 没有可继承的默认重复行为，部分
+//     服务器会解析成 off —— 借用的临时键码恢复后若本机再按到它就不重复了。
+//     写回原值（On/Off）才能真正回到改动前的状态，也不动全局 `xset r` 设置。
+//
+// 时序：抑制请求必须在 keydown 之前进入服务器队列（X 在"键按下 + delay 到期"时
+// 才产 typematic），恢复请求在 keyup 之后。两者都在同一个 XFlush 批次里按序处理。
+namespace {
+// 探测逐键 API 是否被服务器实现：Xlib 的默认错误处理器只打印不退出，但会把每个
+// 失败刷成 "X Error of failed request"；这里临时接管，记录错误码后立刻还原。
+// 非 0 = 请求失败（如某些极简 X server 未实现 KBKey|KBAutoRepeatMode）。
+int g_repeatControlError = 0;
+int captureRepeatControlError(Display*, XErrorEvent* ev)
+{
+    g_repeatControlError = ev ? static_cast<int>(ev->error_code) : -1;
+    return 0;
+}
+} // namespace
+
+bool InputManager::setKeyAutoRepeat(unsigned int keycode, bool suppress)
+{
+    if (!xDisplay_ || keycode == 0 || keyRepeatControlUnsupported_)
+        return false;
+
+    Display* dpy = xdisp(xDisplay_);
+    if (autoRepeatDisplay_ != xDisplay_) {
+        // X 连接换过了：旧记录属于旧连接（旧显示的状态已随连接关闭不复存在），
+        // 重新建账，并允许对新连接重新探测一次。
+        autoRepeatSuppressed_.clear();
+        autoRepeatOriginal_.clear();
+        autoRepeatDisplay_ = xDisplay_;
+        lastRepeatReconcileMs_ = 0;
+        repeatControlProbed_ = false;
+    }
+
+    const int kc = static_cast<int>(keycode);
+    const bool tracked = autoRepeatSuppressed_.contains(kc);
+    if (suppress == tracked) {
+        // 仍在按住：刷新"最近按下"时刻，让惰性对账不会把活跃的长按误判成 keyup 丢失。
+        if (suppress)
+            autoRepeatSuppressed_[kc] = QDateTime::currentMSecsSinceEpoch();
+        return true;
+    }
+
+    // 抑制前先记下这枚 keycode 的原值（每枚键只查一次并长期缓存：恢复时总是写回
+    // 原值，X 侧状态因此不会被本进程改脏，缓存不会过期）。XKeyboardState 的
+    // auto_repeats 是逐键位图，1 = 该键会重复。
+    if (suppress && !autoRepeatOriginal_.contains(kc)) {
+        XKeyboardState st;
+        if (kc < 256 && XGetKeyboardControl(dpy, &st) != 0) {
+            const int byte = kc / 8;
+            const int bit = kc % 8;
+            autoRepeatOriginal_[kc] = (st.auto_repeats[byte] & (1 << bit))
+                ? AutoRepeatModeOn : AutoRepeatModeOff;
+        } else {
+            // 查不到就退回 Default（不改行为，只是"原值未知"）。
+            autoRepeatOriginal_[kc] = AutoRepeatModeDefault;
+        }
+    }
+
+    XKeyboardControl ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.key = kc;
+    ctrl.auto_repeat_mode = suppress
+        ? AutoRepeatModeOff
+        : autoRepeatOriginal_.value(kc, AutoRepeatModeDefault);
+
+    if (!repeatControlProbed_) {
+        // 首次调用做一次同步往返：这是唯一能确认"逐键 API 可用"的时机。
+        // 只探测一次，之后每次都只发请求 + XFlush，不给每个按键加往返延迟。
+        int (*prevHandler)(Display*, XErrorEvent*) = XSetErrorHandler(captureRepeatControlError);
+        g_repeatControlError = 0;
+        XChangeKeyboardControl(dpy, KBKey | KBAutoRepeatMode, &ctrl);
+        XSync(dpy, False);
+        XSetErrorHandler(prevHandler);
+        repeatControlProbed_ = true;
+        if (g_repeatControlError != 0) {
+            // 如实报告限制，不静默失败：注入仍照常进行，只是长按会多出 1~2 个字符
+            //（X 的 typematic 与浏览器首个 repeat 重叠）。
+            keyRepeatControlUnsupported_ = true;
+            autoRepeatSuppressed_.clear();
+            autoRepeatOriginal_.clear();
+            qWarning() << "InputManager: X 服务器未实现逐键 auto-repeat 控制 (X error"
+                       << g_repeatControlError << ")，无法抑制 X 的 typematic；长按可能多出"
+                       << "1~2 个字符。未改动全局自动重复设置（xset q 不受影响）";
+            return false;
+        }
+    } else {
+        XChangeKeyboardControl(dpy, KBKey | KBAutoRepeatMode, &ctrl);
+        XFlush(dpy);
+    }
+
+    if (suppress)
+        autoRepeatSuppressed_.insert(kc, QDateTime::currentMSecsSinceEpoch());
+    else
+        autoRepeatSuppressed_.remove(kc);
+    return true;
+}
+
+// 还清所有"欠恢复"的 keycode：keyup 丢失、断线、客户端切换、换 X 连接、析构
+// 都走这里。任何路径都不能让某颗键永久停在"不重复"。
+//
+// 已知限制：进程被 kill -9 时没有任何收尾机会，那几颗键的"不重复"会留在 X
+// 服务器上（逐键状态不随客户端连接关闭还原）；恢复办法是对相应 keycode 执行
+// `xset r <keycode>`（实测 `xset r on` 只改全局模式，清不掉逐键残留）。
+// 这是极端场景，正常退出/断线/失焦都已被上面的路径覆盖。
+void InputManager::restoreAutoRepeatKeycodes()
+{
+    if (autoRepeatSuppressed_.isEmpty()) {
+        autoRepeatDisplay_ = xDisplay_;
+        return;
+    }
+    if (!xDisplay_ || autoRepeatDisplay_ != xDisplay_) {
+        // 旧连接已经关了：那份逐键状态留在旧显示服务器上（连接关闭不会自动还原
+        // 键盘映射/重复标志），但本进程已无法再向它发请求。本地账目作废。
+        autoRepeatSuppressed_.clear();
+        autoRepeatOriginal_.clear();
+        autoRepeatDisplay_ = xDisplay_;
+        return;
+    }
+
+    Display* dpy = xdisp(xDisplay_);
+    const QHash<int, qint64> keys = autoRepeatSuppressed_;
+    autoRepeatSuppressed_.clear();
+    int (*prevHandler)(Display*, XErrorEvent*) = XSetErrorHandler(captureRepeatControlError);
+    g_repeatControlError = 0;
+    for (auto it = keys.constBegin(); it != keys.constEnd(); ++it) {
+        XKeyboardControl ctrl;
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.key = it.key();
+        // 写回抑制前记录的原值（On/Off）；见 setKeyAutoRepeat 里的记录逻辑。
+        ctrl.auto_repeat_mode = autoRepeatOriginal_.value(it.key(), AutoRepeatModeDefault);
+        XChangeKeyboardControl(dpy, KBKey | KBAutoRepeatMode, &ctrl);
+    }
+    XSync(dpy, False);
+    XSetErrorHandler(prevHandler);
+    if (g_repeatControlError != 0) {
+        qWarning() << "InputManager: 恢复逐键自动重复失败 (X error" << g_repeatControlError
+                   << ")；若发现本机某颗键长按不出重复，对该 keycode 执行 `xset r <keycode>`"
+                   << "恢复（`xset r on` 只改全局模式，清不掉逐键残留）";
+    } else {
+        qInfo() << "InputManager: 已恢复" << keys.size() << "枚按键的自动重复设置";
+    }
+}
+
+// 惰性对账（不引入任何定时器/线程等待）：每次键盘注入前最多每 2s 查一次服务器
+// 的按键状态。集合里有、但服务器显示已抬起的 keycode 说明 keyup 丢失或被其它
+// 路径释放了 —— 此时它不可能再产生 typematic，立即写回原值，避免永久卡住。
+void InputManager::reconcileAutoRepeatKeycodes()
+{
+    if (autoRepeatSuppressed_.isEmpty() || !xDisplay_
+            || autoRepeatDisplay_ != xDisplay_ || keyRepeatControlUnsupported_)
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (lastRepeatReconcileMs_ != 0 && now - lastRepeatReconcileMs_ < 2000)
+        return;
+    lastRepeatReconcileMs_ = now;
+
+    Display* dpy = xdisp(xDisplay_);
+    char keyState[32];
+    if (XQueryKeymap(dpy, keyState) == 0)
+        return;
+
+    QList<int> released;
+    for (auto it = autoRepeatSuppressed_.constBegin(); it != autoRepeatSuppressed_.constEnd(); ++it) {
+        const int kc = it.key();
+        if (kc < 0 || kc >= 256)
+            continue;
+        // 最近 3s 内还在被"按下"刷新 → 这是一次正常长按（repeat 翻译每 ~50ms 刷新
+        // 一次），不能当成 keyup 丢失，否则会周期性误放开重复。
+        if (now - it.value() < 3000)
+            continue;
+        const int byte = kc / 8;
+        const int bit = kc % 8;
+        if (!(keyState[byte] & (1 << bit)))
+            released.append(kc);
+    }
+    if (released.isEmpty())
+        return;
+
+    int (*prevHandler)(Display*, XErrorEvent*) = XSetErrorHandler(captureRepeatControlError);
+    g_repeatControlError = 0;
+    for (int kc : released) {
+        XKeyboardControl ctrl;
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.key = kc;
+        // 同 restoreAutoRepeatKeycodes：写回该键抑制前的原值。
+        ctrl.auto_repeat_mode = autoRepeatOriginal_.value(kc, AutoRepeatModeDefault);
+        XChangeKeyboardControl(dpy, KBKey | KBAutoRepeatMode, &ctrl);
+        autoRepeatSuppressed_.remove(kc);
+    }
+    XSync(dpy, False);
+    XSetErrorHandler(prevHandler);
+    if (g_repeatControlError != 0)
+        qWarning() << "InputManager: 对账恢复逐键自动重复失败 (X error" << g_repeatControlError << ")";
+    else
+        qInfo() << "InputManager: 检测到 keyup 丢失，已恢复" << released.size()
+                << "枚按键的自动重复设置";
 }
 
 // ── Unicode 上屏字符注入（中文等）──────────────────────────────────────────
@@ -321,26 +549,59 @@ bool InputManager::ensureXDisplay()
 //      把"刷新"这次走完之后，20/20、12/12 全对。
 //   ② 下一个字符改映射太早：本次按键被解成**下一个**字符（实测整串错位一位：
 //      "中文你好测试一下é" → "文你好测试一下éé"）。所以一枚字符的映射要在它的
-//      down/up 之后继续挂 kUnicodeHoldMs 才允许再改。
+//      down/up 之后继续挂保持期（默认 20 ms）才允许再改。
 // 保持期只在字符之间生效：同一字符的抬起不改映射，也就不额外花时间。
 //
-// kUnicodeHoldMs 是扫描出来的（Xvfb + xterm 落盘，12 字符连打 ×5 轮，期望串由码点算出）：
+// 默认保持期 20 ms 是扫描出来的（Xvfb + xterm 落盘，12 字符连打 ×5 轮，期望串由码点算出）：
 //   · 间隔 0 ms：只有最后一个字符对（整串错位）；加到 5 ms 仍有丢字，15 ms 起 5/5 全对。
 //   · 把同样的时间花在"按下前等"（settle=5 / hold=0）几乎无效 —— 决定性的量是字符之间
 //     的间隔，不是按下前的等待，所以预算主要给 hold。
 //   · 空闲机上 2 ms 就够；把 24 核全部吃满（模拟远端正在采集+编码）后 5/10 ms 会偶发
 //     丢字，15 ms 起才稳。取 20 ms 留余量。慢打字时上一次绑定早就过了保持期，
-//     waitUnicodeHoldMs 不会真的睡。kUnicodeSettleMs 藏在 hold 里，不额外花时间。
-static const int kUnicodeSettleMs = 5;
-static const qint64 kUnicodeHoldMs = 20;
+//     队列 pump 不会真的等；稳定期（默认 5 ms）短于保持期，不额外花时间。
+// 保持期（字符之间）与稳定期（改映射到按键之间）默认值来自实测，但不同
+// compositor/客户端刷新键表缓存的快慢差异很大，允许运行时用环境变量覆盖，
+// 便于现场调优（0 = 不等待，仅排障用，可能出现丢字/错位）。
+//
+// 默认值由 20/5ms 调整为 60/12ms：20ms 保持期下 GTK 类应用（mousepad）偶发把
+// 某个汉字解成 NoSymbol 直接吞掉（同一序列 6 次里丢 2 次"有"字，xev 侧确认 7 个
+// keysym 全部送达 → 丢在接收端读键表这一步）。代价只在中文字符上（队列串行），
+// 英文/ASCII 与开关关闭态完全不受影响。
+static int unicodeHoldMs()
+{
+    static const int v = []() {
+        bool ok = false;
+        const int m = qEnvironmentVariableIntValue("QTRD_UNICODE_HOLD_MS", &ok);
+        return ok ? qBound(0, m, 500) : 60;
+    }();
+    return v;
+}
+
+static int unicodeSettleMs()
+{
+    static const int v = []() {
+        bool ok = false;
+        const int m = qEnvironmentVariableIntValue("QTRD_UNICODE_SETTLE_MS", &ok);
+        return ok ? qBound(0, m, 200) : 12;
+    }();
+    return v;
+}
+
 static const unsigned long F24KeySym = 0xffbe;   // 借用时预热用：功能键，不产出文本
 
-// 距 sinceMs 不足保持期就补足等待。
+// 码点 → 要绑到借用键上的 keysym（Latin-1 内沿用老规矩，其余加 Unicode 前缀）
+static unsigned long unicodeWantKeySym(unsigned int codePoint)
+{
+    return codePoint < 0x100 ? codePoint : 0x01000000UL + codePoint;
+}
+
+// 距 sinceMs 不足保持期就补足等待。只用于极少发生的一次性收尾（还原映射），
+// 逐字符注入已改为队列 + QTimer，不再在这里阻塞主线程。
 static void waitUnicodeHoldMs(qint64 sinceMs)
 {
-    const qint64 remain = kUnicodeHoldMs - (QDateTime::currentMSecsSinceEpoch() - sinceMs);
+    const qint64 remain = unicodeHoldMs() - (QDateTime::currentMSecsSinceEpoch() - sinceMs);
     if (remain > 0)
-        QThread::msleep(static_cast<unsigned long>(remain));
+        QThread::msleep(static_cast<unsigned long>(qMin<qint64>(remain, 600)));
 }
 
 bool InputManager::borrowUnicodeKeycode()
@@ -430,10 +691,18 @@ void InputManager::restoreUnicodeKeycode()
 {
     if (unicodeKeycode_ == 0)
         return;
+    // 借用键码也可能正被远端按住（Unicode 字符的 down 还没等到 up）：先把它从
+    // "不重复"名单里还清，再还原映射，避免这颗键在断线后永久失去自动重复。
+    if (autoRepeatSuppressed_.contains(unicodeKeycode_))
+        setKeyAutoRepeat(static_cast<unsigned int>(unicodeKeycode_), false);
+    // 队列里尚未执行的字符一并作废：映射随后就被还原，再注入必然出错。
+    unicodePending_.clear();
+    unicodePumpScheduled_ = false;
     if (xDisplay_ && unicodeDisplay_ == xDisplay_ && unicodeRowLen_ > 0) {
         Display *dpy = xdisp(xDisplay_);
         // 原始行全为 NoSymbol（只借整行空白的键），还原后那个字符就再也解不出来了：
         // 最后一个字符可能还没被接收端读走，先等满保持期再还原。
+        // 这是收尾路径（析构/换连接），只发生一次，阻塞可接受。
         if (unicodeBound_ != 0)
             waitUnicodeHoldMs(unicodeBoundMs_);
         XChangeKeyboardMapping(dpy, unicodeKeycode_, unicodeRowLen_,
@@ -448,22 +717,156 @@ void InputManager::restoreUnicodeKeycode()
     unicodeDisplay_ = nullptr;
 }
 
+// [残留按键] 旧实现这里用 XQueryKeymap 把**整个服务器**处于按下状态的键全部
+// 补发抬起（只跳过借用键码）。这在共享桌面上是错的：会把本机物理用户真正按住的
+// Ctrl/Shift 悄悄"松掉"，也会干扰同一台机器上的其它客户端。已删除。
+// 现在的做法：只由拥有该按键记账的一方释放 —— rdpserver 按 clientId 记录
+// pressedKeys_，断线/失焦时由前端 releaseHeldRemoteInput() 与
+// RDPServer::onClientDisconnected 各发各的 keyup（互不影响别人的键）。
+// 中文输入打开态更彻底：拼音首字母根本不会发往远端（index.html 先挂起），
+// 不存在"组合期间遗留按住键"这个前提。
+
 bool InputManager::sendUnicodeChar(unsigned int codePoint, bool isDown)
 {
     if (!ensureXDisplay())
         return false;
     if (!borrowUnicodeKeycode())
         return false;
-    Display *dpy = xdisp(xDisplay_);
 
-    // Latin-1 以内沿用 X11 的老规矩（keysym == 码点），其余加 Unicode 前缀。
-    const unsigned long want = codePoint < 0x100
-        ? codePoint
-        : 0x01000000UL + codePoint;
+    // 只入队，不在调用线程（主线程/事件循环）里等待保持期或稳定期。
+    // 改映射与按下/抬起由 pumpUnicodeQueue 在等待到期后执行，入队顺序即注入顺序，
+    // 同一字符的 down/up 也保持先后。
+    //
+    // 乱序问题（"中a" 落成 "a中"）：字符注入要等映射的稳定期/保持期，而 ASCII
+    // 若仍走 injectKeyboard 同步注入就会"超车"。因此中文输入开关打开时，rdpserver
+    // 把该连接的**所有**键（含 ASCII/Enter）也交给 enqueueKeyboard，走同一个 FIFO，
+    // 由本队列串行执行 —— 顺序就是消息到达顺序。开关关闭（默认）时 rdpserver 在
+    // onInputReceived 入口丢弃 isChar 并直接调 injectKeyboard，本队列完全不参与。
+    PendingUnicodeKey pending;
+    pending.codePoint = codePoint;
+    pending.isDown = isDown;
+    pending.isChar = true;
+    return enqueueUnicode(pending);
+}
+
+bool InputManager::enqueueKeyboard(int keycode, const QString &code, bool isDown,
+                                   bool ctrl, bool alt, bool shift, bool isChar, bool meta)
+{
+    if (!ensureXDisplay())
+        return false;
+    PendingUnicodeKey pending;
+    pending.isChar = isChar;
+    pending.codePoint = static_cast<unsigned int>(keycode);
+    pending.isDown = isDown;
+    pending.keycode = keycode;
+    pending.code = code;
+    pending.ctrl = ctrl;
+    pending.alt = alt;
+    pending.shift = shift;
+    pending.meta = meta;
+    return enqueueUnicode(pending);
+}
+
+bool InputManager::enqueueUnicode(const PendingUnicodeKey &pending)
+{
+    // 字符注入需要先借到一枚空闲键码（惰性、只借一次）。普通键码不需要，
+    // 借不到也不能因此把 ASCII/Enter 一起丢掉。
+    if (pending.isChar && !borrowUnicodeKeycode())
+        return false;
+    // 上限：队列按"条目"计（一个上屏字符 = down+up 两条），256 条≈128 个汉字，
+    // 覆盖一次输入法上屏/整段替换的常见上限。无上限时客户端狂发 isChar（或断线
+    // 前积压）会让队列越拉越长、延迟无限增长；超限丢最旧的：用户看到的是"少字"，
+    // 而不是"越打越卡死"。按 60ms 保持期，128 字的最坏排空时间约 9s（只在一次
+    // 上屏就超过 128 字时才会遇到；正常逐句上屏每句 <20 字，约 1.5s 内落完）。
+    static const int kMaxUnicodePending = 256;
+    if (unicodePending_.size() >= kMaxUnicodePending) {
+        while (unicodePending_.size() >= kMaxUnicodePending)
+            unicodePending_.dequeue();
+    }
+    unicodePending_.enqueue(pending);
+    scheduleUnicodePump();
+    return true;
+}
+
+void InputManager::flushPendingInput()
+{
+    // 断线/析构：队列里没注入的输入已经没有意义，直接作废；再还原借用的
+    // 键码 —— 否则断开后本机物理键盘按那颗键会继续打出最后一个汉字。
+    // restoreUnicodeKeycode 会等满保持期再还原（一次性收尾，阻塞 ≤60ms 可接受）。
+    const bool hadPending = !unicodePending_.isEmpty();
+    unicodePending_.clear();
+    unicodePumpScheduled_ = false;
+    restoreUnicodeKeycode();
+    // 注意：这里**不做**全量 restoreAutoRepeatKeycodes —— 还有别的客户端可能正
+    // 按着键，放开重复等于让 X 替它多打字符。该连接的按键由 releasePressedKeys
+    // 逐键补发 keyup 时恢复；"没有客户端了"的兜底由 RDPServer 单独调用。
+    if (hadPending)
+        qInfo() << "InputManager: 断线/退出，已丢弃未注入的中文字符并还原借用键码";
+}
+
+void InputManager::scheduleUnicodePump()
+{
+    if (unicodePumpScheduled_ || unicodePending_.isEmpty())
+        return;
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 readyMs = now;
+    if (unicodePending_.head().isChar) {
+        const unsigned long want = unicodeWantKeySym(unicodePending_.head().codePoint);
+        if (want != unicodeBound_) {
+            // 改映射前必须等够上一枚字符的保持期，否则接收端会把上一个按键解成新字符
+            readyMs = unicodeBoundMs_ + unicodeHoldMs();
+        } else {
+            // 映射已绑定：同一字符的 down/up 复用，只需等映射稳定期
+            readyMs = unicodeMappingReadyMs_;
+        }
+    }
+    // 普通键码（ASCII/Enter/修饰键）不涉及映射，无需等待，排到队首就执行。
+
+    qint64 delayMs = readyMs - now;
+    if (delayMs < 0)
+        delayMs = 0;
+    unicodePumpScheduled_ = true;
+    QTimer::singleShot(static_cast<int>(qMin<qint64>(delayMs, 60000)),
+                       this, &InputManager::pumpUnicodeQueue);
+}
+
+void InputManager::pumpUnicodeQueue()
+{
+    unicodePumpScheduled_ = false;
+    if (unicodePending_.isEmpty())
+        return;
+    if (!xDisplay_) {
+        // X 连接已断：队列无法执行，直接作废（等下次 ensureXDisplay 重新借用键码）
+        unicodePending_.clear();
+        return;
+    }
+    Display *dpy = xdisp(xDisplay_);
+    const PendingUnicodeKey head = unicodePending_.head();
+
+    if (!head.isChar) {
+        // 普通键码：直接注入（与旧路径完全相同的 keycode 语义），不碰映射。
+        // 因为排在同一个 FIFO 里，它必然落在前面所有中文字符之后。
+        unicodePending_.dequeue();
+        injectKeyboard(head.keycode, head.code, head.isDown, head.ctrl, head.alt,
+                       head.shift, false, false, head.meta);
+        scheduleUnicodePump();
+        return;
+    }
+    if (unicodeKeycode_ == 0 || unicodeRowLen_ <= 0) {
+        // 没借到键码（或 X 连接已换）：字符无法注入，作废队列。
+        unicodePending_.clear();
+        return;
+    }
+
+    const unsigned long want = unicodeWantKeySym(head.codePoint);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
     if (want != unicodeBound_) {
-        // 先等够上一枚字符的保持期，再改映射（见下方注释）。
-        if (unicodeBound_ != 0)
-            waitUnicodeHoldMs(unicodeBoundMs_);
+        if (now < unicodeBoundMs_ + unicodeHoldMs()) {
+            scheduleUnicodePump();          // 保持期未到，稍后再试
+            return;
+        }
         // 整行原样写回、只改前两槽：[0]=不按 Shift、[1]=按 Shift。两槽都填同一个
         // keysym，远端恰好按着 Shift 时也能出这个字符；长度用原始 keysyms-per-keycode，
         // 避免把服务器的映射行宽改成 1 而波及整张键盘表。
@@ -474,20 +877,48 @@ bool InputManager::sendUnicodeChar(unsigned int codePoint, bool isDown)
         if (unicodeRowLen_ > 1)
             row[1] = static_cast<KeySym>(want);
         XChangeKeyboardMapping(dpy, unicodeKeycode_, unicodeRowLen_, row.data(), 1);
-        // 同步一次：确保服务器已应用新映射，再发按键。
+        // 同步一次：确保服务器已应用新映射，再安排按键（稳定期后再按键）。
         XFlush(dpy);
         XSync(dpy, False);
         unicodeBound_ = want;
-        unicodeBoundMs_ = QDateTime::currentMSecsSinceEpoch();
-        QThread::msleep(kUnicodeSettleMs);
+        unicodeBoundMs_ = now;
+        unicodeMappingReadyMs_ = now + unicodeSettleMs();
+        scheduleUnicodePump();
+        return;
     }
 
+    if (now < unicodeMappingReadyMs_) {
+        scheduleUnicodePump();              // 稳定期未到，等映射生效再按键
+        return;
+    }
+
+    unicodePending_.dequeue();
+
     focusLockScreenWindow(dpy);
+    // 逐键 auto-repeat：借用键码也是"远端正按住的键"，按下前关掉 typematic、
+    // 抬起后恢复默认。否则长按/连续上屏时 X 会在两次 repeat 之间自行补字符。
+    if (head.isDown)
+        setKeyAutoRepeat(static_cast<unsigned int>(unicodeKeycode_), true);
     XTestGrabControl(dpy, True);
-    XTestFakeKeyEvent(dpy, static_cast<KeyCode>(unicodeKeycode_), isDown, CurrentTime);
+    const int ok = XTestFakeKeyEvent(dpy, static_cast<KeyCode>(unicodeKeycode_),
+                                     head.isDown, CurrentTime);
     XTestGrabControl(dpy, False);
     XFlush(dpy);
-    return true;
+    if (!head.isDown)
+        setKeyAutoRepeat(static_cast<unsigned int>(unicodeKeycode_), false);
+    if (ok == 0) {
+        // 旧实现不看返回值，注入失败也报成功，只能靠对端现象猜。把焦点窗口一起
+        // 记下来，便于判断是"X 连接失效"还是"焦点窗口被销毁"。
+        Window focusWin = None;
+        int revert = 0;
+        XGetInputFocus(dpy, &focusWin, &revert);
+        qWarning() << "InputManager: XTestFakeKeyEvent 失败 (down=" << head.isDown
+                   << ") keycode=" << unicodeKeycode_
+                   << " codepoint=" << head.codePoint
+                   << " focus=0x" << QString::number(focusWin, 16);
+    }
+    // 下一个字符（或同一字符的抬起）继续排队执行
+    scheduleUnicodePump();
 }
 
 void InputManager::injectMouseMove(int x, int y) {
@@ -847,7 +1278,41 @@ bool InputManager::initUinputMouse()
     usetup.id.product = 0x5679;
     snprintf(usetup.name, sizeof(usetup.name), "QtRemoteDesktop Virtual Pointer");
     if (ioctl(fd, UI_DEV_SETUP, &usetup) < 0) {
-        qWarning() << "InputManager: pointer UI_DEV_SETUP failed";
+        // 旧内核（未实现 UI_DEV_SETUP，ioctl 返回 EINVAL）：回退到旧 API，
+        // 否则指针设备建不出来 / 绝对轴沿用内核默认范围，定位会被钳边。
+        qWarning() << "InputManager: pointer UI_DEV_SETUP failed, using legacy uinput_user_dev";
+        struct uinput_user_dev legacy;
+        memset(&legacy, 0, sizeof(legacy));
+        legacy.id.bustype = BUS_USB;
+        legacy.id.vendor = 0x1234;
+        legacy.id.product = 0x5679;
+        snprintf(legacy.name, sizeof(legacy.name), "QtRemoteDesktop Virtual Pointer");
+        legacy.absmin[ABS_X] = 0;
+        legacy.absmax[ABS_X] = 65535;
+        legacy.absmin[ABS_Y] = 0;
+        legacy.absmax[ABS_Y] = 65535;
+        if (write(fd, &legacy, sizeof(legacy)) < 0) {
+            qWarning() << "InputManager: pointer uinput write (legacy) failed";
+            close(fd);
+            return false;
+        }
+    }
+#else
+    // 旧版 uinput API (RHEL 7 / CentOS 7 等旧内核头)：没有 UI_DEV_SETUP/UI_ABS_SETUP，
+    // 设备信息与绝对轴范围必须在 uinput_user_dev 里一次性写下去 —— 缺 absmin/absmax
+    // 时内核按默认范围处理，绝对定位会贴边/错位。参照键盘设备的旧 API 分支。
+    struct uinput_user_dev usetup;
+    memset(&usetup, 0, sizeof(usetup));
+    usetup.id.bustype = BUS_USB;
+    usetup.id.vendor = 0x1234;
+    usetup.id.product = 0x5679;
+    snprintf(usetup.name, sizeof(usetup.name), "QtRemoteDesktop Virtual Pointer");
+    usetup.absmin[ABS_X] = 0;
+    usetup.absmax[ABS_X] = 65535;
+    usetup.absmin[ABS_Y] = 0;
+    usetup.absmax[ABS_Y] = 65535;
+    if (write(fd, &usetup, sizeof(usetup)) < 0) {
+        qWarning() << "InputManager: pointer uinput write failed";
         close(fd);
         return false;
     }
@@ -1125,6 +1590,9 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
     Q_UNUSED(useVkFallback);
     unsigned int unicodeCp = 0;   // 非 ASCII 上屏字符的码点（0 = 没走 Unicode 路）
 
+    // 惰性对账：keyup 丢失的键不会永久停在"不重复"（详见 reconcileAutoRepeatKeycodes）
+    reconcileAutoRepeatKeycodes();
+
     // Wayland 门户模式：通过 D-Bus 注入键盘
     if (waylandPortalMode_ && portalReady_) {
         // 先同步修饰键状态（Ctrl/Alt/Shift），保证组合键（Ctrl+C 等）生效
@@ -1339,10 +1807,17 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
         focusLockScreenWindow(xdisp(xDisplay_));
         KeyCode xKeyCode = XKeysymToKeycode(xdisp(xDisplay_), static_cast<KeySym>(ks));
         if (xKeyCode != 0) {
+            // 逐键 auto-repeat：抑制请求必须排在 keydown 之前（同一次 Flush 内
+            // X 按请求顺序处理），恢复排在 keyup 之后。这样 X 永远不会对"正被
+            // 远端按住的这颗键"产生 typematic，重复只来自客户端 repeat 翻译。
+            if (down)
+                setKeyAutoRepeat(static_cast<unsigned int>(xKeyCode), true);
             XTestGrabControl(xdisp(xDisplay_), True);
             XTestFakeKeyEvent(xdisp(xDisplay_), xKeyCode, down, CurrentTime);
             XTestGrabControl(xdisp(xDisplay_), False);
             XFlush(xdisp(xDisplay_));
+            if (!down)
+                setKeyAutoRepeat(static_cast<unsigned int>(xKeyCode), false);
         }
     };
 
