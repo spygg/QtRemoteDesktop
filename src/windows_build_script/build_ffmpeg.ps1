@@ -1,4 +1,7 @@
 # FFmpeg Build Script
+# Builds the legacy FFmpeg 3.4.8 used ONLY by the Windows XP 32-bit compatible
+# build. Every other target (Win7 32-bit, 64-bit, Linux, macOS) uses FFmpeg
+# 6.1.2 through CMake; do not use this script for those.
 # All project paths are derived relative to this script's location.
 $ErrorActionPreference = 'Stop'
 

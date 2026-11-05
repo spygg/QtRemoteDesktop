@@ -101,8 +101,9 @@ detect_qt() {
     exit 1
 }
 
-# FFmpeg 版本：默认 6.1.2（与 src/CMakeLists.txt 的 64 位默认一致，末尾用
-# -DFFMPEG_VERSION 显式传给 cmake，两边不会各选各的）。老工程沿用 3.4.8：
+# FFmpeg 版本：默认 6.1.2（与 src/CMakeLists.txt 的默认一致；只有 Windows XP
+# 兼容构建例外，显式用 3.4.8），末尾用
+# -DFFMPEG_VERSION 显式传给 cmake，两边不会各选各的）。老工程兼容可用 3.4.8：
 # FFMPEG_VERSION=3.4.8 ./build_mac.sh
 FFMPEG_VERSION="${FFMPEG_VERSION:-6.1.2}"
 FFMPEG_MAJOR="${FFMPEG_VERSION%%.*}"

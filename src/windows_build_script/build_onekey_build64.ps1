@@ -1,14 +1,24 @@
 # QtRemoteDesktop - Windows 64-bit one-key build.
-# Companion of build_onekey_build.ps1 (32-bit + FFmpeg 3.4.8), which stays as-is.
+# Companion of build_onekey_build.ps1, which is the Windows XP 32-bit
+# compatible path and pins FFmpeg 3.4.8 explicitly.
 #
-# Bitness and FFmpeg version are decided in src/CMakeLists.txt (32-bit -> 3.4.8,
-# 64-bit -> 6.1.2) and this script passes -DFFMPEG_VERSION explicitly, so the
+# FFmpeg version defaults to 6.1.2 for every target except that XP-compatible
+# build: src/CMakeLists.txt keeps 6.1.2 as the default and the XP script passes
+# -DFFMPEG_VERSION=3.4.8. This script passes -DFFMPEG_VERSION explicitly, so the
 # script and CMake can never disagree. All FFmpeg work - openh264, the NVENC
 # auto-probe, configure, make, install - is done by CMake (cmake/BuildFFmpeg.cmake);
 # this script only prepares the sources and drives cmake.
 #
 # Everything lands in build64/ build_output64/ bin64/ so the existing 32-bit
 # build/ bin/ trees are never touched.
+#
+# 32-bit BUILD RULES do not apply to this 64-bit build (build_output64/ is a
+# private archive directory, nothing else links against it). They are documented
+# in build_onekey_build.ps1 / build_onekey_build_32pair.ps1: 32-bit Win7 (FFmpeg
+# 6.1.2) must be built BEFORE 32-bit XP (3.4.8), and both must purge the shared
+# <repo>\build_output_win32\lib\*.a first - libVideoEncoder.a holds FFmpeg
+# version-specific objects, so a leftover archive silently disables FFmpeg in
+# the other package. Use build_32pair.bat for the two 32-bit packages.
 
 $ErrorActionPreference = 'Stop'
 
@@ -376,7 +386,7 @@ if (-not $nvOk) {
 }
 
 # AMF is optional like NVENC: CMake enables it only when it can find the SDK
-# headers. A 32-bit build (FFmpeg 3.4.8) has no AMF support at all, so skip.
+# headers. The XP build (FFmpeg 3.4.8) has no AMF support at all, so skip.
 if (($ffmpegVer -ge [Version]'5.0') -and (-not (Find-AmfHeaderRoot))) {
     if (-not (Ensure-AmfHeaders $amfHeadersSrc $amfVersion)) {
         Write-Host "[WARN] AMF headers missing - FFmpeg will be built without AMD AMF (NVENC/software only)" -ForegroundColor Yellow

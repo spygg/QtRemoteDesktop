@@ -9,7 +9,7 @@
     {
       "name": "windows-mingw",
       "displayName": "Windows / MinGW + Qt5 (E:/programes/Qt)",
-      "description": "本机 MinGW GCC 5.3 工具链；Qt 交给自动探测（按 GCC 版本挑 mingw 套件）。工具链不在该位置时改下面三个编译器路径。",
+      "description": "本机 MinGW GCC 5.3 工具链；Qt 交给自动探测（按 GCC 版本挑 mingw 套件）。工具链不在该位置时改下面三个编译器路径。FFmpeg 默认 6.1.2；Windows XP 兼容构建请改用 windows_build_script/build.bat（它显式传 -DFFMPEG_VERSION=3.4.8）。",
       "generator": "MinGW Makefiles",
       "binaryDir": "${sourceDir}/../build",
       "cacheVariables": {

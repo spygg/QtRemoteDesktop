@@ -10,8 +10,10 @@ rem      h264_nvenc (cuInit returns CUDA_ERROR_NO_DEVICE).
 rem    - FFmpeg >= 4.1: current drivers no longer answer the NVENC API 8.0
 rem      "preset GUID" interface that 3.4.8 uses, so avcodec_open2 fails with
 rem      -40 on this hardware. 6.1.2 opens preset p1-p7 and encodes.
-rem  build.bat / build_onekey_build.ps1 keep producing the 32-bit 3.4.8 binary
-rem  for XP / Win7 hosts; nothing they use is modified by this script.
+rem  build.bat / build_onekey_build.ps1 are the Windows XP 32-bit compatible
+rem  path and pin FFmpeg 3.4.8 explicitly (-DFFMPEG_VERSION=3.4.8). Win7 32-bit
+rem  builds should pass -DFFMPEG_VERSION=6.1.2 instead (the same Qt 5.7
+rem  mingw53_32 toolchain works); nothing they use is modified by this script.
 rem
 rem  Output is kept fully separated so the two bitnesses never overwrite
 rem  each other: build64\  build_output64\  bin64\QtRemoteDesktop.exe

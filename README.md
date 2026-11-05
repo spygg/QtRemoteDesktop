@@ -86,6 +86,23 @@ bin\QtRemoteDesktop.exe                            # Windows
 
 > Default ports: HTTP `8080`, WebSocket `8081` (= HTTP port + 1). All options: `--no-ssl`, `--log-level debug|info|warning|critical`, `--install/--uninstall/--service`, `--helper`.
 
+### Windows 32-bit: one command, two packages (Win7 6.1.2 + XP 3.4.8)
+
+```bat
+src\windows_build_script\build_32pair.bat          :: both, Win7 first
+src\windows_build_script\build_32pair.bat win7     :: FFmpeg 6.1.2 only
+src\windows_build_script\build_32pair.bat xp       :: FFmpeg 3.4.8 only
+```
+
+Produces `bin_win7_612\QtRemoteDesktop.exe` (FFmpeg 6.1.2) and `bin_xp_348\QtRemoteDesktop.exe` (FFmpeg 3.4.8), then prints **size + SHA256** of both exes.
+
+Rules the script enforces (also documented in `build_onekey_build*.ps1`, `build.bat` and `build_32pair.bat`):
+
+1. **Build order: Win7 (6.1.2) first, XP (3.4.8) second.**
+2. **Delete `build_output_win32\lib\*.a` before every build.** Both 32-bit trees write their static libs to that one shared directory (`CMAKE_ARCHIVE_OUTPUT_DIRECTORY`), and `libVideoEncoder.a` embeds FFmpeg-version-specific objects. An archive left by the other tree is linked as-is — the 6.1.2 link then fails with `undefined reference to 'avcodec_register_all'`, while the 3.4.8 link silently produces an exe **without FFmpeg** (`7,394,065` bytes instead of ~`10.2 MB`, observed 2026-11-04).
+3. **Verify before shipping:** each exe must contain its own FFmpeg marker (`av_channel_layout_default` for 6.1.2, `avcodec_register_all` for 3.4.8), must *not* contain the other one, and must contain openh264 (`WelsCreateSVCEncoder`). The pair script does this automatically.
+4. Compare the printed SHA256 with the exe actually deployed on the target machine.
+
 ---
 
 ## 🔧 Build requirements
@@ -265,6 +282,23 @@ bin\QtRemoteDesktop.exe                            # Windows
 
 > 默认端口：HTTP `8080`，WebSocket `8081`（= HTTP 端口 + 1）。常用参数：`--no-ssl`、`--log-level debug|info|warning|critical`、`--install/--uninstall/--service`、`--helper`。
 
+### Windows 32 位：一条命令出两个包（Win7 6.1.2 + XP 3.4.8）
+
+```bat
+src\windows_build_script\build_32pair.bat          :: 两个包，先 Win7
+src\windows_build_script\build_32pair.bat win7     :: 只出 FFmpeg 6.1.2
+src\windows_build_script\build_32pair.bat xp       :: 只出 FFmpeg 3.4.8
+```
+
+产物为 `bin_win7_612\QtRemoteDesktop.exe`（FFmpeg 6.1.2）与 `bin_xp_348\QtRemoteDesktop.exe`（FFmpeg 3.4.8），结束时打印两个 exe 的**尺寸 + SHA256**。
+
+脚本固化的构建规则（`build_onekey_build*.ps1` / `build.bat` / `build_32pair.bat` 中同样写明）：
+
+1. **构建顺序：先 Win7（6.1.2），后 XP（3.4.8）。**
+2. **每次构建前删 `build_output_win32\lib\*.a`。** 两棵 32 位树把静态库都写进同一个共享目录（`CMAKE_ARCHIVE_OUTPUT_DIRECTORY`），而 `libVideoEncoder.a` 里编进了 FFmpeg 版本相关的目标文件。后构建的树会直接链接另一棵树留下的归档：6.1.2 侧报 `undefined reference to 'avcodec_register_all'`；3.4.8 侧不报错，但产出的 exe **不含 FFmpeg**（`7,394,065` 字节，正常应约 `10.2 MB`，2026-11-04 实际发生）。
+3. **出包即校验：** exe 必须含自身版本的 FFmpeg 标记（6.1.2 为 `av_channel_layout_default`，3.4.8 为 `avcodec_register_all`），且不能含另一版本的标记，同时必须含 openh264（`WelsCreateSVCEncoder`）。双目标脚本会自动做这一步。
+4. 用打印出的 SHA256 与目标机上实际部署的 exe 比对，确认部署版就是本次出包。
+
 ### 直接用 CMake 构建（不用一键脚本）
 
 Qt 会自动探测（Windows 扫 `QT_ROOT`、`E:/programes/Qt`、`C:/Qt`、`%ProgramFiles%/Qt`、`~/Qt`；
@@ -308,8 +342,9 @@ cmake --build build --parallel 8
 | 选项 | 说明 |
 |---|---|
 | `BUILD_THIRDPARTY` | 非 MSVC 平台默认 ON：从源码构建 metaRTC / srtp / usrsctp / openh264（需 GNU make；MSVC 下强制 OFF） |
-| `BUILD_FFMPEG` | `build_output/ffmpeg_install` 缺失时默认 ON：由 CMake 构建自带 FFmpeg 3.4.8（含 libopenh264 编码器）。有预编译产物时自动跳过 |
-| `USE_FFMPEG` | OFF=自动探测（预编译产物放在 `build_output/ffmpeg_install`），ON=找不到即报错 |
+| `FFMPEG_VERSION` | FFmpeg 版本，默认 `6.1.2`（Win7 32 位、64 位、Linux、macOS 一律用它）；只有 Windows XP 32 位兼容构建显式传 `3.4.8`（`build.bat` 已自动传） |
+| `BUILD_FFMPEG` | 对应版本的 `build_output/ffmpeg_install*` 缺失时默认 ON：由 CMake 构建自带 FFmpeg（`3.4.8` 用 `ffmpeg_install`，`6.1.2` 用 `ffmpeg_install-6.1.2`，均含 libopenh264 编码器）。有预编译产物时自动跳过 |
+| `USE_FFMPEG` | OFF=自动探测（预编译产物放在对应版本的 `build_output/ffmpeg_install*`），ON=找不到即报错 |
 | `USE_WEBRTC` | OFF=自动（有 FFmpeg 且 `BUILD_THIRDPARTY=ON` 时启用），ON=条件不满足即报错 |
 | `BUILD_OUTPUT_DIR` / `BIN_OUTPUT_DIR` | 覆盖共享输出目录，便于多个构建目录并存 |
 
@@ -330,6 +365,8 @@ cmake --build build --parallel 8
 > `FFmpeg: x86asm enabled via ...`；缺失时退纯 C 实现（swscale RGB→YUV 明显变慢）。
 
 > `build_output/` 与 `bin/` 默认被所有构建目录共用：同时保留多套配置（如开关 WebRTC）时，请显式指定不同的 `BUILD_OUTPUT_DIR`/`BIN_OUTPUT_DIR`，否则后一次构建会覆盖前一次的同名产物。
+>
+> 例外是 32 位双目标（Win7 6.1.2 + XP 3.4.8）：它们**有意**共用 `build_output_win32`（FFmpeg 产物按版本分目录 `ffmpeg_install` / `ffmpeg_install-6.1.2`），因此必须遵守「先 Win7 后 XP + 每次构建前清空 `build_output_win32/lib/*.a`」。`build_32pair.bat` 已内置这两条规则，手工跑 cmake 时要自己删。
 
 ---
 

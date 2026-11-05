@@ -191,26 +191,27 @@ if(MSVC AND NOT CMAKE_PREFIX_PATH AND NOT Qt5_DIR AND NOT Qt6_DIR)
 endif()
 
 # ---- FFmpeg：优先复用已有产物；缺失时可由 CMake 现编（BUILD_FFMPEG）----
-# 版本按位宽自动选，可用 -DFFMPEG_VERSION=3.4.8|6.1.2 覆盖（构建脚本会显式传）。
-#   32 位 → 3.4.8：NVIDIA 不提供 32 位 CUDA（32 位进程 cuInit 恒返 CUDA_ERROR_NO_DEVICE），
-#         XP/Win7 那批机器升版本换不到任何硬编收益，却要重编全部三方产物。
-#   64 位 → 6.1.2：新驱动的 NVENC 不再给 API 8.0 的"预设 GUID"接口返回预设，3.4.8 的
-#         avcodec_open2 直接返回 -40；4.1 起的 p1–p7 接口才可用（本机 RTX 5060 +
+# 版本口径：只有 Windows XP 32 位兼容构建用 3.4.8，其余一律 6.1.2
+# （Win7 32 位、Win7/10/11 64 位、Linux、macOS 全部 6.1.2）。
+#   XP 构建由 src/windows_build_script/build.bat -> build_onekey_build.ps1 显式传
+#   -DFFMPEG_VERSION=3.4.8；CMake 无法从位宽/编译器版本区分 XP 与 Win7 32 位
+#   （两者共用 MinGW 5.3 + Qt 5.7 mingw53_32），所以默认值不能再按位宽推断。
+#   3.4.8（仅 XP 兼容）：NVIDIA 不提供 32 位 CUDA（32 位进程 cuInit 恒返
+#         CUDA_ERROR_NO_DEVICE），且新驱动不再给 API 8.0 的"预设 GUID"接口返回预设，
+#         3.4.8 的 avcodec_open2 直接返回 -40；XP 上这两点都无解，维持老版本可避免
+#         重编全部三方产物。
+#   6.1.2（其余所有目标）：4.1 起的 p1–p7 接口在新驱动上可用（本机 RTX 5060 +
 #         32.0.15.9071 实测：3.4.8 所有 preset 打不开，6.1.2 全部可开并正常出码流）。
-set(FFMPEG_VERSION "" CACHE STRING "要使用/现编的 FFmpeg 版本 (3.4.8 或 6.1.2)，留空=按位宽自动选择")
+set(FFMPEG_VERSION "" CACHE STRING "要使用/现编的 FFmpeg 版本 (3.4.8 或 6.1.2)，留空=6.1.2（仅 XP 兼容构建显式传 3.4.8）")
 if(FFMPEG_VERSION STREQUAL "")
-    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-        set(FFMPEG_VERSION_EFFECTIVE "3.4.8")
-    else()
-        set(FFMPEG_VERSION_EFFECTIVE "6.1.2")
-    endif()
+    set(FFMPEG_VERSION_EFFECTIVE "6.1.2")
 else()
     set(FFMPEG_VERSION_EFFECTIVE "${FFMPEG_VERSION}")
 endif()
 
 set(FFMPEG_SRC_DIR "${CMAKE_SOURCE_DIR}/remotedesk/thridparty/ffmpeg/FFmpeg-n${FFMPEG_VERSION_EFFECTIVE}")
 if(FFMPEG_VERSION_EFFECTIVE VERSION_LESS 5)
-    # 3.4.8 沿用老目录名：已经编好 FFmpeg 的机器不需要重编
+    # 3.4.8（XP 兼容）沿用老目录名：已经编好 FFmpeg 的 XP 机器不需要重编
     set(FFMPEG_INSTALL_DIR "${BUILD_OUTPUT_DIR}/ffmpeg_install")
 else()
     set(FFMPEG_INSTALL_DIR "${BUILD_OUTPUT_DIR}/ffmpeg_install-${FFMPEG_VERSION_EFFECTIVE}")
@@ -236,8 +237,8 @@ if(NOT _ffmpeg_prebuilt AND NOT EXISTS "${FFMPEG_SRC_DIR}/configure" AND NOT _BU
     message(WARNING
         "找不到 FFmpeg ${FFMPEG_VERSION_EFFECTIVE}：既没有产物 ${FFMPEG_INSTALL_DIR}，"
         "也没有源码 ${FFMPEG_SRC_DIR}。\n"
-        "放对应版本源码到该目录，或用另一个版本：cmake -DFFMPEG_VERSION=3.4.8（32 位）"
-        "/ -DFFMPEG_VERSION=6.1.2（64 位，NVENC 需要）。")
+        "放对应版本源码到该目录，或用另一个版本：cmake -DFFMPEG_VERSION=3.4.8（仅 Windows XP 兼容）"
+        "/ -DFFMPEG_VERSION=6.1.2（Win7 32 位及其余所有平台，NVENC 需要）。")
 endif()
 
 find_package(FFmpeg QUIET)

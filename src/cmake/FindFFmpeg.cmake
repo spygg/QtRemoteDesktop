@@ -99,8 +99,8 @@ if(FFMPEG_FOUND)
         # （configure 的 check_lib bcrypt 通过就会编进这条路径，3.4.8 没有），
         # 少了 -lbcrypt 会在链接 QtRemoteDesktop 时报
         # undefined reference to `BCryptOpenAlgorithmProvider'。
-        # bcrypt.dll 是 Vista+ 的系统 DLL，所以这条只影响 64 位新版本产物；
-        # 32 位（XP/Win7 那批机器）沿用 3.4.8，链接行与以前完全一致。
+        # bcrypt.dll 是 Vista+ 的系统 DLL，所以这条只影响 6.1.2 产物；
+        # 只有 XP 兼容构建沿用 3.4.8，链接行与以前完全一致。
         if(NOT FFMPEG_VERSION_EFFECTIVE VERSION_LESS 5)
             list(APPEND FFMPEG_EXTRA_LIBS bcrypt)
         endif()

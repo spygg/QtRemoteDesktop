@@ -39,9 +39,12 @@ jobs:
             # FFmpeg >= 5 源码树里没有 compat/nvenc，必须外部 nv-codec-headers
             nvcodec: 'n12.2.72.0'
             artifact: QtRemoteDesktop-windows-x64.zip
-          # Windows XP / 老 Win7（32 位）：Qt 5.7 是最后一个官方支持 XP 的版本；MSVC 运行库
+          # Windows XP（32 位兼容产物）：Qt 5.7 是最后一个官方支持 XP 的版本；MSVC 运行库
           # 在 XP 上装不上，所以用 MinGW 5.3 32 位（产物无 VC 运行时依赖）。
           # Qt 5.7 在线仓库已下架、aqtinstall 不支持 5.9 以下，因此从离线安装包解包。
+          # 这是全仓库唯一固定 FFmpeg 3.4.8 的构建（XP 兼容）。Win7 32 位不在本腿：
+          # 它和其他平台一样用 6.1.2，可复用同一 Qt 5.7 工具链并显式传
+          # -DFFMPEG_VERSION=6.1.2（本地对应 build_win7_612）。
           # FFmpeg 固定 3.4.8：mingw530 是 32 位而 NVIDIA 不提供 32 位 CUDA，
           # 这里硬编本来就用不上，升版本只会逼着全部三方产物重编。
           - name: Windows XP x86

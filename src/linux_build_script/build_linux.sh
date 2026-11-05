@@ -160,8 +160,9 @@ detect_qt() {
 # 默认 6.1.2：新驱动不再回答 NVENC API 8.0 的"预设 GUID"接口，3.4.8 的
 # avcodec_open2 在这类机器上直接返回 -40（本机 RTX 5060 / 32.0.15.9071 实测），
 # 4.1 起的 p1–p7 词表才可用；软编与 VAAPI 路径两个版本都正常。
-# 老机器沿用 3.4.8：FFMPEG_VERSION=3.4.8 ./build_linux.sh。这里选定的版本会用
-# -DFFMPEG_VERSION 显式传给 cmake（覆盖 CMakeLists 的按位宽默认），脚本与 CMake
+# 3.4.8 只作为兼容极老环境的显式选项（非默认，也不是 Linux 的约定版本）：
+# FFMPEG_VERSION=3.4.8 ./build_linux.sh。这里选定的版本会用
+# -DFFMPEG_VERSION 显式传给 cmake（覆盖 CMakeLists 的 6.1.2 默认），脚本与 CMake
 # 用的源码目录、产物目录因此始终一致。
 FFMPEG_VERSION="${FFMPEG_VERSION:-6.1.2}"
 FFMPEG_MAJOR="${FFMPEG_VERSION%%.*}"

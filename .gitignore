@@ -104,3 +104,40 @@ desktop.ini
 # 代理/调试工具的临时工作目录（脚本、抓包、构建试验，不进仓库）
 .workbuddy/
 .playwright-cli/
+
+# Windows 32 位 + FFmpeg 6.1.2 的收口重建产物目录（目录保留复用，内容不入库）
+/bin_win7_612/
+
+# 运行日志（bin/ 本身已忽略，这里显式列出便于理解）
+/bin/logs/
+
+# 仓库根的一次性诊断/验证脚本与落盘快照
+/_diag_*
+/_served_index.html
+/_vercheck*.sh
+/_locate_logs.sh
+
+# 临时测试与草稿目录
+/_ime_test/
+/_dev/
+
+# Qoder RepoWiki 自动生成的文档缓存（可随时重建，不需要入库）
+/.qoder/
+
+# ── 构建产物与本地取证文件（追加）─────────────────────────────
+# 32 位双目标包目录。bin_win7_612 已单列，bin_xp_348 目前漏掉：
+# 里面的 QtRemoteDesktop.exe.debug（1.4 MB 调试符号）会出现在 git status。
+# 用 /bin_*/ 统一覆盖，不写成 /bin_xp_348/，以后再加 bin_* 包不用改规则。
+/bin_*/
+
+# 崩溃转储：忽略本地产生的 dump。
+# breakpad 自带的 48 个 .dmp 是已跟踪测试样本，用否定规则显式保留；
+# 新增样本仍可用 git add -f 强制加入。
+*.dmp
+!src/remotedesk/thridparty/breakpad/src/processor/testdata/*.dmp
+
+# 静态库与调试符号：仓库当前没有已跟踪的 .a/.lib/.debug。
+# 构建产物散落到源码目录（如误跑 make install）时不该被提交。
+*.a
+*.lib
+*.debug

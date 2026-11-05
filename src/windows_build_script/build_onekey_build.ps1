@@ -1,6 +1,40 @@
 # One-Key Build Script for QtRemoteDesktop
 # Usage: Run this script in PowerShell as Administrator
 # All project paths are derived relative to this script's location.
+#
+# This is the Windows XP 32-bit compatible build path and the only build that
+# pins FFmpeg 3.4.8 (passed to CMake explicitly below). Win7 32-bit and every
+# other target use FFmpeg 6.1.2: reuse the same Qt 5.7 mingw53_32 toolchain but
+# point a separate build directory at it with -DFFMPEG_VERSION=6.1.2.
+#
+# =============================================================================
+# 32-bit BUILD RULES (see also build_onekey_build_32pair.ps1 / build.bat / README)
+#
+#   R1  Order: Win7 32-bit (FFmpeg 6.1.2) FIRST, XP 32-bit (FFmpeg 3.4.8) SECOND.
+#       For the pair in one command use build_onekey_build_32pair.ps1,
+#       which enforces this order and prints both hashes.
+#
+#   R2  Both 32-bit trees write their static libs into the same shared archive
+#       directory: <BUILD_OUTPUT_DIR>/lib (CMAKE_ARCHIVE_OUTPUT_DIRECTORY).
+#       libVideoEncoder.a embeds FFmpeg-version-specific objects, so an archive
+#       from the other tree gets linked as-is: the 6.1.2 link then fails with
+#       "undefined reference to `avcodec_register_all'", and the 3.4.8 link
+#       silently produces an exe with no FFmpeg at all (7,394,065 bytes instead
+#       of ~10.2 MB on 2026-11-04).
+#
+#   R3  This script therefore deletes <outDir>/lib/*.a before configuring.
+#       Purging every archive (not just libVideoEncoder.a) keeps the invariant
+#       simple and costs only re-archive + relink. FFmpeg/openh264 static libs
+#       live in <outDir>/ffmpeg_install* / openh264_install and are not touched.
+#
+#   R4  The final exe's size and SHA256 are printed at the end so the package
+#       can be compared with what is actually deployed on the target machine.
+#
+#   NOTE: this script's own build/ + build_output/ tree is private, but if you
+#   also maintain the Win7 32-bit tree against the same BUILD_OUTPUT_DIR, the
+#   purge in R3 is what keeps the two from contaminating each other. Prefer
+#   build_onekey_build_32pair.ps1 in that case.
+# =============================================================================
 
 $ErrorActionPreference = 'Stop'
 
@@ -16,9 +50,10 @@ $repoRoot  = [IO.Path]::GetFullPath((Join-Path $srcDir '..'))
 $buildDir  = Join-Path $repoRoot 'build'
 $outDir    = Join-Path $repoRoot 'build_output'
 $ffmpegDir = Join-Path $srcDir 'remotedesk\thridparty\ffmpeg'
-$ffmpegSrc = Join-Path $ffmpegDir 'FFmpeg-n3.4.8'
-$ffmpegTar = Join-Path $env:TEMP 'ffmpeg-3.4.8.tar.bz2'
-$ffmpegLocalTar = Join-Path $ffmpegDir 'ffmpeg-3.4.8.tar.bz2'
+$ffmpegVersion   = '3.4.8'   # XP-compatible path: the only build pinned to 3.4.8
+$ffmpegSrc = Join-Path $ffmpegDir "FFmpeg-n$ffmpegVersion"
+$ffmpegTar = Join-Path $env:TEMP "ffmpeg-$ffmpegVersion.tar.bz2"
+$ffmpegLocalTar = Join-Path $ffmpegDir "ffmpeg-$ffmpegVersion.tar.bz2"
 $openh264Src     = Join-Path $srcDir 'remotedesk\thridparty\third_party_src\openh264'
 $openh264Build   = Join-Path $buildDir 'openh264_build'
 $openh264Install = Join-Path $outDir 'openh264_install'
@@ -36,6 +71,54 @@ Write-Host "Git Bash : $gitBash"
 Write-Host "Qt prefix: $qtPrefix"
 Write-Host "MinGW bin: $mingwBin"
 Write-Host ""
+
+# ---- Package fingerprint helpers (R4) ----
+# Get-FileHash does not exist on PowerShell 2.0 (default on Windows 7 / XP),
+# so hash with .NET directly. Upper-case hex, same format as certutil.
+function Get-FileSha256([string]$Path) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $fs = [IO.File]::OpenRead($Path)
+        try { $hash = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
+    } finally { $sha.Dispose() }
+    return (($hash | ForEach-Object { $_.ToString('x2') }) -join '').ToUpperInvariant()
+}
+
+function Format-Size([long]$Bytes) {
+    return "{0:N0} bytes ({1:N2} MB)" -f $Bytes, ($Bytes / 1MB)
+}
+
+# ---- Shared-archive purge (R2/R3) ----
+# Both 32-bit trees put their static libs in <BUILD_OUTPUT_DIR>/lib and
+# libVideoEncoder.a embeds FFmpeg-version-specific objects, so an archive left
+# by a tree built against the other FFmpeg version is linked as-is. Dropping
+# every archive before configure keeps the two trees from contaminating each
+# other; the libs are re-archived from objects that already exist.
+# Retry: Defender / a lingering linker can hold a handle for a moment
+# ("Unable to rename ... Permission denied" while ar re-creates the archive).
+function Reset-SharedArchives([string]$LibDir) {
+    if (-not (Test-Path $LibDir)) {
+        New-Item -ItemType Directory -Path $LibDir -Force | Out-Null
+        return
+    }
+    $removed = 0
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        $left = @(Get-ChildItem -LiteralPath $LibDir -Filter '*.a' -File -ErrorAction SilentlyContinue)
+        if (-not $left) { break }
+        foreach ($f in $left) {
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $f.FullName)) { $removed++ }
+        }
+        if (-not (Get-ChildItem -LiteralPath $LibDir -Filter '*.a' -File -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 400
+    }
+    $left = @(Get-ChildItem -LiteralPath $LibDir -Filter '*.a' -File -ErrorAction SilentlyContinue)
+    if ($left) {
+        throw ("could not purge shared archives in {0}: {1} still locked" -f
+               $LibDir, (($left | Select-Object -ExpandProperty Name) -join ', '))
+    }
+    Write-Host "[purge] removed $removed shared archive(s) from $LibDir (R2/R3)"
+}
 
 # ---- Stray-header cleanup ------------------------------------------------
 # src/remotedesk/ must never hold loose .h files. Older runs (and a failed
@@ -58,8 +141,8 @@ $env:PATH = "$mingwBin;$env:PATH"
 if (-not (Test-Path "$ffmpegSrc\configure")) {
     # Prefer the local tar bundle over re-downloading
     if (-not (Test-Path $ffmpegLocalTar) -and -not (Test-Path $ffmpegTar)) {
-        Write-Host "[1/5] Downloading FFmpeg 3.4.8..."
-        Invoke-WebRequest -Uri "https://ffmpeg.org/releases/ffmpeg-3.4.8.tar.bz2" -OutFile $ffmpegTar -UseBasicParsing
+        Write-Host "[1/5] Downloading FFmpeg $ffmpegVersion..."
+        Invoke-WebRequest -Uri "https://ffmpeg.org/releases/ffmpeg-$ffmpegVersion.tar.bz2" -OutFile $ffmpegTar -UseBasicParsing
     }
     $tarToUse = if (Test-Path $ffmpegLocalTar) { $ffmpegLocalTar } else { $ffmpegTar }
     Write-Host "Extracting $tarToUse..."
@@ -113,8 +196,9 @@ if (-not (Test-Path "$ffmpegInstall\lib\libavcodec.a")) {
     $ldflags   = "-L" + $openh264Lib.Replace('\', '/')
 
     # ---- pkg-config support for FFmpeg configure ----
-    # FFmpeg 3.4.8 detects libopenh264 via pkg-config. Two layers make the
-    # detection use THIS repo's openh264 no matter where the repo lives:
+    # FFmpeg 3.4.8 (this XP-compatible build) detects libopenh264 via pkg-config.
+    # Two layers make the detection use THIS repo's openh264 no matter where the
+    # repo lives:
     #   1. QTRD_OPENH264_INC/LIB env vars (repo-relative, derived from $scriptDir)
     #      consumed by the global pkg-config shim in Git\usr\bin.
     #   2. A repo-local pkg-config shim placed first on PATH (used when the
@@ -198,11 +282,18 @@ esac
 }
 
 # ---- 4. Configure CMake ----
+# R2/R3: drop the shared archives first. A stale libVideoEncoder.a from a tree
+# built against the other FFmpeg version would be linked as-is, which either
+# fails the link (avcodec_register_all undefined) or silently ships an exe
+# without FFmpeg (no H.264 / no video support).
+Reset-SharedArchives (Join-Path $outDir 'lib')
+
 Write-Host "[4/5] Configuring CMake..."
 & cmake -G "MinGW Makefiles" -S $srcDir -B $buildDir `
     -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_PREFIX_PATH="$qtPrefix" `
-    -DBUILD_THIRDPARTY=ON
+    -DBUILD_THIRDPARTY=ON `
+    "-DFFMPEG_VERSION=$ffmpegVersion"
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
 # ---- 5. Build project ----
@@ -215,4 +306,13 @@ Write-Host "========================================"
 Write-Host "  Build Complete!"
 Write-Host "========================================"
 Write-Host ""
-Write-Host "Output: $(Join-Path $repoRoot 'bin\QtRemoteDesktop.exe')"
+$exePath = Join-Path $repoRoot 'bin\QtRemoteDesktop.exe'
+if (-not (Test-Path -LiteralPath $exePath)) { throw "package missing after build: $exePath" }
+Write-Host "Output : $exePath"
+Write-Host "FFmpeg : $ffmpegVersion"
+Write-Host ("Size   : {0}" -f (Format-Size (Get-Item -LiteralPath $exePath).Length))
+Write-Host ("SHA256 : {0}" -f (Get-FileSha256 $exePath))
+Write-Host ""
+Write-Host "Compare the SHA256 above with the exe deployed on the target machine."
+Write-Host "For both 32-bit packages in one command (Win7 6.1.2 first, then XP 3.4.8):"
+Write-Host "  build_onekey_build_32pair.ps1"
