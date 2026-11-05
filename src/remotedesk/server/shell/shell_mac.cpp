@@ -5,6 +5,7 @@
 #include <util.h>
 #include <crt_externs.h>
 #include <sys/ioctl.h>
+#include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
 #include <signal.h>
@@ -25,9 +26,13 @@ public:
     void stop() override;
 
 private:
+    void flushWrite();
+
     int masterFd_ = -1;
     pid_t childPid_ = 0;
     QSocketNotifier* notifier_ = nullptr;
+    QSocketNotifier* writeNotifier_ = nullptr;
+    QByteArray pendingWrite_;
 };
 
 InteractiveShell* InteractiveShell::create(QWebSocket* socket, QObject* parent)
@@ -43,6 +48,19 @@ void MacInteractiveShell::start()
     int slaveFd = -1;
     if (openpty(&masterFd_, &slaveFd, nullptr, nullptr, nullptr) != 0) {
         qWarning() << "InteractiveShell: openpty failed";
+        ws_->close();
+        return;
+    }
+
+    // master 必须非阻塞：否则远端 shell 不读 stdin（cat 大文件、vim 粘贴）时
+    // 主线程的 write() 会卡死整个服务。读侧同样依赖 EAGAIN 语义。
+    const int masterFlags = fcntl(masterFd_, F_GETFL, 0);
+    if (masterFlags < 0
+        || fcntl(masterFd_, F_SETFL, masterFlags | O_NONBLOCK) < 0) {
+        qWarning() << "InteractiveShell: failed to set PTY master non-blocking";
+        close(slaveFd);
+        close(masterFd_);
+        masterFd_ = -1;
         ws_->close();
         return;
     }
@@ -75,8 +93,21 @@ void MacInteractiveShell::start()
     for (std::string& s : envStrings)
         envp.push_back(const_cast<char*>(s.c_str()));
     envp.push_back(nullptr);
-    char* const argv[] = { const_cast<char*>("/bin/bash"),
-                           const_cast<char*>("--login"), nullptr };
+    // 交互式 shell：优先 $SHELL（绝对路径且可执行），退回 /bin/sh。
+    // macOS 默认 $SHELL=/bin/zsh，硬编码 /bin/bash 会跑成旧版 bash（3.2）。
+    const char* envShell = ::getenv("SHELL");
+    std::string shellPath = (envShell && envShell[0] == '/'
+                             && ::access(envShell, X_OK) == 0)
+        ? std::string(envShell) : std::string("/bin/sh");
+    // --login 只对 bash 传：dash/BusyBox sh 会把 --login 当脚本文件名。
+    const bool shellIsBash = shellPath.size() >= 4
+        && shellPath.compare(shellPath.size() - 4, 4, "bash") == 0;
+    char* const argvLogin[] = { const_cast<char*>(shellPath.c_str()),
+                                const_cast<char*>("--login"), nullptr };
+    char* const argvPlain[] = { const_cast<char*>(shellPath.c_str()), nullptr };
+    char* const* argv = shellIsBash ? argvLogin : argvPlain;
+    // exec 失败要在 PTY 里给出原因；格式化不是 AS-safe，fork 前先拼好。
+    const std::string execFailMsg = "remotedesk: failed to exec " + shellPath + "\n";
 
     childPid_ = fork();
     if (childPid_ == 0) {
@@ -88,8 +119,10 @@ void MacInteractiveShell::start()
         dup2(slaveFd, 0); dup2(slaveFd, 1); dup2(slaveFd, 2);
         if (slaveFd > 2) close(slaveFd);
         close(masterFd_);
-        execve("/bin/bash", argv, envp.data());
-        _exit(1);
+        execve(shellPath.c_str(), argv, envp.data());
+        // stderr 已指向 PTY 从端：exec 失败时前端终端能看到原因，而不是空白
+        (void)::write(2, execFailMsg.c_str(), execFailMsg.size());
+        _exit(127);
     }
     close(slaveFd);
 
@@ -103,24 +136,73 @@ void MacInteractiveShell::start()
     notifier_ = new QSocketNotifier(masterFd_, QSocketNotifier::Read, this);
     connect(notifier_, &QSocketNotifier::activated, this, [this](int fd) {
         char buf[16384];
-        int n = read(fd, buf, sizeof(buf));
-        // 被信号打断（EINTR）不是 EOF：旧实现把 n<0 一律当断开，信号一来就
-        // 误关用户的交互式 shell。重试一次即可；EAGAIN 交给下一轮可读通知。
-        if (n < 0 && errno == EINTR)
+        int n;
+        do {
             n = read(fd, buf, sizeof(buf));
+        } while (n < 0 && errno == EINTR);
         if (n > 0) {
             // 用二进制帧发送原始终端字节，避免 UTF-8 多字节序列被拆成多帧导致乱码
             ws_->sendBinaryMessage(QByteArray(buf, n));
-        } else {
+        } else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            // EOF 或真错误才关闭；EAGAIN 只是这一轮没数据，交给下一次可读通知。
             ws_->close();
         }
     });
+
+    writeNotifier_ = new QSocketNotifier(masterFd_, QSocketNotifier::Write, this);
+    writeNotifier_->setEnabled(false);
+    connect(writeNotifier_, &QSocketNotifier::activated,
+            this, [this]() { flushWrite(); });
 }
 
 void MacInteractiveShell::write(const QByteArray& data)
 {
-    if (!data.isEmpty() && masterFd_ >= 0)
-        ::write(masterFd_, data.data(), data.size());
+    if (data.isEmpty() || masterFd_ < 0)
+        return;
+    // 单次粘贴上限，避免远端不读时 pendingWrite_ 无界增长。
+    static const int kMaxPendingWrite = 8 * 1024 * 1024;
+    if (data.size() > kMaxPendingWrite) {
+        ws_->close();
+        return;
+    }
+    pendingWrite_.append(data);
+    if (pendingWrite_.size() > kMaxPendingWrite) {
+        ws_->close();
+        return;
+    }
+    flushWrite();
+}
+
+void MacInteractiveShell::flushWrite()
+{
+    if (masterFd_ < 0) {
+        if (writeNotifier_)
+            writeNotifier_->setEnabled(false);
+        pendingWrite_.clear();
+        return;
+    }
+    // 非阻塞 master：能写多少写多少，写不动的部分留在 pendingWrite_，
+    // 等 QSocketNotifier 的下次可写通知。
+    while (!pendingWrite_.isEmpty()) {
+        const ssize_t n = ::write(masterFd_, pendingWrite_.constData(),
+                                  static_cast<size_t>(pendingWrite_.size()));
+        if (n > 0) {
+            pendingWrite_.remove(0, static_cast<int>(n));
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (writeNotifier_)
+                writeNotifier_->setEnabled(true);
+            return;
+        }
+        // 对端已关闭等硬错误：丢弃剩余数据，由读侧 EOF 关闭会话。
+        pendingWrite_.clear();
+        break;
+    }
+    if (writeNotifier_)
+        writeNotifier_->setEnabled(!pendingWrite_.isEmpty());
 }
 
 void MacInteractiveShell::resize(int cols, int rows)
@@ -136,10 +218,13 @@ void MacInteractiveShell::resize(int cols, int rows)
 void MacInteractiveShell::stop()
 {
     if (notifier_) { notifier_->setEnabled(false); }
+    if (writeNotifier_) { writeNotifier_->setEnabled(false); }
+    pendingWrite_.clear();
     if (childPid_ > 0) {
         kill(childPid_, SIGTERM);
-        // 有限等待子进程退出并回收（WNOHANG 只回收已退出的，会残留僵尸）
-        for (int i = 0; i < 20; ++i) {
+        // 与 Linux 实现一致：只等两次 50ms，没退就 SIGKILL，避免会话关闭时
+        // 在主线程里 1s 轮询。
+        for (int i = 0; i < 2; ++i) {
             if (waitpid(childPid_, nullptr, WNOHANG) == childPid_) {
                 childPid_ = 0;
                 break;

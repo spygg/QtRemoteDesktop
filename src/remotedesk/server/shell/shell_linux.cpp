@@ -4,6 +4,7 @@
 #include <QDebug>
 #include <fcntl.h>
 #include <cerrno>
+#include <cstdlib>
 #include <pty.h>
 #include <utmp.h>
 #include <sys/ioctl.h>
@@ -108,8 +109,23 @@ void LinuxInteractiveShell::start()
     for (std::string& s : envStrings)
         envp.push_back(const_cast<char*>(s.c_str()));
     envp.push_back(nullptr);
-    char* const argv[] = { const_cast<char*>("/bin/bash"),
-                           const_cast<char*>("--login"), nullptr };
+    // 交互式 shell：优先用户环境的 $SHELL（必须是可执行的绝对路径），
+    // 退回 /bin/sh —— 不再硬编码 /bin/bash：Alpine/BusyBox、精简容器里没有 bash，
+    // execve 会直接失败，网页终端一连上就断。
+    const char* envShell = ::getenv("SHELL");
+    std::string shellPath = (envShell && envShell[0] == '/'
+                             && ::access(envShell, X_OK) == 0)
+        ? std::string(envShell) : std::string("/bin/sh");
+    // --login 只对 bash 传：dash/BusyBox sh 会把 --login 当成脚本文件名直接报错。
+    const bool shellIsBash = shellPath.size() >= 4
+        && shellPath.compare(shellPath.size() - 4, 4, "bash") == 0;
+    char* const argvLogin[] = { const_cast<char*>(shellPath.c_str()),
+                                const_cast<char*>("--login"), nullptr };
+    char* const argvPlain[] = { const_cast<char*>(shellPath.c_str()), nullptr };
+    char* const* argv = shellIsBash ? argvLogin : argvPlain;
+    // exec 失败时子进程要在 PTY 里留下原因；snprintf/格式化不是 AS-safe，
+    // 消息在 fork 前先拼好。
+    const std::string execFailMsg = "remotedesk: failed to exec " + shellPath + "\n";
 
     childPid_ = fork();
     if (childPid_ == 0) {
@@ -119,8 +135,11 @@ void LinuxInteractiveShell::start()
         dup2(slaveFd, 0); dup2(slaveFd, 1); dup2(slaveFd, 2);
         if (slaveFd > 2) ::close(slaveFd);
         ::close(masterFd_);
-        execve("/bin/bash", argv, envp.data());
-        _exit(1);
+        execve(shellPath.c_str(), argv, envp.data());
+        // exec 失败：stderr 已 dup2 到 PTY 从端，前端终端能看到这行错误，
+        // 比无声 _exit 后「终端一片空白」好排查。
+        (void)::write(2, execFailMsg.c_str(), execFailMsg.size());
+        _exit(127);
     }
     // 父进程不再需要从端：不关会导致子进程退出后 PTY 不产生 EOF（会话泄漏）
     ::close(slaveFd);

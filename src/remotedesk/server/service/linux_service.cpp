@@ -2689,8 +2689,40 @@ static bool detectUserX11Env()
     return getenv("DISPLAY") && getenv("DISPLAY")[0];
 }
 
+// systemd unit 参数/环境值的引号转义：双引号包裹，内部反斜杠与双引号前加 \。
+// 路径/用户名里出现空格、引号时，不加引号会被 unit 解析器拆成多个参数。
+static void writeUnitQuoted(FILE* f, const char* s)
+{
+    fputc('"', f);
+    for (const char* p = s; *p; ++p) {
+        if (*p == '"' || *p == '\\')
+            fputc('\\', f);
+        fputc(*p, f);
+    }
+    fputc('"', f);
+}
+
+static void writeUnitEnv(FILE* f, const char* name, const char* value)
+{
+    fprintf(f, "Environment=\"%s=", name);
+    for (const char* p = value; *p; ++p) {
+        if (*p == '"' || *p == '\\')
+            fputc('\\', f);
+        fputc(*p, f);
+    }
+    fprintf(f, "\"\n");
+}
+
 int LinuxService::install(int argc, char* argv[])
 {
+    // 非 systemd 主机（其他 init / 部分容器）：生成 unit 文件没有任何意义，
+    // 明确报错而不是打印一串"看起来成功"的安装步骤。
+    if (access("/run/systemd/system", F_OK) != 0) {
+        fprintf(stderr, "remotedesk: this host is not running systemd "
+                        "(/run/systemd/system not found); cannot install a systemd unit.\n");
+        return 1;
+    }
+
     (void)argc;
     char exePath[4096] = {};
     ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
@@ -2758,6 +2790,13 @@ int LinuxService::install(int argc, char* argv[])
         forcedRoot = true;
 
     char runHome[512] = {};
+    // systemd 的 Group= 不能假定与用户名同值：用户的主组名可能完全不同
+    // （如 useradd -g wheel）。从 getpwnam 的 pw_gid 反查 getgrgid。
+    char runGroup[64] = {};
+    // 登录 shell：shell_linux.cpp 优先用 $SHELL 启动交互式终端，缺失就落 /bin/sh
+    // 且不带 --login；systemd 不会自动继承/提供 SHELL，所以 unit 里要显式写。
+    char runShell[512] = {};
+    gid_t runGid = 0;
     if (runAs[0] && !forcedRoot) {
         struct passwd* pw = getpwnam(runAs);
         if (!pw) {
@@ -2765,6 +2804,11 @@ int LinuxService::install(int argc, char* argv[])
             return 1;
         }
         snprintf(runHome, sizeof(runHome), "%s", pw->pw_dir ? pw->pw_dir : "/");
+        if (pw->pw_shell && pw->pw_shell[0])
+            snprintf(runShell, sizeof(runShell), "%s", pw->pw_shell);
+        runGid = pw->pw_gid;
+        if (struct group* gr = getgrgid(runGid))
+            snprintf(runGroup, sizeof(runGroup), "%s", gr->gr_name);
     } else if (userAuto && !runAs[0]) {
         // 只在显式 --user=auto 且**没有歧义**时才收窄：二进制位于 /home/<u>/ 下，
         // 或全机只有一个普通用户。有多个用户时保持 root —— 非 root 服务读不到
@@ -2794,13 +2838,44 @@ int LinuxService::install(int argc, char* argv[])
             if (passwdIsDesktopUser(pw)) {
                 snprintf(runAs, sizeof(runAs), "%s", pw->pw_name);
                 snprintf(runHome, sizeof(runHome), "%s", pw->pw_dir ? pw->pw_dir : "/");
+                if (pw->pw_shell && pw->pw_shell[0])
+                    snprintf(runShell, sizeof(runShell), "%s", pw->pw_shell);
+                runGid = pw->pw_gid;
+                if (struct group* gr = getgrgid(runGid))
+                    snprintf(runGroup, sizeof(runGroup), "%s", gr->gr_name);
             }
         }
     }
 
-    FILE* f = fopen("remotedesk.service", "w");
+    if (runAs[0] && !runGroup[0])
+        snprintf(runGroup, sizeof(runGroup), "%s", runAs);   // 反查失败时退回旧行为
+    // root 运行 / 收窄失败时上面不会查 passwd：用实际运行用户（root 或 runAs）
+    // 补一次登录 shell，避免 unit 里没有 SHELL。
+    if (!runShell[0]) {
+        struct passwd* pw = getpwnam(runAs[0] ? runAs : "root");
+        if (pw && pw->pw_shell && pw->pw_shell[0])
+            snprintf(runShell, sizeof(runShell), "%s", pw->pw_shell);
+    }
+
+    // 原子写：先写同目录下的临时文件，fsync 后 rename 覆盖最终路径。
+    // 直接 fopen 最终路径时，写入中途失败（磁盘满/被杀）会留下半截 unit，
+    // systemctl 下次读到的是残缺文件。路径用绝对路径，避免依赖 cwd。
+    char finalPath[4096] = {};
+    const bool installToEtc = access("/etc/systemd/system", W_OK) == 0;
+    if (installToEtc) {
+        snprintf(finalPath, sizeof(finalPath), "/etc/systemd/system/remotedesk.service");
+    } else {
+        char cwd[4096] = {};
+        if (!getcwd(cwd, sizeof(cwd)))
+            snprintf(cwd, sizeof(cwd), ".");
+        snprintf(finalPath, sizeof(finalPath), "%s/remotedesk.service", cwd);
+    }
+    char tmpPath[4200] = {};
+    snprintf(tmpPath, sizeof(tmpPath), "%s.tmp.%ld", finalPath, (long)getpid());
+
+    FILE* f = fopen(tmpPath, "w");
     if (!f) {
-        fprintf(stderr, "Failed to create remotedesk.service\n");
+        fprintf(stderr, "Failed to create %s: %s\n", tmpPath, strerror(errno));
         return 1;
     }
     fprintf(f, "[Unit]\n");
@@ -2839,17 +2914,29 @@ int LinuxService::install(int argc, char* argv[])
         fprintf(f, "# 以桌面用户运行：能读自己的 session cookie，但读不到\n");
         fprintf(f, "# /run/lightdm/root/:0，也无法接管其他用户的会话。\n");
         fprintf(f, "User=%s\n", runAs);
-        fprintf(f, "Group=%s\n", runAs);
+        // Group 用主组名（pw_gid 反查），不是用户名：两者可能不同。
+        if (runGroup[0])
+            fprintf(f, "Group=%s\n", runGroup);
         if (runHome[0])
-            fprintf(f, "Environment=HOME=%s\n", runHome);
+            writeUnitEnv(f, "HOME", runHome);
+        // shell_linux.cpp 用 $SHELL 决定网页终端的交互式 shell；systemd 不提供
+        // SHELL，缺失就会落 /bin/sh 且不带 --login，终端丢 profile/PATH。
+        if (runShell[0])
+            writeUnitEnv(f, "SHELL", runShell);
     } else {
         fprintf(f, "# root 运行：可接管任意用户会话与登录界面。\n");
         fprintf(f, "# 开机早期的抢屏由 ExecStartPre 延时 + 进程内 QTRD_BOOT_GRACE 宽限避免。\n");
         fprintf(f, "Environment=QTRD_BOOT_GRACE=120\n");
+        // root 的登录 shell 同样显式给：网页终端在服务模式下依赖 $SHELL。
+        if (runShell[0])
+            writeUnitEnv(f, "SHELL", runShell);
     }
     // 直接执行二进制本身：旧代码拼了 ".sh" 后缀，但工程并不生成该脚本，
     // 安装后 systemd 必然 start failure 并每 5s 重试。
-    fprintf(f, "ExecStart=%s --service\n", exePath);
+    // 路径可能含空格，必须加引号（否则 systemd 把后半段当成独立参数）。
+    fprintf(f, "ExecStart=");
+    writeUnitQuoted(f, exePath);
+    fprintf(f, " --service\n");
     // 用 always 而不是 on-failure：systemd 把 SIGHUP/SIGINT/SIGPIPE 一律算作
     // 「干净退出」（CLEAN_SIGNALS），on-failure 遇到这些信号不会重启。远程桌面
     // 服务一旦静默消失，现场只能靠人肉发现（2026-10-29 龙蜥实测：网页终端把
@@ -2859,7 +2946,34 @@ int LinuxService::install(int argc, char* argv[])
     fprintf(f, "RestartSec=5\n\n");
     fprintf(f, "[Install]\n");
     fprintf(f, "WantedBy=multi-user.target\n");
-    fclose(f);
+    fflush(f);
+    fsync(fileno(f));
+    if (fclose(f) != 0) {
+        fprintf(stderr, "Failed to write %s: %s\n", tmpPath, strerror(errno));
+        unlink(tmpPath);
+        return 1;
+    }
+    // 覆盖 /etc/systemd/system 下已有的 unit 前先备份：管理员经常手改 unit
+    // （补 Environment=、调 ExecStartPre 等），重装/升级直接 rename 会静默冲掉。
+    // 硬链接备份与旧文件共享 inode，随后的 rename 只替换目录项，备份仍保留旧内容，
+    // 也不存在"unit 短暂不存在"的窗口。
+    if (installToEtc && access(finalPath, F_OK) == 0) {
+        const QByteArray ts =
+            QDateTime::currentDateTime().toString("yyyyMMddhhmmss").toLatin1();
+        char backupPath[4300] = {};
+        snprintf(backupPath, sizeof(backupPath), "%s.bak.%s", finalPath, ts.constData());
+        if (link(finalPath, backupPath) == 0) {
+            fprintf(stdout, "  existing unit backed up: %s\n", backupPath);
+        } else {
+            fprintf(stderr, "  warning: cannot back up existing %s: %s (overwriting anyway)\n",
+                    finalPath, strerror(errno));
+        }
+    }
+    if (rename(tmpPath, finalPath) != 0) {
+        fprintf(stderr, "Failed to install %s: %s\n", finalPath, strerror(errno));
+        unlink(tmpPath);
+        return 1;
+    }
 
     fprintf(stdout, "remotedesk.service created (User=%s%s).\n",
             runAs[0] ? runAs : "root",
@@ -2879,12 +2993,22 @@ int LinuxService::install(int argc, char* argv[])
         snprintf(appDir, sizeof(appDir), "%s", exePath);
         char* slash = strrchr(appDir, '/');
         if (slash) *slash = '\0';
+        // 组名同样用 pw_gid 反查结果（缺省退回用户名）
         fprintf(stdout, "  sudo chown -R %s:%s %s   # 让服务能写 logs/ 与 server_config.json\n",
-                runAs, runAs, appDir);
+                runAs, runGroup[0] ? runGroup : runAs, appDir);
     }
-    fprintf(stdout, "  sudo cp remotedesk.service /etc/systemd/system/\n");
-    fprintf(stdout, "  sudo systemctl enable remotedesk\n");
-    fprintf(stdout, "  sudo systemctl start remotedesk\n");
+    if (installToEtc) {
+        fprintf(stdout, "  unit installed: %s\n", finalPath);
+        fprintf(stdout, "  sudo systemctl daemon-reload\n");
+        fprintf(stdout, "  sudo systemctl enable remotedesk\n");
+        fprintf(stdout, "  sudo systemctl start remotedesk\n");
+    } else {
+        fprintf(stdout, "  unit generated: %s\n", finalPath);
+        fprintf(stdout, "  sudo cp %s /etc/systemd/system/\n", finalPath);
+        fprintf(stdout, "  sudo systemctl daemon-reload\n");
+        fprintf(stdout, "  sudo systemctl enable remotedesk\n");
+        fprintf(stdout, "  sudo systemctl start remotedesk\n");
+    }
     return 0;
 }
 
