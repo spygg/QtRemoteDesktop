@@ -37,6 +37,31 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
+
+// 按可执行文件名判断进程是否在跑。只用于锁屏 kind 的诊断分类：Vista+ 的
+// OpenInputDesktop 失败时拿不到桌面名（见 desktopCheckTimer 的失败分支），
+// 只能靠 LogonUI.exe / 屏保进程来区分 logon 与 screensaver。
+// 不参与「锁没锁」的判定，判定仍由 OpenInputDesktop 的成败决定。
+static bool isProcessRunningByName(const wchar_t* exeName)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+    const QString wanted = QString::fromWCharArray(exeName);
+    bool found = false;
+    PROCESSENTRY32W pe = { };
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (QString::fromWCharArray(pe.szExeFile).compare(wanted, Qt::CaseInsensitive) == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
 #endif
 
 #ifdef Q_OS_LINUX
@@ -232,7 +257,8 @@ int HelperProcess::run(int argc, char* argv[])
 
 #ifdef USE_FFMPEG
     // ---- 采集喂帧泵 ----
-    // 背景（2026-10-08 本地实测定位）：本工程裁剪版 libopenh264（FFmpeg 3.4.8）存在
+    // 背景（2026-10-08 本地实测定位）：本工程裁剪版 libopenh264（XP 兼容构建用的
+    // FFmpeg 3.4.8）存在
     // **1 帧编码延迟**——encode(输入N) 的码流要等 encode(输入N+1) 才吐出来，
     // 即 N 个输入只产出 N-1 个输出（日志实测：第 5 帧输入无输出，第 6 帧输入才输出）。
     // 而 screencapturer 有变化检测，桌面静止（常见：锁屏、无人值守）时只有
@@ -1212,15 +1238,61 @@ int HelperProcess::run(int argc, char* argv[])
                 QString action = obj["action"].toString();
                 qInfo() << "Helper: system action requested:" << action;
 #ifdef _WIN32
+                // [SYS-ACT] 注销/重启/关机回执：服务端必须知道"命令到底有没有被系统
+                // 接受"。startDetached 只能报"进程起来了"，拿不到退出码；这里改成
+                // 同步 QProcess 并读 shutdown 的真实退出码（0 = 已发起）。
+                // reboot/poweroff 带 /t 5：既给回执留出送达时间，也给用户 shutdown /a
+                // 的取消窗口（服务端只转发，不猜结果）。
+                auto runShutdownAck = [&ws, action, obj](const QStringList& args,
+                                                         const QString& label) {
+                    QProcess p;
+                    p.start(QStringLiteral("shutdown"), args);
+                    const bool started = p.waitForStarted(1500);
+                    const bool finished = started && p.waitForFinished(2000);
+                    const int code = finished ? p.exitCode() : -1;
+                    const bool ok = started && finished
+                                    && p.exitStatus() == QProcess::NormalExit && code == 0;
+                    if (ok)
+                        qInfo() << "Helper: shutdown" << label << "accepted (exit 0)";
+                    else
+                        qWarning() << "Helper: shutdown" << label << "failed, started ="
+                                   << started << "finished =" << finished
+                                   << "exit code =" << code;
+                    QJsonObject ack;
+                    ack["type"] = "system_action_result";
+                    ack["action"] = action;
+                    ack["ok"] = ok;
+                    if (obj.contains("seq"))
+                        ack["seq"] = obj["seq"];
+                    ack["detail"] = ok
+                        ? QStringLiteral("已发起%1（shutdown 退出码 0）").arg(label)
+                        : started ? QStringLiteral("%1失败：shutdown 退出码 %2").arg(label).arg(code)
+                                  : QStringLiteral("%1失败：shutdown 无法启动").arg(label);
+                    ws.sendTextMessage(QString::fromUtf8(
+                        QJsonDocument(ack).toJson(QJsonDocument::Compact)));
+                };
                 if (action == "lock") {
                     // 直接在 helper 进程里调 LockWorkStation：它本来就跑在
                     // winsta0\Default 交互桌面上，起 `rundll32.exe user32.dll,LockWorkStation`
                     // 子进程只是把失败变成无声（实测 XP 主机：日志显示动作已到达 helper，
                     // 屏幕却从未锁上，且拿不到任何错误码）。
-                    if (LockWorkStation())
+                    const BOOL ok = LockWorkStation();
+                    const DWORD err = ok ? 0 : GetLastError();
+                    if (ok)
                         qInfo() << "Helper: LockWorkStation ok";
                     else
-                        qWarning() << "Helper: LockWorkStation failed, error =" << GetLastError();
+                        qWarning() << "Helper: LockWorkStation failed, error =" << err;
+                    // [LOCK] 回执：服务端据此把"没锁上"如实回给前端。以前这里只有日志，
+                    // 服务端等不到任何结果，锁屏失败时前端照样显示"已锁定"。
+                    QJsonObject ack;
+                    ack["type"] = "system_action_result";
+                    ack["action"] = "lock";
+                    ack["ok"] = bool(ok);
+                    if (!ok)
+                        ack["detail"] = QStringLiteral("LockWorkStation 返回失败，错误码 %1")
+                                            .arg(static_cast<qulonglong>(err));
+                    ws.sendTextMessage(QString::fromUtf8(
+                        QJsonDocument(ack).toJson(QJsonDocument::Compact)));
                 } else if (action == "show_desktop") {
                     // Win7+ 用 PowerShell；WinXP 无 powershell → cscript 同款 COM 调用
                     QString ps = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
@@ -1242,11 +1314,16 @@ int HelperProcess::run(int argc, char* argv[])
                 } else if (action == "task_manager") {
                     QProcess::startDetached(QStringLiteral("taskmgr"));
                 } else if (action == "logout") {
-                    QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/l"), QStringLiteral("/f") });
+                    runShutdownAck({ QStringLiteral("/l"), QStringLiteral("/f") },
+                                   QStringLiteral("注销"));
                 } else if (action == "reboot") {
-                    QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/r"), QStringLiteral("/t"), QStringLiteral("0") });
+                    runShutdownAck({ QStringLiteral("/r"), QStringLiteral("/t"),
+                                     QStringLiteral("5"), QStringLiteral("/f") },
+                                   QStringLiteral("重启"));
                 } else if (action == "poweroff") {
-                    QProcess::startDetached(QStringLiteral("shutdown"), { QStringLiteral("/s"), QStringLiteral("/t"), QStringLiteral("0") });
+                    runShutdownAck({ QStringLiteral("/s"), QStringLiteral("/t"),
+                                     QStringLiteral("5"), QStringLiteral("/f") },
+                                   QStringLiteral("关机"));
                 }
 #elif defined(Q_OS_LINUX)
                 auto findBin = [](const char* name) -> QString {
@@ -1474,6 +1551,10 @@ int HelperProcess::run(int argc, char* argv[])
                     obj["button"].toInt(), type == "mousedown");
                 needFrame = true;
             } else if (type == "keydown" || type == "keyup") {
+                // 长按 repeat 已在 RDPServer::onInputReceived 入口统一翻译成
+                // "先松再按"（一条 keyup + 原 keydown，所有平台一致），再转给本
+                // helper。因此这里收到的都是显式 down/up，不需要（也不能再）做
+                // 二次翻译。
                 inputMgr.injectKeyboard(obj["keycode"].toInt(), obj["code"].toString(),
                     type == "keydown", obj["ctrl"].toBool(),
                     obj["alt"].toBool(), obj["shift"].toBool(),
@@ -1568,7 +1649,7 @@ int HelperProcess::run(int argc, char* argv[])
         const QString lower = desk.toLower();
         if (lower == QStringLiteral("winlogon") || lower == QStringLiteral("welcome"))
             return QStringLiteral("logon");
-        return QStringLiteral("secure");
+        return QStringLiteral("locked");
     };
     auto lockHintFor = [](const QString&) -> QString {
         return QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码");
@@ -1607,8 +1688,21 @@ int HelperProcess::run(int argc, char* argv[])
                                                    : QStringLiteral("logon");
                 hint = lockHintFor(kind);
             } else {
-                kind = QStringLiteral("unknown");
-                hint = QString::fromUtf8("Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码");
+                // Vista+：OpenInputDesktop 失败本身就是"已锁"（登录安全桌面不允许其它
+                // 会话打开它），但它同样不给我们桌面名 —— 旧实现因此把 Vista+ 的 kind
+                // 写死成 unknown，Win7 普通锁（Win+L）的报告里永远是 unknown，排障时
+                // 看不出锁定类型。这里只用进程证据补诊断字段，**不改变** locked 的
+                // 判定（失败分支一律 locked=true 保持原样）：
+                //   · 屏保进程在跑且恢复要密码 → screensaver（安全屏保盖住了桌面）
+                //   · LogonUI.exe 在跑         → logon（普通锁屏 / 注销后的登录界面）
+                //   · 两者都没有               → locked（系统报告已锁，但无法再细分）
+                if (screenSaverProcessRunning() && screenSaverRequiresPassword())
+                    kind = QStringLiteral("screensaver");
+                else if (isProcessRunningByName(L"LogonUI.exe"))
+                    kind = QStringLiteral("logon");
+                else
+                    kind = QStringLiteral("locked");
+                hint = lockHintFor(kind);
             }
             if (!locked || kind != lastReportedKind) {
                 locked = true;

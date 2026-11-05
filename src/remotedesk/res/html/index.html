@@ -232,6 +232,9 @@
             font-size: 11px;
         }
         #sys-menu button:hover { background: rgba(255, 255, 255, 0.12); }
+        /* [LOCK] 锁屏按钮等待确认期间禁用（避免连点产生多轮请求） */
+        #sys-menu button:disabled { opacity: 0.55; cursor: default; }
+        #sys-menu button:disabled:hover { background: none; }
         #sys-menu .sep {
             height: 1px;
             margin: 5px 8px;
@@ -752,6 +755,17 @@
             background: rgba(255, 255, 255, 0.22);
         }
 
+        /* [C] 失败后的「重试」：只在服务端报 retryable reason 时出现，用琥珀色区分
+           于常态操作，避免用户把它当成默认按钮。 */
+        #lock-overlay .lock-input-area #lock-retry-btn {
+            background: rgba(255, 170, 0, 0.85);
+            border: 1px solid rgba(255, 190, 60, 0.9);
+        }
+
+        #lock-overlay .lock-input-area #lock-retry-btn:hover {
+            background: rgba(255, 190, 60, 0.95);
+        }
+
         #transfer-status {
             position: fixed;
             bottom: 40px;
@@ -884,15 +898,15 @@
     <!-- 系统操作下拉菜单：置于 toolbar 之外（toolbar 带 transform/overflow，
          会裁剪内部 fixed 子元素），由 toggleSysMenu 依据按钮坐标在按钮下方弹出 -->
     <div id="sys-menu">
-        <button onclick="systemAction('lock')"><span class="sys-icon">🔒</span>锁屏</button>
+        <button id="sys-lock-btn" onclick="systemAction('lock')"><span class="sys-icon">🔒</span><span id="sys-lock-label">锁屏</span></button>
         <button onclick="systemAction('unlock_screen')"><span class="sys-icon">🔓</span>解锁屏幕</button>
         <button onclick="cycleIme(); document.getElementById('sys-menu').classList.remove('open');"><span class="sys-icon">文</span>输入法<span class="sys-shortcut">Ctrl+Alt+I</span></button>
         <button onclick="systemAction('show_desktop')"><span class="sys-icon">🖥️</span>显示桌面</button>
         <button onclick="systemAction('task_manager')"><span class="sys-icon">⚙️</span>任务管理器</button>
-        <button onclick="systemAction('logout')"><span class="sys-icon">🚪</span>注销</button>
+        <button id="sys-logout-btn" onclick="systemAction('logout')"><span class="sys-icon">🚪</span>注销</button>
         <div class="sep"></div>
-        <button class="danger" onclick="systemAction('reboot')"><span class="sys-icon">🔄</span>重启</button>
-        <button class="danger" onclick="systemAction('poweroff')"><span class="sys-icon">⏻</span>关机</button>
+        <button id="sys-reboot-btn" class="danger" onclick="systemAction('reboot')"><span class="sys-icon">🔄</span>重启</button>
+        <button id="sys-poweroff-btn" class="danger" onclick="systemAction('poweroff')"><span class="sys-icon">⏻</span>关机</button>
     </div>
 
     <!-- 配置下拉菜单遮罩 -->
@@ -917,6 +931,17 @@
             <div class="dropdown-title">观看模式</div>
             <div class="dropdown-note">开启后只能观看画面：鼠标、键盘、系统操作、输入法切换与剪贴板写入全部禁用；画质/帧率/分辨率等显示设置仍可用</div>
             <div class="dropdown-options" data-key="viewonly">
+                <button data-value="off">关闭</button>
+                <button data-value="on">开启</button>
+            </div>
+        </div>
+        <!-- 中文输入：默认关闭。关闭态走纯键码注入（不进 Unicode keysym 队列、
+             不借键码、不改远端键盘映射），代价是中文（输入法上屏）打不进去。
+             中文不是常用场景，需要时再打开，避免为它付出任何延迟/映射风险。 -->
+        <div class="dropdown-section">
+            <div class="dropdown-title">中文输入</div>
+            <div class="dropdown-note">默认关闭：仅发送键码，中文无法上屏（英文/数字/长按更快）。开启后走 Unicode 注入，支持输入法上屏的中文</div>
+            <div class="dropdown-options" data-key="chineseinput">
                 <button data-value="off">关闭</button>
                 <button data-value="on">开启</button>
             </div>
@@ -1056,12 +1081,18 @@
     <!-- 锁屏遮罩 -->
     <div id="lock-overlay">
         <div class="lock-icon">🔒</div>
-        <div class="lock-text">屏幕已锁定</div>
+        <div class="lock-text" id="lock-text">屏幕已锁定</div>
         <div class="lock-hint" id="lock-hint"></div>
         <div class="lock-input-area">
             <input type="password" id="lock-password" placeholder="输入密码解锁" autocomplete="off" />
             <button id="lock-unlock-btn" onclick="unlockScreen()">解锁</button>
             <button id="lock-onekey-btn" onclick="requestRemoteUnlock()">一键解锁</button>
+            <!-- [LOGIN] 停在登录界面（注销后/开机未登录，无用户会话）时的远程登录入口。
+                 与「一键解锁」区分：那里是已有用户会话的锁屏，这里是没会话的登录界面。 -->
+            <button id="lock-login-btn" onclick="requestRemoteLogin()" style="display:none">远程登录</button>
+            <!-- [C] 失败后的重试入口：只有 retryable 的 reason 才显示（见 onUnlockResult）。
+                 与「一键解锁」区分：它仅在服务端明确报"没键入/界面不对"时出现。 -->
+            <button id="lock-retry-btn" onclick="requestRemoteUnlock()" style="display:none">重试</button>
         </div>
     </div>
 
@@ -1138,6 +1169,10 @@
             // 被控端平台（screen_locked.platform）：决定锁屏密码怎么送。
             // windows → 交服务端注入安全桌面；其他 → 逐字 XTEST 注入。
             lockPlatform: '',
+            // [LOGIN] 服务端探测到"停在登录界面且没有用户会话"时为 true。
+            // 与锁屏区分：锁屏有用户会话；登录界面连 helper 都起不来。
+            loginScreen: false,
+            loginUsername: '',
             mouseX: 0,
             mouseY: 0,
             // [B13] code → keycode：blur 补发 keyup 时必须带原始 keycode。
@@ -1148,6 +1183,19 @@
             // 消息（见 VIEW_ONLY_BLOCKED_TYPES），服务端还有一层按 clientId 的权威丢弃。
             // 持久化：刷新/重连后保持只读，由常驻徽标+整屏描边提示原因。
             viewOnly: (localStorage.getItem('rd_viewonly') === '1'),
+            // 中文输入（IME 上屏）开关，默认关闭。
+            //   关：只走键码注入（keydown/keyup 的 keycode），完全不碰服务端的
+            //       Unicode keysym 路径（不借键码、不改键盘映射、不进定时器队列），
+            //       也不给按键挂任何守卫延迟 —— 中文打不进去是预期行为；
+            //       英文/ASCII、长按重复、鼠标操作与旧版完全一致且更快。
+            //   开：组合结束（compositionend）的文本逐字符发 isChar，服务端走
+            //       sendUnicodeChar 的"借键码 + 改映射 + 定时器队列"；
+            //       同时可打印键改为"先挂起、等 keyup/compositionstart 定夺"，
+            //       解决拼音首字母被提前发到远端的问题。
+            // 持久化：localStorage（纯前端偏好，不进 server_config.json）；
+            // 每条连接建立时通过 set_chinese_input 声明（服务端按 clientId 记账，
+            // 老客户端不带该字段 → 服务端按"关闭"处理）。
+            chineseInput: (localStorage.getItem('rd_chinese_input') === '1'),
             // 共享剪贴板状态。核心难点：**本机剪贴板往往非空但内容陈旧**（上一次 Ctrl+C
             // 的残留），远端刚复制的内容又常常因为非安全上下文而写不进本机剪贴板。
             // 因此除内容本身外还要记录“谁更新得晚”，粘贴时据此仲裁优先级。
@@ -2443,6 +2491,11 @@
                 // 重新声明，否则服务端会把这个新连接当成可操作连接。
                 if (state.viewOnly) send({ type: 'set_view_only', enabled: true });
 
+                // 中文输入是**每连接**状态（服务端按 clientId 记账）：连接建立时
+                // 必须声明一次。默认关闭，老客户端（不带该字段）服务端同样按关闭
+                // 处理，行为与旧版一致（只走键码注入）。
+                send({ type: 'set_chinese_input', enabled: state.chineseInput });
+
                 // 连接后立即加载远端文件列表（同时获取服务端下发的桌面路径 desktopPath，
                 // 作为本机拖入文件的默认落点）。
                 refreshFileList();
@@ -2949,39 +3002,96 @@
                     // 浏览器逐字发的 keydown 只会落到用户桌面（没人看得到），必须
                     // 交给服务端的 secure-input 在安全桌面上写登录框。
                     if (msg.platform) state.lockPlatform = msg.platform;
-                    document.getElementById('lock-overlay').classList.toggle('active', msg.locked);
-                    if (msg.locked) {
+                    // [LOGIN] 登录模式优先：登录界面没有用户会话，screen_locked 可能
+                    // 由 helper 临终上报；此时保持「远程登录」界面，不能用锁屏文案覆盖。
+                    if (!state.loginScreen)
+                        document.getElementById('lock-overlay').classList.toggle('active', msg.locked);
+                    // [LOCK] 锁屏按钮跟随真实状态：screen_locked 是最终事实来源
+                    setLockButtonState(msg.locked ? 'locked' : 'idle');
+                    if (state.loginScreen) {
+                        // 登录模式下忽略锁屏文案/按钮重置（登录界面仍处于 active）
+                    } else if (msg.locked) {
                         const hintEl = document.getElementById('lock-hint');
                         hintEl.textContent = msg.hint || (state.lockPlatform === 'windows'
                             ? 'Windows 锁屏在安全桌面上，点「解锁」由服务端注入密码' : '');
+                        hideLockRetry();
                         resetLockButtons();
                         document.getElementById('lock-password').focus();
                     } else {
                         document.getElementById('lock-password').value = '';
                         document.getElementById('lock-hint').textContent = '';
+                        // [C] 屏幕已解开 = 这一轮解锁序列作废：连"重试"入口一起收掉，
+                        // 绝不能再出现"已经解开却显示被拒绝"的残留文案。
+                        hideLockRetry();
                         resetLockButtons();
                     }
                     break;
                 case 'unlock_result':
-                    if (msg.ok && !msg.pending) {
-                        // 已切回桌面 VT：手动收起锁屏遮罩（Linux 端锁屏检测目前关闭，
-                        // 不会自动再广播 screen_locked=false）
-                        document.getElementById('lock-overlay').classList.remove('active');
-                        document.getElementById('lock-password').value = '';
-                        resetLockButtons();
-                    } else if (!msg.ok) {
-                        resetLockButtons();
-                        alert('解锁失败：' + (msg.message || '未知原因'));
-                    } else {
-                        // pending：密码正在注入（Windows secure-input），遮罩保持，
-                        // 真正解锁后 screen_locked=false 会自动收起
-                        showTransferStatus(msg.message || '正在解锁…', 3000);
-                    }
+                    onUnlockResult(msg);
+                    break;
+                case 'login_screen_state':
+                    // 服务端周期探测结果：true = 停在登录界面且没有用户会话。
+                    applyLoginMode(msg.active, msg.username);
+                    break;
+                case 'login_result':
+                    onLoginResult(msg);
                     break;
                 case 'lock_result':
-                    // 服务端已逐步验证（LockedHint / dm-tool），ok 才代表真的锁上了
-                    showTransferStatus(msg.ok ? (msg.message || '已锁屏') : ('锁屏失败：' + (msg.message || '未知原因')), 4000);
+                    // [LOCK] 只认服务端的结构化 reason（不按 message 文本判断）。
+                    //   ok:true  = helper 已执行 / helper 报 screen_locked / 本来就锁着 /
+                    //              兜底 --lock-once 返回真实 BOOL 成功
+                    //   no_helper= 用户会话 helper 未连接，服务端**没有**执行锁屏
+                    //   timeout  = helper 3s 未回执，且 console 会话兜底也失败
+                    //   lock_failed / helper_lost = 执行失败 / 执行中 helper 掉线
+                    //   busy     = 上一轮锁定还在等回执，本次请求未执行（B4）
+                    // 收到任何 lock_result 都会进 setLockButtonState → 立刻取消前端安全网。
+                    if (msg.ok) {
+                        setLockButtonState('locked');
+                        showTransferStatus(msg.message || '已锁屏', 4000);
+                    } else {
+                        setLockButtonState('idle');
+                        const reason = msg.reason || '';
+                        let text = '未锁定：' + (msg.message || '未知原因');
+                        if (reason === 'no_helper')
+                            text = '未锁定：用户会话的 helper 未连接，锁屏没有执行';
+                        else if (reason === 'timeout')
+                            text = '未锁定：服务端没有收到锁屏确认';
+                        else if (reason === 'lock_failed')
+                            text = '未锁定：用户会话执行锁屏失败';
+                        else if (reason === 'helper_lost')
+                            text = '未锁定：helper 在锁屏过程中断开，结果未知';
+                        else if (reason === 'busy')
+                            text = '未锁定：上一轮锁定请求仍在等待结果';
+                        showTransferStatus(text, 6000);
+                    }
                     break;
+                case 'logout_result':
+                case 'reboot_result':
+                case 'poweroff_result': {
+                    // [SYS-ACT] 与 lock 同一范式：只认服务端结构化 reason。
+                    // 收到结果才恢复按钮/提示，杜绝"界面报已关机、机器没动"。
+                    const act = msg.type.replace('_result', '');
+                    const names = { logout: '注销', reboot: '重启', poweroff: '关机' };
+                    setSysActionPending(act, false);
+                    if (msg.ok) {
+                        showTransferStatus(msg.message || ('已发起' + names[act]), 5000);
+                    } else {
+                        const reason = msg.reason || '';
+                        let text = '未' + names[act] + '：' + (msg.message || '未知原因');
+                        if (reason === 'no_helper')
+                            text = '未' + names[act] + '：用户会话的 helper 未连接，操作没有执行';
+                        else if (reason === 'timeout')
+                            text = '未' + names[act] + '：服务端没有收到确认，操作结果未知';
+                        else if (reason === 'busy')
+                            text = '未' + names[act] + '：上一轮系统操作仍在等待结果';
+                        else if (reason === 'helper_lost')
+                            text = '未' + names[act] + '：helper 在操作过程中断开，结果未知';
+                        else if (reason === 'unconfirmed')
+                            text = '未' + names[act] + '：命令已发出，但未检测到会话退出，结果未知';
+                        showTransferStatus(text, 6000);
+                    }
+                    break;
+                }
                 case 'clipboard':
                     // 远端剪贴板变化（文本/图片）→ 存入缓冲，下一次用户手势时写入本地系统剪贴板
                     onRemoteClipboard(msg);
@@ -3269,6 +3379,30 @@
             updateDropdownActive();
         }
 
+        // ---- 中文输入开关：默认关闭，纯前端偏好（localStorage）+ 每连接声明 ----
+        // 关闭（默认）：只发键码（keydown/keyup），完全不产生 isChar —— 服务端的
+        // Unicode 路径（sendUnicodeChar：借键码 + 改远端键盘映射 + 定时器队列）
+        // 一次都不会被走到，也就不存在"与同一时刻其它 XTest 按键没有严格先后顺序"
+        // 的风险；键按下的当拍就发，没有任何守卫延迟（英文/数字/长按更快）。
+        // 开启：compositionend 逐字发 isChar，且可打印键改为"先挂起、等 keyup/
+        // compositionstart 定夺"，保证拼音首字母不漏、上屏字符不重复。
+        function setChineseInput(enabled) {
+            enabled = !!enabled;
+            const changed = (state.chineseInput !== enabled);
+            state.chineseInput = enabled;
+            try { localStorage.setItem('rd_chinese_input', enabled ? '1' : '0'); } catch (e) {}
+            // 挂起中的按键不用清理：keyup 分支先查 pendingKeydowns，无论开关
+            // 之后是什么状态都会把它补发出去（关→开的瞬时切换不会丢字/漏 up）。
+            if (changed) {
+                showTransferStatus(enabled ? '已开启中文输入（Unicode 注入）'
+                                           : '已关闭中文输入（仅键码注入）', 2000);
+            }
+            // 每次都同步给服务端：服务端按 clientId 记账，重连后是新连接需要重新声明。
+            // 老客户端不发这条消息 → 服务端按"关闭"处理，行为与旧版一致。
+            send({ type: 'set_chinese_input', enabled: state.chineseInput });
+            updateDropdownActive();
+        }
+
         // ---- 输入法切换：发 ime_cycle，服务端直接切 ibus engine ----
         function cycleIme() {
             if (!state.connected || !state.ws) return;
@@ -3299,6 +3433,66 @@
                 m.style.top = top + 'px';
             }
         }
+        // [LOCK] 锁屏按钮的三态：idle / pending / locked。
+        // 不再"点了就显示已锁"：只有服务端 lock_result{ok:true} 或 screen_locked=true
+        // 才切到「已锁定」；安全网内没有任何确认就回滚成「锁屏」并提示"未锁定"。
+        // （服务端 3s 等 helper 回执；超时则用 console 会话令牌跑一次性锁定（≤3s），
+        //   其退出码作为 ack。服务端最坏链路 = 3s 回执窗口 + 3s 兜底预算，所以前端
+        //   安全网放宽到 7s；**任何** lock_result / screen_locked 到达都会调用
+        //   setLockButtonState，从而立刻清掉这个定时器（只有真的"没回执"才等到它）。
+        var lockUiTimer = null;
+        function setLockButtonState(s) {
+            const btn = document.getElementById('sys-lock-btn');
+            const lab = document.getElementById('sys-lock-label');
+            if (!btn || !lab) return;
+            if (lockUiTimer) { clearTimeout(lockUiTimer); lockUiTimer = null; }
+            if (s === 'pending') {
+                btn.disabled = true;
+                lab.textContent = '锁定中…';
+                lockUiTimer = setTimeout(function () {
+                    lockUiTimer = null;
+                    btn.disabled = false;
+                    lab.textContent = '锁屏';
+                    showTransferStatus('未锁定：等待锁屏确认超时（服务端没有执行或没有回执）', 6000);
+                }, 7000);
+            } else if (s === 'locked') {
+                btn.disabled = false;
+                lab.textContent = '已锁定';
+            } else {
+                btn.disabled = false;
+                lab.textContent = '锁屏';
+            }
+        }
+
+        // [SYS-ACT] 注销/重启/关机的回执等待（仅 Windows：服务端回 <action>_result）。
+        // 与 lock 同一范式：点击 → 按钮 pending，收到结果再恢复；7s 安全网兜底
+        // （服务端 3s 预算 + helper 执行 shutdown 的时间）。Linux/mac 没有回执，
+        // 不进入 pending，行为保持不变。
+        var sysActionHtml = {};
+        var sysActionTimer = null;
+        function setSysActionPending(action, pending) {
+            const btn = document.getElementById('sys-' + action + '-btn');
+            if (!btn) return;
+            const labels = { logout: '注销中…', reboot: '重启中…', poweroff: '关机中…' };
+            if (pending) {
+                if (sysActionTimer) { clearTimeout(sysActionTimer); sysActionTimer = null; }
+                sysActionHtml[action] = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<span class="sys-icon">⏳</span>' + (labels[action] || '处理中…');
+                sysActionTimer = setTimeout(function () {
+                    sysActionTimer = null;
+                    setSysActionPending(action, false);
+                    const names = { logout: '注销', reboot: '重启', poweroff: '关机' };
+                    showTransferStatus('未' + (names[action] || action)
+                        + '：未收到服务端回执，操作可能没有执行', 6000);
+                }, 7000);
+            } else {
+                btn.disabled = false;
+                if (sysActionHtml[action]) btn.innerHTML = sysActionHtml[action];
+                delete sysActionHtml[action];
+            }
+        }
+
         function systemAction(action) {
             if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
             const names = { lock: '锁屏', unlock_screen: '解锁屏幕', show_desktop: '显示桌面',
@@ -3306,6 +3500,19 @@
             const destructive = ['reboot', 'poweroff', 'logout'];
             if (destructive.includes(action) && !confirm('确定要对被控端执行「' + (names[action] || action) + '」吗？'))
                 return;
+            // [LOCK] 锁屏先进入"等待确认"，由 lock_result / screen_locked 收尾。
+            // 只有 Windows 用这套三态（Linux 有自己的 lock_result 语义、mac/Android
+            // 根本没有回执）；其它平台保持原来的"乐观置位"，把本轮改动严格限制在
+            // Windows 行为上，避免 Linux/mac 等不到回执时被安全网误回滚。
+            if (action === 'lock') {
+                if (state.lockPlatform === 'windows') setLockButtonState('pending');
+                else setLockButtonState('locked');
+            }
+            // [SYS-ACT] 注销/重启/关机：同样只对 Windows 等回执再置位。
+            if ((action === 'logout' || action === 'reboot' || action === 'poweroff')
+                && state.lockPlatform === 'windows') {
+                setSysActionPending(action, true);
+            }
             send({ type: 'system_action', action: action });
             document.getElementById('sys-menu').classList.remove('open');
         }
@@ -3322,8 +3529,198 @@
             if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
             const btn = document.getElementById('lock-onekey-btn');
             if (btn) { btn.disabled = true; btn.textContent = '解锁中…'; }
+            const r = document.getElementById('lock-retry-btn');
+            if (r) { r.disabled = true; r.textContent = '解锁中…'; }
             send({ type: 'system_action', action: 'unlock_screen' });
             setTimeout(resetLockButtons, 25000);
+        }
+
+        // [C] 失败后的「重试」入口：只有 retryable 的 reason 才显示
+        // （not_logon_ui / uncertain / nothing_typed / channel_not_ready）。
+        function showLockRetry(label) {
+            const b = document.getElementById('lock-retry-btn');
+            if (b) { b.textContent = label || '重试'; b.style.display = ''; }
+        }
+
+        function hideLockRetry() {
+            const b = document.getElementById('lock-retry-btn');
+            if (b) b.style.display = 'none';
+        }
+
+        // [C] 解锁结果分派：只认服务端的结构化 reason，**不看 message 文本**。
+        //   message 是给人看的，会随文案调整；reason 才是稳定契约。
+        //   成功（ok && !pending）：收遮罩、清输入、收重试；
+        //   pending：仍在注入，遮罩保持（真正的成功由 screen_locked=false 收起）；
+        //   not_logon_ui / uncertain / nothing_typed：这一轮没键入 → 给出「重试」；
+        //   wrong_password：确实登录失败 → 引导手动输入（重试同一密码没有意义）；
+        //   其余（no_user_session/no_password/channel_not_ready 等）：文案取 message。
+        function onUnlockResult(msg) {
+            const input = document.getElementById('lock-password');
+            const hint = document.getElementById('lock-hint');
+            if (msg.ok && msg.pending) {
+                showTransferStatus(msg.message || '正在解锁…', 3000);
+                return;
+            }
+            if (msg.ok) {
+                document.getElementById('lock-overlay').classList.remove('active');
+                if (input) input.value = '';
+                if (hint) hint.textContent = '';
+                hideLockRetry();
+                resetLockButtons();
+                return;
+            }
+            resetLockButtons();
+            const reason = msg.reason || '';
+            if (reason === 'not_logon_ui') {
+                if (hint) hint.textContent = '远端登录界面当前不在密码框状态（可能有错误弹窗或其它窗口在前）。'
+                    + '请先在远端画面点一下密码框 / 关掉弹窗，再点「重试」。';
+                showLockRetry('重试');
+                if (input) input.focus();
+                return;
+            }
+            if (reason === 'screensaver_stuck') {
+                // 屏保型锁屏：唤醒后输入桌面仍停在 Screen-saver，secure-input 拒绝
+                // 在屏保桌面上注入（本轮一个密码字符都没有键入）。可重试。
+                if (hint) hint.textContent = '远端仍停在屏保安全桌面，本轮没有键入任何密码字符。'
+                    + '点「重试」再试一次（或先在远端画面晃动鼠标唤醒屏保）。';
+                showLockRetry('重试');
+                if (input) input.focus();
+                return;
+            }
+            if (reason === 'uncertain') {
+                if (hint) hint.textContent = '没能确认远端密码框的焦点，本轮没有键入密码。点「重试」再试一次。';
+                showLockRetry('重试');
+                if (input) input.focus();
+                return;
+            }
+            if (reason === 'nothing_typed') {
+                if (hint) hint.textContent = '密码字符没能送进远端输入队列，本轮没有键入。点「重试」再试一次。';
+                showLockRetry('重试');
+                if (input) input.focus();
+                return;
+            }
+            if (reason === 'wrong_password') {
+                if (hint) hint.textContent = '密码未通过远端验证。请手动输入远端账户密码后点「解锁」，'
+                    + '或检查服务端 server_config.json 里的 unlockPassword。';
+                hideLockRetry();
+                if (input) input.focus();
+                return;
+            }
+            if (reason === 'channel_not_ready') {
+                if (hint) hint.textContent = '安全输入通道尚未就绪（secure-input 正在启动）。点「重试」再试一次。';
+                showLockRetry('重试');
+                return;
+            }
+            if (reason === 'injecting') {
+                showTransferStatus(msg.message || '正在解锁…', 3000);
+                return;
+            }
+            // no_user_session / no_password / 未知 reason：只给服务端文案，不猜语义
+            if (hint) hint.textContent = msg.message || '解锁失败（未知原因）';
+            hideLockRetry();
+        }
+
+        // ==================== 登录界面远程登录 ====================
+        // 与「解锁」的区别：登录界面（注销后/开机未登录）没有用户会话，
+        // helper 起不来，所以由服务端 SYSTEM 令牌把 secure-input 投到
+        // winlogon 桌面：Win7 先选中用户磁贴再注入，XP 走 #32770。
+        function applyLoginMode(active, username) {
+            state.loginScreen = !!active;
+            state.loginUsername = username || '';
+            const overlay = document.getElementById('lock-overlay');
+            const label = document.getElementById('lock-text');
+            const hint = document.getElementById('lock-hint');
+            const input = document.getElementById('lock-password');
+            const loginBtn = document.getElementById('lock-login-btn');
+            const unlockBtn = document.getElementById('lock-unlock-btn');
+            const onekeyBtn = document.getElementById('lock-onekey-btn');
+            if (active) {
+                overlay.classList.add('active');
+                setLockButtonState('locked');
+                if (label) label.textContent = '远端停在登录界面（未登录）';
+                if (input) {
+                    input.value = '';
+                    input.placeholder = '输入密码远程登录';
+                    input.focus();
+                }
+                if (loginBtn) { loginBtn.style.display = ''; loginBtn.disabled = false; loginBtn.textContent = '远程登录'; }
+                if (unlockBtn) unlockBtn.style.display = 'none';
+                if (onekeyBtn) onekeyBtn.style.display = 'none';
+                hideLockRetry();
+                if (hint) {
+                    hint.textContent = state.loginUsername
+                        ? `将登录账户：${state.loginUsername}（可在 server_config.json 的 loginUsername 修改）`
+                        : '未配置 loginUsername，且无法推断最后控制台用户';
+                }
+            } else {
+                if (loginBtn) loginBtn.style.display = 'none';
+                if (unlockBtn) unlockBtn.style.display = '';
+                if (onekeyBtn) onekeyBtn.style.display = '';
+                if (label) label.textContent = '屏幕已锁定';
+                if (input) input.placeholder = '输入密码解锁';
+                // 是否收遮罩由 screen_locked 决定（登录成功后 helper 会报 false）
+            }
+        }
+
+        function requestRemoteLogin() {
+            if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
+            const input = document.getElementById('lock-password');
+            const btn = document.getElementById('lock-login-btn');
+            const pwd = input ? input.value : '';
+            if (btn) { btn.disabled = true; btn.textContent = '登录中…'; }
+            // 密码留空 = 服务端复用 server_config.json 的 unlockPassword（只此一个密码源）；
+            // 填了就用这次输入的值。username 留空 = 服务端取 loginUsername / 最后控制台用户。
+            send({
+                type: 'system_action', action: 'login_screen',
+                username: state.loginUsername || '', password: pwd,
+            });
+            setTimeout(resetLockButtons, 25000);
+        }
+
+        function onLoginResult(msg) {
+            const hint = document.getElementById('lock-hint');
+            const input = document.getElementById('lock-password');
+            const btn = document.getElementById('lock-login-btn');
+            if (msg.ok && msg.pending) {
+                if (hint) hint.textContent = msg.message || '正在登录…';
+                showTransferStatus(msg.message || '正在登录…', 3000);
+                return;
+            }
+            if (btn) { btn.disabled = false; btn.textContent = '远程登录'; }
+            if (msg.ok) {
+                document.getElementById('lock-overlay').classList.remove('active');
+                state.loginScreen = false;
+                if (input) input.value = '';
+                if (hint) hint.textContent = '';
+                hideLockRetry();
+                resetLockButtons();
+                showTransferStatus(msg.message || '远程登录成功', 5000);
+                return;
+            }
+            const reason = msg.reason || '';
+            if (reason === 'wrong_password') {
+                if (hint) hint.textContent = '密码未通过远端验证。请手动输入该账户密码后点「远程登录」，'
+                    + '或检查 server_config.json 的 unlockPassword。';
+            } else if (reason === 'user_not_found') {
+                if (hint) hint.textContent = '登录界面上没有该账户（本轮未键入密码）：'
+                    + (msg.message || '');
+            } else if (reason === 'not_logon_ui') {
+                if (hint) hint.textContent = '远端当前不是可操作的登录界面：' + (msg.message || '');
+            } else if (reason === 'no_console_session') {
+                if (hint) hint.textContent = '远端没有活动的控制台会话，无法远程登录。';
+            } else if (reason === 'no_credentials') {
+                if (hint) hint.textContent = msg.message || '未配置登录账户或密码。';
+            } else if (reason === 'unconfirmed') {
+                if (hint) hint.textContent = '未确认登录结果，本轮没有连环重试：' + (msg.message || '');
+            } else if (reason === 'stuck_dialog') {
+                if (hint) hint.textContent = '登录界面残留错误提示，无法自动回到用户磁贴列表'
+                    + '（本轮未键入密码）。请在 VM 控制台手动关闭提示后重试：' + (msg.message || '');
+            } else if (reason === 'injecting' || reason === 'confirming') {
+                return;
+            } else {
+                if (hint) hint.textContent = msg.message || '远程登录失败（未知原因）';
+            }
+            if (input) input.focus();
         }
 
         // 恢复锁屏按钮的常态文案/可用性（解锁成功、失败、解锁状态变化都调用）
@@ -3332,13 +3729,22 @@
             if (b) { b.disabled = false; b.textContent = '解锁'; }
             const o = document.getElementById('lock-onekey-btn');
             if (o) { o.disabled = false; o.textContent = '一键解锁'; }
+            // [C] 「重试」只恢复可用性/文案，可见性由 showLockRetry/hideLockRetry 管
+            const r = document.getElementById('lock-retry-btn');
+            if (r) { r.disabled = false; r.textContent = '重试'; }
+            // [LOGIN] 远程登录按钮：可见性由 applyLoginMode 管（若已被 reset 监听器
+            // 在 25s 安全网里提前恢复，登录模式仍应可再次点击）
+            const l = document.getElementById('lock-login-btn');
+            if (l) { l.disabled = false; l.textContent = '远程登录'; }
         }
 
         // 锁定密码输入
         function sendChar(char, isDown) {
             // codePointAt 而非 charCodeAt：emoji 等 astral 字符在 JS 里是代理对，
             // charCodeAt 只取到高代理码点（0xD800 段），远端收到错误按键。
-            send({ type: isDown ? 'keydown' : 'keyup', keycode: char.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
+            // lock:true 标明这是锁屏密码逐字注入：服务端的"中文输入"门禁（关闭态
+            // 丢弃 isChar）必须放行它，否则开关关闭的用户永远解不开锁。
+            send({ type: isDown ? 'keydown' : 'keyup', keycode: char.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true, lock: true });
         }
         function unlockScreen() {
             if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
@@ -3391,7 +3797,8 @@
         document.addEventListener('keydown', (e) => {
             if (e.isComposing) return;
             if (e.key === 'Enter' && document.getElementById('lock-overlay').classList.contains('active') && document.activeElement === document.getElementById('lock-password')) {
-                unlockScreen();
+                if (state.loginScreen) requestRemoteLogin();
+                else unlockScreen();
             }
         });
 
@@ -3528,6 +3935,10 @@
             window.addEventListener('compositionend', (e) => {
                 // 观看模式：输入法上屏的文字同样不能发往远端
                 if (state.viewOnly) return;
+                // 中文输入开关关闭（默认）：不上屏。开关关闭态只允许键码注入，
+                // 这里一个 isChar 都不发 —— 服务端也就不会走 sendUnicodeChar
+                //（借键码/改远端键盘映射/定时器队列）那条路径。
+                if (!state.chineseInput) return;
                 if (e.data) {
                     for (const ch of e.data) {
                         send({ type: 'keydown', keycode: ch.codePointAt(0), code: '', ctrl: false, alt: false, shift: false, isChar: true });
@@ -3556,6 +3967,43 @@
                 return overlay && overlay.classList.contains('active') &&
                     document.activeElement === document.getElementById('lock-password');
             }
+            // [P0 IME 首键] Chrome 在 IME 组合开始**之前**会先发一次 isComposing=false
+            // 的可打印键 keydown（就是拼音首字母，如 "测试" 的 c、"中文" 的 z），而组合
+            // 期间的 keyup 被下面的过滤规则丢弃 → 远端那枚键永久"按住"，X 服务器的自动
+            // 重复（500ms 延迟 / 20Hz）会把它灌成一串垃圾字母：实测 "cccc测试""zzzzz中文"。
+            //
+            // 历史做法：给可打印键加 30ms 守卫定时器（kImeGuardMs），到点先发 keydown，
+            // 若期间来了 compositionstart 就把 pending 丢掉。这等于在赌"输入法多久开始
+            // 组合"：CDP 模拟时 keydown→compositionstart 通常 <30ms，测不出问题；但真实
+            // 输入法该间隔在 30~200ms+ 之间浮动（实测浏览器客户端 30/60/100/200ms 档
+            // 全部漏字，仅 ≤20ms 才不漏），只要超过守卫值，首字母就先被发出去，
+            // compositionstart 之后只能补一个 keyup → 远端得到一颗"孤儿字母"：
+            //   "怎么都…没有了…呢" 实测落盘为 "z怎么 d都 m没有了 n呢"。
+            //
+            // 现在不再用定时器抢跑，改为**可打印键先挂起、由后续事件定夺**：
+            //   · keyup 先到          → 普通英文/符号输入：补发 down+up（不丢字、无固定延迟）
+            //   · compositionstart 先到 → 拼音首字母：整条丢弃（远端一个字符都收不到）
+            // 挂起没有时间上限，因此与输入法快慢无关；也没有定时器，不会给正常打字加延迟。
+            // 挂起只在"中文输入"开关打开时生效（见 setChineseInput）；关闭态直接发送。
+            const pendingKeydowns = new Map();   // code -> payload（已按下但未发往远端）
+            const MODIFIER_CODES = new Set(['ControlLeft', 'ControlRight', 'ShiftLeft',
+                'ShiftRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight']);
+            window.addEventListener('compositionstart', () => {
+                // 丢弃还没发出的拼音首键（同时把它的本地按下记账一起删掉，
+                // 否则兜底分支会给一个从没发过 keydown 的键补 keyup）
+                for (const code of pendingKeydowns.keys())
+                    state.keysPressed.delete(code);
+                pendingKeydowns.clear();
+                // 兜底：已经发过去但 keyup 被组合态吃掉的键，立刻补发抬起，
+                // 不让远端留着卡键（Win 键/修饰键不动，避免打断组合键）。
+                for (const [code, keycode] of Array.from(state.keysPressed)) {
+                    if (MODIFIER_CODES.has(code)) continue;
+                    state.keysPressed.delete(code);
+                    send({ type: 'keyup', keycode, code, ctrl: false, alt: false,
+                           shift: false, meta: false });
+                }
+            }, true);
+
             // 捕获阶段处理并 stopPropagation：远程会话期间按键不应再被页面里的
             // 其它监听器（Chrome 插件的字母快捷键、统计脚本等）看到。用捕获阶段
             // 是因为 window 捕获先于 document/目标的任何监听器，不依赖注册顺序；
@@ -3613,26 +4061,75 @@
                 // 非 repeat 的重复 keydown 只去重本地记账，但也不能再传播给页面
                 e.stopPropagation();
                 // [B18] 长按按键浏览器会发 repeat=true 的连续 keydown：这些必须继续
-                // 转发，远端才有自动重复语义（否则长按只出一个字符）。
+                // 转发，远端才有重复语义（否则长按只出一个字符）。
                 // keysPressed 去重只拦截非 repeat 的重复事件。
+                // 服务端收到一次 repeat 会统一翻译成"先松再按"（keyup + keydown，
+                // 所有平台一致，不依赖 X 的自动重复）。前端只需保证 repeat 事件照常
+                // 带着 repeat:true 发出去，不要在这里自行补发 down/up。
                 if (state.keysPressed.has(e.code) && !e.repeat) return;
 
                 state.keysPressed.set(e.code, e.keyCode);
-                send({
+                const kd = {
                     type: 'keydown',
                     keycode: e.keyCode,
                     code: e.code,
                     ctrl: e.ctrlKey,
                     alt: e.altKey,
                     shift: e.shiftKey,
-                    meta: e.metaKey
-                });
+                    meta: e.metaKey,
+                    // repeat 标记交给服务端处理：服务端把一次 repeat 翻译成
+                    // "先松再按"（所有平台一致）。前端不做本地翻译、也不额外补发 keyup。
+                    repeat: e.repeat === true
+                };
+                // 中文输入开关打开时，可打印单字符键（不带 Ctrl/Alt/Meta）先挂起，
+                // 由 keyup / compositionstart 定夺（见上方 [P0 IME 首键] 注释）。
+                // 关闭态（默认）直接发送，不进队列、不加任何延迟。
+                const isPlainChar = !e.repeat && typeof e.key === 'string'
+                    && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey
+                    && !e.isComposing && state.chineseInput;
+                if (isPlainChar) {
+                    pendingKeydowns.set(e.code, kd);
+                } else if (e.repeat && pendingKeydowns.has(e.code)) {
+                    // 长按：收到第一个 repeat 说明这枚键不是拼音首字母（真的组合开始时
+                    // keydown 会带 isComposing 提前 return）。先把挂起的初始 keydown
+                    // 发出去（出一个字），再补发这一条 repeat —— 服务端会把它翻译成
+                    // 一次"先松再按"，再出一个字。
+                    send(pendingKeydowns.get(e.code));
+                    pendingKeydowns.delete(e.code);
+                    send(kd);
+                } else {
+                    send(kd);
+                }
             }, true);
 
             window.addEventListener('keyup', (e) => {
                 // 观看模式：没有转发过 keydown，也不应补发 keyup
                 if (state.viewOnly) return;
                 if (isLockInputFocused()) return;
+                // IME 首键挂起：这枚键的 keydown 还压在 pendingKeydowns 里没发。
+                //  ● 正常打字（keyup 先到）：立刻补发 down+up，不丢字（无固定延迟，
+                //    只在松手这一刻发，按住期间不会被提前发出）；
+                //  ● 组合态（拼音首字母，keyup 的 isComposing=true）：整条丢弃，
+                //    远端一个字符都收不到，由 compositionend 的 isChar 上屏。
+                const pend = pendingKeydowns.get(e.code);
+                if (pend) {
+                    pendingKeydowns.delete(e.code);
+                    state.keysPressed.delete(e.code);
+                    if (!(e.isComposing || e.keyCode === 229)) {
+                        e.stopPropagation();
+                        send(pend);
+                        send({
+                            type: 'keyup',
+                            keycode: pend.keycode,
+                            code: pend.code,
+                            ctrl: e.ctrlKey,
+                            alt: e.altKey,
+                            shift: e.shiftKey,
+                            meta: e.metaKey
+                        });
+                    }
+                    return;
+                }
                 // [B13] IME 组合期间的 keyup 不下发：keydown 已过滤 isComposing，
                 // 若 keyup 放行会造出"孤立 keyup"，中文输入时远端键位错乱/卡键
                 if (e.isComposing || e.keyCode === 229) {
@@ -3661,6 +4158,11 @@
             // 鼠标按钮按原按下点补发：窗口失焦时没有鼠标位置可用。
             state.releaseHeldRemoteInput = () => {
                 cancelPendingMove();
+                // IME 首键挂起里还压着没发出的 keydown：直接丢掉。远端从没收到 down，
+                // 若跟着 keysPressed 一起补 up，就是一条孤立 keyup。
+                for (const code of pendingKeydowns.keys())
+                    state.keysPressed.delete(code);
+                pendingKeydowns.clear();
                 pressedButtons.forEach((pos, button) => {
                     send({ type: 'mouseup', x: pos.x, y: pos.y, button: button });
                 });
@@ -3973,7 +4475,10 @@
                             // 观看模式也是纯前端状态（服务端只记只读标记）
                             : (key === 'viewonly')
                                 ? (state.viewOnly ? 'on' : 'off')
-                                : String(cfg[key]);
+                                // 中文输入同样是纯前端状态（服务端只记每连接标记）
+                                : (key === 'chineseinput')
+                                    ? (state.chineseInput ? 'on' : 'off')
+                                    : String(cfg[key]);
                 group.querySelectorAll('button').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.value === val);
                 });
@@ -4019,6 +4524,11 @@
                 // 观看模式：纯前端开关 + 服务端权威记录（见 setViewOnly）
                 setViewOnly(val === 'on');
                 return; // setViewOnly 内部已刷新高亮，不需要再走下面的配置分支
+            }
+            if (key === 'chineseinput') {
+                // 中文输入：纯前端开关 + 每连接声明（见 setChineseInput）
+                setChineseInput(val === 'on');
+                return; // setChineseInput 内部已刷新高亮
             }
             if (key === 'quality') {
                 const fps = state.currentConfig.fps;

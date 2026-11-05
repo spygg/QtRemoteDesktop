@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QMessageLogContext>
 #include <QTimer>
 
@@ -15,6 +16,8 @@
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
 void applyLogLevelFromArgs(int argc, char* argv[]);
+// 安装目录 ACL 固化（定义在 install() 之后，见下方说明）
+static bool ensureInstallDirAcl(QString* why);
 
 #define SERVICE_NAME L"QtRemoteDesktop"
 
@@ -228,6 +231,14 @@ void WINAPI WindowsService::serviceMain(DWORD argc, LPWSTR* argv)
         QDir().mkpath(logDir);
         qInstallMessageHandler(logToFile);
 
+        // 升级路径同样要保证安装目录 ACL：现场升级是「换 exe + 启服务」，不会跑
+        // --install。这里在每次启动时幂等校正一次；失败只记日志、不阻断启动。
+        {
+            QString why;
+            if (!ensureInstallDirAcl(&why))
+                qWarning() << "Service: install dir ACL not applied:" << why;
+        }
+
         RDPServer server;
 
         if (!server.initialize(QString(), true, true)) {
@@ -379,6 +390,16 @@ bool WindowsService::install()
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(NULL, path, MAX_PATH);
 
+    // 安装目录 ACL 固化（部署步骤）：Win7 实测 C:\bin 只授权给安装者/Administrators/
+    // SYSTEM，非管理员账户登录后 helper 以 user-token 运行，加载 Qt DLL 失败
+    // （0xC0000135），桌面起不来。这里把「Users 可读可执行安装目录」写进安装流程，
+    // 失败只告警、不阻断安装。详见 ensureInstallDirAcl()。
+    {
+        QString why;
+        if (!ensureInstallDirAcl(&why))
+            wprintf(L"Warning: install dir ACL not applied: %ls\n", why.toStdWString().c_str());
+    }
+
     wchar_t cmdLine[MAX_PATH + 32];
     // [B8] 宽字符 printf 格式必须用 %ls：%S 在 MSVC 宽格式里表示窄字符串，
     // 传入 wchar_t* 是 UB，服务安装路径会损坏（MinGW 下同样不可依赖）。
@@ -408,6 +429,98 @@ bool WindowsService::install()
     wprintf(L"CreateServiceW failed: %lu\n", GetLastError());
     CloseServiceHandle(scm);
     return FALSE;
+}
+
+// ---------------------------------------------------------------------------
+// 安装目录 ACL 固化（安装 / 升级路径，幂等）
+//
+// 背景（2026-11 Win7 实测）：C:\bin 只授权给 安装者/Administrators/SYSTEM。非管理员
+// 账户登录后，服务用该用户令牌拉起的 helper 加载 C:\bin 下的 Qt DLL 失败
+// （0xC0000135），桌面起不来；手工补一条 BUILTIN\Users:(OI)(CI)(RX) 才恢复。
+//
+// 固化规则：
+//   · 用 SID（*S-1-5-32-545）而不是本地化组名，英文/中文/其它语言系统一致；
+//   · 只授予安装目录（exe/DLL/资源所在的层级）：Users 读+执行、可遍历；
+//     ACL 是集合，重复 grant 同一条不会叠加 —— 幂等；
+//   · logs/crashdumps/bearer 属于数据目录（日志可能含敏感信息），不跟着继承放宽：
+//     显式去掉继承、只保留 管理员 + SYSTEM 的完全控制；
+//   · 任何一步失败只返回原因给调用方记日志，绝不阻断安装/启动；
+//     XP 没有 icacls，CreateProcess 直接失败 → 同样只记日志。
+// ---------------------------------------------------------------------------
+static QString exeDirPath()
+{
+    wchar_t path[MAX_PATH] = { 0 };
+    if (!GetModuleFileNameW(NULL, path, MAX_PATH))
+        return QString();
+    const QString full = QString::fromWCharArray(path);
+    const int slash = full.lastIndexOf(QLatin1Char('\\'));
+    return slash > 1 ? full.left(slash) : QString();
+}
+
+static bool runIcacls(const QString& args, int* exitCode)
+{
+    const QString cmd = QStringLiteral("icacls.exe ") + args;
+    std::wstring wcmd = cmd.toStdWString();
+    STARTUPINFOW si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+    if (!CreateProcessW(nullptr, const_cast<LPWSTR>(wcmd.c_str()), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        *exitCode = -1;
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, 20000);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    *exitCode = static_cast<int>(code);
+    return true;
+}
+
+static bool ensureInstallDirAcl(QString* why)
+{
+    // XP 没有 icacls（其 C:\bin 也是普通目录 ACL，无需固化）：跳过，不刷错误日志。
+    const QString icaclsPath = QString::fromLocal8Bit(qgetenv("SystemRoot"))
+                               + QStringLiteral("/System32/icacls.exe");
+    if (!QFile::exists(icaclsPath))
+        return true;
+
+    const QString dir = exeDirPath();
+    if (dir.isEmpty()) {
+        *why = QStringLiteral("cannot resolve install dir");
+        return false;
+    }
+    int rc = 0;
+    if (!runIcacls(QStringLiteral("\"%1\" /grant *S-1-5-32-545:(OI)(CI)(RX)").arg(dir), &rc)) {
+        *why = QStringLiteral("cannot start icacls");
+        return false;
+    }
+    if (rc != 0) {
+        *why = QStringLiteral("icacls grant on %1 failed rc=%2").arg(dir).arg(rc);
+        return false;
+    }
+    static const char* const kSensitiveDirs[] = { "logs", "crashdumps", "bearer" };
+    for (const char* sub : kSensitiveDirs) {
+        const QString p = dir + QLatin1Char('\\') + QLatin1String(sub);
+        if (!QDir(p).exists())
+            continue;
+        int rc2 = 0;
+        // 去掉从安装目录继承来的 Users 读权限，只留 管理员 + SYSTEM。
+        if (!runIcacls(QStringLiteral("\"%1\" /inheritance:r /grant:r "
+                                      "*S-1-5-32-544:(OI)(CI)(F) *S-1-5-18:(OI)(CI)(F)")
+                           .arg(p),
+                       &rc2)
+            || rc2 != 0) {
+            *why = QStringLiteral("icacls harden %1 failed rc=%2").arg(p).arg(rc2);
+            return false;
+        }
+    }
+    return true;
 }
 
 bool WindowsService::uninstall()

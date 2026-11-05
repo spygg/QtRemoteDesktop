@@ -36,3 +36,10 @@ if(ENABLE_WEBRTC)
     target_link_libraries(${RDP_SERVER} PUBLIC WebRtcSession)
     target_compile_definitions(${RDP_SERVER} PUBLIC USE_WEBRTC)
 endif()
+
+if(WIN32)
+    # [Win-登录] WTSQuerySessionInformationW（查 console 会话用户名做登录确认）
+    # + NetUserGetInfoW（登录前校验账户是否存在，避免盲打密码）。
+    # 两者在 XP 与 Vista+ 都由系统自带 DLL 提供。
+    target_link_libraries(${RDP_SERVER} PUBLIC wtsapi32 netapi32)
+endif()

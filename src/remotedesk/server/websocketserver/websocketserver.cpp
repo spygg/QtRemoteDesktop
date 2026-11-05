@@ -328,6 +328,18 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             if (secureInputSource_ == socket)
                 secureInputLastPongMs_ = QDateTime::currentMSecsSinceEpoch();
         });
+        // [B] 这条通道本来是单向的，唯一的上行是 secure-input 拒绝注入密码时的
+        // 原因上报（unlock_blocked）。只转发 JSON 对象，其余上行文本忽略。
+        connect(socket, &QWebSocket::textMessageReceived, this, [this, socket](const QString& text) {
+            if (secureInputSource_ != socket)
+                return;
+            QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
+            if (!doc.isObject()) {
+                qWarning() << "Secure input helper sent non-JSON text, ignored";
+                return;
+            }
+            emit secureInputMessageReceived(doc.object());
+        });
         connect(socket, &QWebSocket::disconnected, this, [this, socket]() {
             qWarning() << "Secure input helper disconnected";
             if (secureInputSource_ == socket) {

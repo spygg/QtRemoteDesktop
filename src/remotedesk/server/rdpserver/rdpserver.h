@@ -144,7 +144,12 @@ public:
     // 浏览器 WS 完全相同的处理路径。
     // clientId 传空串是安全的：所有 sendJson 都按 clientId 查表，查不到即 no-op，
     // 而 broadcastJson 照常把结果发给所有在线页面。
-    void applyConfigFromHttp(const QJsonObject& cfg);
+    // 返回值表示配置是否真正被接受：非法/空配置返回 false 并给出原因，
+    // HTTP 侧据此返回 4xx，不再"失败也 200 success"。
+    bool applyConfigFromHttp(const QJsonObject& cfg, QString* error = nullptr);
+    // set_resolution 的公共实现（WS 与 HTTP 入口共用）：返回分辨率是否切换成功，
+    // 失败时按 clientId 回发 error（空 id 时为 no-op）。
+    bool applyResolutionChange(int w, int h, const QString& clientId);
 
     // [A17] 剪贴板轮询的挂起状态由"helper 通道活跃"与"没有观众"两个条件合成：
     // X11 CLI 后端每秒 fork 两次 xclip（实测 20s 内 33 次 execve ≈14 万进程/天），
@@ -268,6 +273,13 @@ private:
     // 对象断开全部信号后**故意泄漏**于此，绝不析构（析构路径 qFatal 会连坐服务）。
     // 线程真正退出后由 reapRetiredEncoders() 安全回收，避免反复卡死无限累积。
     std::vector<std::unique_ptr<VideoEncoder>> retiredEncoders_;
+    // 编码器代际：每次创建/退役都递增。已投递到主线程队列的旧 encodedFrame /
+    // codecConfigChanged 靠创建时捕获的代际号丢弃，避免旧帧/旧 avcC 混入新实例。
+    quint64 videoEncoderGeneration_ = 0;
+    // 硬编退役后旧线程短超时未退出时，推迟新实例创建；墓地回收器在旧线程退出
+    // 后（或等待超过上限后）再重建，避免新硬编 open 撞上旧实例仍占用的设备。
+    bool videoRebuildPending_ = false;
+    qint64 videoRebuildPendingSinceMs_ = 0;
     // 缓存最近一帧关键帧，用于新客户端接入时立即回放以引导出图
     // （静态桌面抓取去重不会主动出帧，否则新客户端永远等不到关键帧而黑屏）。
     QByteArray lastKeyframeData_;
@@ -307,6 +319,9 @@ private:
     // 不认 flush + pict_type=I 仍输出 P 帧，需要超时兜底重建编码器才能真的产出 IDR。
     qint64 idrRequestMs_ = 0;
     QTimer* idrFallbackTimer_ = nullptr;
+    // [ASYNC-RETIRE] 退役编码器的回收定时器：退役只置 abort_ 唤醒编码线程，
+    // 线程真正退出后由它把墓地对象安全析构，主线程不再同步等最长 8s。
+    QTimer* retiredEncoderReapTimer_ = nullptr;
     // PLI 处理计数（诊断：复用缓存 IDR vs 重新出帧）。
     quint64 pliReuseCount_ = 0;
     quint64 pliEncodeCount_ = 0;
@@ -424,6 +439,21 @@ private:
     // [Win-解锁] 一键免密解锁用的明文密码（server_config.json 的 unlockPassword，
     // 局域网自用场景）。锁屏 UI 在 winlogon 安全桌面，只能经 secure-input 注入。
     QString unlockPassword_;
+    // [Win-登录] 登录界面远程登录（login_screen）使用的账户名（server_config.json
+    // 的 loginUsername）。空 = 取"最后控制台用户"（注册表 LastLoggedOnUser）。
+    // 密码不另设来源，复用上面的 unlockPassword_。
+    QString loginUsername_;
+    // [Win-登录] 是否处于"停在登录界面且没有用户会话"状态（服务侧周期探测）。
+    // 与 screenLocked_ 独立：登录界面没有 helper，screenLocked_ 可能一直为 false，
+    // 但前端仍需要「远程登录」入口，键盘/鼠标也必须转发到 secure-input。
+    bool loginScreenActive_ = false;
+    // 登录序列状态机：同一时刻只允许一轮；seq 让旧回调自动失效。
+    int loginSeq_ = 0;
+    bool loginPending_ = false;
+    bool loginFinalSent_ = false;
+    bool loginTyped_ = false;
+    QString loginPendingClientId_;
+    QString loginPendingUser_;
     // 前端页面标题的自定义系统名称（server_config.json 的 systemName，如
     // "办公室-242"）。空则回退主机名。多台被控机靠它区分标签页。
     QString systemName_;
@@ -438,6 +468,46 @@ private:
     // 健康判定据此杀掉正在写密码的进程，第一次尝试全废，XP 解锁从 ~2s 拖到 ~9s。
     // 用到期时间而非 bool：终判定时器若因 helper 掉线没跑，也不会把门禁永久留着。
     qint64 secureInputUnlockUntilMs_ = 0;
+    // [B] 最近一次解锁请求的客户端：secure-input 的注入前目标校验拒绝注入时，
+    // 把原因（unlock_progress: blocked/uncertain）转成 unlock_result 回给这个客户端，
+    // 避免只回一句笼统的"密码未通过验证"。
+    // [C] 解锁序列状态机（配套字段在下面）：
+    //   unlockSeq_            每次 unlock_screen 自增；所有延时回调都校验它，
+    //                         新请求 / 解锁成功都会让上一轮的定时器自动失效；
+    //   secureUnlockTyped_    本轮是否真的把密码键入了（secure-input 的 typed 上报）；
+    //   secureUnlockDefinite_ 本轮是否被**明确**拒绝（not_logon_ui，如错误密码弹窗）。
+    //                         这两个标志决定 8s 重试还要不要发：Vista+ 有键入 → 不重试。
+    QString secureInputUnlockClientId_;
+    int unlockSeq_ = 0;
+    bool secureUnlockTyped_ = false;
+    bool secureUnlockDefinite_ = false;
+    bool secureUnlockBlockedReported_ = false;
+    // [LOCK] 锁屏请求的回执窗口（Windows 服务模式）：lock 必须由用户会话里的 helper
+    // 执行，服务只在 Session 0 里调 rundll32 属于空操作（屏幕没锁、界面却显示"已锁"）。
+    // 转发后等三种收尾之一：helper 的 system_action_result ack、helper 报
+    // screen_locked=true、或超时。lockSeq_ 每次请求自增，连点时只认最后一次；
+    // 超时后再用 console 会话令牌兜底补发一次，仍无确认才回 timeout。
+    bool lockPending_ = false;
+    QString lockPendingClientId_;
+    int lockPendingSeq_ = 0;
+    int lockSeq_ = 0;
+    // [SYS-ACT] logout/reboot/poweroff 的回执窗口（Windows，与 lock 同一范式）：
+    // 这些动作只能在用户会话里执行（服务在 Session 0 调 shutdown 是空操作）。
+    // 服务模式：helper 在 → 转发 + 3s 预算 + 回 <action>_result；helper 不在 →
+    // 立即 no_helper，绝不本地"猜着执行"。同一时刻只允许一个系统操作在途。
+    bool sysActionPending_ = false;
+    QString sysActionPendingClientId_;
+    QString sysActionPendingAction_;
+    int sysActionPendingSeq_ = 0;
+    int sysActionSeq_ = 0;
+    // [SYS-ACT] logout 专用：ACK 之后继续等"会话开始销毁"的证据。baseline 在
+    // 下发 logout 时记录（当时若已锁屏，LogonUI 可能已在跑，就不能再拿它当信号）。
+    bool logoutConfirmPending_ = false;
+    int logoutConfirmSeq_ = 0;
+    QString logoutConfirmClientId_;
+    int logoutConfirmTries_ = 0;
+    bool logoutLogonUiBefore_ = false;
+    bool logoutExplorerBefore_ = false;
     bool captureAvailable_ = true;
     // 采集启动重入保护：startCapture() 全程置位（Wayland 初始化/切换视频模式
     // 都在其中），期间巡检定时器与 set_resolution 必须跳过，否则会释放/重启
@@ -455,6 +525,10 @@ private:
     // 观看模式（只读）客户端：只推送画面，任何"能操作被控端"的消息在
     // onInputReceived 入口丢弃。按连接记录，断线时清理（clientId 可能被复用）。
     QSet<QString> viewOnlyClients_;
+    // 中文输入（IME 上屏）开启的客户端：只有这些连接允许 isChar（Unicode 注入）。
+    // 默认关闭 —— 老客户端不发 set_chinese_input，按关闭处理；关闭态收到 isChar
+    // 在 onInputReceived 入口静默丢弃（不借键码、不改键表、不进定时器队列）。
+    QSet<QString> chineseInputClients_;
 
     // 每个 HTTP 连接的请求解析状态（跨 readyRead 累积，避免主线程阻塞）
     QHash<QTcpSocket*, HttpParseState> httpParseState_;
@@ -507,6 +581,14 @@ private:
     VideoEncoder* ensureVideoEncoder();
     // 回收墓地中线程已退出的退役编码器（见 retiredEncoders_）
     void reapRetiredEncoders();
+    // [ASYNC-RETIRE] 退役当前 videoEncoder_：先断开全部信号（数据源切走，
+    // 在途帧不再回调主线程），再 beginRetire() 唤醒编码线程；硬编短超时等线程退出，
+    // 已退出则立即析构释放设备，否则把对象移入墓地交给 retiredEncoderReapTimer_。
+    // onlyIfIdle 且有在飞帧时返回 false（未做任何改动，调用方应稍后重试）。
+    bool retireVideoEncoderAsync(bool onlyIfIdle, bool* threadStopped = nullptr);
+    // 墓地硬上限回收：先复用 stoppable 的对象；仍卡死的对象线程可能还在触碰
+    // codecCtx_/mpp_，无法安全析构，只能放弃所有权（release）以阻止 vector 无限增长。
+    void capRetiredEncoders();
 #endif
 
     void loadServerConfig(const QString& configPath);
@@ -538,7 +620,52 @@ private:
     // ---- 系统操作（快捷键面板） ----
     // 执行被控端系统动作：lock/show_desktop/task_manager/logout/reboot/poweroff
     void handleSystemAction(const QString& action, const QString& clientId,
-                            const QString& password = QString());
+                            const QString& password = QString(),
+                            const QString& username = QString());
+#ifdef _WIN32
+    // [LOCK] Windows 的 lock 三态：helper 在 → 转发 + ack/超时；helper 不在 →
+    // 立即 no_helper（绝不退回 Session 0）；非服务模式 → 本会话直接执行。
+    void handleWindowsLock(const QString& clientId);
+    // [SYS-ACT] logout / reboot / poweroff 的回执（Windows）：
+    //   非服务模式 → 本会话直接跑 shutdown 并等退出码；
+    //   服务模式 + helper 在 → 转发 system_action，3s 内等 helper 的
+    //     system_action_result（helper 依据 shutdown 的真实退出码回 ok）；
+    //   服务模式 + helper 不在 → 立即 {ok:false, reason:"no_helper"}，零副作用。
+    // reboot/poweroff 属于破坏性动作：服务端只在 helper 已连接时才下发。
+    void handleWindowsSysAction(const QString& action, const QString& clientId);
+    // [Win-登录] 登录界面远程登录：不依赖用户令牌，服务用 SYSTEM 令牌把
+    // secure-input 投到 console 会话的 winlogon 桌面；Vista+ 找用户磁贴后注入，
+    // XP 走 #32770。最终结果必须由会话用户名确认（confirmed / wrong_password /
+    // unconfirmed），不凭"已注入"就算成功。
+    void handleWindowsLoginScreen(const QString& clientId, const QString& username,
+                                  const QString& password);
+    // secure-input 的 login_progress 中转（typed / blocked / uncertain）。
+    void handleLoginProgress(const QJsonObject& msg);
+    void tickLoginConfirmation(int seq, int attempt);
+    // 周期探测"控制台会话停在登录界面且无用户"，状态变化时广播
+    // login_screen_state（active / username），供前端显示「远程登录」。
+    void startLoginScreenWatcher();
+    void updateLoginScreenState();
+    QString effectiveLoginUsername() const;
+    // [SYS-ACT] logout 完成性确认：helper 的 shutdown 退出码 0 只说明命令被
+    // 交互会话接受，不代表会话已经开始销毁（XP 实测 ACK 后约 0.6s 才出现
+    // 注销/登录界面，explorer 要 8~10s 才退出）。因此 ACK 后再等 ≤3s，
+    // 观察到登录 UI 出现或用户 shell 退出才回 ok，否则 unconfirmed。
+    void beginLogoutConfirmation(const QString& clientId, int seq);
+    void tickLogoutConfirmation();
+    // [LOCK] 兜底：用 console 会话的登录用户令牌（无用户则服务令牌 + 改会话号）
+    // 在用户会话里跑一次性 --lock-once 进程，并用它的退出码（LockWorkStation 的
+    // 真实 BOOL）作为 ack。
+    // [B3] 等待放到工作线程里做，主线程只收回调（3s 硬预算见 kLockFallbackBudgetMs）。
+    // helperTimedOut 只影响失败时的 reason：helper 3s 没回执 → timeout；
+    // XP / 直接兜底 → lock_failed。
+    void startLockFallback(int seq, const QString& clientId, bool helperTimedOut);
+    void finishWindowsLockFallback(int seq, const QString& clientId, bool ok,
+                                   const QString& detail, bool helperTimedOut);
+    // [B1] 兜底锁定成功 → 立刻置 screenLocked_、拉起 secure-input、广播
+    // screen_locked。否则这段窗口里点「解锁」会命中 not_locked 分支。
+    void applyFallbackScreenLocked();
+#endif
 
     // ---- 输入法切换 ----
     // ibus panel 的 hotkey grab（如 Super+space）对 XTEST 注入的合成按键不响应，
@@ -551,6 +678,11 @@ private:
     // 系统操作/输入法切换一律丢弃，画质/帧率/分辨率等纯显示设置不受影响。
     // 判定放在服务端（而非只靠前端 send()）是为了防止改过的客户端或其它注入路径绕过。
     void setClientViewOnly(const QString& clientId, bool enabled);
+    // ---- 中文输入（IME 上屏） ----
+    // 切换某连接的中文输入开关。只有开启的连接允许 isChar（Unicode keysym 注入）；
+    // 关闭态（默认，含不带该字段的老客户端）在 onInputReceived 入口静默丢弃 isChar。
+    // 锁屏密码是例外：它同样走 isChar 逐字符注入，不受该开关影响。
+    void setClientChineseInput(const QString& clientId, bool enabled);
     // 释放某客户端已按下的所有键：断线，以及进入观看模式（此后的 keyup 会被拦掉）。
     void releasePressedKeys(const QString& clientId);
 

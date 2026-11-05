@@ -71,6 +71,20 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
     return msg;
 }
 
+// 浏览器在按住某键期间会持续补发 repeat=true 的 keydown。服务端**不按平台分叉**，
+// 统一把一次 repeat 翻译成"先松再按"（keyup + 原 keydown），每次 repeat 产出一个字符：
+//
+//   · Windows / macOS：SendInput / CGEvent 是合成注入，没有键盘驱动的 typematic
+//     自动重复，丢弃 repeat 就等于"长按只出一个字符"。
+//   · Linux：也不再依赖 X 服务器的原生自动重复。auto-repeat 是**显示级状态、跨进程
+//     存活**：旧版本遗留的 XAutoRepeatOff、或用户/发行版默认的 `xset r off`，都会让
+//     长按静默失效且没有任何报错。统一翻译后这条隐式依赖彻底断开，长按行为只由本
+//     服务端决定，与 X 的 repeat 开关无关（`xset r off` 下长按同样正常）。
+//
+// 翻译放在 onInputReceived 入口（注入之前）而不是注入层：直连与 helper（服务模式）
+// 两条路径都从这里分流，避免再次出现"只修了直连、helper 仍丢重复"的分叉。
+// 实现见 onInputReceived 入口的 repeat 分支。
+
 #include <QCursor>
 #include <QDateTime>
 #include <QFile>
@@ -97,6 +111,7 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #ifdef _WIN32
 #include <windows.h>
 #include <wtsapi32.h>
+#include <tlhelp32.h>
 #endif
 
 #ifdef Q_OS_LINUX
@@ -284,6 +299,42 @@ RDPServer::RDPServer(QObject* parent)
 #endif
     });
 #ifdef USE_FFMPEG
+    // [ASYNC-RETIRE] 退役编码器回收定时器：切换模式/重建时只置 abort_ 唤醒编码线程，
+    // 主线程不再同步等最长 8s。线程真正退出后（threadStopped()）才安全析构墓地对象，
+    // 因此用单次定时器周期性重扫；仍有未退出的对象就继续重挂。
+    retiredEncoderReapTimer_ = new QTimer(this);
+    retiredEncoderReapTimer_->setSingleShot(true);
+    retiredEncoderReapTimer_->setInterval(500);
+    connect(retiredEncoderReapTimer_, &QTimer::timeout, this, [this]() {
+        reapRetiredEncoders();
+        if (!retiredEncoders_.empty()) {
+            retiredEncoderReapTimer_->start();
+#ifdef USE_FFMPEG
+            if (videoRebuildPending_) {
+                // 旧硬编线程一直不退出也不能无限等：超过上限就带着风险重试，
+                // MPP 的"一次重试"策略会兜住这次失败，不会立刻永久退软编。
+                static constexpr qint64 kMaxDeferredRebuildWaitMs = 5000;
+                if (monoNowMs() - videoRebuildPendingSinceMs_ >= kMaxDeferredRebuildWaitMs) {
+                    qWarning() << "Retired HW encoder still running after" << kMaxDeferredRebuildWaitMs
+                               << "ms; attempting deferred rebuild anyway";
+                    rebuildVideoEncoder(/*onlyIfIdle=*/false);
+                }
+            }
+#endif
+            return;
+        }
+#ifdef USE_FFMPEG
+        if (videoRebuildPending_) {
+            if (currentMode_ != ServerMode::Video || !screenCapturer_) {
+                videoRebuildPending_ = false;
+                return;
+            }
+            qInfo() << "Retired HW encoder stopped; resuming deferred encoder rebuild";
+            rebuildVideoEncoder(/*onlyIfIdle=*/false);
+        }
+#endif
+    });
+
     // [PLI-REUSE] IDR 请求兜底定时器：videoEncoder_->requestKeyframe() 只是置标志，
     // 部分软编（openh264 实测）不认 avcodec_flush_buffers + frame->pict_type，flush
     // 后仍输出 P 帧。1.2s 内没等到关键帧就重建编码器（重建后首帧必为 IDR）。
@@ -396,6 +447,7 @@ RDPServer::~RDPServer()
     if (configSaveTimer_) configSaveTimer_->stop();
 #ifdef USE_FFMPEG
     if (idrFallbackTimer_) idrFallbackTimer_->stop();
+    if (retiredEncoderReapTimer_) retiredEncoderReapTimer_->stop();
 #endif
     if (webrtcKfTimer_) webrtcKfTimer_->stop();
     if (cursorTimer_) cursorTimer_->stop();
@@ -675,6 +727,9 @@ void RDPServer::loadServerConfig(const QString& configPath)
     }
     if (root.contains("unlockPassword"))
         unlockPassword_ = root["unlockPassword"].toString();
+    // [Win-登录] 登录界面远程登录的目标账户；留空时运行时取"最后控制台用户"。
+    if (root.contains("loginUsername"))
+        loginUsername_ = root["loginUsername"].toString().trimmed();
     if (root.contains("systemName"))
         systemName_ = root["systemName"].toString();
 
@@ -775,6 +830,8 @@ void RDPServer::saveServerConfig(const QString& configPath)
     // 页面标题名（前端口子里的「计算机名称」）。空 = 跟随主机名，因此必须照写：
     // 用户把自定义名清空后要能"恢复默认"，只在非空时写会让旧名字永远留着。
     root["systemName"] = systemName_;
+    // [Win-登录] 空 = 运行时取最后控制台用户，照写以支持"清空恢复默认"。
+    root["loginUsername"] = loginUsername_;
 
     // 原子替换：旧实现 QFile::remove(path) 后再 rename，两步之间进程被杀/
     // 断电会永久丢失配置文件；Windows 上 remove 失败则 rename 必失败。
@@ -914,6 +971,95 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         this, &RDPServer::onClientDisconnected);
     connect(wsServer_.get(), &WebSocketServer::inputReceived,
         this, &RDPServer::onInputReceived);
+    // [C] secure-input 的上行解锁进度：verified / typed / blocked / uncertain。
+    // 服务端据此决定"这一轮还要不要补发"，以及"要不要告诉客户端被拒绝"。
+    // 排序/去重全部在这里做：secure-input 不知道服务端的屏幕状态，也没有序列号以外
+    // 的判据可用。
+    connect(wsServer_.get(), &WebSocketServer::secureInputMessageReceived,
+        this, [this](const QJsonObject& msg) {
+            if (msg["type"].toString() != QLatin1String("unlock_progress"))
+                return;
+            const int seq = msg["seq"].toInt();
+            const QString stage = msg["stage"].toString();
+            const QString reason = msg["reason"].toString();
+            const QString text = msg["message"].toString();
+            const QString desktop = msg["desktop"].toString();
+
+            // 过期上报：上一轮解锁的、或解锁已经完成的。seq 不匹配就整条丢弃，
+            // 这样"成功后 8s 补发报 blocked"那种误报不会再出现在客户端。
+            if (seq != unlockSeq_ || secureInputUnlockClientId_.isEmpty()) {
+                qInfo() << "Service: drop stale unlock progress (stage =" << stage
+                        << ", seq =" << seq << ", current =" << unlockSeq_ << ")";
+                return;
+            }
+
+            if (stage == QLatin1String("verified")) {
+                qInfo() << "Service: unlock target verified (seq =" << seq << ")";
+                return;
+            }
+
+            if (stage == QLatin1String("typed")) {
+                // 这一轮密码真的键入了：Vista+ 绝不能再补发第二轮 —— 补发发生在
+                // 登录成功之后，会把明文密码敲进新用户的桌面/普通窗口。
+                // 同时把 15s 终判换成"看得见结果"的判据：再过 8s 屏幕还锁着，就是密码不对。
+                secureUnlockTyped_ = true;
+                qInfo() << "Service: unlock password typed (typed =" << msg["typed"].toInt()
+                        << ", dropped =" << msg["dropped"].toInt()
+                        << ", cleared =" << msg["cleared"].toInt()
+                        << ") -> no retry this round, seq =" << seq;
+                QTimer::singleShot(8000, this, [this, seq]() {
+                    if (seq != unlockSeq_ || !screenLocked_ || !secureUnlockTyped_)
+                        return;
+                    if (secureUnlockBlockedReported_)
+                        return;
+                    qWarning() << "Service: unlock still locked 8s after typed password"
+                               << "-> wrong_password";
+                    QJsonObject out;
+                    out["type"] = "unlock_result";
+                    out["ok"] = false;
+                    out["reason"] = "wrong_password";
+                    out["message"] = "密码未通过验证（unlockPassword 与 Windows 登录密码不一致？）";
+                    wsServer_->sendJson(secureInputUnlockClientId_, out);
+                });
+                return;
+            }
+
+            // blocked / uncertain：这一轮没键入任何字符。
+            const bool definite = (stage == QLatin1String("blocked"));
+            secureUnlockDefinite_ = definite;
+            qWarning() << "Service: secure-input did not inject -" << stage << reason
+                       << "desktop =" << desktop << text
+                       << "seq =" << seq;
+
+            // 屏幕已经解开 / 客户端已换：不再报"被拒绝"（否则就是"已经解开却显示被拒绝"）。
+            if (!screenLocked_ || secureInputUnlockClientId_.isEmpty())
+                return;
+            // 同一轮只报一次（uncertain 允许 8s 后补发一次，别连着报两遍）。
+            if (secureUnlockBlockedReported_)
+                return;
+            secureUnlockBlockedReported_ = true;
+
+            QJsonObject out;
+            out["type"] = "unlock_result";
+            out["ok"] = false;
+            out["blocked"] = true;
+            out["stage"] = stage;
+            out["reason"] = reason;      // not_logon_ui / uncertain / nothing_typed
+            out["message"] = text;
+            wsServer_->sendJson(secureInputUnlockClientId_, out);
+        });
+
+#ifdef Q_OS_WIN32
+    // [Win-登录] secure-input 的登录进度：typed → 服务端轮询 WTS 会话用户名做
+    // 最终确认；blocked/uncertain → 直接把固定枚举回给客户端。与 unlock_progress
+    // 共用通道，靠 type 分流，互不影响。
+    connect(wsServer_.get(), &WebSocketServer::secureInputMessageReceived,
+        this, [this](const QJsonObject& msg) {
+            if (msg["type"].toString() != QLatin1String("login_progress"))
+                return;
+            handleLoginProgress(msg);
+        });
+#endif
 
     // 剪贴板服务：系统剪贴板变化（文本/图片）→ 广播给所有客户端
     clipboardService_ = std::unique_ptr<ClipboardService>(new ClipboardService(this));
@@ -1099,6 +1245,17 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 static const bool isWinXP = !isVistaPlusOs();
 #endif
                 screenLocked_ = locked;
+                if (!locked) {
+                    // [C] 屏幕已解开 = 当前解锁序列结束：seq 自增让所有延时回调
+                    // （首轮投递 / 8s 重试 / 8s wrong_password 判定 / 15s 终判）立刻
+                    // 失效，连同已排队的 blocked 转发一起作废 —— 客户端不会再看到
+                    // "已经解开了却弹出一条解锁失败"。
+                    ++unlockSeq_;
+                    secureUnlockTyped_ = false;
+                    secureUnlockDefinite_ = false;
+                    secureUnlockBlockedReported_ = false;
+                    secureInputUnlockClientId_.clear();
+                }
                 // [B16] 与 startCapture 的处理器保持一致：坐标归一化基准 + 锁屏
                 // 焦点抓取开关。前台路径缺这两个调用 → 锁屏密码输入失焦逻辑失效、
                 // 坐标回退物理像素错位。
@@ -1211,8 +1368,30 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     lockedHint_ = screenLocked_ ? msg["hint"].toString() : QString();
                     if (screenLocked_)
                         startSecureInputProcess();
-                    else
+                    else {
                         stopSecureInputProcess();
+                        // [B] 已解锁：这一轮解锁序列（含可能的拦截上报）结束，
+                        // 清掉请求来源，避免把拦截原因回给过期的客户端。
+                        // [C] 同时作废该序列的全部延时回调与已排队的 blocked 转发：
+                        // seq 自增后，8s 重试 / 8s wrong_password / 15s 终判的 lambda
+                        // 与之后到达的 unlock_progress 都会被 seq 校验丢弃。
+                        ++unlockSeq_;
+                        secureUnlockTyped_ = false;
+                        secureUnlockDefinite_ = false;
+                        secureUnlockBlockedReported_ = false;
+                        secureInputUnlockClientId_.clear();
+                    }
+                    // [LOCK] helper 报"已锁"是比 ack 更硬的证据：等锁屏结果的客户端
+                    // 在这里收尾，之后 3s/2.5s 的兜底定时器会因 lockPending_=false 失效。
+                    if (screenLocked_ && lockPending_) {
+                        lockPending_ = false;
+                        const QString cid = lockPendingClientId_;
+                        lockPendingClientId_.clear();
+                        qInfo() << "Lock: confirmed by screen_locked=true, notify client";
+                        wsServer_->sendJson(cid, QJsonObject {
+                            { "type", "lock_result" }, { "ok", true },
+                            { "reason", "locked" }, { "message", "已锁屏" } });
+                    }
                     // 补平台标识后自行广播（随后统一 broadcastJson 会再发一次，
                     // 这里带 return 避免前端收到两条同内容消息）。
                     QJsonObject out = msg;
@@ -1221,6 +1400,66 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     out["isXP"] = !isVistaPlusOs();
 #endif
                     wsServer_->broadcastJson(out);
+                    return;
+                } else if (t == "system_action_result") {
+                    // [LOCK] helper 对系统操作的回执（服务端↔helper 的内部消息，
+                    // 绝不能广播给浏览器）。lock 用它收尾等待中的请求。
+                    const QString act = msg["action"].toString();
+                    const bool ok = msg["ok"].toBool();
+                    qInfo() << "Service: helper system_action_result action =" << act
+                            << "ok =" << ok << "detail =" << msg["detail"].toString();
+                    if (act == QLatin1String("lock") && lockPending_) {
+                        lockPending_ = false;
+                        const QString cid = lockPendingClientId_;
+                        lockPendingClientId_.clear();
+                        wsServer_->sendJson(cid, QJsonObject {
+                            { "type", "lock_result" }, { "ok", ok },
+                            { "reason", ok ? QStringLiteral("locked")
+                                           : QStringLiteral("lock_failed") },
+                            { "message", ok ? QStringLiteral("已锁屏")
+                                            : QStringLiteral("用户会话执行 LockWorkStation 失败（%1）")
+                                                  .arg(msg["detail"].toString()) } });
+                    } else if (sysActionPending_ && act == sysActionPendingAction_
+                               && (act == QLatin1String("logout") || act == QLatin1String("reboot")
+                                   || act == QLatin1String("poweroff"))) {
+                        // [SYS-ACT] helper 用 shutdown 的真实退出码回 ok。
+                        // logout 例外：退出码 0 只说明命令被交互会话接受，此时会话
+                        // 往往还没开始销毁（XP 实测：ACK 后 ~0.6s 才出现注销/登录
+                        // 界面，explorer 要 8~10s 才退出）。先不下结论，交给
+                        // beginLogoutConfirmation 在 ≤3s 内等"会话开始销毁"的证据；
+                        // 拿不到就回 unconfirmed（绝不再凭退出码报成功）。
+                        const QString cid = sysActionPendingClientId_;
+                        const QString actName = sysActionPendingAction_;
+                        const QString label = actName == QLatin1String("logout")
+                                                  ? QStringLiteral("注销")
+                                                  : actName == QLatin1String("reboot")
+                                                        ? QStringLiteral("重启")
+                                                        : QStringLiteral("关机");
+                        const QString detail = msg["detail"].toString();
+#ifdef _WIN32
+                        // 只有 Windows 的 shutdown /l 存在"退出码 0 但会话还没开始
+                        // 销毁"的窗口，需要额外确认；其它平台维持原样。
+                        if (ok && actName == QLatin1String("logout")) {
+                            beginLogoutConfirmation(cid, sysActionPendingSeq_);
+                            return;
+                        }
+#endif
+                        sysActionPending_ = false;
+                        sysActionPendingClientId_.clear();
+                        sysActionPendingAction_.clear();
+                        wsServer_->sendJson(cid, QJsonObject {
+                            { "type", actName + QStringLiteral("_result") },
+                            { "ok", ok },
+                            { "reason", ok ? QStringLiteral("initiated")
+                                           : actName + QStringLiteral("_failed") },
+                            { "message", ok ? (detail.isEmpty()
+                                                   ? QStringLiteral("已发起%1").arg(label)
+                                                   : detail)
+                                            : QStringLiteral("%1失败：%2")
+                                                  .arg(label)
+                                                  .arg(detail.isEmpty() ? QStringLiteral("shutdown 返回失败")
+                                                                        : detail) } });
+                    }
                     return;
                 } else if (t == "capture_adapt") {
                     // [ADAPT] helper 的慢机自适应结果。以前只记日志：结果只活在 helper
@@ -1330,6 +1569,45 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 updateClipboardSuspend();
                 captureVideoCapable_ = false;
                 captureHwEncode_ = false;
+                // [LOCK] helper 在等 lock 回执时掉线：本次锁屏请求已经不可能被确认，
+                // 立即如实回 + 清等待位（否则 3s 定时器还会再发一次兜底，制造噪声）。
+                if (lockPending_) {
+                    lockPending_ = false;
+                    const QString cid = lockPendingClientId_;
+                    lockPendingClientId_.clear();
+                    qWarning() << "Lock: helper disconnected while waiting ack";
+                    wsServer_->sendJson(cid, QJsonObject {
+                        { "type", "lock_result" }, { "ok", false },
+                        { "reason", "helper_lost" },
+                        { "message", "helper 在锁屏过程中断开，锁屏结果未知" } });
+                }
+                // [SYS-ACT] 注销/重启/关机在等回执时 helper 掉线：动作可能已经发出
+                // （helper 先执行再 ack），也可能没执行 —— 如实回"结果未知"，
+                // 不要猜成成功（更不能出现"界面报已关机、机器没动"）。
+                // logout 例外：helper 已经 ack 成功、正在等"会话销毁"证据时，
+                // helper 随会话被销毁而掉线是预期现象，不能在这里抢答 helper_lost，
+                // 让 beginLogoutConfirmation 继续按 LogonUI/explorer 证据判定。
+                if (sysActionPending_
+                    && !(logoutConfirmPending_
+                         && sysActionPendingAction_ == QLatin1String("logout"))) {
+                    sysActionPending_ = false;
+                    const QString cid = sysActionPendingClientId_;
+                    const QString actName = sysActionPendingAction_;
+                    sysActionPendingClientId_.clear();
+                    sysActionPendingAction_.clear();
+                    const QString label = actName == QLatin1String("logout")
+                                              ? QStringLiteral("注销")
+                                              : actName == QLatin1String("reboot")
+                                                    ? QStringLiteral("重启")
+                                                    : QStringLiteral("关机");
+                    qWarning() << "SysAction:" << actName
+                               << "helper disconnected while waiting ack";
+                    wsServer_->sendJson(cid, QJsonObject {
+                        { "type", actName + QStringLiteral("_result") }, { "ok", false },
+                        { "reason", "helper_lost" },
+                        { "message", QStringLiteral("helper 在%1过程中断开，操作可能已发出，"
+                                                    "结果未知").arg(label) } });
+                }
                 // helper 掉线且当前在视频模式：回落图片模式并通知前端（否则画面冻结无提示）
                 if (currentMode_ == ServerMode::Video)
                     switchToImageMode();
@@ -2229,7 +2507,15 @@ void RDPServer::onHttpRequest()
                 socket->disconnectFromHost();
                 return;
             }
-            applyConfigFromHttp(doc.object());
+            QString error;
+            if (!applyConfigFromHttp(doc.object(), &error)) {
+                QByteArray resp = buildHttpResponse(400, "Bad Request", "application/json; charset=utf-8",
+                    QJsonDocument(QJsonObject { { "success", false }, { "error", error } }).toJson(QJsonDocument::Compact));
+                socket->write(resp);
+                socket->flush();
+                socket->disconnectFromHost();
+                return;
+            }
             QByteArray ok = buildHttpResponse(200, "OK", "application/json; charset=utf-8",
                 QJsonDocument(QJsonObject { { "success", true } }).toJson(QJsonDocument::Compact));
             socket->write(ok);
@@ -2873,6 +3159,12 @@ void RDPServer::start()
         // 服务模式初始为图片模式；Linux 本地捕获可用时前端会发起 WebRTC，
         // startWebRtcSession 内部再切到视频模式
         currentMode_ = ServerMode::Image;
+#ifdef Q_OS_WIN32
+        // [Win-登录] 开机停在登录界面时没有 helper，也没人上报 screen_locked。
+        // 周期探测"控制台会话无用户 + LogonUI 在跑"，据此拉起 secure-input
+        // 并通知前端显示「远程登录」入口。
+        startLoginScreenWatcher();
+#endif
         qInfo() << "RDP Server started in service mode (waiting for helper connection)";
         return;
     }
@@ -2961,6 +3253,14 @@ bool RDPServer::startCapture()
         connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
             this, [this](bool locked) {
                 screenLocked_ = locked;
+                if (!locked) {
+                    // [C] 与前台路径一致：解锁即作废本解锁序列的延时回调/待发 blocked。
+                    ++unlockSeq_;
+                    secureUnlockTyped_ = false;
+                    secureUnlockDefinite_ = false;
+                    secureUnlockBlockedReported_ = false;
+                    secureInputUnlockClientId_.clear();
+                }
                 // 输入坐标归一化基准与前端 canvas（screen_info）保持一致
                 if (inputManager_) {
                     inputManager_->setScreenSize(screenCapturer_->width(), screenCapturer_->height());
@@ -3118,9 +3418,18 @@ bool RDPServer::restartCapture()
     screenLocked_ = false;
     // 重启采集会丢掉旧的锁屏状态，但已连接前端的遮罩不会自动收起（新捕获器
     // 只在状态"变化"时才发 screen_locked）→ 必须主动广播一次解锁。
-    if (wasLocked && wsServer_)
-        wsServer_->broadcastJson(QJsonObject {
-            { "type", "screen_locked" }, { "locked", false } });
+    if (wasLocked) {
+        // [C] 状态已离开锁屏：作废当前解锁序列的全部延时回调与 blocked 转发，
+        // 否则"重启采集"这种非解锁路径也可能在 8s/15s 后弹出解锁失败。
+        ++unlockSeq_;
+        secureUnlockTyped_ = false;
+        secureUnlockDefinite_ = false;
+        secureUnlockBlockedReported_ = false;
+        secureInputUnlockClientId_.clear();
+        if (wsServer_)
+            wsServer_->broadcastJson(QJsonObject {
+                { "type", "screen_locked" }, { "locked", false } });
+    }
     return startCapture();
 }
 
@@ -3537,12 +3846,293 @@ static void x11ShowDesktopOnce(bool show)
 }
 #endif
 
+#ifdef _WIN32
+// [LOCK] helper 回执窗口：3s 内既没有 system_action_result，也没有 screen_locked
+// 才算"没回执"，随后用 console 会话令牌补投一次。
+static const int kLockAckTimeoutMs = 3000;
+
+// [LOCK] Windows 的锁屏：三态收敛，绝不再"没锁上却报已锁"。
+//   ① 非服务模式：本进程就在用户会话里 → 直接 LockWorkStation()，返回值即真相；
+//   ② 服务模式 + helper 在：转发给用户会话的 helper，等 system_action_result ack
+//      或 screen_locked=true；3s 都没有 → 用 console 会话令牌在用户会话里跑一次性
+//      --lock-once 进程，其退出码（LockWorkStation 的 BOOL）就是这一轮的 ack；
+//   ③ 服务模式 + helper 不在：**立即**回 ok:false/no_helper，绝不退回 Session 0
+//      的 rundll32（那正是"锁定空操作"的根因）。
+// XP（isVistaPlusOs()==false）同样走 --lock-once：XP 的服务与用户同处一个会话，
+// 一次性进程里的 LockWorkStation() 返回值就是真实 BOOL，失败如实回
+// {ok:false, reason:"lock_failed"}，不再"发个 rundll32 就报 requested"。
+void RDPServer::handleWindowsLock(const QString& clientId)
+{
+    auto reply = [this, clientId](bool ok, const QString& reason, const QString& message) {
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "lock_result" }, { "ok", ok },
+            { "reason", reason }, { "message", message } });
+    };
+
+    // [B4] 已有一个请求在等回执：绝不能用新请求覆盖它的 pending —— 被覆盖的那个
+    // 客户端再也收不到 lock_result，前端只能等安全网回滚。如实回 busy。
+    if (lockPending_) {
+        qInfo() << "Lock: busy, previous request from" << lockPendingClientId_.left(8)
+                << "still pending (seq" << lockPendingSeq_ << ")";
+        reply(false, QStringLiteral("busy"),
+              QStringLiteral("上一轮锁定请求仍在等待结果，请稍后再试"));
+        return;
+    }
+
+    if (screenLocked_) {
+        // 幂等：已经锁着就不用再发，前端据此显示"已锁定"。
+        reply(true, QStringLiteral("already_locked"), QStringLiteral("屏幕已经是锁定状态"));
+        return;
+    }
+
+    if (!serviceMode_) {
+        // 非服务模式：进程本身就在用户会话（绿色版/调试运行），直接执行。
+        const BOOL ok = ::LockWorkStation();
+        const DWORD err = ok ? 0 : ::GetLastError();
+        qInfo() << "Lock: local LockWorkStation ok =" << bool(ok) << "err =" << err;
+        reply(ok != FALSE, ok ? QStringLiteral("locked") : QStringLiteral("lock_failed"),
+              ok ? QStringLiteral("已锁屏")
+                 : QStringLiteral("LockWorkStation 调用失败，错误码 %1")
+                       .arg(static_cast<qulonglong>(err)));
+        return;
+    }
+
+    const int seq = ++lockSeq_;
+    lockPending_ = true;
+    lockPendingClientId_ = clientId;
+    lockPendingSeq_ = seq;
+
+    if (!isVistaPlusOs()) {
+        // [B5] XP：服务与用户同会话，--lock-once 的退出码就是 LockWorkStation 的
+        // 真实 BOOL。走和 Vista+ 兜底同一条异步通路（不阻塞主线程），失败回 lock_failed。
+        qInfo() << "Lock: XP -> --lock-once (real BOOL), seq =" << seq;
+        startLockFallback(seq, clientId, /*helperTimedOut=*/false);
+        return;
+    }
+
+    if (!wsServer_->isCaptureSourceConnected()) {
+        // 服务模式且 helper 不在：**绝不**再退回 Session 0 的 rundll32 —— 它在隔离
+        // 会话里空转，屏幕没锁、日志无异常、前端却显示"已锁"（用户反馈的"锁定空操作"）。
+        // 如实回失败，前端按 reason 回滚按钮并提示未锁定。
+        lockPending_ = false;
+        lockPendingClientId_.clear();
+        qWarning() << "Lock: no helper in user session, reject (Session-0 fallback removed)";
+        reply(false, QStringLiteral("no_helper"),
+              QStringLiteral("用户会话 helper 未连接，锁屏未执行"));
+        return;
+    }
+
+    qInfo() << "Lock: forwarded to helper, seq =" << seq;
+    wsServer_->sendToCaptureSource(QJsonObject {
+        { "type", "system_action" }, { "action", "lock" } });
+
+    QTimer::singleShot(kLockAckTimeoutMs, this, [this, seq, clientId]() {
+        if (!lockPending_ || seq != lockPendingSeq_ || lockPendingClientId_ != clientId)
+            return;   // 已被 ack / screen_locked / 新请求收尾
+        // helper 在但 3s 内不回执：用 console 会话令牌把本程序以 --lock-once
+        // 投到用户会话，由它执行 LockWorkStation() 并用退出码回报成败 ——
+        // 这个退出码就是这一次的 ack，不再"投递成功就当锁上了"。
+        // [B3] 等待在 LockOnceThread 里做，主线程不会被 WaitForSingleObject 卡住。
+        qWarning() << "Lock: helper did not ack in" << kLockAckTimeoutMs
+                   << "ms, trying console-session token fallback";
+        startLockFallback(seq, clientId, /*helperTimedOut=*/true);
+    });
+}
+
+// [SYS-ACT] logout 完成性确认用到的进程探测（Windows 专用）。
+// 只看"跨进程快照里有没有这个 exe"：不按会话过滤是刻意的 —— XP 上 console、
+// 服务、helper 全在 session 0，按会话过滤反而会把 LogonUI 滤掉。产品是单用户
+// console 场景；配合 baseline 的"从无到有/从有到无"翻转判断，不会把本来就
+// 在跑的 LogonUI（锁屏界面）误当成注销信号。
+static bool rdProcessRunning(const wchar_t* exeName)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+    PROCESSENTRY32W pe;
+    ZeroMemory(&pe, sizeof(pe));
+    pe.dwSize = sizeof(pe);
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, exeName) == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+// [SYS-ACT] logout：helper 已 ack（shutdown 退出码 0）之后，再等 ≤3s 看会话是否
+// 真的开始销毁。证据：登录 UI 出现（LogonUI 从无到有）或用户 shell 退出
+// （explorer 从有到无）。两条都拿不到就回 unconfirmed —— 绝不凭退出码报成功。
+void RDPServer::beginLogoutConfirmation(const QString& clientId, int seq)
+{
+    logoutConfirmPending_ = true;
+    logoutConfirmSeq_ = seq;
+    logoutConfirmClientId_ = clientId;
+    logoutConfirmTries_ = 0;
+    QTimer::singleShot(300, this, [this]() { tickLogoutConfirmation(); });
+}
+
+void RDPServer::tickLogoutConfirmation()
+{
+    if (!logoutConfirmPending_ || !sysActionPending_
+        || sysActionPendingSeq_ != logoutConfirmSeq_)
+        return;   // 已被其它路径收尾/作废
+    const bool logonUiNow = rdProcessRunning(L"LogonUI.exe");
+    const bool explorerNow = rdProcessRunning(L"explorer.exe");
+    const bool uiAppeared = !logoutLogonUiBefore_ && logonUiNow;
+    const bool shellGone = logoutExplorerBefore_ && !explorerNow;
+    if (uiAppeared || shellGone) {
+        logoutConfirmPending_ = false;
+        sysActionPending_ = false;
+        sysActionPendingClientId_.clear();
+        sysActionPendingAction_.clear();
+        qInfo() << "SysAction: logout confirmed by"
+                << (uiAppeared ? "logon UI appeared" : "user shell exited")
+                << "seq =" << logoutConfirmSeq_;
+        wsServer_->sendJson(logoutConfirmClientId_, QJsonObject {
+            { "type", "logout_result" }, { "ok", true },
+            { "reason", QStringLiteral("confirmed") },
+            { "message", QStringLiteral("已注销（已确认会话退出，进入登录界面）") } });
+        return;
+    }
+    if (++logoutConfirmTries_ >= 10) {   // 10 × 300ms = 3s
+        logoutConfirmPending_ = false;
+        sysActionPending_ = false;
+        sysActionPendingClientId_.clear();
+        sysActionPendingAction_.clear();
+        qWarning() << "SysAction: logout unconfirmed after 3s, seq =" << logoutConfirmSeq_;
+        wsServer_->sendJson(logoutConfirmClientId_, QJsonObject {
+            { "type", "logout_result" }, { "ok", false },
+            { "reason", QStringLiteral("unconfirmed") },
+            { "message", QStringLiteral("注销命令已发出（shutdown 退出码 0），但 3s 内"
+                                        "未检测到会话退出（登录界面未出现），结果未知") } });
+        return;
+    }
+    QTimer::singleShot(300, this, [this]() { tickLogoutConfirmation(); });
+}
+
+// [SYS-ACT] Windows 的注销/重启/关机回执。
+// 为什么必须分三态（与 lock 同一范式）：服务进程在 Session 0，shutdown 在隔离会话
+// 里执行只会影响不存在的服务桌面（实测：界面提示"已关机"、机器纹丝不动）。所以
+//   ① 非服务模式（进程就在用户会话）→ 本进程直接跑 shutdown，等它的退出码；
+//   ② 服务模式 + helper 在 → 转发给 helper，3s 内等 system_action_result；
+//   ③ 服务模式 + helper 不在 → 立即 no_helper，不执行任何东西。reboot/poweroff
+//      是破坏性动作，必须"先确认 helper 在，再执行"，绝不能先执行再找 helper。
+// reboot/poweroff 带 /t 5：既给回执留出送达时间，也给用户一个 shutdown /a 的
+// 取消窗口（与 Windows 自身的关机提示语义一致）。
+void RDPServer::handleWindowsSysAction(const QString& action, const QString& clientId)
+{
+    const QString resultType = action + QStringLiteral("_result");
+    const QString label = action == QLatin1String("logout")
+                              ? QStringLiteral("注销")
+                              : action == QLatin1String("reboot")
+                                    ? QStringLiteral("重启")
+                                    : QStringLiteral("关机");
+    auto reply = [this, clientId, resultType](bool ok, const QString& reason,
+                                              const QString& message) {
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", resultType }, { "ok", ok }, { "reason", reason },
+            { "message", message } });
+    };
+
+    if (sysActionPending_) {
+        // 同一时刻只允许一个系统操作在途：连着点"重启"和"关机"时，结果会互串。
+        reply(false, QStringLiteral("busy"),
+              QStringLiteral("上一轮系统操作仍在等待结果，请稍后再试"));
+        return;
+    }
+
+    QStringList args;
+    if (action == "logout") {
+        args << QStringLiteral("/l") << QStringLiteral("/f");
+    } else {
+        args << (action == "reboot" ? QStringLiteral("/r") : QStringLiteral("/s"))
+             << QStringLiteral("/t") << QStringLiteral("5") << QStringLiteral("/f");
+    }
+
+    if (!serviceMode_) {
+        // 本进程就在用户会话里：直接执行，shutdown 的退出码就是这次的真实结果。
+        QProcess p;
+        p.start(QStringLiteral("shutdown"), args);
+        const bool started = p.waitForStarted(1500);
+        const bool finished = started && p.waitForFinished(2000);
+        const int code = finished ? p.exitCode() : -1;
+        const bool ok = started && finished && p.exitStatus() == QProcess::NormalExit
+                        && code == 0;
+        qInfo() << "SysAction:" << action << "local shutdown ok =" << ok
+                << "exit code =" << code << "err =" << p.errorString();
+        reply(ok, ok ? QStringLiteral("initiated")
+                     : QStringLiteral("%1_failed").arg(action),
+              ok ? QStringLiteral("已发起%1").arg(label)
+                 : QStringLiteral("%1命令失败（shutdown 退出码 %2）").arg(label).arg(code));
+        return;
+    }
+
+    if (!wsServer_->isCaptureSourceConnected()) {
+        reply(false, QStringLiteral("no_helper"),
+              QStringLiteral("用户会话 helper 未连接，%1未执行").arg(label));
+        return;
+    }
+
+    if (action == QLatin1String("logout")) {
+        // 下发前记录 baseline：此时若已锁屏，LogonUI 可能本来就在跑，
+        // 只有"从无到有"才算注销信号。
+        logoutConfirmPending_ = false;
+        logoutConfirmSeq_ = 0;
+        logoutLogonUiBefore_ = rdProcessRunning(L"LogonUI.exe");
+        logoutExplorerBefore_ = rdProcessRunning(L"explorer.exe");
+        qInfo() << "SysAction: logout baseline logonui =" << logoutLogonUiBefore_
+                << "explorer =" << logoutExplorerBefore_;
+    }
+
+    const int seq = ++sysActionSeq_;
+    sysActionPending_ = true;
+    sysActionPendingClientId_ = clientId;
+    sysActionPendingAction_ = action;
+    sysActionPendingSeq_ = seq;
+    qInfo() << "SysAction:" << action << "forwarded to helper, seq =" << seq;
+    wsServer_->sendToCaptureSource(QJsonObject {
+        { "type", "system_action" }, { "action", action }, { "seq", seq } });
+
+    QTimer::singleShot(kLockAckTimeoutMs, this,
+                       [this, seq, clientId, action, resultType, label]() {
+        if (!sysActionPending_ || seq != sysActionPendingSeq_
+            || sysActionPendingClientId_ != clientId)
+            return;   // 已被 helper ack 收尾
+        if (logoutConfirmPending_ && action == QLatin1String("logout"))
+            return;   // 已 ack 成功，确认轮询接管结果（它自己有 3s 预算）
+        sysActionPending_ = false;
+        sysActionPendingClientId_.clear();
+        sysActionPendingAction_.clear();
+        qWarning() << "SysAction:" << action << "helper did not ack in"
+                   << kLockAckTimeoutMs << "ms";
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", resultType }, { "ok", false },
+            { "reason", QStringLiteral("timeout") },
+            { "message", QStringLiteral("用户会话没有在 3s 内确认「%1」，操作结果未知")
+                             .arg(label) } });
+    });
+}
+#endif
+
 void RDPServer::handleSystemAction(const QString& action, const QString& clientId,
-                                   const QString& password)
+                                   const QString& password, const QString& username)
 {
     qInfo() << "System action requested:" << action << "from" << clientId.left(8);
 
 #ifdef Q_OS_WIN32
+    if (action == "login_screen") {
+        // 登录界面远程登录：与 unlock_screen 是两条链路。
+        // unlock_screen 针对"已有用户会话的锁屏"；login_screen 针对
+        // "注销后/开机停登录界面（无任何用户会话）"，不依赖 helper 与用户令牌。
+        handleWindowsLoginScreen(clientId, username, password);
+        return;
+    }
     if (action == "unlock_screen") {
         // Windows 免密解锁：锁屏 UI 运行在 winlogon 安全桌面，普通进程（含
         // helper，同在用户会话）的 SendInput 到不了那里，唯一通路是
@@ -3556,15 +4146,18 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
             // 任何远程首登（不做 GINA 替换的话），报"屏幕未锁定"会把人引到死路上。
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", false },
+                { "reason", "no_user_session" },
                 { "message", "被控机还没有已登录的用户会话（开机锁屏）："
                              "首次登录无法远程完成，请在机器前登录一次" } });
         } else if (!screenLocked_) {
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", true },
+                { "reason", "not_locked" },
                 { "message", "屏幕未锁定" } });
         } else if (pwd.isEmpty()) {
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", false },
+                { "reason", "no_password" },
                 { "message", "未配置解锁密码：在 server_config.json 中设置 unlockPassword（明文，局域网自用）" } });
         } else {
             // XP 与 Vista+ 走同一条通路，差异全在 secure-input 里：
@@ -3580,45 +4173,87 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
             if (!justStarted && !wsServer_->isSecureInputConnected()) {
                 wsServer_->sendJson(clientId, QJsonObject {
                     { "type", "unlock_result" }, { "ok", false },
+                    { "reason", "channel_not_ready" },
                     { "message", "安全输入通道未就绪，请稍后重试" } });
                 return;
             }
             const QString cid = clientId;
-            auto sendUnlock = [this, pwd]() {
+            // [C] 新一轮解锁：seq 自增会作废上一轮所有延时回调（连点两次不会叠加
+            // 两套重试/终判），同时清空上一轮的"已键入/已明确拒绝"状态。
+            const int seq = ++unlockSeq_;
+            secureUnlockTyped_ = false;
+            secureUnlockDefinite_ = false;
+            secureUnlockBlockedReported_ = false;
+            auto sendUnlock = [this, pwd, seq]() {
                 wsServer_->sendToSecureInput(QJsonObject {
-                    { "type", "unlock" }, { "password", pwd } });
+                    { "type", "unlock" }, { "password", pwd }, { "seq", seq } });
             };
             // 解锁序列期间禁止按"桌面不符"重投 secure-input（SAS 一定会换桌面）；
             // 30s = 本函数下面两轮重试 + 终判的最长链路，到期自动失效，不留永久门禁。
             secureInputUnlockUntilMs_ = monoNowMs() + 30000;
+            // [B] 记下这次解锁是哪个客户端发起的：secure-input 的注入前校验拒绝注入时，
+            // 拦截原因要回到这个客户端（见构造里的 secureInputMessageReceived 连接）。
+            secureInputUnlockClientId_ = clientId;
             const int base = justStarted ? 1500 : 0;
             // 把密码交给 secure-input 进程，由它在安全桌面上判断界面形态后自己处理：
             //   传统登录对话框 → 直接写控件 + 提交；
             //   XP 屏保桌面   → 先结束 .scr，桌面切回登录桌面后点用户磁贴 + 键入密码；
             //   欢迎屏幕      → 点用户磁贴把密码框展开 + 键入密码。
             // 这里不要再无条件先发 SAS：若对话框已就绪，多按一次 Ctrl+Alt+Del 会把它切走。
-            QTimer::singleShot(base, this, sendUnlock);
-            // 第二轮：极少数机器 SAS 之后还会闪一次屏保，第一轮可能落空。
-            // Win7/Win10 第一轮即成功，此轮自动跳过。
-            // 时限：XP 安全屏保要 SAS→桌面切换(4s)→登录框→写控件，整链实测 8~12s，
-            // 所以重试放到 8s、终判放到再 15s，否则会在真正解锁前一秒误报「密码不对」。
-            QTimer::singleShot(base + 8000, this, [this, cid, sendUnlock]() {
-                if (!screenLocked_)
+            QTimer::singleShot(base, this, [this, seq, sendUnlock]() {
+                if (seq != unlockSeq_)
                     return;
-                qInfo() << "Unlock: still locked after the first attempt - retrying";
                 sendUnlock();
-                QTimer::singleShot(15000, this, [this, cid]() {
-                    if (screenLocked_) {
-                        wsServer_->sendJson(cid, QJsonObject {
-                            { "type", "unlock_result" }, { "ok", false },
-                            { "message", "密码未通过验证（unlockPassword 与 Windows 登录密码不一致？）" } });
-                    }
+            });
+            // [C] 第二轮改成**有条件**的：只有"这一轮确实没键入"才补发。
+            //   Vista+：secure-input 报了 typed → 不补发（补发会落在已登录的桌面上，
+            //           把明文密码敲进普通窗口）；报了 blocked(not_logon_ui) → 明确拒绝，
+            //           也不补发（弹窗态下再发一次只会再来一条 blocked）。
+            //   报了 uncertain（UIA 超时）→ 允许补发一次，这正是"再试一次"有用的场景。
+            //   XP：secure-input 不上报进度，条件永远成立，所以仍是 8s 补发 + 15s 终判
+            //       （安全屏保 SAS→桌面切换整链实测 8~12s，不能更早）。
+            QTimer::singleShot(base + 8000, this, [this, seq, sendUnlock]() {
+                if (seq != unlockSeq_ || !screenLocked_)
+                    return;
+                if (secureUnlockTyped_ || secureUnlockDefinite_) {
+                    qInfo() << "Unlock: skip 8s retry (typed =" << secureUnlockTyped_
+                            << ", definite block =" << secureUnlockDefinite_ << ")";
+                    return;
+                }
+                qInfo() << "Unlock: still locked and nothing typed - retrying once";
+                sendUnlock();
+                QTimer::singleShot(15000, this, [this, seq]() {
+                    if (seq != unlockSeq_ || !screenLocked_)
+                        return;
+                    // 已经上报过"拒绝注入"就别再补一句"密码未通过验证"（自相矛盾）。
+                    if (secureUnlockTyped_ || secureUnlockBlockedReported_)
+                        return;
+                    wsServer_->sendJson(secureInputUnlockClientId_, QJsonObject {
+                        { "type", "unlock_result" }, { "ok", false },
+                        { "reason", "wrong_password" },
+                        { "message", "密码未通过验证（unlockPassword 与 Windows 登录密码不一致？）" } });
                 });
             });
             wsServer_->sendJson(clientId, QJsonObject {
                 { "type", "unlock_result" }, { "ok", true }, { "pending", true },
+                { "reason", "injecting" },
                 { "message", "正在注入解锁密码…" } });
         }
+        return;
+    }
+
+    // [LOCK] 锁屏单独成支：Windows 不再走下面"服务模式无脑转发 / 本地 rundll32"
+    // 的通用路径（那条路径在 Session 0 上是空操作，且没有任何结果回报）。
+    if (action == "lock") {
+        handleWindowsLock(clientId);
+        return;
+    }
+
+    // [SYS-ACT] 注销/重启/关机同样单独成支：通用路径只会转发给 helper 且
+    // **没有任何回执**，前端无法区分"已发起"和"根本没执行"；helper 不在时
+    // 还会落到 Session 0 的本地执行（对注销/关机是彻底的空操作）。
+    if (action == "logout" || action == "reboot" || action == "poweroff") {
+        handleWindowsSysAction(action, clientId);
         return;
     }
 #endif
@@ -3896,9 +4531,11 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         qWarning() << "Unknown system action:" << action;
     }
 #elif defined(_WIN32)
-    if (action == "lock") {
-        QProcess::startDetached(QStringLiteral("rundll32.exe"), { QStringLiteral("user32.dll,LockWorkStation") });
-    } else if (action == "show_desktop") {
+    // [LOCK] lock 已在 handleSystemAction 开头单独成支（handleWindowsLock）。
+    // 这里保留旧的 rundll32 就等于把"锁定空操作"留给没被拦住的路径：
+    // Session 0 上的 LockWorkStation 只作用于不可见的服务会话，屏幕不会锁，
+    // 却没有任何失败回报。所以 lock 分支已从这里删除。
+    if (action == "show_desktop") {
         // 显示桌面：Shell COM 接口 ToggleDesktop（Win2000+ 的 Shell.Application 均有）。
         // Win7+ 用 PowerShell；WinXP 无 powershell.exe → 用 cscript 执行同款 COM 调用。
         QString ps = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
@@ -4013,6 +4650,20 @@ void RDPServer::onClientConnected(const QString& clientId)
     } else if (serviceMode_ && !lastScreenInfo_.isEmpty()) {
         wsServer_->sendJson(clientId, lastScreenInfo_);
     }
+
+#ifdef Q_OS_WIN32
+    // [Win-登录] login_screen_state 只在状态切换时广播；后接入的客户端必须补一份
+    // 快照，否则刷新页面后「远程登录」入口消失（界面停在登录界面却无从操作）。
+    if (serviceMode_ && loginScreenActive_) {
+        QJsonObject st;
+        st["type"] = "login_screen_state";
+        st["active"] = true;
+        st["username"] = effectiveLoginUsername();
+        st["platform"] = QStringLiteral("windows");
+        st["isXP"] = !isVistaPlusOs();
+        wsServer_->sendJson(clientId, st);
+    }
+#endif
 
     // 发送当前画质/帧率/分辨率配置（前端据此显示正确的标签）
     {
@@ -4195,6 +4846,25 @@ void RDPServer::setClientViewOnly(const QString& clientId, bool enabled)
     });
 }
 
+void RDPServer::setClientChineseInput(const QString& clientId, bool enabled)
+{
+    // 中文输入（IME 上屏）开关：按连接记录。关闭（默认）时该连接发来的 isChar
+    // 在 onInputReceived 入口被静默丢弃 —— 不借键码、不改远端键盘映射、不进
+    // sendUnicodeChar 的定时器队列，也不打日志（关闭态打中文属预期行为）。
+    if (enabled) {
+        chineseInputClients_.insert(clientId);
+        qInfo() << "Client enabled Chinese input (Unicode injection):" << clientId;
+    } else {
+        chineseInputClients_.remove(clientId);
+        qInfo() << "Client disabled Chinese input (keycode-only):" << clientId;
+    }
+    // 回执：前端以服务端状态为准，重连/异常时静默对齐。
+    wsServer_->sendJson(clientId, QJsonObject {
+        { "type", "chinese_input_state" },
+        { "enabled", enabled },
+    });
+}
+
 void RDPServer::onClientDisconnected(const QString& clientId)
 {
     qInfo() << "Client disconnected:" << clientId;
@@ -4220,6 +4890,15 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 
     // 观看模式按连接记录，断线即清理（clientId 可能被复用）。
     viewOnlyClients_.remove(clientId);
+    // 中文输入开关同样按连接记录，断线即清理（默认即"关闭"）。
+    chineseInputClients_.remove(clientId);
+    // 队列/映射清理：最后一个开了中文输入的连接断开后，把还没注入的字符作废，
+    // 并还原借用的键码映射 —— 否则断开后本机物理键盘按下那颗键会继续出中文。
+    // 还有别的中文输入连接在用同一个队列时不能清（那会把别人的输入一起丢掉）。
+#ifdef Q_OS_LINUX
+    if (chineseInputClients_.isEmpty() && inputManager_)
+        inputManager_->flushPendingInput();
+#endif
     // [A3] 关键帧请求冷却时刻按连接记录，clientId 可能被复用，断线必须清。
     kfRequestMsByClient_.remove(clientId);
 
@@ -4232,6 +4911,14 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 
     // 没有客户端了 → 暂停屏幕捕获，降低 CPU
     if (wsServer_->clientCount() == 0) {
+#ifdef Q_OS_LINUX
+        // 最后一个客户端也断了：把逐键 auto-repeat 的"欠账"全部还清。有些 keyup
+        // 可能从未送达（浏览器崩溃/网络瞬断），按 clientId 的按键记账只能覆盖
+        // "服务端确实收到过 keydown"的那部分。此时没有任何客户端还按着键，全量
+        // 恢复是安全的（也不会短暂放开别人按住的键）。
+        if (inputManager_)
+            inputManager_->restoreAutoRepeatKeycodes();
+#endif
         updateClipboardSuspend();   // [A17] 无观众时停掉 xclip 轮询
         updateSleepInhibit(false); // 远程会话结束，解除睡眠抑制
         if (screenCapturer_)
@@ -4256,6 +4943,12 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         setClientViewOnly(clientId, input["enabled"].toBool());
         return;
     }
+    // 中文输入开关（纯偏好，不是操作被控端）：同样必须放在观看模式拦截之前，
+    // 否则只读连接改不了这个开关、重连后状态对不上。
+    if (type == QLatin1String("set_chinese_input")) {
+        setClientChineseInput(clientId, input["enabled"].toBool());
+        return;
+    }
     // 权威兜底：观看模式下丢弃一切"能操作被控端"的消息（前端 send() 出口已拦一层，
     // 这里按 clientId 再判一次，防止改过的客户端/其它注入路径绕过）。
     // 纯显示设置（config/set_output/set_resolution/request_keyframe、WebRTC 信令）不拦。
@@ -4269,6 +4962,41 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                     << "client =" << clientId;
         }
         return;
+    }
+
+    // ---- 中文输入（IME 上屏）门禁 ----
+    // 只有前端声明过的连接（set_chinese_input:true）才允许 isChar。默认关闭，
+    // 老客户端不带该字段 → 同样按关闭处理，行为与旧版一致（纯键码注入）。
+    // 关闭态收到 isChar 直接静默丢弃，理由：
+    //   · 不借键码、不改远端键盘映射、不进 sendUnicodeChar 的定时器队列 ——
+    //     B 组队列"与同一时刻其它 XTest 按键没有严格先后顺序"的风险在关闭态
+    //     自然不存在（这条路径根本不会被走到）；
+    //   · 不打日志：中文输入关闭时打中文是预期行为，逐条 qWarning 会刷爆日志；
+    //   · 不按 keycode 注入：前端关闭态不会发 isChar，这里只做权威兜底，
+    //     把码点当键码注入只会产生随机字符。
+    // 例外：锁屏密码逐字注入（前端带 lock:true）以及锁屏期间的 isChar，必须放行，
+    // 否则开关关闭的用户永远解不开锁。lock 字段比 screenLocked_ 更可靠：Linux 的
+    // 锁屏有时由外部程序（xscreensaver 等）呈现，服务端不一定及时探到。
+    if ((type == QLatin1String("keydown") || type == QLatin1String("keyup"))
+            && input["isChar"].toBool()
+            && !input["lock"].toBool()
+            && !chineseInputClients_.contains(clientId)
+            && !screenLocked_) {
+        return;
+    }
+
+    // 长按 repeat：所有平台统一翻译成"先松再按"（见文件开头注释）。
+    // 一次 repeat = 一条 keyup + 原 keydown，不依赖任何平台的自动重复：
+    // Windows/macOS 的合成注入没有 typematic；X 的 auto-repeat 又是显示级全局状态
+    // （可能被遗留的 off 或 `xset r off` 关掉，长按会静默失效）。
+    if (type == QLatin1String("keydown") && input["repeat"].toBool()) {
+        QJsonObject release = input;
+        release["type"] = QLatin1String("keyup");
+        release["repeat"] = false;
+        // 复用同一入口：观看模式/锁屏/中文开关/按键跟踪/helper 转发全走原有逻辑，
+        // 不再复制一份"直连 vs helper"的分发代码（那正是旧版 helper 路径漏翻译的根因）。
+        onInputReceived(clientId, release);
+        // 随后照常处理原 keydown，形成完整的 up -> down 对。
     }
 
     // [B-1] 记录本客户端按下的键（code 为唯一标识，存最近 keydown 完整载荷，
@@ -4366,7 +5094,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         // password 只有「解锁屏幕」用得上：Windows 侧必须交给 secure-input 去写
         // 安全桌面上的登录框（浏览器逐字发 keydown 到不了 winlogon 桌面）。
         handleSystemAction(input["action"].toString(), clientId,
-                           input["password"].toString());
+                           input["password"].toString(),
+                           input["username"].toString());
         return;
     }
 
@@ -4441,13 +5170,22 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 invalidateCachedIdr();
             }
             wsServer_->sendToCaptureSource(input);
-            if (screenLocked_ && secureInputRunning_)
+            if ((screenLocked_ || loginScreenActive_) && secureInputRunning_)
                 wsServer_->sendToSecureInput(input);
             // config/set_resolution 跳过转发，由下面的本地逻辑处理
         } else {
             // 直接处理分支：鼠标/键盘等高频事件不写日志（避免同步文件 I/O 占用主线程 CPU）
             if (isInputEventLogged(type))
                 qDebug() << "Service: no helper, handling input directly, type =" << type;
+            // [Win-登录] 停在登录界面（无用户会话）时，键盘/鼠标必须进 secure-input
+            // （winsta0\Winlogon）；本地 inputManager 只在 session 0 自己的桌面生效。
+            const bool isUserInputEvent = (type == "mousemove" || type == "mousedown"
+                                           || type == "mouseup" || type == "keydown"
+                                           || type == "keyup" || type == "wheel");
+            if (loginScreenActive_ && secureInputRunning_ && isUserInputEvent) {
+                wsServer_->sendToSecureInput(input);
+                return;
+            }
             // 没有 helper（如 Linux 无头模式），直接在本地注入输入
             if (!inputManager_)
                 return;
@@ -4473,7 +5211,19 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 bool isChar = input["isChar"].toBool();
                 bool meta = input["meta"].toBool();
                 // 按键逐条打日志会刷爆日志文件，不再记录（需要排查时临时加回）
-                inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar, meta);
+                // 中文输入开关打开时，该连接的**所有**键都走 InputManager 的同一条
+                // FIFO（含 ASCII/Enter）：否则同步注入的 ASCII 会超车排在队列里的
+                // 中文字符（"中a" 落成 "a中"）。关闭态（默认）直接同步注入，零延迟。
+#ifdef Q_OS_LINUX
+                if (chineseInputClients_.contains(clientId)) {
+                    inputManager_->enqueueKeyboard(keycode, code, isDown, ctrl, alt,
+                                                   shift, isChar, meta);
+                } else
+#endif
+                {
+                    inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt,
+                                                  shift, false, isChar, meta);
+                }
                 if (screenCapturer_) screenCapturer_->forceNextFrame();
             } else if (type == "wheel") {
                 int delta = input["delta"].toInt();
@@ -4560,7 +5310,18 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             bool shift = input["shift"].toBool();
             bool isChar = input["isChar"].toBool();
             bool meta = input["meta"].toBool();
+#ifdef Q_OS_LINUX
+            // 与直连路径同一规则：中文输入打开时走 FIFO，保证锁屏密码这类
+            // "字符与键码混排"的输入不会互相超车。
+            if (chineseInputClients_.contains(clientId) || isChar)
+                inputManager_->enqueueKeyboard(keycode, code, isDown, ctrl, alt,
+                                               shift, isChar, meta);
+            else
+                inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt,
+                                              shift, false, isChar, meta);
+#else
             inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar, meta);
+#endif
         } else if (type == "wheel") {
             int delta = input["delta"].toInt();
             inputManager_->injectWheel(delta);
@@ -4775,56 +5536,8 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     } else if (type == "file_upload_done") {
         emit requestUploadDone(clientId, input["path"].toString());
     } else if (type == "set_resolution" && !serviceMode_) {
-        // 采集启动期间不允许停/起采集器：此时可能正处在 Wayland 初始化的
-        // 嵌套事件循环里，stop()+start() 会销毁正在使用的平台捕获器。
-        if (captureStarting_) {
-            wsServer_->sendJson(clientId, QJsonObject {
-                { "type", "error" },
-                { "message", "屏幕采集正在启动，请稍后重试" } });
-            return;
-        }
-        int w = input["width"].toInt();
-        int h = input["height"].toInt();
-        if (ScreenCapturer::changeDisplayResolution(w, h)) {
-            if (screenCapturer_)
-                screenCapturer_->stop();
-            if (screenCapturer_ && !screenCapturer_->start(configFps_))
-                qWarning() << "Failed to restart capturer after resolution change";
-            // [B-4] 同步输入归一化基准：uinput 绝对定位按屏幕尺寸缩放 0..65535，
-            // 不同步会导致切分辨率后鼠标坐标系统性偏移（helper 路径已修、此处为直连路径）。
-            // 优先用抓屏器回报的实际尺寸（显示器可能未精确应用请求的模式）。
-            if (inputManager_)
-                inputManager_->setScreenSize(
-                    screenCapturer_ && screenCapturer_->width() > 0 ? screenCapturer_->width() : w,
-                    screenCapturer_ && screenCapturer_->height() > 0 ? screenCapturer_->height() : h);
-            if (inputManager_ && screenCapturer_)
-                inputManager_->setScreenOffset(screenCapturer_->originX(), screenCapturer_->originY());
-#ifdef USE_FFMPEG
-            // 分辨率变化后必须重建编码器：sws/编码器上下文仍按旧尺寸建立，
-            // 继续投帧会让 sws_scale 按旧宽度读新帧 → 堆越界读。
-            // 缓存的关键帧也一并作废（尺寸与参数集都已变化）。
-            lastKeyframeData_.clear();
-            lastKeyframeTs_ = 0;
-            reinitVideoEncoderForScale();
-#endif
-            QJsonObject info;
-            info["type"] = "screen_info";
-            // 必须广播**实际**尺寸：显示器可能未精确应用请求的模式（如 Android
-            // 上 1800x1200 被 XFCE 改成 1600x1200）。广播请求值会让前端按错误
-            // 宽高做坐标映射，所有点击系统性偏移。
-            const int actualW = (screenCapturer_ && screenCapturer_->width() > 0)
-                    ? screenCapturer_->width() : w;
-            const int actualH = (screenCapturer_ && screenCapturer_->height() > 0)
-                    ? screenCapturer_->height() : h;
-            info["width"] = actualW;
-            info["height"] = actualH;
-            wsServer_->broadcastJson(info);
-        } else {
-            QJsonObject err;
-            err["type"] = "error";
-            err["message"] = QString("分辨率 %1x%2 切换失败").arg(w).arg(h);
-            wsServer_->sendJson(clientId, err);
-        }
+        // 与 HTTP /api/config 共用同一实现：失败时回 error，成功时广播实际尺寸。
+        applyResolutionChange(input["width"].toInt(), input["height"].toInt(), clientId);
     } else if (type == "set_output") {
         // 多屏切换（Linux X11）：切换捕获目标输出
         int index = input["index"].toInt();
@@ -5098,8 +5811,15 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
     wsServer_->broadcastFrame(data, isKeyframe, timestamp);
 }
 
-void RDPServer::applyConfigFromHttp(const QJsonObject& cfg)
+bool RDPServer::applyConfigFromHttp(const QJsonObject& cfg, QString* error)
 {
+    auto reject = [&](const QString& msg) {
+        if (error)
+            *error = msg;
+        qWarning() << "HTTP config rejected:" << msg;
+        return false;
+    };
+
     // 消息类型由服务端决定，前端不传（否则这个入口就成了"任意消息注入"）。
     // 只允许改显示/编码参数，不允许 keydown/input 等输入类消息。
     QJsonObject input;
@@ -5109,11 +5829,164 @@ void RDPServer::applyConfigFromHttp(const QJsonObject& cfg)
                 || k == "hw_encode" || k == "systemName" || k == "width" || k == "height")
             input.insert(k, it.value());
     }
-    input["type"] = cfg.contains("width") ? QStringLiteral("set_resolution")
-                                          : QStringLiteral("config");
+    if (input.isEmpty())
+        return reject(QStringLiteral("没有可应用的配置项"));
+
+    // 参数校验：旧实现把非法值交给 onInputReceived，内部多数字段是"不合法就忽略"，
+    // 但 HTTP 一律回 200 success，前端以为设置已生效。这里先挡掉非法值。
+    if (input.contains("quality")) {
+        const QString q = input.value("quality").toString();
+        if (q != QLatin1String("high") && q != QLatin1String("medium")
+            && q != QLatin1String("low") && q != QLatin1String("verylow")) {
+            return reject(QStringLiteral("quality 必须是 high/medium/low/verylow"));
+        }
+    }
+    if (input.contains("fps")) {
+        const int f = input.value("fps").toInt(0);
+        if (f < 1 || f > 60)
+            return reject(QStringLiteral("fps 必须在 1..60"));
+    }
+    if (input.contains("scale")) {
+        const int s = input.value("scale").toInt(0);
+        if (s < 10 || s > 100)
+            return reject(QStringLiteral("scale 必须在 10..100"));
+    }
+    if (input.contains("codec")) {
+        const QString c = input.value("codec").toString().toLower();
+        // 只接受 codecFromString 真正认识的协议。旧白名单里的 h265/mjpeg 会被
+        // codecFromString 静默回退成 H.264，接口却回 success —— 删掉这两项，
+        // 让拒绝发生在入口（hevc 是 H.265 的正式名，前端统一传 hevc）。
+        if (c != QLatin1String("h264") && c != QLatin1String("hevc")
+            && c != QLatin1String("vp8") && c != QLatin1String("vp9")
+            && c != QLatin1String("av1")) {
+            return reject(QStringLiteral("不支持的 codec: %1").arg(c));
+        }
+    }
+    if (input.contains("hw_encode")) {
+        const QString h = input.value("hw_encode").toString().toLower();
+        if (h != QLatin1String("auto") && h != QLatin1String("on")
+            && h != QLatin1String("off")) {
+            return reject(QStringLiteral("hw_encode 必须是 auto/on/off"));
+        }
+    }
+
+    // 分辨率请求：旧实现把 type 改成 set_resolution 后整条消息只走分辨率分支，
+    // 其余字段被静默忽略且仍回 success。现在混用直接拒绝，单一分辨率请求则
+    // 把真实结果带回去（applyResolutionChange 失败会返回 false → HTTP 4xx）。
+    if (input.contains("width") || input.contains("height")) {
+        if (!input.contains("width") || !input.contains("height"))
+            return reject(QStringLiteral("width 与 height 必须同时提供"));
+        // 分辨率切换会停/起采集器并重建编码器；同一条请求里再带 quality/fps/scale/
+        // codec 等字段会被 onInputReceived 的分辨率分支静默丢弃（旧实现仍回 success）。
+        // 显式拒绝混用，避免"只改了一半却报成功"；这些参数请分开请求。
+        QStringList mixed;
+        const QStringList resolutionExclusive = {
+            QStringLiteral("quality"), QStringLiteral("fps"), QStringLiteral("scale"),
+            QStringLiteral("codec"), QStringLiteral("hw_encode"), QStringLiteral("systemName")
+        };
+        for (const QString& key : resolutionExclusive) {
+            if (input.contains(key))
+                mixed << key;
+        }
+        if (!mixed.isEmpty()) {
+            return reject(QStringLiteral("width/height 不能与 %1 同时提交；请分开请求")
+                              .arg(mixed.join(QStringLiteral("/"))));
+        }
+        const int w = input.value("width").toInt(0);
+        const int h = input.value("height").toInt(0);
+        if (w <= 0 || h <= 0)
+            return reject(QStringLiteral("width/height 必须为正整数"));
+        input["type"] = QStringLiteral("set_resolution");
+        qInfo() << "HTTP config applied:" << QString::fromUtf8(
+            QJsonDocument(input).toJson(QJsonDocument::Compact));
+        if (serviceMode_) {
+            // 服务模式下分辨率由 helper 应用，本进程只能确认"已下发"。
+            onInputReceived(QString(), input);
+            return true;
+        }
+        return applyResolutionChange(w, h, QString());
+    }
+
+    input["type"] = QStringLiteral("config");
     qInfo() << "HTTP config applied:" << QString::fromUtf8(
         QJsonDocument(input).toJson(QJsonDocument::Compact));
     onInputReceived(QString(), input);
+    return true;
+}
+
+bool RDPServer::applyResolutionChange(int w, int h, const QString& clientId)
+{
+    // 采集启动期间不允许停/起采集器：此时可能正处在 Wayland 初始化的
+    // 嵌套事件循环里，stop()+start() 会销毁正在使用的平台捕获器。
+    if (captureStarting_) {
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "error" },
+            { "message", "屏幕采集正在启动，请稍后重试" } });
+        return false;
+    }
+    if (!ScreenCapturer::changeDisplayResolution(w, h)) {
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "error" },
+            { "message", QString("分辨率 %1x%2 切换失败").arg(w).arg(h) } });
+        return false;
+    }
+    // 记录切换前的实际尺寸，供采集器重启失败时回滚。
+    const int oldW = screenCapturer_ ? screenCapturer_->width() : 0;
+    const int oldH = screenCapturer_ ? screenCapturer_->height() : 0;
+    if (screenCapturer_)
+        screenCapturer_->stop();
+    if (screenCapturer_ && !screenCapturer_->start(configFps_)) {
+        // 旧实现只 qWarning 然后照常广播 screen_info + return true，调用方以为成功。
+        // 现在必须回滚：先把显示模式切回旧尺寸，再尝试恢复采集；都失败则明确报错。
+        qCritical() << "Failed to restart capturer after resolution change; rolling back";
+        bool rolledBack = false;
+        if (oldW > 0 && oldH > 0 && ScreenCapturer::changeDisplayResolution(oldW, oldH))
+            rolledBack = screenCapturer_->start(configFps_);
+        // 采集没恢复时 width() 可能是 0，不能把 0 写进输入归一化基准。
+        if (inputManager_ && screenCapturer_ && screenCapturer_->width() > 0
+                && screenCapturer_->height() > 0) {
+            inputManager_->setScreenSize(screenCapturer_->width(), screenCapturer_->height());
+            inputManager_->setScreenOffset(screenCapturer_->originX(), screenCapturer_->originY());
+        }
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", "error" },
+            { "message", rolledBack
+                ? QString("分辨率 %1x%2 切换失败，已恢复原分辨率 %3x%4")
+                      .arg(w).arg(h).arg(oldW).arg(oldH)
+                : QString("分辨率 %1x%2 切换失败，且恢复原分辨率失败；屏幕采集已停止")
+                      .arg(w).arg(h) } });
+        return false;
+    }
+    // [B-4] 同步输入归一化基准：uinput 绝对定位按屏幕尺寸缩放 0..65535，
+    // 不同步会导致切分辨率后鼠标坐标系统性偏移（helper 路径已修、此处为直连路径）。
+    // 优先用抓屏器回报的实际尺寸（显示器可能未精确应用请求的模式）。
+    if (inputManager_)
+        inputManager_->setScreenSize(
+            screenCapturer_ && screenCapturer_->width() > 0 ? screenCapturer_->width() : w,
+            screenCapturer_ && screenCapturer_->height() > 0 ? screenCapturer_->height() : h);
+    if (inputManager_ && screenCapturer_)
+        inputManager_->setScreenOffset(screenCapturer_->originX(), screenCapturer_->originY());
+#ifdef USE_FFMPEG
+    // 分辨率变化后必须重建编码器：sws/编码器上下文仍按旧尺寸建立，
+    // 继续投帧会让 sws_scale 按旧宽度读新帧 → 堆越界读。
+    // 缓存的关键帧也一并作废（尺寸与参数集都已变化）。
+    lastKeyframeData_.clear();
+    lastKeyframeTs_ = 0;
+    reinitVideoEncoderForScale();
+#endif
+    QJsonObject info;
+    info["type"] = "screen_info";
+    // 必须广播**实际**尺寸：显示器可能未精确应用请求的模式（如 Android
+    // 上 1800x1200 被 XFCE 改成 1600x1200）。广播请求值会让前端按错误
+    // 宽高做坐标映射，所有点击系统性偏移。
+    const int actualW = (screenCapturer_ && screenCapturer_->width() > 0)
+            ? screenCapturer_->width() : w;
+    const int actualH = (screenCapturer_ && screenCapturer_->height() > 0)
+            ? screenCapturer_->height() : h;
+    info["width"] = actualW;
+    info["height"] = actualH;
+    wsServer_->broadcastJson(info);
+    return true;
 }
 
 void RDPServer::updateClipboardSuspend()
@@ -5324,6 +6197,10 @@ void RDPServer::switchToImageMode()
     if (currentMode_ == ServerMode::Image)
         return;
 
+    // [ASYNC-RETIRE] 先把数据源切走：此后采集帧不再投给旧编码器，编码线程的在途帧
+    // 也会被 onEncodedFrame 的模式门丢弃；下面的退役因此无需主线程阻塞等待。
+    currentMode_ = ServerMode::Image;
+
 #ifdef USE_WEBRTC
     // 切图片模式时结束所有 WebRTC 会话：RTP 推流依赖 H.264 编码器，
     // 编码器即将销毁，保留会话只会让客户端对着断流等待。
@@ -5346,20 +6223,10 @@ void RDPServer::switchToImageMode()
 
     // 释放视频编码器（会调用析构，析构中调用 shutdown）
 #ifdef USE_FFMPEG
-    // 如果视频编码器已初始化，停止它
-    // if (videoEncoder_) {
-    //     videoEncoder_->shutdown();
-    // }
-    // [N6] 切图片模式是用户高频操作：线程卡死时走退役（断信号+故意泄漏），
-    // 不能经析构 qFatal 把整个服务带走；正常停止仍照常 reset 释放。
-    if (videoEncoder_ && !videoEncoder_->shutdownRetire()) {
-        qWarning() << "Encoder thread wedged on image-mode switch; retiring encoder";
-        QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
-        reapRetiredEncoders();
-        retiredEncoders_.push_back(std::move(videoEncoder_));
-    } else {
-        videoEncoder_.reset(); // unique_ptr 释放对象
-    }
+    // [ASYNC-RETIRE] 切图片模式是用户高频操作：只置 abort_ 唤醒编码线程；线程若已
+    // 退出则立即析构释放，否则移入墓地由回收定时器处理，主线程不再同步等最长 8s。
+    // 旧编码器已断开全部信号，在途帧不会回调到本对象；线程退出后由回收定时器析构。
+    retireVideoEncoderAsync(/*onlyIfIdle=*/false);
     // 编码器销毁后，缓存的关键帧与 codec extradata 全部作废：
     // 若保留，下次切回视频模式时新客户端会收到上一次编码器的 IDR/SPS/PPS，
     // 而前端已按新的 codec_config 配置解码器 → 花屏或黑屏。
@@ -5367,8 +6234,6 @@ void RDPServer::switchToImageMode()
     lastKeyframeTs_ = 0;
     lastCodecExtra_.clear();
 #endif
-
-    currentMode_ = ServerMode::Image;
 
 #ifdef USE_WEBRTC
     // 图片模式不涉及编码：恢复 WebRTC 强制 H.264 之前的用户选择，
@@ -5473,12 +6338,8 @@ bool RDPServer::switchToVideoMode()
             // 两次 initialize 都失败：残留的编码器上下文不可用，尽早释放。
             // 否则对象留在"半初始化"状态（编码线程已启动、上下文为空），
             // 下次切视频模式时复用会出现状态错乱/编码线程空转。
-            // [N6] 线程卡死则断信号退役（故意泄漏），不 qFatal 连坐服务。
-            if (!videoEncoder_->shutdownRetire()) {
-                QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
-                reapRetiredEncoders();
-                retiredEncoders_.push_back(std::move(videoEncoder_));
-            }
+            // [ASYNC-RETIRE] 非阻塞退役，失败路径也不再让主线程同步等最长 8s。
+            retireVideoEncoderAsync(/*onlyIfIdle=*/false);
             return false;
         }
     }
@@ -5517,20 +6378,34 @@ void RDPServer::createVideoEncoder()
         return;
 
     videoEncoder_ = std::unique_ptr<VideoEncoder>(new VideoEncoder(this));
+    // 代际：创建/退役各递增一次。disconnect 不会撤销已经排进主线程队列的元调用，
+    // 所以每个 lambda 捕获创建时的代际号，投递时若已换代就丢弃——否则旧分辨率
+    // 帧会进新 sws、旧 avcC 会覆盖新的 SPS/PPS，表现为花屏。
+    const quint64 gen = ++videoEncoderGeneration_;
     connect(videoEncoder_.get(), &VideoEncoder::encodedFrame,
-        this, &RDPServer::onEncodedFrame);
+        this, [this, gen](const QByteArray& data, bool isKeyframe, qint64 timestamp) {
+            if (gen != videoEncoderGeneration_)
+                return;
+            onEncodedFrame(data, isKeyframe, timestamp);
+        });
     connect(videoEncoder_.get(), &VideoEncoder::codecConfigChanged,
-        this, &RDPServer::onCodecConfigChanged);
+        this, [this, gen](const QByteArray& extradata) {
+            if (gen != videoEncoderGeneration_)
+                return;
+            onCodecConfigChanged(extradata);
+        });
     // 编码器（重）初始化完成：请求捕获端强制推帧（静止桌面首帧兜底）
     connect(videoEncoder_.get(), &VideoEncoder::encoderReady,
-        this, [this]() {
+        this, [this, gen]() {
+            if (gen != videoEncoderGeneration_)
+                return;
             if (screenCapturer_)
                 screenCapturer_->forceNextFrame();
         });
     // 过载时自动降码率，恢复后回到基准码率
     connect(videoEncoder_.get(), &VideoEncoder::encoderOverload,
-        this, [this](bool overloaded) {
-            if (!videoEncoder_)
+        this, [this, gen](bool overloaded) {
+            if (gen != videoEncoderGeneration_ || !videoEncoder_)
                 return;
             if (overloaded) {
                 int cur = videoEncoder_->currentBitrate();
@@ -5545,8 +6420,8 @@ void RDPServer::createVideoEncoder()
     // MPP 硬编被证明不可用：由本线程（主线程）重建为软编。
     // 必须在主线程做：VideoEncoder 的 encodingLoop 不允许重建自己所属的线程。
     connect(videoEncoder_.get(), &VideoEncoder::reinitRequired,
-        this, [this]() {
-            if (!videoEncoder_)
+        this, [this, gen]() {
+            if (gen != videoEncoderGeneration_ || !videoEncoder_)
                 return;
             qInfo() << "Video encoder reinit requested (MPP unavailable), rebuilding with software encoder";
             reinitVideoEncoderForScale();
@@ -5572,6 +6447,70 @@ void RDPServer::reinitVideoEncoderForScale()
 #endif
 }
 
+// [ASYNC-RETIRE] 退役：主线程切数据源 + 置 abort_，不无限等线程退出。
+// 硬编只做 500ms 短超时等待（设备独占）；线程已退出则立即析构释放，否则移入墓地。
+// 返回 false 表示 onlyIfIdle 且有在飞帧，未做任何改动（调用方稍后重试）。
+bool RDPServer::retireVideoEncoderAsync(bool onlyIfIdle, bool* threadStopped)
+{
+    if (threadStopped)
+        *threadStopped = true;
+    if (!videoEncoder_)
+        return true;
+    if (!videoEncoder_->beginRetire(onlyIfIdle))
+        return false;
+    // 退役即换代：队列里尚未投递的旧 encodedFrame/codecConfigChanged 全部作废。
+    ++videoEncoderGeneration_;
+    // 先断信号：即使编码线程还在处理在途帧，也不会再回调本对象（数据源已切走）。
+    QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
+
+    // 硬编重建前等旧线程退出。线程还在驱动调用里就让新实例 open，会撞上设备独占
+    // （RK MPP 表现为 mpp_venc_kcfg_init 失败），这是"永久退软编"的根因之一。
+    // 只等一个短超时，绝不在主线程无限等；等不到就进墓地，由回收定时器延后重建。
+    bool stopped = videoEncoder_->threadStopped();
+    const bool hardware = videoEncoder_->isHardwareEncoder();
+    if (hardware && !stopped) {
+        static constexpr int kHwRetireWaitMs = 500;
+        stopped = videoEncoder_->waitStopped(kHwRetireWaitMs);
+        if (!stopped)
+            qWarning() << "Retired HW encoder thread still running after"
+                       << kHwRetireWaitMs << "ms; deferring rebuild";
+    }
+    if (threadStopped)
+        *threadStopped = stopped;
+
+    reapRetiredEncoders();
+    if (stopped) {
+        // 线程已退出：直接析构会走 shutdown() 的 !isRunning 分支，同步释放
+        // codecCtx_/mpp_ 等设备资源，让新实例立刻可用；不必留在墓地占位。
+        videoEncoder_.reset();
+        return true;
+    }
+    retiredEncoders_.push_back(std::move(videoEncoder_));
+    capRetiredEncoders();
+    // 线程自行退出后由定时器把墓地对象析构（threadStopped() 后才安全）。
+    if (retiredEncoderReapTimer_ && !retiredEncoderReapTimer_->isActive())
+        retiredEncoderReapTimer_->start();
+    return true;
+}
+
+// 墓地硬上限：先回收线程已退出的对象；仍卡死的对象线程可能还在触碰
+// codecCtx_/mpp_，析构是 UB，只能放弃所有权（release）阻止 vector 无限增长。
+// 这是有意的最后一次泄漏，且每个溢出周期只发生一次并打 qCritical。
+void RDPServer::capRetiredEncoders()
+{
+    static constexpr std::size_t kMaxRetiredEncoders = 4;
+    if (retiredEncoders_.size() <= kMaxRetiredEncoders)
+        return;
+    reapRetiredEncoders();
+    while (retiredEncoders_.size() > kMaxRetiredEncoders) {
+        std::unique_ptr<VideoEncoder> stuck = std::move(retiredEncoders_.front());
+        retiredEncoders_.erase(retiredEncoders_.begin());
+        stuck.release();
+        qCritical() << "Retired encoder graveyard exceeded" << kMaxRetiredEncoders
+                    << "entries while the oldest thread is still wedged; abandoning it (deliberate leak)";
+    }
+}
+
 // 退役对象只能在线程真正退出后释放：卡死时线程仍在触碰 codecCtx_/mpp_，删除
 // 对象是 UB。每次新退役前清扫一次，卡死恢复后墓地不会无限累积历史编码器；
 // 仍卡死的对象继续留在墓地里（无安全手段强杀，见 stopEncoderThread 注释）。
@@ -5589,9 +6528,20 @@ void RDPServer::reapRetiredEncoders()
 // 图片模式）都算已处理，返回 Done。
 RDPServer::RebuildResult RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
 {
-    if (!videoEncoder_ || !screenCapturer_)
+    if (!screenCapturer_)
         return RebuildResult::NotApplicable;
+    // 上一次因旧硬编线程未退出而推迟创建时，videoEncoder_ 为空但重建请求仍有效。
+    // 旧对象还在墓地（线程/设备未释放）时，任何提前的重建请求继续排队，避免
+    // PLI/IDR 的 200ms 重试绕过等待直接 open 新硬编实例。
+    if (!videoEncoder_ && videoRebuildPending_) {
+        if (!retiredEncoders_.empty())
+            return RebuildResult::Deferred;
+        // 墓地已空：旧线程已退出且资源已释放，可以立即创建。
+    } else if (!videoEncoder_) {
+        return RebuildResult::NotApplicable;
+    }
 
+    const bool wasHardware = videoEncoder_ && videoEncoder_->isHardwareEncoder();
     int sw = screenCapturer_->width(), sh = screenCapturer_->height();
     int ew = sw, eh = sh;
     if (configScale_ < 100) {
@@ -5599,30 +6549,30 @@ RDPServer::RebuildResult RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
         if (tw > 0 && th > 0) { ew = tw; eh = th; }
     }
 
-    // [N6] 重建走可退役停机：线程卡死在驱动调用时不 abort/qFatal——
-    // 断开信号后把旧编码器故意泄漏到墓地，新建一个继续推流，服务不受连坐。
+    // [ASYNC-RETIRE] 重建走非阻塞退役：旧编码器只置 abort_ 并移入墓地，主线程不再
+    // 同步等最长 8s（旧实现线程卡在驱动调用时每次重建都冻住 UI/输入）。信号已断开，
+    // 在途帧不会回调；随后立刻建新编码器继续推流，旧线程醒来自行退出并被定时器回收。
     // onlyIfIdle：IDR 兜底路径专用，空闲判定与置 abort_ 在编码器内部同一把锁
-    // 完成（retireIfIdle），避免先 busyForMs()==0 再停线程之间的竞态。
-    bool wedged = false;
-    if (onlyIfIdle) {
-        const VideoEncoder::RetireState st = videoEncoder_->retireIfIdle();
-        if (st == VideoEncoder::RetireState::Busy)
-            return RebuildResult::Deferred;
-        wedged = (st == VideoEncoder::RetireState::Wedged);
-    } else {
-        wedged = !videoEncoder_->shutdownRetire();
+    // 完成（beginRetire），避免先 busyForMs()==0 再停线程之间的竞态。
+    bool stopped = true;
+    if (!retireVideoEncoderAsync(onlyIfIdle, &stopped))
+        return RebuildResult::Deferred;
+    if (wasHardware && !stopped) {
+        // 旧线程仍可能占着硬编设备：推迟创建，等回收定时器确认线程退出后再建，
+        // 避免新实例 open 失败（RK MPP 会返回 init 失败并被误判成硬编不可用）。
+        videoRebuildPending_ = true;
+        videoRebuildPendingSinceMs_ = monoNowMs();
+        if (retiredEncoderReapTimer_ && !retiredEncoderReapTimer_->isActive())
+            retiredEncoderReapTimer_->start();
+        return RebuildResult::Done;
     }
-    if (wedged) {
-        qWarning() << "Encoder thread wedged during reinit; retiring old encoder and rebuilding a fresh one";
-        QObject::disconnect(videoEncoder_.get(), nullptr, this, nullptr);
-        reapRetiredEncoders();
-        retiredEncoders_.push_back(std::move(videoEncoder_));
-        createVideoEncoder();
-        // 旧编码器已经退役（不可回滚），这里不能报 Deferred 让调用方重试；
-        // 返回 Done，下一次该路径会被开头的 !videoEncoder_ 判据清掉请求。
-        if (!videoEncoder_)
-            return RebuildResult::Done;
-    }
+    createVideoEncoder();
+    videoRebuildPending_ = false;
+    // 旧编码器已经退役（不可回滚），这里不能报 Deferred 让调用方重试；
+    // 返回 Done：新实例在本函数内同步创建，或已排队给墓地的回收定时器在旧线程
+    // 退出后创建（videoRebuildPending_）。
+    if (!videoEncoder_)
+        return RebuildResult::Done;
     // 重建后旧编码器的比特流上下文作废：缓存 IDR/extradata/静态复用标记必须清空，
     // 否则新客户端补发或 PLI 复用会把旧编码器的关键帧喂给新会话（花屏/黑屏）。
     lastKeyframeData_.clear();

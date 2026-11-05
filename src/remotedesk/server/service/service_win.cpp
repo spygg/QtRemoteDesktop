@@ -39,6 +39,14 @@ int platformMain(int argc, char* argv[])
         if (strcmp(argv[i], "--helper") == 0) {
             return HelperProcess::run(argc, argv);
         }
+        if (strcmp(argv[i], "--lock-once") == 0) {
+            // [LOCK] 服务端在 helper 不回执时的兜底：用 console 会话令牌把本程序
+            // 投到用户会话，在这里调 LockWorkStation() 并以退出码回报结果。
+            // 退出码就是最直接的 ack：0 = BOOL TRUE，非 0 = 失败（拿不到 rundll32
+            // 那样的"投递成功但不知道有没有锁上"的模糊结论）。
+            const BOOL ok = LockWorkStation();
+            return ok ? 0 : 2;
+        }
     }
     return -1;
 }

@@ -95,6 +95,9 @@ signals:
     // 与服务端 → 浏览器的 13 字节头完全一致，服务端可直接复用 onEncodedFrame 分发。
     void captureVideoFrameReceived(const QByteArray& data, bool isKeyframe, qint64 timestamp);
     void captureMessageReceived(const QJsonObject& msg);
+    // /secure-input 通道的上行消息（原本是单向通道，唯一的例外）：目前只有
+    // unlock_blocked —— secure-input 的注入前目标校验没通过，把原因上报回来。
+    void secureInputMessageReceived(const QJsonObject& msg);
     void captureSourceConnected();
     void captureSourceDisconnected();
     void shellConnected(QWebSocket* socket);
