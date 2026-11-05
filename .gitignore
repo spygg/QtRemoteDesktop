@@ -121,6 +121,9 @@ desktop.ini
 /_ime_test/
 /_dev/
 
+# 本地第三方参考/实验代码（QtScrcpy），不入库
+/src/QtScrcpy/
+
 # Qoder RepoWiki 自动生成的文档缓存（可随时重建，不需要入库）
 /.qoder/
 
