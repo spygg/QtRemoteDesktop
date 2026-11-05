@@ -43,6 +43,11 @@ InputManager::~InputManager()
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     destroyUinput();
     if (xDisplay_) {
+        // 正常退出前先做一次与启动时相同的键位卫生检查：把本进程记录过、且此刻
+        // 仍按下的 keycode 补一次 keyup。远端长按期间直接停服务/重启（SIGTERM）
+        // 不会走连接断开的 releasePressedKeys 路径，否则那颗键会留在 X 服务器上。
+        // 只处理状态文件里本产品记录过的 keycode，不碰用户物理键盘按住的其它键。
+        hygieneRestoreOnNewDisplay();
         // 键盘映射改动是全局且持久的：连接一断就还不回去了，先归还借用的 keycode。
         restoreUnicodeKeycode();
         // 逐键 auto-repeat 同理：进程退出前把自己置为"不重复"的键全部恢复默认，
@@ -51,5 +56,10 @@ InputManager::~InputManager()
         XCloseDisplay(static_cast<Display*>(xDisplay_));
         xDisplay_ = nullptr;
     }
+    // 只有"确实拿到过 X 连接"的实例才动落盘状态：上面 hygiene/restore 路径已按需
+    // 清理。绝不能在这里无条件删——RDPServer 在 startCapture() 里总会重建
+    // InputManager（Linux 需要按新 DISPLAY 取环境），那次重建的旧实例从未开过 X，
+    // 若它把状态文件删掉，下一次真正拿到 X 的实例就永远读不到 kill -9 的残留，
+    // 卡住的键也就没人释放（2026-11-05 实测复现）。
 #endif
 }

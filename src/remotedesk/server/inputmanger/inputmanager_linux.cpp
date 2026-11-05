@@ -3,8 +3,14 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QScreen>
+#include <QSaveFile>
 #include <QThread>
 #include <QTimer>
 
@@ -244,6 +250,38 @@ bool InputManager::desktopSessionIsWayland()
     return false;
 }
 
+// 探测逐键 API 是否被服务器实现：Xlib 的默认错误处理器只打印不退出，但会把每个
+// 失败刷成 "X Error of failed request"；这里临时接管，记录错误码后立刻还原。
+// 非 0 = 请求失败（如某些极简 X server 未实现 KBKey|KBAutoRepeatMode）。
+// 定义提前到卫生检查之前：启动恢复也要用同一个错误收集器。
+namespace {
+int g_repeatControlError = 0;
+int captureRepeatControlError(Display*, XErrorEvent* ev)
+{
+    g_repeatControlError = ev ? static_cast<int>(ev->error_code) : -1;
+    return 0;
+}
+} // namespace
+
+// 键位卫生状态的落盘位置：$XDG_RUNTIME_DIR（登录会话）或 /run/remotedesk
+// （root 系统服务，/run 是 tmpfs，随重启清理；不能放 systemd RuntimeDirectory ——
+// 服务崩溃后 systemd 会在下次启动前删掉该目录，恰好把恢复所需的状态丢了）。
+// 只写本进程自己抑制过的 keycode 与原值，文件很小（几十字节）。
+static QString keyHygieneStatePath()
+{
+    QString dir;
+    const QByteArray rt = qgetenv("XDG_RUNTIME_DIR");
+    if (!rt.isEmpty() && QDir(QString::fromUtf8(rt)).exists())
+        dir = QString::fromUtf8(rt) + QStringLiteral("/remotedesk");
+    else
+        dir = QStringLiteral("/run/remotedesk");
+    if (!QDir().mkpath(dir) || !QFileInfo(dir).isWritable()) {
+        dir = QStringLiteral("/tmp/remotedesk-%1").arg(::getuid());
+        QDir().mkpath(dir);
+    }
+    return dir + QStringLiteral("/key_state.json");
+}
+
 // 惰性打开 X display（首次注入时调用）。
 // 线程约束：所有 inject* 注入入口最终都经 RDPServer::onInputReceived 在主线程
 // 串行执行（WS 的 inputReceived 为队列连接），因此此处对 xDisplay_ 的写无需
@@ -294,6 +332,11 @@ bool InputManager::ensureXDisplay()
     xDisplay_ = d;
     openedDisplay_ = curDpy;
     openedXauth_ = curAuth;
+    qInfo() << "InputManager: X display opened, DISPLAY =" << curDpy
+            << "XAUTHORITY =" << curAuth;
+    // [HYGIENE] 新连接（服务启动/首次拿到 X）立刻核对上一次进程遗留的键位。
+    // kill -9 会绕过所有收尾路径，逐键 auto-repeat 与按下的键都留在 X 服务器上。
+    hygieneRestoreOnNewDisplay();
     // [自动重复] 这里**从不**调用 XAutoRepeatOff / XAutoRepeatOn。
     // 旧实现为了压住"某键 keyup 丢失后 X 自动重复灌出一串字母"（实测
     // "cccc测试"/"zzzzz中文"）关掉了整个 X 服务器的自动重复 —— 但那是**全局**
@@ -320,6 +363,152 @@ bool InputManager::ensureXDisplay()
     return true;
 }
 
+// ── 键位卫生检查（跨进程崩溃恢复） ───────────────────────────────────────────
+// 为什么安全：只处理状态文件里"本进程自己记录过"的 keycode。
+//   · 释放按键：仅当该 keycode 在当前 XQueryKeymap 里仍处于按下状态才补一次
+//     keyup。没有记录过的键（也就是用户物理键盘上真按住的键）一个都不碰。
+//   · 恢复重复位：写回的是抑制前用 XGetKeyboardControl 记录的原值（On/Off），
+//     不是 AutoRepeatModeDefault，因此不会把空闲键码解析成 off。
+//   · 状态文件按 DISPLAY 绑定：换了显示会话的记录直接丢弃，不误伤新显示。
+void InputManager::hygieneRestoreOnNewDisplay()
+{
+    const QString path = keyHygieneStatePath();
+    QFile f(path);
+    qInfo() << "InputManager: key hygiene check, state file" << path
+            << "exists =" << f.exists()
+            << "connection DISPLAY =" << openedDisplay_
+            << "current DISPLAY =" << QString::fromUtf8(qgetenv("DISPLAY"));
+    if (!f.exists())
+        return;
+    if (!f.open(QIODevice::ReadOnly)) {
+        qWarning() << "InputManager: 无法读取键位卫生状态" << path;
+        return;
+    }
+    const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+    f.close();
+    const QString savedDisplay = root.value(QStringLiteral("display")).toString();
+    // 比较对象必须是"当前这条 X 连接对应的显示"，而不是此刻的进程环境 DISPLAY：
+    // 服务在锁屏/解锁时会先改环境再重建 InputManager，旧实例析构时环境已是新显示，
+    // 若按环境比较会把"旧连接上仍按下的键"误判成来自另一块屏而跳过释放。
+    const QString curDisplay = openedDisplay_.isEmpty()
+        ? QString::fromUtf8(qgetenv("DISPLAY")) : openedDisplay_;
+    if (savedDisplay != curDisplay) {
+        // 记录属于另一块显示（会话已换）。旧记录的 X 服务器可能已不存在，
+        // 无法也不该在当前显示上补 keyup / 改 repeat。
+        qInfo() << "InputManager: key hygiene state for display" << savedDisplay
+                << "ignored (current display is" << curDisplay << ")";
+        clearPersistedKeyHygieneState();
+        return;
+    }
+
+    Display* dpy = xdisp(xDisplay_);
+    const QJsonObject keys = root.value(QStringLiteral("keys")).toObject();
+    char keymap[32];
+    const bool haveMap = XQueryKeymap(dpy, keymap) != 0;
+    QStringList released, restored;
+    int (*prevHandler)(Display*, XErrorEvent*) = XSetErrorHandler(captureRepeatControlError);
+    g_repeatControlError = 0;
+    // 先还原上一次进程借用的 Unicode keycode 映射（kill -9 会把 kc → Uxxxx 留在
+    // X 服务器上）。只按记录过的原始行还原，不发散到其它 keycode。
+    const QJsonObject uni = root.value(QStringLiteral("unicode")).toObject();
+    const int uniKc = uni.value(QStringLiteral("keycode")).toInt(0);
+    const QJsonArray uniRow = uni.value(QStringLiteral("row")).toArray();
+    if (uniKc > 8 && uniKc < 256 && !uniRow.isEmpty()) {
+        if (haveMap && (keymap[uniKc / 8] & (1 << (uniKc % 8)))) {
+            XTestFakeKeyEvent(dpy, static_cast<unsigned int>(uniKc), False, CurrentTime);
+            released << QString::number(uniKc);
+        }
+        QVector<KeySym> orig;
+        orig.reserve(uniRow.size());
+        for (const QJsonValue& v : uniRow)
+            orig.append(static_cast<KeySym>(v.toDouble()));
+        XChangeKeyboardMapping(dpy, uniKc, orig.size(), orig.data(), 1);
+        const int uniRepeat = uni.value(QStringLiteral("repeat")).toInt(-1);
+        if (uniRepeat >= 0) {
+            XKeyboardControl ctrl;
+            memset(&ctrl, 0, sizeof(ctrl));
+            ctrl.key = uniKc;
+            ctrl.auto_repeat_mode = uniRepeat;
+            XChangeKeyboardControl(dpy, KBKey | KBAutoRepeatMode, &ctrl);
+            restored << QStringLiteral("unicode:") + QString::number(uniKc);
+        }
+        qInfo() << "InputManager: startup hygiene restored borrowed unicode keycode" << uniKc;
+    }
+    for (auto it = keys.constBegin(); it != keys.constEnd(); ++it) {
+        const int kc = it.key().toInt();
+        if (kc <= 0 || kc >= 256)
+            continue;
+        // 只释放"本产品记录过、且现在仍按下"的 keycode：这是上一次进程注入后
+        // 没来得及回放的 keyup（含 kill -9 场景）。没有记录的用户按键不在此列。
+        const bool down = haveMap && (keymap[kc / 8] & (1 << (kc % 8)));
+        if (down) {
+            XTestFakeKeyEvent(dpy, static_cast<unsigned int>(kc), False, CurrentTime);
+            released << QString::number(kc);
+        }
+        XKeyboardControl ctrl;
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.key = kc;
+        ctrl.auto_repeat_mode = it.value().isDouble()
+            ? it.value().toInt() : AutoRepeatModeDefault;
+        XChangeKeyboardControl(dpy, KBKey | KBAutoRepeatMode, &ctrl);
+        restored << QString::number(kc);
+    }
+    XSync(dpy, False);
+    XSetErrorHandler(prevHandler);
+    if (g_repeatControlError != 0)
+        qWarning() << "InputManager: 启动卫生检查恢复逐键重复位失败 (X error"
+                   << g_repeatControlError << ")";
+    qInfo() << "InputManager: startup key hygiene - released stuck keys" << released
+            << ", restored auto-repeat for" << restored;
+    clearPersistedKeyHygieneState();
+}
+
+void InputManager::persistKeyHygieneState()
+{
+    // 借用的 Unicode keycode 同样属于"本产品改过的键位"：kill -9 后映射会留在
+    // X 服务器上（xmodmap 里能看到 kc → Uxxxx），也必须落盘待下次启动还原。
+    if (autoRepeatSuppressed_.isEmpty() && unicodeKeycode_ == 0) {
+        clearPersistedKeyHygieneState();
+        return;
+    }
+    QJsonObject keys;
+    for (auto it = autoRepeatSuppressed_.constBegin(); it != autoRepeatSuppressed_.constEnd(); ++it)
+        keys.insert(QString::number(it.key()),
+                    autoRepeatOriginal_.value(it.key(), AutoRepeatModeDefault));
+    QJsonObject root;
+    // 与 hygieneRestoreOnNewDisplay 的比对口径保持一致：记录"连接实际指向的显示"。
+    root.insert(QStringLiteral("display"), openedDisplay_.isEmpty()
+        ? QString::fromUtf8(qgetenv("DISPLAY")) : openedDisplay_);
+    root.insert(QStringLiteral("keys"), keys);
+    if (unicodeKeycode_ != 0 && unicodeDisplay_ == xDisplay_ && unicodeRowLen_ > 0) {
+        QJsonObject u;
+        u.insert(QStringLiteral("keycode"), static_cast<int>(unicodeKeycode_));
+        QJsonArray row;
+        for (int i = 0; i < unicodeOriginalRow_.size(); ++i)
+            row.append(static_cast<double>(unicodeOriginalRow_.at(i)));
+        u.insert(QStringLiteral("row"), row);
+        u.insert(QStringLiteral("repeat"),
+                 autoRepeatOriginal_.value(static_cast<int>(unicodeKeycode_), -1));
+        root.insert(QStringLiteral("unicode"), u);
+    }
+    qInfo() << "InputManager: persist key hygiene" << root;
+    QSaveFile f(keyHygieneStatePath());
+    if (!f.open(QIODevice::WriteOnly)) {
+        qWarning() << "InputManager: 无法写入键位卫生状态" << f.fileName();
+        return;
+    }
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+    if (!f.commit())
+        qWarning() << "InputManager: 提交键位卫生状态失败" << f.fileName();
+}
+
+void InputManager::clearPersistedKeyHygieneState()
+{
+    const QString path = keyHygieneStatePath();
+    if (QFile::exists(path) && !QFile::remove(path))
+        qWarning() << "InputManager: 删除键位卫生状态失败" << path;
+}
+
 // ── 逐键 auto-repeat 抑制 ───────────────────────────────────────────────────
 // 为什么是"逐键"而不是整显示 XAutoRepeatOff：
 //   · X 的 auto-repeat 是**显示级全局状态**，XAutoRepeatOff 会把本机物理键盘一起
@@ -336,17 +525,6 @@ bool InputManager::ensureXDisplay()
 //
 // 时序：抑制请求必须在 keydown 之前进入服务器队列（X 在"键按下 + delay 到期"时
 // 才产 typematic），恢复请求在 keyup 之后。两者都在同一个 XFlush 批次里按序处理。
-namespace {
-// 探测逐键 API 是否被服务器实现：Xlib 的默认错误处理器只打印不退出，但会把每个
-// 失败刷成 "X Error of failed request"；这里临时接管，记录错误码后立刻还原。
-// 非 0 = 请求失败（如某些极简 X server 未实现 KBKey|KBAutoRepeatMode）。
-int g_repeatControlError = 0;
-int captureRepeatControlError(Display*, XErrorEvent* ev)
-{
-    g_repeatControlError = ev ? static_cast<int>(ev->error_code) : -1;
-    return 0;
-}
-} // namespace
 
 bool InputManager::setKeyAutoRepeat(unsigned int keycode, bool suppress)
 {
@@ -425,6 +603,12 @@ bool InputManager::setKeyAutoRepeat(unsigned int keycode, bool suppress)
         autoRepeatSuppressed_.insert(kc, QDateTime::currentMSecsSinceEpoch());
     else
         autoRepeatSuppressed_.remove(kc);
+    // [HYGIENE] 抑制账目变化时落盘（keydown 记录/全部释放时删除文件），
+    // 供 kill -9 后的下一次启动恢复。文件只有几十字节，按每次按键的粒度写可接受。
+    if (suppress)
+        persistKeyHygieneState();
+    else if (autoRepeatSuppressed_.isEmpty())
+        clearPersistedKeyHygieneState();
     return true;
 }
 
@@ -439,6 +623,8 @@ void InputManager::restoreAutoRepeatKeycodes()
 {
     if (autoRepeatSuppressed_.isEmpty()) {
         autoRepeatDisplay_ = xDisplay_;
+        // 正常收尾（断线/析构）没有待恢复项：清掉落盘状态，下一轮启动无副作用。
+        clearPersistedKeyHygieneState();
         return;
     }
     if (!xDisplay_ || autoRepeatDisplay_ != xDisplay_) {
@@ -447,6 +633,7 @@ void InputManager::restoreAutoRepeatKeycodes()
         autoRepeatSuppressed_.clear();
         autoRepeatOriginal_.clear();
         autoRepeatDisplay_ = xDisplay_;
+        clearPersistedKeyHygieneState();
         return;
     }
 
@@ -472,6 +659,7 @@ void InputManager::restoreAutoRepeatKeycodes()
     } else {
         qInfo() << "InputManager: 已恢复" << keys.size() << "枚按键的自动重复设置";
     }
+    clearPersistedKeyHygieneState();
 }
 
 // 惰性对账（不引入任何定时器/线程等待）：每次键盘注入前最多每 2s 查一次服务器
@@ -527,6 +715,8 @@ void InputManager::reconcileAutoRepeatKeycodes()
     else
         qInfo() << "InputManager: 检测到 keyup 丢失，已恢复" << released.size()
                 << "枚按键的自动重复设置";
+    // 账目变了：同步落盘（全空时自动删除），保持崩溃恢复记录准确。
+    persistKeyHygieneState();
 }
 
 // ── Unicode 上屏字符注入（中文等）──────────────────────────────────────────
@@ -667,6 +857,29 @@ bool InputManager::borrowUnicodeKeycode()
     unicodeKeycode_ = chosen;
     unicodeDisplay_ = xDisplay_;
 
+    // 记录"借用前"的逐键重复位：XChangeKeyboardMapping 把空闲键码变成已用键时，
+    // X 服务器会顺手把它的 auto-repeat 位打开。若等 setKeyAutoRepeat 在首次按下时
+    // 才查询原值，就会把"映射后的 on"当成基线，归还后 xset q 位图回不到原状
+    //（实测借用 keycode 250/253 会残留一位 on）。这里趁映射发生前先存原值。
+    {
+        XKeyboardState st;
+        const int byte = chosen / 8;
+        const int bit = chosen % 8;
+        if (XGetKeyboardControl(dpy, &st) != 0)
+            autoRepeatOriginal_[chosen] = (st.auto_repeats[byte] & (1 << bit))
+                ? AutoRepeatModeOn : AutoRepeatModeOff;
+        else
+            autoRepeatOriginal_[chosen] = AutoRepeatModeDefault;
+        qInfo() << "InputManager: 借用 keycode" << chosen
+                << "repeat 原值 =" << autoRepeatOriginal_.value(chosen)
+                << "bitmap byte =" << QString::number(
+                       static_cast<int>(st.auto_repeats[chosen / 8]), 16);
+    }
+
+    // 借用动作本身就要落盘：kill -9 可能发生在"已改映射、还没注入/抑制"的窗口，
+    // 状态文件里没有它，下次启动就无法把 kc → Uxxxx 的映射还原回去。
+    persistKeyHygieneState();
+
     // 预热一次映射：接收端是在处理 MappingNotify 时才回头刷新自己的键表缓存，
     // 而"刚借来的键第一次由 NoSymbol 变成有值"这一步实测最容易踩到缓存还没刷新
     // 的窗口（按下事件确实到了，解出来却是 keysym=0x0，字符直接丢）。这里先把它
@@ -693,8 +906,21 @@ void InputManager::restoreUnicodeKeycode()
         return;
     // 借用键码也可能正被远端按住（Unicode 字符的 down 还没等到 up）：先把它从
     // "不重复"名单里还清，再还原映射，避免这颗键在断线后永久失去自动重复。
-    if (autoRepeatSuppressed_.contains(unicodeKeycode_))
-        setKeyAutoRepeat(static_cast<unsigned int>(unicodeKeycode_), false);
+    const int ukc = static_cast<int>(unicodeKeycode_);
+    if (autoRepeatSuppressed_.contains(ukc))
+        setKeyAutoRepeat(static_cast<unsigned int>(ukc), false);
+    // 只借过映射、没真正按下（或按下已还清）时，映射本身可能已把该 keycode 的
+    // repeat 位改成 on；归还映射前按"借用前原值"写回，只碰本产品借用的这一枚。
+    if (xDisplay_ && autoRepeatOriginal_.contains(ukc)) {
+        Display *dpy = xdisp(xDisplay_);
+        XKeyboardControl ctrl;
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.key = ukc;
+        ctrl.auto_repeat_mode = autoRepeatOriginal_.value(ukc, AutoRepeatModeDefault);
+        XChangeKeyboardControl(dpy, KBKey | KBAutoRepeatMode, &ctrl);
+        XFlush(dpy);
+        autoRepeatOriginal_.remove(ukc);
+    }
     // 队列里尚未执行的字符一并作废：映射随后就被还原，再注入必然出错。
     unicodePending_.clear();
     unicodePumpScheduled_ = false;
@@ -715,6 +941,9 @@ void InputManager::restoreUnicodeKeycode()
     unicodeRowLen_ = 0;
     unicodeOriginalRow_.clear();
     unicodeDisplay_ = nullptr;
+    // 映射已按原行还原、借用码也不再占用：同步清掉落盘的借用记录（若还有被抑制
+    // 的键，persist 会重写一份只含这些键的文件）。
+    persistKeyHygieneState();
 }
 
 // [残留按键] 旧实现这里用 XQueryKeymap 把**整个服务器**处于按下状态的键全部
@@ -1062,6 +1291,11 @@ void InputManager::injectWheel(int delta) {
 }
 
 void InputManager::primeFocusWindow() {
+    // 惰性 X 连接在"首次注入"才打开；但启动卫生检查（恢复上一进程 kill -9
+    // 遗留的卡键/重复位）挂在 ensureXDisplay 上，若等到首个按键才执行，卡住的键
+    // 会在整个空闲窗口里一直按着。采集启动时主动建连，让卫生检查随启动落地。
+    if (!ensureXDisplay())
+        return;
     if (xDisplay_)
         focusLockScreenWindow(xdisp(xDisplay_));
 }

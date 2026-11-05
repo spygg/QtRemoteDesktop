@@ -189,6 +189,14 @@ private:
     // 析构都必须还清，否则那颗键会永久失去自动重复（本机物理键盘同受影响）。
     bool setKeyAutoRepeat(unsigned int keycode, bool suppress);
     void reconcileAutoRepeatKeycodes();        // 惰性对账：X 侧已抬起的键立即恢复
+    // [HYGIENE] 跨进程启动卫生检查：把上一次进程（可能被 kill -9，没有任何收尾
+    // 机会）遗留的"本产品抑制过的 keycode"从落盘状态里恢复，并清掉明显残留的
+    // 按下的键。只处理状态文件里记录的 keycode，绝不扫描/释放用户物理按住的其它键。
+    void hygieneRestoreOnNewDisplay();
+    // 把当前"抑制中的 keycode → 原值"落盘（$XDG_RUNTIME_DIR 或 /run/remotedesk）。
+    // 仅用于崩溃恢复，正常退出会删除该文件。
+    void persistKeyHygieneState();
+    void clearPersistedKeyHygieneState();
     // keycode → 最近一次「按下」注入时刻。集合本身就是"本对象欠一次恢复"的账；
     // 时间戳只用于对账：仍在被按住（repeat 翻译不断刷新）的键不能被误判为丢失。
     QHash<int, qint64> autoRepeatSuppressed_;

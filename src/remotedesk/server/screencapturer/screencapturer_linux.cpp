@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QProcess>
@@ -64,6 +65,23 @@ static QString detectWaylandSocketName()
     return QString();
 }
 
+// 当前前台 VT（"tty1"/"tty2"...）。root 服务直接读 /sys；失败返回空串。
+// 用途：lightdm 型锁屏把前台切到 greeter VT，而原桌面的 X server 仍在跑，
+// XGetImage 依然成功 —— 只靠"采集失败"无法识别这种锁屏。
+static QString activeConsoleVt()
+{
+    QFile f(QStringLiteral("/sys/class/tty/tty0/active"));
+    if (!f.open(QIODevice::ReadOnly))
+        return QString();
+    const QString v = QString::fromLatin1(f.readAll()).trimmed();
+    return v.startsWith(QLatin1String("tty")) ? v : QString();
+}
+
+static QString vtName(const QString& nr)
+{
+    return nr.isEmpty() ? QString() : QStringLiteral("tty") + nr;
+}
+
 int ScreenCapturer::realLockState()
 {
     if (lockQueryTimer_.isValid() && lockQueryTimer_.elapsed() < 2000)
@@ -85,6 +103,8 @@ int ScreenCapturer::realLockState()
                 bool anyQueried = false;   // 读到过有效用户图形会话的 LockedHint
                 bool anyLocked = false;
                 bool anyGreeter = false;   // 系统停在登录界面（lightdm/gdm greeter 会话 active）
+                QString desktopVt;         // active 图形用户会话所在 VT
+                QString greeterVt;         // active greeter 会话所在 VT
                 const QDBusArgument arr = reply.arguments().first().value<QDBusArgument>();
                 arr.beginArray();
                 while (!arr.atEnd()) {
@@ -92,8 +112,13 @@ int ScreenCapturer::realLockState()
                     QString sid;
                     quint32 suid = 0;
                     QString uname;
+                    QString seat;
                     QDBusObjectPath spath;
-                    arr >> sid >> suid >> uname >> spath;
+                    // ListSessions 的签名是 a(susso)：id、uid、user、seat、session path。
+                    // 少读一个字段（旧代码漏了 seat）会让 spath 读到 "seat0"，
+                    // 后续 QDBusInterface 路径非法 → 所有会话被跳过 → 永远判定
+                    // "未锁屏"（这正是锁屏后仍广播 locked:false 的根因之一）。
+                    arr >> sid >> suid >> uname >> seat >> spath;
                     arr.endStructure();
                     if (spath.path().isEmpty())
                         continue;
@@ -109,11 +134,14 @@ int ScreenCapturer::realLockState()
                         continue;
                     const QString cls = sess.property("Class").toString();
                     const QString st = sess.property("State").toString();
+                    const QString type = sess.property("Type").toString();
                     if (cls == QLatin1String("greeter")) {
                         // greeter 会话没有 LockedHint 语义；active 即代表前台
                         // 停在登录界面（开机未登录/注销/lightdm 型锁屏切 VT）。
-                        if (st == QLatin1String("active"))
+                        if (st == QLatin1String("active")) {
                             anyGreeter = true;
+                            greeterVt = vtName(sess.property("VTNr").toString());
+                        }
                         continue;
                     }
                     const QVariant v = sess.property("LockedHint");
@@ -123,20 +151,51 @@ int ScreenCapturer::realLockState()
                         // root 服务：只认 active 的图形用户会话（x11/wayland）。
                         // SSH（tty 类型）等会话与屏幕锁定无关，不能把
                         // "SSH 在线、桌面停在登录界面" 误判成 "未锁定"。
-                        const QString type = sess.property("Type").toString();
                         if (st != QLatin1String("active") ||
                             (type != QLatin1String("x11") && type != QLatin1String("wayland")))
                             continue;
                     }
                     anyQueried = true;
+                    // 记录桌面会话的 VT，供"前台 VT 是否仍停在桌面"的交叉判定。
+                    // 仅图形会话有效，避免同 uid 的 SSH/tty 会话覆盖结果。
+                    if (st == QLatin1String("active")
+                        && (type == QLatin1String("x11") || type == QLatin1String("wayland")))
+                        desktopVt = vtName(sess.property("VTNr").toString());
                     if (v.toBool())
                         anyLocked = true;
                 }
                 arr.endArray();
-                if (anyQueried)
-                    state = anyLocked ? 1 : 0;
-                else if (anyGreeter)
-                    state = 1;   // 无 active 图形用户会话 + 登录界面在前台 = 锁定语义
+                // 交叉证据：LockedHint 之外，再看"前台 VT 是否仍是桌面所在 VT"。
+                // lightdm 型锁屏切到 greeter VT 时 LockedHint 往往还是 no（用户会话
+                // 仍是 active、只是不在前台），只看 LockedHint 会误报未锁定。
+                const QString curVt = activeConsoleVt();
+                const bool vtMismatch = !desktopVt.isEmpty() && !curVt.isEmpty()
+                                        && curVt != desktopVt;
+                const bool greeterOnFront = !greeterVt.isEmpty() && !curVt.isEmpty()
+                                            && curVt == greeterVt;
+                const bool desktopOnFront = !desktopVt.isEmpty() && !curVt.isEmpty()
+                                            && curVt == desktopVt;
+                // 只有"用户桌面就在前台"才算明确的未锁屏证据（state=0）。
+                // 其余组合宁可返回 1 或 -1，也不要在 VT 切换/登录器并存的过渡期
+                // 用一个弱信号把前端遮罩收回去。
+                if (anyLocked || vtMismatch || greeterOnFront) {
+                    state = 1;
+                } else if (desktopOnFront) {
+                    state = 0;
+                } else if (anyGreeter) {
+                    // 读不到前台 VT 或桌面 VT 未知，但登录器处于 active：
+                    // 保守判定为锁定（lightdm 锁屏正是这种形态）。
+                    state = 1;
+                } else if (anyQueried) {
+                    state = 0;
+                }
+                // 没有可用的图形会话信息时保持 -1（未知）：不要用"只有 SSH 会话"
+                // 这种残缺信息去猜锁屏，否则会把正常桌面误判成锁定。
+                if (vtMismatch || greeterOnFront || anyLocked) {
+                    qInfo() << "ScreenCapturer: lock evidence" << "lockedHint=" << anyLocked
+                            << "desktopVt=" << desktopVt << "curVt=" << curVt
+                            << "greeterVt=" << greeterVt << "state=" << state;
+                }
             }
         }
     }
@@ -162,22 +221,42 @@ int ScreenCapturer::realLockState()
     return state;
 }
 
-bool ScreenCapturer::shouldDeclareLocked()
+// 把锁屏判定与"能否采集"解耦：原实现只在采集失败/黑帧时判定锁屏，
+// 而 lightdm 型锁屏下原桌面的 X server 仍在跑、采集照常成功，服务端会一直
+// 广播 locked:false（前端无遮罩、无一键解锁）。这里每个采集周期查一次真实
+// 状态（内部 2s 缓存），状态翻转立即 emit。
+void ScreenCapturer::pollRealLockState()
 {
     const int st = realLockState();
-    if (st == 0) {
-        // 采集持续失败/黑帧但系统并未锁屏（典型：Wayland 会话下 X11 回落到
-        // XWayland，root 无内容）→ 不声明锁屏，纠正既有状态，避免前端误弹
-        // 解锁界面。
-        if (screenLocked_) {
-            screenLocked_ = false;
-            emit screenLocked(false);
-            qInfo() << "ScreenCapturer: capture unavailable but session NOT locked, clearing lock state";
-        }
-        return false;
+    if (st == 1 && !screenLocked_) {
+        screenLocked_ = true;
+        emit screenLocked(true);
+        qInfo() << "ScreenCapturer: screen locked (VT/desktop session changed)";
+    } else if (st == 0 && screenLocked_) {
+        screenLocked_ = false;
+        emit screenLocked(false);
+        qInfo() << "ScreenCapturer: screen unlocked (desktop session back to foreground)";
     }
-    // 已锁屏（1）或无法查询（-1）→ 维持旧启发式行为
-    return true;
+}
+
+void ScreenCapturer::refreshLockState()
+{
+    lockQueryTimer_.invalidate();
+    cachedLockState_ = -1;
+    pollRealLockState();
+}
+
+void ScreenCapturer::setLockedExternally(bool locked)
+{
+    // 命令侧已经用 VT/登录器/LockedHint 交叉确认过，属于强证据：直接落地，
+    // 后续采集周期的自动判定会复用这个缓存值（2s 后重新查询）。
+    cachedLockState_ = locked ? 1 : 0;
+    lockQueryTimer_.start();
+    if (screenLocked_ != locked) {
+        screenLocked_ = locked;
+        emit screenLocked(locked);
+    }
+    qInfo() << "ScreenCapturer: lock state set externally ->" << locked;
 }
 
 // sudo apt install libx11-dev libxtst-dev libxdamage-dev libxcomposite-dev libxrender-dev
@@ -1128,6 +1207,9 @@ void ScreenCapturer::captureFrameBody()
         return;
     }
     QScopedValueRollback<bool> captureGuard(inCaptureFrame_, true);
+    // 锁屏判定独立于采集成败：lightdm 切 greeter VT 后原桌面的 X server 仍在
+    // 跑、采集照常成功，必须在每个采集周期主动核对 VT/logind 状态。
+    pollRealLockState();
     QImage frame;
     if (useX11_ && x11Capturer_) {
         bool updated = true;
@@ -1135,11 +1217,11 @@ void ScreenCapturer::captureFrameBody()
             captureFailCount_++;
             if (captureFailCount_ == 5 || captureFailCount_ % 300 == 0)
                 qWarning() << "ScreenCapturer: X11 captureFrame FAIL #" << captureFailCount_
-                           << "(lock declaration now verified via logind/gnome-screensaver)";
-            if (captureFailCount_ >= 5 && !screenLocked_ && shouldDeclareLocked()) {
-                screenLocked_ = true;
-                emit screenLocked(true);
-            }
+                           << "(capture failure is not a lock signal; lock state comes only from pollRealLockState)";
+            // 采集失败只记录、不改锁状态：真正的锁屏（含 lightdm 切 greeter VT）由
+            // 每个周期的 pollRealLockState() 用 logind/VT 交叉证据判定；X 连接整体
+            // 断开时 linux_service 的 XIO handler 会 _exit(1)，systemd 重启后由新的
+            // pollRealLockState() 重新落地，因此这里不需要"采集失败 ⇒ 置锁"的推断。
             return;
         }
         captureFailCount_ = 0;
@@ -1167,17 +1249,14 @@ void ScreenCapturer::captureFrameBody()
         }
 
         if (isFrameBlack(frame)) {
-            if (!screenLocked_ && shouldDeclareLocked()) {
-                screenLocked_ = true;
-                emit screenLocked(true);
-            }
+            // 黑帧只跳过本帧，不改锁状态：深色桌面/采集目标被遮挡都可能出黑帧，
+            // 它不是锁屏证据。真锁屏由 pollRealLockState() 的交叉证据判定。
             return;
         }
-        if (screenLocked_) {
-            screenLocked_ = false;
-            emit screenLocked(false);
-        }
-
+        // 注意：采集成功不再是"未锁屏"的证据。lightdm 锁屏把前台切到 greeter
+        // VT 后，原桌面的 X server 仍在跑、XGetImage 照样成功 —— 旧代码在这里
+        // 无条件 emit(false)，与周期判定交替广播，前端遮罩会疯狂闪烁。
+        // 解锁状态只由文件顶部 pollRealLockState()（logind + VT 交叉证据）驱动。
         bool regionKnownDirty = (useX11_ && x11Capturer_ && x11Capturer_->regionDirty());
         if (regionKnownDirty) {
             // 区域抓取已知有变化（XDamage 非空），跳过全帧校验和以省 CPU
@@ -1232,11 +1311,8 @@ void ScreenCapturer::captureFrameBody()
                            << "screenLocked_=" << screenLocked_
                            << "timerActive=" << captureTimer_->isActive()
                            << "interval=" << captureTimer_->interval();
-            if (captureFailCount_ >= 5 && !screenLocked_ && shouldDeclareLocked()) {
-                screenLocked_ = true;
-                emit screenLocked(true);
-                qWarning() << "ScreenCapturer: EMIT screenLocked(true) after" << captureFailCount_ << "fails";
-            }
+            // 同 X11 分支：采集失败只记录日志，不改锁状态（锁屏只由 pollRealLockState
+            // 的 logind/VT 交叉证据与命令侧 setLockedExternally 决定）。
             return;
         }
         if (captureFailCount_ > 0)
@@ -1251,17 +1327,13 @@ void ScreenCapturer::captureFrameBody()
         }
 
         if (isFrameBlack(frame)) {
-            if (!screenLocked_ && shouldDeclareLocked()) {
-                screenLocked_ = true;
-                emit screenLocked(true);
-            }
+            // 黑帧只跳过本帧，不改锁状态（同 X11 分支）。
             return;
         }
-        if (screenLocked_) {
-            screenLocked_ = false;
-            emit screenLocked(false);
-        }
-
+        // 注意：采集成功不再是"未锁屏"的证据。lightdm 锁屏把前台切到 greeter
+        // VT 后，原桌面的 X server 仍在跑、XGetImage 照样成功 —— 旧代码在这里
+        // 无条件 emit(false)，与周期判定交替广播，前端遮罩会疯狂闪烁。
+        // 解锁状态只由文件顶部 pollRealLockState()（logind + VT 交叉证据）驱动。
         // 空帧 / 0 尺寸帧保护（Wayland 流初始化中可能提交 0 宽高帧）
         if (frame.isNull() || frame.width() <= 0 || frame.height() <= 0) {
             idleCount_++;
@@ -1297,16 +1369,10 @@ void ScreenCapturer::captureFrameBody()
     frame = pixmap.toImage().convertToFormat(QImage::Format_RGB888);
 
     if (isFrameBlack(frame)) {
-        if (!screenLocked_ && shouldDeclareLocked()) {
-            screenLocked_ = true;
-            emit screenLocked(true);
-        }
+        // 黑帧只跳过本帧，不改锁状态（同 X11 分支）。
         return;
     }
-    if (screenLocked_) {
-        screenLocked_ = false;
-        emit screenLocked(false);
-    }
+    // 采集成功不是未锁屏证据（同 X11 分支）：解锁只由 pollRealLockState 驱动。
 
     quint16 checksum = quickFrameChecksum(frame);
     if (forceFrameCount_ <= 0 && checksum == lastFrameChecksum_) {

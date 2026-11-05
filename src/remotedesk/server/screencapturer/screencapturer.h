@@ -130,6 +130,18 @@ public:
     explicit ScreenCapturer(QObject* parent = nullptr);
     ~ScreenCapturer();
 
+#ifdef Q_OS_LINUX
+    // [LOCK-VT] 立刻失效缓存并重新判定一次锁屏状态（logind LockedHint +
+    // 前台 VT/桌面 VT + greeter 会话交叉证据），有变化就 emit screenLocked。
+    // 锁屏/解锁动作完成后调用：lightdm 型锁屏会把前台切到 greeter VT，
+    // 而原桌面的 X server 仍在跑、采集照常成功，不能等"采集失败"才更新状态。
+    void refreshLockState();
+    // 锁定/解锁命令已被服务端确认（VT/登录器/LockedHint 至少一项变化）时，
+    // 直接把判定落地并 emit，避免"命令成功但采集仍在原桌面的 X server 上跑、
+    // 自动判定读不到变化"导致前端遮罩不收/不弹。
+    void setLockedExternally(bool locked);
+#endif
+
     bool start(int fps);
     void stop();
     void suspend();
@@ -449,13 +461,14 @@ private:
     bool inCaptureFrame_ = false;
 
     // 真实锁屏状态查询（logind LockedHint 优先，gnome-screensaver 兜底），
-    // 带 2s 缓存。返回 1=已锁屏 0=未锁屏 -1=查询失败（调用方回退旧启发式）。
-    // 背景：Wayland 会话下服务端若回落 XWayland，采集会持续失败，旧的
-    // "失败>=5 次 ⇒ 锁屏"启发式会误报锁屏（前端弹出假解锁界面）。
+    // 带 2s 缓存。返回 1=已锁屏 0=未锁屏 -1=查询失败（本轮不翻转状态）。
+    // 这是 screen_locked 的唯一权威来源（配合命令侧 setLockedExternally）：
+    // 采集失败/黑帧一律只记录、不再推断锁屏 —— Wayland 回落 XWayland 等
+    // "采集不可用但未锁屏"的场景曾因此误报（前端弹出假解锁界面）。
     int realLockState();
-    // "采集失败/黑帧"时是否允许声明锁屏：查询到未锁屏 → 返回 false 并纠正
-    // 既有状态；已锁屏或查询失败 → 返回 true 维持旧行为。
-    bool shouldDeclareLocked();
+    // 每个采集周期做一次（realLockState 内部 2s 缓存，实际 DBus 开销可控）：
+    // 把锁屏判定与"能否采集"解耦，采集成功不代表用户看得见桌面。
+    void pollRealLockState();
     int cachedLockState_ = -1;
     QElapsedTimer lockQueryTimer_;
 #endif
