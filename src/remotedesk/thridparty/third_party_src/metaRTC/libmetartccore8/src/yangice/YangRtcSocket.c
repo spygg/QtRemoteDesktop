@@ -142,7 +142,7 @@ void* yang_run_rtcudp_thread(void *obj) {
 	yang_memset(&src, 0, sizeof(YangIpAddress));
 	src.familyType=session->familyType;
 
-	while (session->isLoop) {
+	while (session->isLoop && !session->stopRequested) {
 		yang_memset(buffer, 0, 2048);
 		if ((nbytes = yang_socket_recvfrom(session->fd, buffer, 2048,  &src)) > 0) {
 			static int udpdbg = 0;
@@ -176,9 +176,14 @@ void* yang_run_rtcudp_thread(void *obj) {
 		}
 	}
 
+	// 线程退出后不再触碰 socket：关闭 fd 与置 fd=-1 统一由 yang_stop_rtcudp 在
+	// join 之后完成。旧实现在这里关闭 fd 并把 fd 写回 -1，而 stop() 只轮询
+	// isStart 并不 join，调用方（yang_destroy_rtcContext）紧接着就
+	// yang_free(context->sock)；fd 位于 YangRtcSocketSession 偏移 0（也是
+	// YangRtcSocket 首成员），这条 -1 写入落在已释放堆块的空闲链表链接字上，
+	// 把 LFH 链表写成 0xffffffff，后续任意 malloc 在 ntdll 里按 [edi+4]
+	// 访问回绕到地址 0x3 崩溃（0xC0000005 / exit 1067）。
 	session->isStart = yangfalse;
-	yang_socket_close(session->fd);
-	session->fd = -1;
 
 	return NULL;
 }
@@ -193,6 +198,10 @@ void* yang_run_rtctcp_thread(void *obj) {
 
 	if (yang_socket_connect(session->fd, &session->remote_addr) == -1) {
 		yang_socket_close(session->fd);
+		// 连接失败：fd 已关闭，这里必须同时清 fd 与 isStart，否则 stop()/join
+		// 会等一个永远不会结束的线程（旧实现里 isStart 一直是 true）。
+		session->fd = -1;
+		session->isStart = yangfalse;
 		yang_error_wrap(ERROR_SOCKET, "rtc tcp connect socket error(%d)",GetSockError());
 		return NULL;
 	}
@@ -202,7 +211,7 @@ void* yang_run_rtctcp_thread(void *obj) {
 	yang_trace("\n rtc tcp socket(%s) is starting",session->familyType==Yang_IpFamilyType_IPV4?"IPV4":"IPV6");
 	session->isLoop = yangtrue;
 
-	while (session->isLoop) {
+	while (session->isLoop && !session->stopRequested) {
 		yang_memset(buffer, 0, 4096);
         if ((readLen = yang_socket_recv(session->fd, buffer, 4096, 0)) > 0) {
         		if (session->receive)	session->receive(buffer, readLen, session->user);
@@ -222,9 +231,8 @@ void* yang_run_rtctcp_thread(void *obj) {
 		}
 	}
 
+	// 同 UDP：fd 的关闭与 fd=-1 统一交给 yang_stop_rtcudp（join 之后）。
 	session->isStart = yangfalse;
-	yang_socket_close(session->fd);
-	session->fd = -1;
 
 	return NULL;
 }
@@ -246,6 +254,9 @@ void* yang_run_rtctcp_thread_turn(void *obj) {
 
 	if (yang_socket_connect(session->fd, &session->remote_addr) == -1) {
 		yang_socket_close(session->fd);
+		// 同 yang_run_rtctcp_thread：失败路径也要清 fd/isStart，stop() 才能 join 成功。
+		session->fd = -1;
+		session->isStart = yangfalse;
 		yang_error_wrap(ERROR_SOCKET, "rtc tcp connect socket error(%d)",GetSockError());
 		return NULL;
 	}
@@ -256,7 +267,7 @@ void* yang_run_rtctcp_thread_turn(void *obj) {
 	session->isLoop = yangtrue;
 
 
-	while (session->isLoop) {
+	while (session->isLoop && !session->stopRequested) {
 		if(!recvData){
 			if(msgLen==0)
 				msgReadLen=headerLen;
@@ -314,9 +325,8 @@ void* yang_run_rtctcp_thread_turn(void *obj) {
 		}
 	}
 
+	// 同 UDP：fd 的关闭与 fd=-1 统一交给 yang_stop_rtcudp（join 之后）。
 	session->isStart = yangfalse;
-	yang_socket_close(session->fd);
-	session->fd = -1;
 
 	return NULL;
 }
@@ -324,6 +334,9 @@ void* yang_run_rtctcp_thread_turn(void *obj) {
 void yang_start_rtcudp(YangRtcSocketSession *sock) {
 	if (sock == NULL || sock->isStart)
 		return;
+
+	// 每次启动都复位停止请求；否则上一个会话 stop 后本会话线程会立即退出。
+	sock->stopRequested = yangfalse;
 
 	if(sock->socketProtocol==Yang_Socket_Protocol_Udp){
 		if (yang_thread_create(&sock->threadId, 0, yang_run_rtcudp_thread, sock)) {
@@ -344,8 +357,51 @@ void yang_start_rtcudp(YangRtcSocketSession *sock) {
 
 void yang_stop_rtcudp(YangRtcSocketSession *sock) {
 	if (sock == NULL)	return;
+
+	/*
+	 * 拆除顺序必须是：先置停止请求 → join 等待线程真正退出 → 最后关 fd。
+	 *
+	 * 旧实现只轮询退出标志就返回，存在确定的 use-after-free 竞态：
+	 *
+	 *   接收线程：while (isLoop) { recvfrom ... }
+	 *             session->isStart = yangfalse;   // ← stop 一看到这里就返回
+	 *             yang_socket_close(session->fd); // ← 线程还在跑
+	 *             session->fd = -1;               // ← 线程还在写
+	 *   stop 线程：sock->isLoop = yangfalse;
+	 *             while (sock->isStart) usleep(1ms);   // 不 join
+	 *
+	 * 调用链 yang_destroy_rtcConnection → yang_destroy_rtcContext 在 stop 返回后
+	 * 立刻 yang_destroy_rtcsocket()（关 fd）→ yang_free(context->sock)。此时
+	 * socket 块已经释放，接收线程最后那条 `fd = -1` 才执行：fd 位于
+	 * YangRtcSocketSession 偏移 0（也是 YangRtcSocket 的首成员），-1 正好写进
+	 * 已释放块的第一个字，也就是 LFH 空闲链表的链接字。
+	 *
+	 * 竞态条件：只要“线程发布 isStart=false”与“线程写 fd=-1”之间，主线程完成
+	 * stop 轮询、关 fd、释放 socket 块，链表就被写成 0xffffffff；之后任意一次
+	 * malloc 从该 size 桶取块，ntdll 用该值当节点指针，`mov edi,[edi+4]` 在
+	 * edi=0xffffffff 时 32 位回绕读到地址 0x3 → 0xC0000005（服务退出码 1067）。
+	 * 这与现场 dmp（故障点 ntdll LFH、ecx/edi=0xffffffff、ExceptionInformation[1]=0x3）
+	 * 逐项吻合。旧实现还有第二处竞态：线程 closesocket(fd) 与 destroy 里的关 fd
+	 * 构成 double-close，fd 值可能已被复用，误关其它句柄。
+	 *
+	 * stopRequested 必须最先置位：否则“线程刚 create 还没跑起来”时 stop 只把
+	 * isLoop 置 false，线程入口随后又把它置回 true，join 会永久阻塞。
+	 * 本函数会被调用两次（yang_destroy_rtcContext + yang_destroy_rtcsocket），
+	 * threadId 为空时是无副作用的空操作。
+	 */
+	sock->stopRequested = yangtrue;
 	sock->isLoop = yangfalse;
-	while (sock->isStart)	yang_usleep(1000);
+
+	if (sock->threadId) {
+		yang_thread_join(sock->threadId, NULL);
+		sock->threadId = NULL;
+		sock->isStart = yangfalse;
+	}
+
+	if (sock->fd > 0) {
+		yang_socket_close(sock->fd);
+		sock->fd = -1;
+	}
 }
 
 void yang_rtcsock_update_remoteAddr(YangRtcSocketSession *sock,char* remoteIp,int32_t port){

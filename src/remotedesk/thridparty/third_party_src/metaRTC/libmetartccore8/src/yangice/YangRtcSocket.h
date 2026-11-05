@@ -15,6 +15,10 @@ typedef struct{
 
 	yangbool isStart;
 	yangbool isLoop;
+	// 停止请求：stop() 在 join 之前先置位。线程入口会重新把 isLoop 置 true，
+	// 只靠 isLoop 存在“刚 start 就 stop”的窗口（线程把 false 覆盖回 true），
+	// 此时 join 会永久阻塞；stopRequested 一旦置位只能由 start() 复位。
+	yangbool stopRequested;
 	yangbool notRemoteInit;
 	yangbool stunRequesting;
 	yangbool binded;
