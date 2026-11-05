@@ -8,6 +8,16 @@
 #include <QList>
 #include <QStorageInfo>
 #include <functional>
+#include <chrono>
+
+// 负缓存 TTL 必须基于单调时钟：currentMSecsSinceEpoch() 受 NTP/手动改系统时间
+// 影响，墙钟回跳后 lastFailureMs 会落在"未来"，nowMs - lastFailureMs 变负数，
+// 30s 的失效期被无限延长（用户真正登录后也一直返回空）。
+static qint64 monotonicMsSinceEpoch()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -173,8 +183,17 @@ QString FileTransferService::defaultUploadDir()
 {
     static QString cached;
     static bool computed = false;
+    // [NEG-CACHE] 无图形会话/容器里 /home 为空的 headless 机器上本推导必然失败。
+    // 旧实现只在成功时定版，导致每次 file_list 都重跑 loginctl（最长 3s）+
+    // getent（2s），主线程被反复阻塞。失败结果做 30s TTL 负缓存：连续请求立即
+    // 返回，用户真正登录后最迟 30s 内恢复；成功结果仍永久缓存。
+    static qint64 lastFailureMs = 0;
+    static const qint64 kFailureTtlMs = 30 * 1000;
     if (computed)
         return cached;
+    const qint64 nowMs = monotonicMsSinceEpoch();
+    if (lastFailureMs != 0 && nowMs - lastFailureMs < kFailureTtlMs)
+        return QString();
 
     QString homeDir;
 #ifdef Q_OS_LINUX
@@ -254,8 +273,11 @@ QString FileTransferService::defaultUploadDir()
             computed = true;
         }
     }
-    if (homeDir.isEmpty())
-        return QString();   // 仍推导不出：返回空让前端回落当前目录，下次请求再试
+    if (homeDir.isEmpty()) {
+        // 记下失败时间，后续 30s 内直接返回空，避免反复起 loginctl/getent。
+        lastFailureMs = monotonicMsSinceEpoch();
+        return QString();   // 仍推导不出：返回空让前端回落当前目录，TTL 后再试
+    }
 
     QDir home(homeDir);
     QString result;
@@ -455,6 +477,77 @@ QString FileTransferService::sanitizeFilePath(const QString& path)
     return canon;
 }
 
+// 按 UTF-8 字符边界截断，绝不把多字节序列劈成两段（否则解包端得到非法 UTF-8）。
+static QByteArray utf8SafePrefix(const QByteArray& s, int maxBytes)
+{
+    if (s.size() <= maxBytes)
+        return s;
+    int cut = maxBytes;
+    while (cut > 0 && (static_cast<unsigned char>(s.at(cut)) & 0xC0) == 0x80)
+        --cut;
+    return s.left(cut);
+}
+
+// GNU longname（type 'L'）伪条目：承载完整路径，紧跟其后才是真正的 ustar 头。
+// ustar 单段上限 100 字节、prefix 只有 155 字节且必须按 '/' 拆分；不含 '/' 的
+// 超长单段（中文长文件名约 33 字即超限）无法用 prefix 表达，旧实现直接截断会
+// 劈开多字节字符/丢掉结尾，导致解包文件名损坏或互相覆盖。
+static void appendGnuLongNameHeader(QByteArray& data, const QByteArray& fullName)
+{
+    QByteArray header(512, '\0');
+    memcpy(header.data(), "././@LongLink", 13);
+    memcpy(header.data() + 100, "0000000\0", 8);
+    memcpy(header.data() + 108, "0000000\0", 8);
+    memcpy(header.data() + 116, "0000000\0", 8);
+    const qint64 payloadLen = fullName.size() + 1; // 末尾 NUL 也计入 size
+    QByteArray lenOct = QString::number(payloadLen, 8).toLatin1();
+    lenOct = QByteArray(11 - lenOct.size(), '0') + lenOct;
+    memcpy(header.data() + 124, lenOct.constData(), 11);
+    header[135] = ' ';
+    memcpy(header.data() + 136, "00000000000", 11);
+    header[156] = 'L';
+    // GNU 旧格式 magic：6 字节 "ustar " + version " \0"（共 8 字节）。
+    memcpy(header.data() + 257, "ustar  \0", 8);
+
+    for (int i = 148; i < 156; i++)
+        header[i] = ' ';
+    unsigned int sum = 0;
+    for (int i = 0; i < 512; i++)
+        sum += static_cast<unsigned char>(header[i]);
+    QByteArray chkStr = QString::number(sum, 8).toLatin1();
+    chkStr = QByteArray(6 - chkStr.size(), '0') + chkStr;
+    memcpy(header.data() + 148, chkStr.constData(), 6);
+    header[154] = ' ';
+    header[155] = ' ';
+    data.append(header);
+
+    QByteArray payload = fullName;
+    payload.append('\0');
+    const int pad = (512 - payload.size() % 512) % 512;
+    payload.append(QByteArray(pad, '\0'));
+    data.append(payload);
+}
+
+// 预估 GNU longname 额外占用的字节数（0 表示可走 ustar prefix）。
+// 必须与 writeTarHeader 的拆分策略逐条一致，否则 totalSize/Content-Length
+// 会与实际字节数不符：WS 端按 totalSize 拼包、HTTP 端拿它当 Content-Length，
+// 多出来的块会让下载截断或永久挂起。
+static qint64 tarLongNameExtraBytes(const QByteArray& nameBytes)
+{
+    if (nameBytes.size() <= 100)
+        return 0;
+    for (int i = nameBytes.size() - 1; i > 0; --i) {
+        if (nameBytes.at(i) != '/')
+            continue;
+        const int prefixLen = i;
+        const int baseLen = nameBytes.size() - i - 1;
+        if (baseLen > 0 && baseLen <= 100 && prefixLen <= 155)
+            return 0;
+    }
+    const qint64 payloadLen = nameBytes.size() + 1;
+    return 512 + ((payloadLen + 511) / 512) * 512;
+}
+
 void FileTransferService::writeTarHeader(QByteArray& data, const QString& name, qint64 size, char type)
 {
     QByteArray header(512, '\0');
@@ -481,10 +574,9 @@ void FileTransferService::writeTarHeader(QByteArray& data, const QString& name, 
             prefixBytes = nameBytes.left(split);
             nameBytes = nameBytes.mid(split + 1);
         } else {
-            // 无法拆分（单段就超 100 字节）：只能截断，但必须告警，别静默损坏
-            qWarning() << "writeTarHeader: name too long and not splittable, truncating to 100:"
-                       << name << nameBytes.size();
-            nameBytes = nameBytes.left(100);
+            // 单段就超 100 字节：改用 GNU longname 扩展承载完整名字，不再截断。
+            appendGnuLongNameHeader(data, nameBytes);
+            nameBytes = utf8SafePrefix(nameBytes, 100);
         }
     }
     if (!nameBytes.isEmpty())
@@ -544,7 +636,9 @@ void FileTransferService::writeTarHeader(QByteArray& data, const QString& name, 
 QByteArray FileTransferService::tarHeaderFor(const QString& name, qint64 size, char type)
 {
     QByteArray header;
-    writeTarHeader(header, name, size, type); // 恰好追加 512 字节
+    // 通常是 512 字节；单段名 >100 且无法拆分时会先追加 GNU longname 块
+    //（1 个伪头 + N 个名字数据块），再加真正的 512 字节 ustar 头。
+    writeTarHeader(header, name, size, type);
     return header;
 }
 
@@ -569,7 +663,7 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
     rootEntry.tarName = rootName;
     rootEntry.isDir = true;
     out.append(rootEntry);
-    total += 512;
+    total += 512 + tarLongNameExtraBytes((rootName + QLatin1Char('/')).toUtf8());
 
     // 深度优先先序遍历，条目顺序与 addToTar 的写入顺序一致
     std::function<void(const QDir&, const QString&)> walk =
@@ -577,7 +671,7 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
         if (tooMany)
             return;
         const QFileInfoList entries = dir.entryInfoList(
-            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+            QDir::Files | QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot, QDir::Name);
         for (const QFileInfo& fi : entries) {
             if (out.size() >= kMaxTarEntries) {
                 tooMany = true;
@@ -597,6 +691,8 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
             e.size = e.isDir ? 0 : fi.size();
             out.append(e);
             total += 512; // header
+            total += tarLongNameExtraBytes(
+                (e.isDir ? e.tarName + QLatin1Char('/') : e.tarName).toUtf8());
             if (e.isDir) {
                 walk(QDir(e.absPath), e.tarName);
             } else {
@@ -690,8 +786,10 @@ void FileTransferService::processFileList(const QString& clientId, const QString
         return;
     }
 
+    // AllEntries 不含隐藏项：Linux 的 .local/.config（回收站在 ~/.local/share/Trash）
+    // 与 Windows 的 $RECYCLE.BIN、AppData 都必须显式带 Hidden 才列得出来。
     QFileInfoList entries = dir.entryInfoList(
-        QDir::AllEntries | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
+        QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
 
     QJsonArray items;
     for (const QFileInfo& fi : entries) {
@@ -730,8 +828,10 @@ void FileTransferService::processFileList(const QString& clientId, const QString
         return;
     }
 
+    // AllEntries 不含隐藏项：Linux 的 .local/.config（回收站在 ~/.local/share/Trash）
+    // 与 Windows 的 $RECYCLE.BIN、AppData 都必须显式带 Hidden 才列得出来。
     QFileInfoList entries = dir.entryInfoList(
-        QDir::AllEntries | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
+        QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
 
     QJsonArray items;
     for (const QFileInfo& fi : entries) {
