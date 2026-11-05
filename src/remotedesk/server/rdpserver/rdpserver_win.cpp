@@ -516,7 +516,9 @@ void RDPServer::applyFallbackScreenLocked()
     out["platform"] = QStringLiteral("windows");
     out["isXP"] = !isVistaPlusOs();
     out["hint"] = lockedHint_;
-    wsServer_->broadcastJson(out);
+    // 与其它 screen_locked 路径共用同一广播出口（去重依赖"上次广播值"，
+    // 任何绕过它的直接 broadcastJson 都会让去重状态与真实广播不同步）。
+    broadcastScreenLocked(out);
     qInfo() << "Lock: fallback success -> screenLocked_=true, secure-input started,"
                " screen_locked broadcasted";
 }

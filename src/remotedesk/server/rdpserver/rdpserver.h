@@ -423,6 +423,11 @@ private:
     HwEncodeMode configHwEncodeMode_ = HwEncodeMode::Auto; // 硬件编码开关（auto/on/off）
     int userScale_ = 75;
     bool screenLocked_ = false;
+    // screen_locked 广播去重：上一次实际广播出去的锁状态（-1 = 本进程尚未广播过）。
+    // screenLocked_ 是状态量，多条判定路径（采集周期 pollRealLockState / 命令确认
+    // setLockedExternally / 采集重启 / helper 上报）都可能在状态不变时重复触发，
+    // 这里只在"广播值变化"时下发，避免前端遮罩与提示重复/抖动。
+    int lastBroadcastLocked_ = -1;
     // helper 上报的锁屏输入桌面名（screen_locked 的 desktop 字段，如 "Winlogon"、
     // "Welcome"）。服务进程自己 OpenInputDesktop 会失败，只能靠它把 secure-input
     // 投到登录 UI 真正所在的桌面。空 = 不知道，回退 winsta0\Winlogon。
@@ -522,6 +527,15 @@ private:
     // Windows VK 回放）。断开时逐个补发 keyup，否则按键永久卡死（无限自动
     // 重复 / 修饰键卡住全部变组合键）。
     QMap<QString, QHash<QString, QJsonObject>> pressedKeysByClient_;
+    // helper 掉线/客户端断开时无法下发的 keyup：按 clientId+trackKey 去重暂存，
+    // helper 重连后按序补发（已发出即清理）。只补发本产品记录过的键，绝不按
+    // 全局键盘状态反推 —— 否则会误放用户物理按住的键、干扰同机其它连接。
+    struct PendingKeyRelease {
+        QJsonObject payload;         // 已转成 keyup/mouseup 形态
+        bool viaSecureInput = false; // 锁屏时按在安全桌面，补发需同时投递 secure-input
+        int attempts = 0;            // 每次补发尝试 +1，超过上限丢弃，防止无限增长
+    };
+    QHash<QString, PendingKeyRelease> pendingKeyReleases_;
     // 观看模式（只读）客户端：只推送画面，任何"能操作被控端"的消息在
     // onInputReceived 入口丢弃。按连接记录，断线时清理（clientId 可能被复用）。
     QSet<QString> viewOnlyClients_;
@@ -598,6 +612,9 @@ private:
     QString effectiveSystemName() const;
     // 把当前 systemName 广播给所有已连接页面（改一台上百个标签页一起变）
     void broadcastSystemName();
+    // screen_locked 的唯一广播出口：按 msg 里的 locked 值做"状态不变不重发"去重。
+    // 所有 screen_locked 的广播都必须走这里，否则同一状态会被多条判定路径重复下发。
+    void broadcastScreenLocked(const QJsonObject& msg);
     // index.html 的烤制缓存（标题/WS 端口都写进去了）。改名后必须失效，
     // 否则刷新页面还是旧标题 —— 缓存和失效放在同一把锁里，HTTP 线程安全。
     mutable QMutex htmlCacheMutex_;
@@ -685,6 +702,21 @@ private:
     void setClientChineseInput(const QString& clientId, bool enabled);
     // 释放某客户端已按下的所有键：断线，以及进入观看模式（此后的 keyup 会被拦掉）。
     void releasePressedKeys(const QString& clientId);
+    // [INJECT] 本进程的本地注入（InputManager → XTEST/uinput/SendInput）能否作用到
+    // 用户看得见的桌面。统一实时注入与断连回放两处的判断，避免再出现"实时能注入、
+    // 断连释放却被一个 !serviceMode_ 挡掉"的分叉：
+    //   · Windows Vista+ 服务模式：进程在 Session 0，本地注入打到不可见的服务桌面，
+    //     只有 helper（用户会话）或 secure-input（安全桌面）才有效 → false；
+    //   · Windows XP 服务模式：服务与 console 同会话，本地注入有效 → true；
+    //   · Linux/macOS：没有 Session 0 隔离、没有 helper，服务与桌面共用同一 X/VT，
+    //     本地注入直接生效 → true。
+    bool canInjectLocally() const;
+    // helper 不可达时暂存 keyup（同一键幂等、总量有上限），重连后补发。
+    void enqueuePendingKeyRelease(const QString& clientId, const QString& trackKey,
+                                  const QJsonObject& payload, bool viaSecureInput);
+    void flushPendingKeyReleases();
+    // helper 掉线瞬间：把各客户端当前按下的键整体移入待补发队列。
+    void movePressedKeysToPending();
 
     bool sleepSignalsConnected_ = false;
     bool sleepInhibitActive_ = false;

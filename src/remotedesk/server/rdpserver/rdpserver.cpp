@@ -1267,7 +1267,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 if (inputManager_)
                     inputManager_->setScreenLocked(locked);
 #endif
-                wsServer_->broadcastJson(QJsonObject {
+                broadcastScreenLocked(QJsonObject {
                     { "type", "screen_locked" },
                     { "locked", locked },
                     { "platform", platformTag() },
@@ -1383,7 +1383,12 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                     }
                     // [LOCK] helper 报"已锁"是比 ack 更硬的证据：等锁屏结果的客户端
                     // 在这里收尾，之后 3s/2.5s 的兜底定时器会因 lockPending_=false 失效。
-                    if (screenLocked_ && lockPending_) {
+                    // [LOCK-GATE] 必须有显式非空 clientId 才回执：Linux 分支的锁屏
+                    // 在途状态只用 lockPending_ 表达（从不设置 lockPendingClientId_），
+                    // 其结果由 Linux 分支自己发出。不能依赖"sendJson(空 clientId) 是
+                    // no-op"这一隐式行为——那会让 Linux 的正确性挂在实现细节上；
+                    // 而这里若清掉 lockPending_，也会误清 Linux 的在途标志。
+                    if (screenLocked_ && lockPending_ && !lockPendingClientId_.isEmpty()) {
                         lockPending_ = false;
                         const QString cid = lockPendingClientId_;
                         lockPendingClientId_.clear();
@@ -1392,14 +1397,13 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                             { "type", "lock_result" }, { "ok", true },
                             { "reason", "locked" }, { "message", "已锁屏" } });
                     }
-                    // 补平台标识后自行广播（随后统一 broadcastJson 会再发一次，
-                    // 这里带 return 避免前端收到两条同内容消息）。
+                    // 补平台标识后统一走去重广播（状态未变化不重复下发）。
                     QJsonObject out = msg;
                     out["platform"] = platformTag();
 #ifdef _WIN32
                     out["isXP"] = !isVistaPlusOs();
 #endif
-                    wsServer_->broadcastJson(out);
+                    broadcastScreenLocked(out);
                     return;
                 } else if (t == "system_action_result") {
                     // [LOCK] helper 对系统操作的回执（服务端↔helper 的内部消息，
@@ -1561,6 +1565,8 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 // 否则 helper 会回 JPEG 而服务端仍在等 H.264 → 画面冻结。
                 if (currentMode_ == ServerMode::Video && captureVideoCapable_)
                     sendVideoParamsToCaptureSource(QStringLiteral("video_on"));
+                // helper 重连：补发掉线期间积压的 keyup（只针对本产品记录过的键）。
+                flushPendingKeyReleases();
             });
         connect(wsServer_.get(), &WebSocketServer::captureSourceDisconnected,
             this, [this]() {
@@ -1569,6 +1575,9 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                 updateClipboardSuspend();
                 captureVideoCapable_ = false;
                 captureHwEncode_ = false;
+                // helper 掉线：把各客户端当前按下的键移入待补发队列（重连后 keyup），
+                // 否则客户端若在此期间崩溃/断线，回放会被丢弃 → 键卡死。
+                movePressedKeysToPending();
                 // [LOCK] helper 在等 lock 回执时掉线：本次锁屏请求已经不可能被确认，
                 // 立即如实回 + 清等待位（否则 3s 定时器还会再发一次兜底，制造噪声）。
                 if (lockPending_) {
@@ -3223,6 +3232,22 @@ void RDPServer::start()
     qInfo() << "RDP Server started, mode:" << (currentMode_ == ServerMode::Video ? "video" : "image");
 }
 
+void RDPServer::broadcastScreenLocked(const QJsonObject& msg)
+{
+    // 去重：screen_locked 的权威来源已收敛为 ScreenCapturer::pollRealLockState()
+    // （logind LockedHint + 桌面/前台 VT + greeter VT 交叉证据）与命令侧
+    // setLockedExternally()，但多条路径仍可能对同一状态重复触发（例如命令确认
+    // 与下一次采集周期、采集重启后的重新判定）。状态量不变就不重复下发。
+    // 新客户端接入时由 onClientConnected 单独补发快照，不依赖这里。
+    if (!wsServer_)
+        return;
+    const int v = msg.value(QStringLiteral("locked")).toBool() ? 1 : 0;
+    if (lastBroadcastLocked_ == v)
+        return;
+    lastBroadcastLocked_ = v;
+    wsServer_->broadcastJson(msg);
+}
+
 bool RDPServer::startCapture()
 {
     // 采集重启（休眠恢复 / display 切换 / 采集失败重试）会重建 ScreenCapturer，
@@ -3271,7 +3296,7 @@ bool RDPServer::startCapture()
                     inputManager_->setScreenLocked(locked);
 #endif
                 }
-                wsServer_->broadcastJson(QJsonObject {
+                broadcastScreenLocked(QJsonObject {
                     { "type", "screen_locked" },
                     { "locked", locked },
                     { "platform", platformTag() },
@@ -3416,6 +3441,27 @@ bool RDPServer::restartCapture()
     }
     captureAvailable_ = false;
     screenLocked_ = false;
+#ifdef Q_OS_LINUX
+    // Linux 锁屏会把前台切到 greeter VT，detectUserX11Env 也可能把采集源从
+    // 用户桌面 :1 切到 lightdm 的 :0（"display changed" 触发本函数）。所以
+    // "重启采集"绝不是解锁证据：乐观广播 locked:false 会让前端遮罩闪断。
+    // 重启后立刻用 logind + VT 交叉判定重新落地真实状态。
+    if (!startCapture())
+        return false;
+    if (screenCapturer_)
+        screenCapturer_->refreshLockState();
+    if (wasLocked && !screenLocked_) {
+        // 只有在重新判定确认已不在锁屏时才通知前端收起遮罩。
+        ++unlockSeq_;
+        secureUnlockTyped_ = false;
+        secureUnlockDefinite_ = false;
+        secureUnlockBlockedReported_ = false;
+        secureInputUnlockClientId_.clear();
+        broadcastScreenLocked(QJsonObject {
+            { "type", "screen_locked" }, { "locked", false } });
+    }
+    return true;
+#else
     // 重启采集会丢掉旧的锁屏状态，但已连接前端的遮罩不会自动收起（新捕获器
     // 只在状态"变化"时才发 screen_locked）→ 必须主动广播一次解锁。
     if (wasLocked) {
@@ -3426,11 +3472,11 @@ bool RDPServer::restartCapture()
         secureUnlockDefinite_ = false;
         secureUnlockBlockedReported_ = false;
         secureInputUnlockClientId_.clear();
-        if (wsServer_)
-            wsServer_->broadcastJson(QJsonObject {
-                { "type", "screen_locked" }, { "locked", false } });
+        broadcastScreenLocked(QJsonObject {
+            { "type", "screen_locked" }, { "locked", false } });
     }
     return startCapture();
+#endif
 }
 
 void RDPServer::updateSleepInhibit(bool active)
@@ -4312,6 +4358,25 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
                 { "message", "系统缺少 sh，无法执行锁屏" } });
             return;
         }
+        // [LINUX-LOCK-SERIAL] 锁屏串行化：并发两路 dm-tool/loginctl 时，第二路
+        // 可能在前台已切到 greeter 之后再发一次，命令返回 0 但实际无状态变化。
+        // 复用 lockPending_（Windows 下用于等待 helper 回执）：第一路占位到子进程
+        // 结束，并发的第二路直接回 busy，不再并发下发锁屏命令。
+        if (lockPending_) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "lock_result" }, { "ok", false },
+                { "reason", "busy" },
+                { "message", "另一个锁屏请求正在执行，请稍候" } });
+            return;
+        }
+        if (screenLocked_) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "lock_result" }, { "ok", true },
+                { "reason", "already_locked" },
+                { "message", "屏幕已锁定" } });
+            return;
+        }
+        lockPending_ = true;
         QStringList lines;
         lines << "SESS=''; UID_=''; VT=''; DISP=''";
         lines << "for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do";
@@ -4351,39 +4416,94 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         lines << "if [ -z \"$HOW\" ] && [ \"$(id -u)\" = 0 ] && command -v dm-tool >/dev/null 2>&1 && pgrep -x lightdm >/dev/null 2>&1; then";
         lines << "  XDG_SEAT_PATH=/org/freedesktop/DisplayManager/Seat0 dm-tool lock >/dev/null 2>&1 && HOW=dm-tool";
         lines << "fi";
-        lines << "echo \"HOW=$HOW SESS=$SESS\"";
+        lines << "if [ -n \"$HOW\" ]; then sleep 1; fi";
+        lines << "CUR_VT=$(cat /sys/class/tty/tty0/active 2>/dev/null)";
+        lines << "LOCKED=''; GREETER=no; GREETER_VT=''";
+        lines << "if [ -n \"$SESS\" ]; then LOCKED=$(loginctl show-session \"$SESS\" -p LockedHint --value 2>/dev/null); fi";
+        lines << "for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do";
+        lines << "  cls=$(loginctl show-session \"$s\" -p Class --value 2>/dev/null)";
+        lines << "  st=$(loginctl show-session \"$s\" -p State --value 2>/dev/null)";
+        lines << "  if [ \"$cls\" = greeter ] && [ \"$st\" = active ]; then";
+        lines << "    GREETER=yes; GREETER_VT=$(loginctl show-session \"$s\" -p VTNr --value 2>/dev/null)";
+        lines << "  fi";
+        lines << "done";
+        lines << "echo \"HOW=$HOW SESS=$SESS DESKTOP_VT=$VT CUR_VT=$CUR_VT LOCKED=$LOCKED GREETER=$GREETER GREETER_VT=$GREETER_VT\"";
 
         QProcess* proc = new QProcess(this);
         const QString cid = clientId;
         connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                 this, [this, proc, cid](int, QProcess::ExitStatus) {
             const QString out = QString::fromLocal8Bit(proc->readAllStandardOutput()).trimmed();
-            QString how;
+            QString how, desktopVt, curVt, lockedHint, greeter, greeterVt;
             const QStringList toks = out.split(QLatin1Char(' '));
             for (const QString& tok : toks) {
-                if (tok.startsWith(QLatin1String("HOW="))) {
-                    how = tok.mid(4);
-                    break;
-                }
+                if (tok.startsWith(QLatin1String("HOW=")))             how = tok.mid(4);
+                else if (tok.startsWith(QLatin1String("DESKTOP_VT="))) desktopVt = tok.mid(11);
+                else if (tok.startsWith(QLatin1String("CUR_VT=")))     curVt = tok.mid(7);
+                else if (tok.startsWith(QLatin1String("LOCKED=")))     lockedHint = tok.mid(7);
+                else if (tok.startsWith(QLatin1String("GREETER_VT="))) greeterVt = tok.mid(11);
+                else if (tok.startsWith(QLatin1String("GREETER=")))    greeter = tok.mid(8);
             }
-            const bool ok = !how.isEmpty();
-            QString msg;
-            if (how == QLatin1String("loginctl"))
-                msg = QStringLiteral("已锁屏");
-            else if (how == QLatin1String("dm-tool"))
-                msg = QStringLiteral("已锁屏（登录器接管，画面为黑属正常，用「解锁屏幕」切回）");
-            else if (ok)
-                msg = QStringLiteral("已锁屏（%1）").arg(how);
-            else
+            // 三路交叉证据，任一成立才算真的锁上（不能只信命令退出码）：
+            //  1) logind LockedHint=yes —— DE locker 注册了 logind 的路径；
+            //  2) 前台 VT 从桌面会话的 VT 切走 —— lightdm greeter / chvt 型锁屏。
+            //     这类锁屏下原桌面的 X server 仍在跑、XGetImage 依然成功，
+            //     所以"采集正常"不能作为"未锁屏"的证据；
+            //  3) 当前 VT 上有一个 active 的 greeter 会话 —— 登录器确实接管了屏幕。
+            const bool howOk = !how.isEmpty();
+            const bool locked = lockedHint == QLatin1String("yes");
+            const bool vtChanged = !desktopVt.isEmpty() && !curVt.isEmpty()
+                                   && curVt != (QStringLiteral("tty") + desktopVt);
+            const bool greeterVisible = !greeterVt.isEmpty() && !curVt.isEmpty()
+                                        && greeter == QLatin1String("yes")
+                                        && curVt == (QStringLiteral("tty") + greeterVt);
+            const bool confirmed = howOk && (locked || vtChanged || greeterVisible);
+            QString msg, reason;
+            if (confirmed) {
+                if (how == QLatin1String("dm-tool"))
+                    msg = QStringLiteral("已锁屏（登录器接管，画面为黑属正常，用「解锁屏幕」切回）");
+                else if (how == QLatin1String("loginctl"))
+                    msg = QStringLiteral("已锁屏");
+                else
+                    msg = QStringLiteral("已锁屏（%1）").arg(how);
+            } else if (!howOk) {
+                reason = QStringLiteral("lock_failed");
                 msg = QStringLiteral("未能锁定屏幕：无可用的锁屏机制");
-            qInfo() << "lock result:" << ok << how << msg;
+            } else {
+                // 命令执行了但状态没有变化：如实回报，不乐观成功。
+                reason = QStringLiteral("lock_unconfirmed");
+                msg = QStringLiteral("锁屏命令已执行（%1），但未观测到 VT/登录器/LockedHint 变化").arg(how);
+            }
+            qInfo() << "lock result:" << confirmed << "how=" << how
+                    << "vt:" << desktopVt << "->" << curVt
+                    << "lockedHint=" << lockedHint << "greeter=" << greeter
+                    << "greeterVt=" << greeterVt << msg;
             wsServer_->sendJson(cid, QJsonObject {
-                { "type", "lock_result" }, { "ok", ok }, { "message", msg } });
+                { "type", "lock_result" }, { "ok", confirmed },
+                { "reason", reason }, { "message", msg } });
+            if (confirmed) {
+#ifdef Q_OS_LINUX
+                // 采集不依赖"锁屏后必然失败"，这里把已确认的锁定状态直接落地并
+                // 广播，让前端立刻出现遮罩（不依赖下一次抓帧或 VT 判定缓存）。
+                if (screenCapturer_) {
+                    screenCapturer_->setLockedExternally(true);
+                } else if (!screenLocked_) {
+                    screenLocked_ = true;
+                    broadcastScreenLocked(QJsonObject {
+                        { "type", "screen_locked" }, { "locked", true },
+                        { "platform", platformTag() },
+                        { "hint", QStringLiteral("屏幕已锁屏，点「解锁屏幕」切回桌面") } });
+                }
+#endif
+            }
+            lockPending_ = false;
             proc->deleteLater();
         });
         connect(proc, &QProcess::errorOccurred, this, [this, proc, cid](QProcess::ProcessError) {
+            lockPending_ = false;
             wsServer_->sendJson(cid, QJsonObject {
                 { "type", "lock_result" }, { "ok", false },
+                { "reason", "lock_failed" },
                 { "message", "锁屏命令启动失败: " + proc->errorString() } });
             proc->deleteLater();
         });
@@ -4454,6 +4574,20 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
             qInfo() << "unlock_screen result:" << ok << msg;
             wsServer_->sendJson(cid, QJsonObject {
                 { "type", "unlock_result" }, { "ok", ok }, { "message", msg } });
+            if (ok) {
+#ifdef Q_OS_LINUX
+                // 解锁后必须回到 locked:false（并恢复采集画面）：把确认结果直接
+                // 落地并广播，避免前端遮罩因判定缓存/时序残留。
+                if (screenCapturer_) {
+                    screenCapturer_->setLockedExternally(false);
+                } else if (screenLocked_) {
+                    screenLocked_ = false;
+                    broadcastScreenLocked(QJsonObject {
+                        { "type", "screen_locked" }, { "locked", false },
+                        { "platform", platformTag() }, { "hint", QString() } });
+                }
+#endif
+            }
             proc->deleteLater();
         });
         connect(proc, &QProcess::errorOccurred, this, [this, proc, cid](QProcess::ProcessError) {
@@ -4791,6 +4925,22 @@ void RDPServer::onClientConnected(const QString& clientId)
     }
 }
 
+bool RDPServer::canInjectLocally() const
+{
+    if (!inputManager_)
+        return false;
+#ifdef _WIN32
+    // Vista+ 服务进程在 Session 0：本地注入落到服务自己的桌面，用户看不见，
+    // 还会污染本侧修饰键记账。XP 的服务与 console 同处 Session 0（同一桌面），
+    // 本地注入有效，不能一起禁掉。
+    return !serviceMode_ || !isVistaPlusOs();
+#else
+    // Linux/Android/macOS：没有 Session 0 隔离，服务进程与用户桌面共用同一
+    // X 显示/VT（Linux 也没有 helper），XTEST/uinput 注入直接作用到当前桌面。
+    return true;
+#endif
+}
+
 // 释放某客户端所有已按下的键：断线、以及进入观看模式时立即调用。
 // 回放 keyup 带全 false 修饰键顺带复位修饰键状态；保留原 keycode 供 Windows VK 注入。
 void RDPServer::releasePressedKeys(const QString& clientId)
@@ -4807,15 +4957,23 @@ void RDPServer::releasePressedKeys(const QString& clientId)
         up["alt"] = false;
         up["shift"] = false;
         up["meta"] = false;
-        if (serviceMode_ && wsServer_->isCaptureSourceConnected())
-            wsServer_->sendToCaptureSource(up); // helper 消息为扁平结构，与转发路径一致
+        const bool viaSecure = screenLocked_ && secureInputRunning_;
+        if (serviceMode_) {
+            if (wsServer_->isCaptureSourceConnected())
+                wsServer_->sendToCaptureSource(up); // helper 消息为扁平结构，与转发路径一致
+            else
+                // helper 恰好掉线：不能丢，记入待补发队列，重连后按序补发。
+                enqueuePendingKeyRelease(clientId, it.key(), up, viaSecure);
+        }
         // 锁屏时输入只走 secure-input：helper 的 locked 门会丢弃转发来的 keyup，
         // 若回放不补发 secure-input，winlogon 桌面会被残留的 Shift/Ctrl 卡住。
-        if (screenLocked_ && secureInputRunning_)
+        if (viaSecure)
             wsServer_->sendToSecureInput(up);
-        // 服务模式下本进程在 Session0，本地注入打到无人可见的桌面且会污染
-        // 本侧修饰键状态，故仅在非服务模式（桌面实例）直接注入。
-        if (inputManager_ && !serviceMode_) {
+        // 本地注入是否有效由 canInjectLocally() 统一判断（Linux 服务模式没有
+        // Session 0 隔离，keyup 必须本地落地，否则客户端断开后键卡住）。服务模式
+        // 下若已交给 helper / secure-input，就不能再在本地重复注入。
+        const bool forwarded = serviceMode_ && wsServer_->isCaptureSourceConnected();
+        if (canInjectLocally() && !forwarded && !viaSecure) {
             if (isMouse)
                 inputManager_->injectMouseButton(up["x"].toInt(), up["y"].toInt(),
                                                  up["button"].toInt(), false);
@@ -4825,6 +4983,105 @@ void RDPServer::releasePressedKeys(const QString& clientId)
                                               up["isChar"].toBool(), false);
         }
     }
+}
+
+void RDPServer::enqueuePendingKeyRelease(const QString& clientId, const QString& trackKey,
+                                         const QJsonObject& payload, bool viaSecureInput)
+{
+    // 只有"keyup 必须经 helper 才能送达"时才入队：Windows 服务模式（Session 0
+    // 不能直接注入用户桌面）且 canInjectLocally() 为假。该谓词同时覆盖了
+    // Linux 服务模式与 XP 服务模式——它们能本地落地释放（Linux 无 Session 0
+    // 隔离、XP 有兼容注入），若仍入队就会在 helper 重连时把已经释放过的键再补发
+    // 一遍（幂等但冗余）；非服务模式（直连）也不入队。
+    if (!serviceMode_ || trackKey.isEmpty() || canInjectLocally())
+        return;
+    const QString key = clientId + QLatin1Char('|') + trackKey;
+    if (!pendingKeyReleases_.contains(key)) {
+        // 上限：异常连接（如狂发 keydown 后掉线）不能把队列撑爆。
+        static const int kMaxPendingKeyReleases = 256;
+        if (pendingKeyReleases_.size() >= kMaxPendingKeyReleases) {
+            qWarning() << "Pending key release queue full, dropping" << key;
+            return;
+        }
+    }
+    PendingKeyRelease& entry = pendingKeyReleases_[key];
+    entry.payload = payload;
+    entry.viaSecureInput = viaSecureInput;
+    // 重复入队只更新载荷，不清零 attempts：helper 反复掉线时仍受重试上限约束。
+}
+
+void RDPServer::flushPendingKeyReleases()
+{
+    if (pendingKeyReleases_.isEmpty())
+        return;
+    if (!serviceMode_ || !wsServer_ || !wsServer_->isCaptureSourceConnected())
+        return;
+    static const int kMaxAttempts = 8;
+    QStringList sentKeys;
+    int dropped = 0;
+    for (auto it = pendingKeyReleases_.begin(); it != pendingKeyReleases_.end(); ++it) {
+        PendingKeyRelease& p = it.value();
+        if (p.attempts >= kMaxAttempts) {
+            dropped++;
+            continue;
+        }
+        // 补发过程中 helper 再次掉线：保留剩余项，等下次重连。
+        if (!wsServer_->isCaptureSourceConnected())
+            break;
+        wsServer_->sendToCaptureSource(p.payload);
+        if (p.viaSecureInput && wsServer_->isSecureInputConnected())
+            wsServer_->sendToSecureInput(p.payload);
+        p.attempts++;
+        sentKeys << it.key();
+    }
+    for (const QString& key : sentKeys)
+        pendingKeyReleases_.remove(key);
+    // attempts 达上限的项：下一轮重连时直接清掉，避免永久驻留。
+    if (dropped > 0) {
+        for (auto it = pendingKeyReleases_.begin(); it != pendingKeyReleases_.end();) {
+            if (it.value().attempts >= kMaxAttempts)
+                it = pendingKeyReleases_.erase(it);
+            else
+                ++it;
+        }
+    }
+    qInfo() << "Replayed" << sentKeys.size() << "pending key release(s) after helper reconnect,"
+            << "dropped" << dropped;
+}
+
+void RDPServer::movePressedKeysToPending()
+{
+    if (!serviceMode_ || pressedKeysByClient_.isEmpty())
+        return;
+    // [改1 配套] 能本地注入的平台（XP 服务模式、Linux）不能在这里搬运：本函数把
+    // pressedKeysByClient_ 清空后并不做任何本地注入，而 enqueuePendingKeyRelease()
+    // 已按 canInjectLocally() 早退，照搬就等于把这些 keyup 直接丢掉——客户端随
+    // 后断开时 releasePressedKeys() 已经看不到这些键，它们会一直停在按下状态
+    // （真正的卡键），同时日志还会打出一条不实的 "queued N"。
+    // 因此把这些键保留在原地：客户端断开时 releasePressedKeys() 会本地注入释放，
+    // helper 重连后客户端自己的 keyup 也会正常转发。入队只属于"本地注入够不到
+    // 用户桌面"的模式（Vista+ Windows 服务模式）。
+    if (canInjectLocally())
+        return;
+    // 掉线瞬间的锁屏状态决定补发目标：锁屏按键实际注入在安全桌面上。
+    const bool viaSecure = screenLocked_ && secureInputRunning_;
+    int moved = 0;
+    for (auto cit = pressedKeysByClient_.constBegin();
+         cit != pressedKeysByClient_.constEnd(); ++cit) {
+        for (auto it = cit.value().constBegin(); it != cit.value().constEnd(); ++it) {
+            QJsonObject up = it.value();
+            const bool isMouse = up.contains(QLatin1String("button"));
+            up["type"] = isMouse ? QStringLiteral("mouseup") : QStringLiteral("keyup");
+            up["ctrl"] = false;
+            up["alt"] = false;
+            up["shift"] = false;
+            up["meta"] = false;
+            enqueuePendingKeyRelease(cit.key(), it.key(), up, viaSecure);
+            ++moved;
+        }
+    }
+    pressedKeysByClient_.clear();
+    qInfo() << "Helper lost: queued" << moved << "pressed key/button release(s) for replay";
 }
 
 void RDPServer::setClientViewOnly(const QString& clientId, bool enabled)
@@ -5186,8 +5443,10 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 wsServer_->sendToSecureInput(input);
                 return;
             }
-            // 没有 helper（如 Linux 无头模式），直接在本地注入输入
-            if (!inputManager_)
+            // 没有 helper（如 Linux 无头模式），直接在本地注入输入。
+            // 与断连回放共用同一个能力判断：Windows Vista+ Session 0 本地注入无效，
+            // Linux 服务模式必须能注入（否则键盘/鼠标整体失效）。
+            if (!canInjectLocally())
                 return;
             if (type == "mousemove") {
                 int x = input["x"].toInt();
