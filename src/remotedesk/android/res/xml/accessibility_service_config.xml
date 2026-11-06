@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 阶段 4：无障碍手势注入配置。
+<!-- 阶段 4：无障碍手势注入 + 键盘文本写入配置。
      canPerformGestures 是 dispatchGesture（点击/滑动/长按）的前提；
-     本服务不读取窗口内容，只做手势注入与全局返回/主页动作。 -->
+     canRetrieveWindowContent 是键盘输入的前提：只有能读窗口内容的无障碍服务
+     才能 getRootInActiveWindow()/findFocus(FOCUS_INPUT) 拿到当前焦点输入框，
+     再通过 ACTION_SET_TEXT 写入文本。本服务不读取/上传任何窗口内容，
+     只在用户按键时定位焦点控件。 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
     android:canPerformGestures="true"
-    android:canRetrieveWindowContent="false"
+    android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="100" />
