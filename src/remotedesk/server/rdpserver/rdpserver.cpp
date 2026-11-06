@@ -51,9 +51,11 @@ static bool isRemoteControlType(const QString& type)
     return type == QLatin1String("mousemove") || type == QLatin1String("mousedown")
         || type == QLatin1String("mouseup") || type == QLatin1String("wheel")
         || type == QLatin1String("keydown") || type == QLatin1String("keyup")
+        || type == QLatin1String("input_text")
         || type == QLatin1String("clipboard")
         || type == QLatin1String("system_action") || type == QLatin1String("ime_cycle")
         || type == QLatin1String("global_action")
+        || type == QLatin1String("orientation")
         || type == QLatin1String("file_upload_start") || type == QLatin1String("file_upload_done")
         || type == QLatin1String("file_download");
 }
@@ -1263,6 +1265,8 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
             this, [this](int w, int h) {
                 if (inputManager_)
                     inputManager_->setScreenSize(w, h);
+                // 帧尺寸真的变了才回"转屏成功"（见 completeAndroidOrientation）。
+                completeAndroidOrientation(w, h);
                 if (wsServer_) {
                     QJsonObject info;
                     info["type"] = "screen_info";
@@ -3322,6 +3326,8 @@ bool RDPServer::startCapture()
             this, [this](int w, int h) {
                 if (inputManager_)
                     inputManager_->setScreenSize(w, h);
+                // 帧尺寸真的变了才回"转屏成功"（见 completeAndroidOrientation）。
+                completeAndroidOrientation(w, h);
                 if (wsServer_) {
                     QJsonObject info;
                     info["type"] = "screen_info";
@@ -4999,6 +5005,64 @@ bool RDPServer::canInjectLocally() const
 #endif
 }
 
+#ifdef Q_OS_ANDROID
+void RDPServer::injectAndroidKeyEvent(const QJsonObject& input, const QString& clientId)
+{
+    // Android 没有跨应用键注入权限（INJECT_EVENTS 是 signature 级，普通应用拿不到），
+    // 只能由无障碍服务把文本写进当前焦点输入框。只有 keydown 产生文本：
+    // keyup 没有按住语义（长按 repeat 已在上方翻译成 keyup+keydown）。
+    if (input.value("type").toString() != QLatin1String("keydown") || !inputManager_)
+        return;
+    const int keyState = inputManager_->injectAndroidKey(
+            input["keycode"].toInt(), input["code"].toString(),
+            input["ctrl"].toBool(), input["alt"].toBool(),
+            input["shift"].toBool(), input["isChar"].toBool());
+    if (keyState == 1)
+        return;
+    // 失败回执 2s 限流：按住一个键会连续触发，不能每条都往浏览器推提示。
+    static qint64 lastKeyFailMs = 0;
+    const qint64 nowMs = monoNowMs();
+    if (lastKeyFailMs > 0 && nowMs - lastKeyFailMs < 2000)
+        return;
+    lastKeyFailMs = nowMs;
+    QJsonObject st {
+        { "type", "input_status" },
+        { "ok", false }
+    };
+    if (keyState < 0) {
+        st["reason"] = QStringLiteral("keyboard_key_failed");
+        st["hint"] = QStringLiteral("输入框拒绝了这次写入：受保护输入框可能不允许无障碍设置文本");
+    } else {
+        st["reason"] = QStringLiteral("keyboard_no_focus");
+        st["hint"] = QStringLiteral("键盘输入需要先在手机画面上点中输入框"
+                                     "（Android 只能通过无障碍写入当前焦点输入框）");
+    }
+    wsServer_->sendJson(clientId, st);
+}
+
+void RDPServer::completeAndroidOrientation(int w, int h)
+{
+    if (androidPendingOrientation_.isEmpty() || w <= 0 || h <= 0)
+        return;
+    const bool landscapeNow = w > h;
+    const QList<QString> ids = androidPendingOrientation_.keys();
+    for (const QString& id : ids) {
+        if (androidPendingOrientation_.value(id) != landscapeNow)
+            continue;
+        androidPendingOrientation_.remove(id);
+        // 只有采集帧真的变成了目标方向才回 ok —— 前端随后收到的 screen_info
+        // 会带着同一组宽高，不会出现"有回执但画面没变"的假成功。
+        wsServer_->sendJson(id, QJsonObject {
+            { "type", "orientation_status" },
+            { "ok", true },
+            { "landscape", landscapeNow },
+            { "width", w },
+            { "height", h }
+        });
+    }
+}
+#endif
+
 // 释放某客户端所有已按下的键：断线、以及进入观看模式时立即调用。
 // 回放 keyup 带全 false 修饰键顺带复位修饰键状态；保留原 keycode 供 Windows VK 注入。
 void RDPServer::releasePressedKeys(const QString& clientId)
@@ -5301,11 +5365,115 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     }
 
 #ifdef Q_OS_ANDROID
+    // 「修改系统设置」授权状态查询 / 一键跳转系统授权页。
+    // 查询本身不改动被控端，放在观看模式拦截之后也无妨；这里属于输入分发段，
+    // 与 orientation 同级。
+    if (type == QLatin1String("android_permission")) {
+        const bool granted = inputManager_ && inputManager_->androidWriteSettingsGranted();
+        if (input["action"].toString() == QLatin1String("open_write_settings")) {
+            const bool opened = inputManager_ && inputManager_->openAndroidWriteSettingsPage();
+            QJsonObject reply {
+                { "type", "android_permission_state" },
+                { "ok", opened },
+                { "write_settings", granted }
+            };
+            if (!opened) {
+                reply["reason"] = QStringLiteral("open_failed");
+                reply["hint"] = QStringLiteral("无法打开系统授权页：请手动进入 设置 → 应用 → RemoteDesk → "
+                                                "特殊权限 → 修改系统设置，或执行 adb shell appops set "
+                                                "com.radiometer.remotedesk android:write_settings allow");
+            }
+            wsServer_->sendJson(clientId, reply);
+        } else {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "android_permission_state" },
+                { "ok", true },
+                { "write_settings", granted }
+            });
+        }
+        return;
+    }
+
+    // Android 横竖屏切换：有 WRITE_SETTINGS 时写系统设置（APP 在后台也能真正转屏），
+    // 否则退回 Activity.requestedOrientation（仅前台有效）。
+    // 回执必须等"采集帧尺寸真的变了"才回 ok（转屏是异步的），不能拿到了
+    // setRequestedOrientation 的返回就宣布成功。
+    if (type == QLatin1String("orientation")) {
+        const bool landscape = input["landscape"].toBool();
+        const int state = inputManager_ ? inputManager_->setAndroidOrientation(landscape) : 0;
+        if (state == 2) {
+            // 没有「修改系统设置」特殊权限，且 Activity 不在前台：系统不会旋转。
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "orientation_status" },
+                { "ok", false },
+                { "landscape", landscape },
+                { "reason", "write_settings_required" },
+                { "hint", QStringLiteral("横竖屏切换需要一次性授予「修改系统设置」："
+                                          "点工具栏「授权横屏」直达系统授权页；"
+                                          "或手机 设置 → 应用 → RemoteDesk → 特殊权限 → 修改系统设置；"
+                                          "或 adb shell appops set com.radiometer.remotedesk android:write_settings allow") }
+            });
+            return;
+        }
+        if (state <= 0) {
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "orientation_status" },
+                { "ok", false },
+                { "landscape", landscape },
+                { "reason", "orientation_failed" },
+                { "hint", QStringLiteral("横竖屏切换失败：Activity 尚未就绪或系统拒绝了请求") }
+            });
+            qWarning() << "Android orientation switch failed, landscape =" << landscape;
+            return;
+        }
+        // 记下目标方向：采集帧尺寸变成目标方向后由 completeAndroidOrientation 回 ok。
+        androidPendingOrientation_[clientId] = landscape;
+        if (screenCapturer_ && screenCapturer_->width() > 0 && screenCapturer_->height() > 0
+                && (screenCapturer_->width() > screenCapturer_->height()) == landscape) {
+            completeAndroidOrientation(screenCapturer_->width(), screenCapturer_->height());
+            return;
+        }
+        // 2s 内尺寸仍未变化 → 明确失败，不出现"有回执但画面没变"的假成功。
+        QTimer::singleShot(2000, this, [this, clientId, landscape]() {
+            if (!androidPendingOrientation_.contains(clientId)
+                    || androidPendingOrientation_.value(clientId) != landscape)
+                return; // 已被后续请求替换，或已由帧尺寸变化回执
+            androidPendingOrientation_.remove(clientId);
+            const int w = screenCapturer_ ? screenCapturer_->width() : 0;
+            const int h = screenCapturer_ ? screenCapturer_->height() : 0;
+            if (w > 0 && h > 0 && (w > h) == landscape) {
+                wsServer_->sendJson(clientId, QJsonObject {
+                    { "type", "orientation_status" },
+                    { "ok", true },
+                    { "landscape", landscape },
+                    { "width", w },
+                    { "height", h }
+                });
+                return;
+            }
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "orientation_status" },
+                { "ok", false },
+                { "landscape", landscape },
+                { "reason", "orientation_timeout" },
+                { "hint", QStringLiteral("系统已接受转屏请求，但 2 秒内画面尺寸没有变化"
+                                          "（当前 %1×%2）：请确认系统旋转未锁定；"
+                                          "若手机前台是强制竖屏的界面（桌面/锁屏/部分应用），"
+                                          "系统旋转锁不会覆盖它，请先切到允许旋转的应用；"
+                                          "或授予「修改系统设置」以支持 APP 在后台时转屏")
+                              .arg(w).arg(h) }
+            });
+        });
+        return;
+    }
+
     // Android：无障碍服务未开启时，所有会真正作用到手机的操作都必须明确失败。
     // 静默丢弃只会让用户看到"点了没反应"；这里回执 input_status（限流 2s），
     // 前端据此显示原因和处理路径。
     if ((type == QLatin1String("mousedown") || type == QLatin1String("mouseup")
-         || type == QLatin1String("wheel") || type == QLatin1String("global_action"))
+         || type == QLatin1String("wheel") || type == QLatin1String("global_action")
+         || type == QLatin1String("keydown") || type == QLatin1String("keyup")
+         || type == QLatin1String("input_text"))
             && inputManager_ && !inputManager_->androidInputReady()) {
         static qint64 lastAndroidDenyMs = 0;
         const qint64 nowDenyMs = monoNowMs();
@@ -5325,6 +5493,36 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
     if (type == QLatin1String("global_action")) {
         if (inputManager_)
             inputManager_->injectGlobalAction(input["action"].toString());
+        return;
+    }
+    // 浏览器输入法上屏的整段 Unicode 文本（中文/中英混排）：一次 ACTION_SET_TEXT
+    // 写进当前焦点输入框，与逐键输入共用影子文本，多段先后到达按顺序合并。
+    if (type == QLatin1String("input_text")) {
+        const QString text = input["text"].toString();
+        if (!inputManager_ || text.isEmpty())
+            return;
+        const int state = inputManager_->injectAndroidText(text);
+        if (state == 1)
+            return;
+        // 失败回执 2s 限流：连续上屏（逐词确认）不应刷屏。
+        static qint64 lastTextFailMs = 0;
+        const qint64 nowTextMs = monoNowMs();
+        if (lastTextFailMs > 0 && nowTextMs - lastTextFailMs < 2000)
+            return;
+        lastTextFailMs = nowTextMs;
+        QJsonObject st {
+            { "type", "input_status" },
+            { "ok", false }
+        };
+        if (state < 0) {
+            st["reason"] = QStringLiteral("keyboard_key_failed");
+            st["hint"] = QStringLiteral("输入框拒绝了这次文本写入：受保护输入框可能不允许无障碍设置文本");
+        } else {
+            st["reason"] = QStringLiteral("keyboard_no_focus");
+            st["hint"] = QStringLiteral("中文/文本输入需要先在手机画面上点中输入框"
+                                        "（Android 只能通过无障碍写入当前焦点输入框）");
+        }
+        wsServer_->sendJson(clientId, st);
         return;
     }
 #endif
@@ -5548,6 +5746,10 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 inputManager_->injectMouseButton(x, y, button, isDown);
                 if (screenCapturer_) screenCapturer_->forceNextFrame();
             } else if (type == "keydown" || type == "keyup") {
+#if defined(Q_OS_ANDROID)
+                // Android：没有跨应用键注入权限，按键只能由无障碍写进焦点输入框。
+                injectAndroidKeyEvent(input, clientId);
+#else
                 int keycode = input["keycode"].toInt();
                 QString code = input["code"].toString();
                 bool isDown = (type == "keydown");
@@ -5570,6 +5772,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                     inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt,
                                                   shift, false, isChar, meta);
                 }
+#endif
                 if (screenCapturer_) screenCapturer_->forceNextFrame();
             } else if (type == "wheel") {
                 int delta = input["delta"].toInt();
@@ -5648,6 +5851,10 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             bool isDown = (type == "mousedown");
             inputManager_->injectMouseButton(x, y, button, isDown);
         } else if (type == "keydown" || type == "keyup") {
+#if defined(Q_OS_ANDROID)
+            // Android：无障碍写入当前焦点输入框；失败明确回执（2s 限流）。
+            injectAndroidKeyEvent(input, clientId);
+#else
             int keycode = input["keycode"].toInt();
             QString code = input["code"].toString();
             bool isDown = (type == "keydown");
@@ -5667,6 +5874,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                                               shift, false, isChar, meta);
 #else
             inputManager_->injectKeyboard(keycode, code, isDown, ctrl, alt, shift, false, isChar, meta);
+#endif
 #endif
         } else if (type == "wheel") {
             int delta = input["delta"].toInt();

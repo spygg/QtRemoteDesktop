@@ -13,6 +13,9 @@ namespace {
 // 与 Java 侧 com.radiometer.remotedesk.InputAccessibilityService 的静态入口保持一致。
 constexpr const char* kServiceClass =
         "com/radiometer/remotedesk/InputAccessibilityService";
+// 与 Java 侧 com.radiometer.remotedesk.MainActivity 的静态入口保持一致。
+constexpr const char* kActivityClass =
+        "com/radiometer/remotedesk/MainActivity";
 // Java 侧 globalAction 的动作码：1=BACK，2=HOME。
 constexpr int kGlobalActionBack = 1;
 constexpr int kGlobalActionHome = 2;
@@ -201,10 +204,64 @@ void InputManager::injectWheel(int delta)
                                            center.x(), y1, center.x(), y2, kWheelSwipeMs);
 }
 
-void InputManager::injectKeyboard(int, const QString&, bool, bool, bool, bool, bool, bool, bool)
+void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
+                                  bool ctrl, bool alt, bool shift, bool, bool isChar, bool meta)
 {
-    // Android 键盘注入（IME 文本）不在阶段 4 范围；明确告警而不是静默丢弃。
-    warnReadyOnce("keyboard event");
+    // Android 没有跨应用键注入权限（INJECT_EVENTS 为 signature 级，普通应用拿不到），
+    // 只能用无障碍服务把文本写进当前焦点输入框。没有按住语义：只处理 keydown，
+    // keyup 直接忽略（长按 repeat 已由 rdpserver 翻译成"先松再按"）。
+    // 组合键（Ctrl+V 剪贴板粘贴等）Android 侧暂无对应能力，明确告警而不是
+    // 把 "v" 当成普通字符写进输入框。
+    if (!isDown)
+        return;
+    if (ctrl || alt || meta) {
+        qWarning() << "InputManager: Android keyboard shortcuts are not supported, dropped";
+        return;
+    }
+    injectAndroidKey(keycode, code, ctrl, alt, shift, isChar);
+}
+
+int InputManager::injectAndroidKey(int keycode, const QString& code, bool ctrl,
+                                   bool alt, bool shift, bool isChar)
+{
+    if (!accessibilityReady()) {
+        warnReadyOnce("keyboard event");
+        return 0;
+    }
+    // Java: inputKey(int keycode, String code, boolean shift, boolean ctrl,
+    //               boolean alt, boolean isChar)
+    const jint result = QJniObject::callStaticMethod<jint>(
+            kServiceClass, "inputKey", "(ILjava/lang/String;ZZZZ)I",
+            jint(keycode), QJniObject::fromString(code).object<jstring>(),
+            jboolean(shift), jboolean(ctrl), jboolean(alt), jboolean(isChar));
+    return int(result);
+}
+
+int InputManager::injectAndroidText(const QString& text)
+{
+    if (!accessibilityReady()) {
+        warnReadyOnce("keyboard text");
+        return 0;
+    }
+    if (text.isEmpty())
+        return 1;
+    // Java: inputText(String text)
+    const jint result = QJniObject::callStaticMethod<jint>(
+            kServiceClass, "inputText", "(Ljava/lang/String;)I",
+            QJniObject::fromString(text).object<jstring>());
+    return int(result);
+}
+
+bool InputManager::androidWriteSettingsGranted() const
+{
+    return QJniObject::callStaticMethod<jboolean>(
+            kActivityClass, "hasWriteSettings", "()Z");
+}
+
+bool InputManager::openAndroidWriteSettingsPage() const
+{
+    return QJniObject::callStaticMethod<jboolean>(
+            kActivityClass, "openWriteSettingsPage", "()Z");
 }
 
 void InputManager::updateModifiers(bool, bool, bool)
@@ -241,4 +298,14 @@ bool InputManager::injectGlobalAction(const QString& action)
     if (code < 0)
         return false;
     return QJniObject::callStaticMethod<jboolean>(kServiceClass, "globalAction", "(I)Z", code);
+}
+
+int InputManager::setAndroidOrientation(bool landscape)
+{
+    const jint state = QJniObject::callStaticMethod<jint>(kActivityClass,
+            "setOrientation", "(Z)I", jboolean(landscape));
+    if (state <= 0) {
+        qWarning() << "InputManager: setOrientation failed, landscape =" << landscape;
+    }
+    return int(state);
 }

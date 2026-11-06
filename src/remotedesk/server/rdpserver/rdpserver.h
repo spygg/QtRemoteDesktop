@@ -711,6 +711,16 @@ private:
     //   · Linux/macOS：没有 Session 0 隔离、没有 helper，服务与桌面共用同一 X/VT，
     //     本地注入直接生效 → true。
     bool canInjectLocally() const;
+#ifdef Q_OS_ANDROID
+    // Android 键盘：无障碍 ACTION_SET_TEXT 写进当前焦点输入框。失败必须回执
+    // input_status（keyboard_no_focus / keyboard_key_failed，2s 限流），不能静默。
+    void injectAndroidKeyEvent(const QJsonObject& input, const QString& clientId);
+    // 横竖屏切换回执：转屏是异步的（Display 重配 → VirtualDisplay resize），
+    // 只有观测到采集帧尺寸真的变成目标方向才回 ok，避免"有回执但画面没变"。
+    // clientId → 目标是否横屏。
+    QHash<QString, bool> androidPendingOrientation_;
+    void completeAndroidOrientation(int w, int h);
+#endif
     // helper 不可达时暂存 keyup（同一键幂等、总量有上限），重连后补发。
     void enqueuePendingKeyRelease(const QString& clientId, const QString& trackKey,
                                   const QJsonObject& payload, bool viaSecureInput);

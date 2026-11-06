@@ -50,6 +50,21 @@ public:
     // 全局动作：action = "back" / "home"（Android 无系统级返回/主页键注入接口，
     // 只能走无障碍 performGlobalAction）。
     bool injectGlobalAction(const QString &action);
+    // 横竖屏切换：有 WRITE_SETTINGS 时写系统 ACCELEROMETER_ROTATION + USER_ROTATION
+    // （APP 不在前台也能真正转屏，典型用法是手机放一边、全程浏览器操作），
+    // 否则退回 Activity.requestedOrientation（仅前台有效）。
+    // 0 = 失败；1 = 已生效；2 = 无 WRITE_SETTINGS 且 APP 不在前台，需一次性授权。
+    int setAndroidOrientation(bool landscape);
+    // 键盘：无障碍 ACTION_SET_TEXT / ACTION_IME_ENTER 写进当前焦点输入框。
+    // 0 = 没有可编辑的焦点控件；1 = 已处理；-1 = 控件拒绝写入。
+    int injectAndroidKey(int keycode, const QString &code, bool ctrl, bool alt,
+                         bool shift, bool isChar);
+    // 整段 Unicode 文本（浏览器输入法上屏，中文/中英混排）：与逐键输入共用
+    // 影子文本，在当前光标处合并。返回码同上。
+    int injectAndroidText(const QString &text);
+    // 「修改系统设置」特殊权限：查询是否已授予 / 打开系统授权页。
+    bool androidWriteSettingsGranted() const;
+    bool openAndroidWriteSettingsPage() const;
 #endif
 
 
