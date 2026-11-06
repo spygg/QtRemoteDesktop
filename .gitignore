@@ -121,6 +121,10 @@ desktop.ini
 /_ime_test/
 /_dev/
 
+# 阶段验收截图（数量多，不入库；仅 docs/android/ 下精选的 6 张入库）
+/phase3_evidence/
+/phase4_evidence/
+
 # 本地第三方参考/实验代码（QtScrcpy），不入库
 /src/QtScrcpy/
 
