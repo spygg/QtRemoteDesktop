@@ -1407,9 +1407,17 @@ int VideoEncoder::convertBand(const QImage& image, int band)
         int srcLinesize[1] = { srcStride };
         if (!useTmp) {
             uint8_t* dst[4] = { frame_->data[0] + p.dstX,
-                                frame_->data[1] + p.dstX / 2,
-                                frame_->data[2] + p.dstX / 2,
+                                frame_->data[1],
+                                frame_->data[2],
                                 frame_->data[3] };
+            // NV12 是半平面格式：data[2] 为 null，色度平面 data[1] 每像素 2 字节，
+            // 列偏移是 dstX（而不是 YUV420P 的 dstX/2）。
+            if (swPixFmt_ == AV_PIX_FMT_NV12) {
+                if (dst[1]) dst[1] += static_cast<size_t>(p.dstX / 2 * 2);
+            } else {
+                if (dst[1]) dst[1] += static_cast<size_t>(p.dstX / 2);
+                if (dst[2]) dst[2] += static_cast<size_t>(p.dstX / 2);
+            }
             return sws_scale(swsCtxs_[band], srcData, srcLinesize, 0, p.srcH,
                              dst, frame_->linesize);
         }
@@ -1420,11 +1428,28 @@ int VideoEncoder::convertBand(const QImage& image, int band)
             return 0;
         // 逐行拷回可见列（色度 linesize 有 32 字对齐填充，不能按宽度连续拷贝）
         const int height = frame_->height;
-        for (int plane = 0; plane < 3; ++plane) {
-            const int pw = (plane == 0) ? p.dstW : p.dstW / 2;
-            const int tmpLeft = (plane == 0) ? p.tmpX : p.tmpX / 2;
-            const int dstLeft = (plane == 0) ? p.dstX : p.dstX / 2;
-            const int ph = (plane == 0) ? height : (height + 1) / 2;
+        const bool nv12 = (swPixFmt_ == AV_PIX_FMT_NV12);
+        const int planeCount = nv12 ? 2 : 3;
+        for (int plane = 0; plane < planeCount; ++plane) {
+            if (!frame_->data[plane] || !tmp->data[plane])
+                continue;
+            int pw, tmpLeft, dstLeft, ph;
+            if (plane == 0) {
+                pw = p.dstW;
+                tmpLeft = p.tmpX;
+                dstLeft = p.dstX;
+                ph = height;
+            } else if (nv12) {
+                pw = ((p.dstW + 1) / 2) * 2; // UV 交错：色度样本数 * 2 字节
+                tmpLeft = p.tmpX / 2 * 2;
+                dstLeft = p.dstX / 2 * 2;
+                ph = (height + 1) / 2;
+            } else {
+                pw = p.dstW / 2;
+                tmpLeft = p.tmpX / 2;
+                dstLeft = p.dstX / 2;
+                ph = (height + 1) / 2;
+            }
             for (int y = 0; y < ph; ++y)
                 memcpy(frame_->data[plane]
                            + static_cast<size_t>(y) * frame_->linesize[plane] + dstLeft,
@@ -1448,11 +1473,28 @@ int VideoEncoder::convertBand(const QImage& image, int band)
             return 0;
         // 逐行拷回可见区（色度 linesize 有 32 字对齐填充，不能按宽度连续拷贝）
         const int width = frame_->width;
-        for (int plane = 0; plane < 3; ++plane) {
-            const int pw = (plane == 0) ? width : (width + 1) / 2;
-            const int tmpTop = (plane == 0) ? p.tmpY : p.tmpY / 2;
-            const int dstTop = (plane == 0) ? p.dstY : p.dstY / 2;
-            const int ph = (plane == 0) ? p.dstH : p.dstH / 2;
+        const bool nv12 = (swPixFmt_ == AV_PIX_FMT_NV12);
+        const int planeCount = nv12 ? 2 : 3;
+        for (int plane = 0; plane < planeCount; ++plane) {
+            if (!frame_->data[plane] || !tmp->data[plane])
+                continue;
+            int pw, tmpTop, dstTop, ph;
+            if (plane == 0) {
+                pw = width;
+                tmpTop = p.tmpY;
+                dstTop = p.dstY;
+                ph = p.dstH;
+            } else if (nv12) {
+                pw = ((width + 1) / 2) * 2; // UV 交错：色度样本数 * 2 字节
+                tmpTop = p.tmpY / 2;
+                dstTop = p.dstY / 2;
+                ph = (p.dstH + 1) / 2;
+            } else {
+                pw = (width + 1) / 2;
+                tmpTop = p.tmpY / 2;
+                dstTop = p.dstY / 2;
+                ph = p.dstH / 2;
+            }
             for (int y = 0; y < ph; ++y)
                 memcpy(frame_->data[plane]
                            + static_cast<size_t>(dstTop + y) * frame_->linesize[plane],
@@ -1836,7 +1878,8 @@ void VideoEncoder::encodingLoop()
             codecCtx_->bit_rate = br;
             appliedBitrate_.store(br);
         }
-        if (forceKeyframe_.exchange(false)) {
+        const bool forceThisFrame = forceKeyframe_.exchange(false);
+        if (forceThisFrame) {
             qWarning() << "VideoEncoder: FORCE-KF -> flush (frameCount=" << frameCount_ << ")";
             // libx264 运行期改 gop_size / 设 pict_type 均不可靠（旧版 ffmpeg 不认 frame->pict_type，
             // 实测 frame=2/3/4 强制后仍输出 P 帧），用 avcodec_flush_buffers 重置编码器内部
@@ -1852,7 +1895,7 @@ void VideoEncoder::encodingLoop()
 
         // 编码耗时监控（EMA）：
         // 平均耗时超过帧间隔的 80% 视为过载，每 5 秒最多告警一次，便于定位单板 CPU 压力
-        qint64 encodeStart = QDateTime::currentMSecsSinceEpoch();
+        qint64 encodeStart = monotonicMs();
         int ret = avcodec_send_frame(codecCtx_, sendFrame);
         // send 内部已 av_frame_ref；本帧的 hw 表面引用可以立即释放。
         av_frame_free(&hwUpload);
@@ -1871,7 +1914,10 @@ void VideoEncoder::encodingLoop()
                 // 必须走下方 receive 循环把已编码数据取走，否则输入永远不被
                 // 消费、之后每帧都 EAGAIN → 画面冻结直到 4s 周期重建才恢复
                 // （FFmpeg 模式周期性卡顿的来源之一）。本帧未被消费，排空后
-                // 下一轮循环会以新 pts 重发，内容无损。
+                // 下一个采集帧会带着相同桌面内容重新送入；此刻若强制关键帧
+                // 请求被吞掉，客户端会一直等不到 IDR，因此恢复该标志。
+                if (forceThisFrame)
+                    forceKeyframe_.store(true);
                 consecutiveEncFailures_ = 0;
                 ret = 0; // 使下方的 while (ret >= 0) 排空循环执行
             } else {
@@ -1886,6 +1932,9 @@ void VideoEncoder::encodingLoop()
                     qWarning() << "VideoEncoder: too many send failures, requesting reinit";
                     emit reinitRequired();
                 }
+                // 本帧被编码器拒绝：强制关键帧请求不能就此丢失。
+                if (forceThisFrame)
+                    forceKeyframe_.store(true);
                 continue;
             }
         }
@@ -1938,7 +1987,7 @@ void VideoEncoder::encodingLoop()
 
 void VideoEncoder::updateOverloadState(qint64 encodeStartMs)
 {
-    qint64 encodeMs = QDateTime::currentMSecsSinceEpoch() - encodeStartMs;
+    qint64 encodeMs = monotonicMs() - encodeStartMs;
     encodeEmaMs_ = (encodeEmaMs_ == 0) ? encodeMs : (encodeEmaMs_ * 0.8 + encodeMs * 0.2);
     double frameIntervalMs = fps_ > 0 ? 1000.0 / fps_ : 33.0;
 
@@ -1956,7 +2005,7 @@ void VideoEncoder::updateOverloadState(qint64 encodeStartMs)
         emit encoderOverload(false);
     }
     if (overloadedNow) {
-        qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        qint64 nowMs = monotonicMs();
         if (nowMs - lastOverloadLogMs_ > 5000) {
             lastOverloadLogMs_ = nowMs;
             qWarning() << "VideoEncoder: overloaded, encode EMA"

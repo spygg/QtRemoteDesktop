@@ -34,6 +34,9 @@ public:
     void setPaused(bool paused) override;
     int width() const override { return width_; }
     int height() const override { return height_; }
+    // frame_ 只整块替换、不原地改写；captureFrame 交给上层的是 COW 浅共享帧，
+    // 编码线程直接消费不会读到半更新的数据。
+    bool framesAreExclusive() const override { return true; }
 
     // PipeWire process 回调入口（pw_stream_events 需要函数指针）
     void streamProcess();

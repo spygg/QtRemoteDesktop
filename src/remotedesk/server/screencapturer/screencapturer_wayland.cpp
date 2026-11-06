@@ -917,6 +917,10 @@ bool WaylandCapturer::captureFrame(QImage& outImage, bool* updated)
     // 仍 outImage = frame_.copy() 白拷一整帧 8.3MB（30fps ≈ +250MB/s 带宽）。
     const uint64_t fc = frameCount_.load(std::memory_order_relaxed);
     if (fc == lastDeliveredFrame_) {
+        // 无新帧时也把缓存帧交给上层：强制帧路径（新客户端接入 / request_keyframe）
+        // 需要它，否则静止桌面下 PipeWire 不产新帧，客户端一直拿不到首帧。
+        // QImage 为 COW 浅共享，这里不产生像素拷贝。
+        outImage = frame_;
         if (updated) *updated = false;
         return true; // 采集通道正常，仅无新帧（与 X11 damage 空帧语义一致）
     }

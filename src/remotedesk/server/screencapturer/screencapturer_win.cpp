@@ -466,6 +466,9 @@ public:
     // 供 ScreenCapturer::width()/height() 与编码器保持一致
     int width() const override { return width_; }
     int height() const override { return height_; }
+    // 每帧 outImage 都由 rawImg.copy() 新分配，lastFrame_ 只是额外引用同一块
+    // 只读像素，不会被原地改写；编码线程可直接消费，无需再深拷贝。
+    bool framesAreExclusive() const override { return true; }
     bool initialize() override
     {
 
@@ -495,17 +498,25 @@ public:
         }
         IDXGIOutput* output = nullptr;
         if (FAILED(adapter->EnumOutputs(outputIndex_, &output)) || !output) {
-            // 输出序号不可用时回退 0（主输出），保持捕获可用
-            if (outputIndex_ != 0 && FAILED(adapter->EnumOutputs(0, &output)) || !output) {
+            // 输出序号不可用时回退 0（主输出），保持捕获可用。
+            // 注意括号：原写法受 &&/|| 优先级影响，outputIndex_ != 0 且 EnumOutputs(0)
+            // 成功时会复用调用方传入的 output（null），错误地判定失败/或选中错误输出。
+            if (outputIndex_ != 0 && (FAILED(adapter->EnumOutputs(0, &output)) || !output)) {
                 adapter->Release();
                 dxgiDevice->Release();
                 return false;
             }
+            outputIndex_ = 0; // 后续 resetDuplication 直接复用主输出，不再反复回退
         }
 
         // 获取输出描述（主显示器尺寸）
         DXGI_OUTPUT_DESC outputDesc;
-        output->GetDesc(&outputDesc);
+        if (FAILED(output->GetDesc(&outputDesc))) {
+            output->Release();
+            adapter->Release();
+            dxgiDevice->Release();
+            return false;
+        }
         width_ = outputDesc.DesktopCoordinates.right - outputDesc.DesktopCoordinates.left;
         height_ = outputDesc.DesktopCoordinates.bottom - outputDesc.DesktopCoordinates.top;
 
@@ -733,11 +744,13 @@ public:
         }
         IDXGIOutput* output = nullptr;
         if (FAILED(adapter->EnumOutputs(outputIndex_, &output)) || !output) {
-            if (outputIndex_ != 0 && FAILED(adapter->EnumOutputs(0, &output)) || !output) {
+            // 同 initialize()：显式括号，避免运算符优先级导致非 0 输出序号时误判。
+            if (outputIndex_ != 0 && (FAILED(adapter->EnumOutputs(0, &output)) || !output)) {
                 adapter->Release();
                 dxgiDevice->Release();
                 return;
             }
+            outputIndex_ = 0;
         }
         IDXGIOutput1* output1 = nullptr;
         if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1)) && output1) {

@@ -1320,10 +1320,16 @@ void ScreenCapturer::captureFrameBody()
         captureFailCount_ = 0;
 
         if (!updated) {
-            idleCount_++;
-            if (idleCount_ > static_cast<int>(fps_ * 2))
-                enterIdleThrottle();
-            return;
+            // 强制帧（新客户端接入 / request_keyframe）不依赖 PipeWire 产新帧：
+            // 静态桌面下沿用缓存帧，交给下面的校验和强制放行逻辑。
+            const bool forced = forceFrameCount_ > 0 && !frame.isNull()
+                                && frame.width() > 0 && frame.height() > 0;
+            if (!forced) {
+                idleCount_++;
+                if (idleCount_ > static_cast<int>(fps_ * 2))
+                    enterIdleThrottle();
+                return;
+            }
         }
 
         if (isFrameBlack(frame)) {
