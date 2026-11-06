@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QProcess>
 #include <QList>
+#include <QStandardPaths>
 #include <QStorageInfo>
 #include <functional>
 #include <chrono>
@@ -718,6 +719,54 @@ FileTransferService::collectTarEntries(const QString& dirPath, qint64* totalSize
 
 void FileTransferService::processFileList(const QString& clientId, const QString& path)
 {
+#if defined(Q_OS_ANDROID)
+    // Android 根目录：受 SELinux / 应用沙箱限制，App 直接 QDir("/") 列不出任何条目
+    //（真机实测服务端返回 items=0，前端文件管理一片空白）。这里把 "/" 定义为
+    // "手机侧可读根" 列表：
+    //   · /sdcard 共享存储 —— 实测应用 uid 可列出；具体子目录仍受系统授权约束，
+    //     读不了时下面的通用错误分支会明确回执，不再静默空白；
+    //   · App 私有 files 目录 —— 一定可读写（server_config.json / logs 在此）；
+    //   · App 外部沙箱目录 —— 可读写，首次访问时创建。
+    // 条目额外带 path（绝对路径）：前端进入目录时优先用它，而不是用名字和 "/"
+    // 拼出一个不存在的路径。
+    if (!s_enforceRoot
+        && (path.isEmpty() || path == "/" || path == "\\" || isThisPcAlias(path))) {
+        QJsonArray items;
+        auto addRoot = [&items](const QString& label, const QString& absPath) {
+            if (absPath.isEmpty())
+                return;
+            QFileInfo fi(absPath);
+            if (!fi.exists() || !fi.isDir())
+                return;
+            QJsonObject item;
+            item["name"] = label;
+            item["isDir"] = true;
+            // 标成"盘符"：前端不显示下载按钮也不允许拖出——把整个 /sdcard
+            // 打成压缩包会触发 GB 级传输，没有意义。
+            item["isDrive"] = true;
+            item["size"] = 0;
+            item["path"] = QDir::toNativeSeparators(fi.absoluteFilePath());
+            items.append(item);
+        };
+        const QString appFiles =
+                QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        const QString appExternal =
+                QStringLiteral("/sdcard/Android/data/com.radiometer.remotedesk/files");
+        addRoot(QStringLiteral("共享存储 (/sdcard)"), QStringLiteral("/sdcard"));
+        addRoot(QStringLiteral("应用私有目录"), appFiles);
+        addRoot(QStringLiteral("应用外部目录"), appExternal);
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_list"},
+            {"path", "/"},           // 虚拟根：前端路径拼接/回退逻辑保持不变
+            {"realPath", "/"},
+            {"isRoot", true},
+            {"rootLabel", "本机"},
+            {"items", items},
+            {"desktopPath", appFiles.isEmpty() ? QStringLiteral("/sdcard") : appFiles}
+        });
+        return;
+    }
+#endif
 #ifdef Q_OS_WIN
     // Windows 的虚拟根 = 「此电脑」→ 全部盘符（默认即此模式，见 s_enforceRoot 定义）。
     // "/"、""、"\" 以及前端显示的「此电脑」都映射到驱动器列表；只有显式配置了
@@ -824,6 +873,16 @@ void FileTransferService::processFileList(const QString& clientId, const QString
     if (!dir.exists()) {
         emit jsonResponse(clientId, QJsonObject{
             {"type", "file_list"}, {"path", path}, {"error", "Directory not found"}
+        });
+        return;
+    }
+    // 目录存在但不可读（Android 沙箱/系统授权被拒、Linux 权限位）时
+    // entryInfoList 只返回空列表，前端会误以为"空目录"。显式回执，不静默空白。
+    const QFileInfo dirInfo(safePath);
+    if (!dirInfo.isReadable()) {
+        emit jsonResponse(clientId, QJsonObject{
+            {"type", "file_list"}, {"path", path},
+            {"error", "无权限读取该目录：" + QDir::toNativeSeparators(safePath)}
         });
         return;
     }
