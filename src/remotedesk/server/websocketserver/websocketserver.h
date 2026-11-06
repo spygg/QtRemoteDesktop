@@ -45,6 +45,9 @@ public:
         }
         return false;
     }
+    // 该客户端是否已收到关键帧（P 帧门控状态）。静态 IDR 复用分支据此只给
+    // 尚未起播的客户端回放缓存关键帧，避免向已在收流的客户端重复发送。
+    bool isVideoStarted(const QString& clientId) const { return videoStarted_.contains(clientId); }
     QString clientToken(const QString& clientId) const;
     void dropClient(const QString& clientId);
 

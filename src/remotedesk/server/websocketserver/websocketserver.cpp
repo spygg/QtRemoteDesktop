@@ -7,6 +7,17 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <chrono>
+
+// 判活/空闲超时一律用单调时钟：墙钟被 NTP 前跳一次就会把所有连接误判为
+// 超时批量踢掉，后跳则让半开连接永不超时。
+static qint64 monoNowMs()
+{
+    static const auto origin = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - origin).count();
+}
+
 // 单客户端待发缓冲上限：慢客户端（网络拥塞、标签页被挂起/切到后台）会导致
 // sendBinaryMessage 的发送队列无限增长，最终吃光服务端内存。超过该阈值时主动
 // 丢弃该客户端的媒体帧（图像/视频），待其把积压发完再自然恢复。
@@ -44,7 +55,7 @@ WebSocketServer::WebSocketServer(QWebSocketServer::SslMode mode, QObject* parent
 
     idleTimer_.setInterval(kIdleSweepIntervalMs);
     connect(&idleTimer_, &QTimer::timeout, this, [this]() {
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 now = monoNowMs();
         const QStringList ids = clients_.keys();
         for (const QString& id : ids) {
             QWebSocket* s = clients_.value(id);
@@ -221,7 +232,7 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             old->deleteLater();
         }
         captureSource_ = socket;
-        captureLastDataMs_ = QDateTime::currentMSecsSinceEpoch();
+        captureLastDataMs_ = monoNowMs();
         emit captureSourceConnected();
         connect(socket, &QWebSocket::disconnected, this, [this, socket]() {
             qWarning() << "Helper disconnected from /capture";
@@ -235,7 +246,7 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             // 已被新 helper 替换的旧连接不再产生帧（信号可能断线前已入队）
             if (captureSource_ != socket)
                 return;
-            captureLastDataMs_ = QDateTime::currentMSecsSinceEpoch();
+            captureLastDataMs_ = monoNowMs();
             if (msg.size() < 5) return;
             QDataStream stream(msg);
             stream.setByteOrder(QDataStream::BigEndian);
@@ -270,7 +281,7 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
         connect(socket, &QWebSocket::textMessageReceived, this, [this, socket](const QString& text) {
             if (captureSource_ != socket)
                 return;
-            captureLastDataMs_ = QDateTime::currentMSecsSinceEpoch();
+            captureLastDataMs_ = monoNowMs();
             QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
             if (doc.isObject())
                 emit captureMessageReceived(doc.object());
@@ -293,9 +304,9 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             return;
         }
         shellSockets_.insert(socket);
-        shellLastPongMs_[socket] = QDateTime::currentMSecsSinceEpoch();
+        shellLastPongMs_[socket] = monoNowMs();
         connect(socket, &QWebSocket::pong, this, [this, socket](quint64, const QByteArray&) {
-            shellLastPongMs_[socket] = QDateTime::currentMSecsSinceEpoch();
+            shellLastPongMs_[socket] = monoNowMs();
         });
         connect(socket, &QObject::destroyed, this, [this, socket]() {
             shellSockets_.remove(socket);
@@ -321,12 +332,12 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
             old->deleteLater();
         }
         secureInputSource_ = socket;
-        secureInputLastPongMs_ = QDateTime::currentMSecsSinceEpoch();
+        secureInputLastPongMs_ = monoNowMs();
         // 心跳：idleTimer_ 每 30s ping 一次，pong 回来才刷新活跃时间；
         // 单向通道没有上行数据，这是唯一能发现半开连接的办法。
         connect(socket, &QWebSocket::pong, this, [this, socket](quint64, const QByteArray&) {
             if (secureInputSource_ == socket)
-                secureInputLastPongMs_ = QDateTime::currentMSecsSinceEpoch();
+                secureInputLastPongMs_ = monoNowMs();
         });
         // [B] 这条通道本来是单向的，唯一的上行是 secure-input 拒绝注入密码时的
         // 原因上报（unlock_blocked）。只转发 JSON 对象，其余上行文本忽略。
@@ -397,7 +408,7 @@ void WebSocketServer::handleNewSocket(QWebSocket* socket)
         QMutexLocker lk(&aliveMutex_);
         aliveClients_.insert(clientId);
     }
-    lastActivityMs_[clientId] = QDateTime::currentMSecsSinceEpoch();
+    lastActivityMs_[clientId] = monoNowMs();
     if (!token.isEmpty())
         clientTokens_[clientId] = token;
 
@@ -470,7 +481,7 @@ bool WebSocketServer::isClientAlive(const QString& clientId) const
 void WebSocketServer::touchClient(const QString& clientId)
 {
     if (!clientId.isEmpty())
-        lastActivityMs_[clientId] = QDateTime::currentMSecsSinceEpoch();
+        lastActivityMs_[clientId] = monoNowMs();
 }
 
 void WebSocketServer::onSocketDisconnected()

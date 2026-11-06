@@ -12,11 +12,20 @@
 #include <QUuid>
 
 #include <cstring>
+#include <chrono>
+
+// 会话过期只比较同一进程内的时长：用单调时钟，避免系统校时（NTP 前跳）导致
+// 全部会话立刻失效、后跳导致过期会话被延长。
+static qint64 monoSessionSecs()
+{
+    static const auto origin = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - origin).count();
+}
 
 // Qt 5.7 compatibility
 #if QT_VERSION < QT_VERSION_CHECK(5, 10, 0)
 #include <QDateTime>
-static qint64 currentSecsSinceEpoch() { return QDateTime::currentDateTime().toTime_t(); }
 static QByteArray randomBytes(int count)
 {
     // 优先用 OS 熵源生成会话 token/salt：
@@ -43,7 +52,6 @@ static QByteArray randomBytes(int count)
 }
 #else
 #include <QRandomGenerator>
-static qint64 currentSecsSinceEpoch() { return QDateTime::currentSecsSinceEpoch(); }
 static QByteArray randomBytes(int count)
 {
     QByteArray data;
@@ -245,7 +253,7 @@ QString AuthManager::createSession(const QString& username)
     QString token = generateToken();
     Session sess;
     sess.username = username;
-    sess.expiry = currentSecsSinceEpoch() + 86400; // 24 hours
+    sess.expiry = monoSessionSecs() + 86400; // 24 hours
     sessions_[token] = sess;
     return token;
 }
@@ -255,7 +263,7 @@ bool AuthManager::validateSession(const QString& token) const
     auto it = sessions_.find(token);
     if (it == sessions_.end())
         return false;
-    return currentSecsSinceEpoch() < it.value().expiry;
+    return monoSessionSecs() < it.value().expiry;
 }
 
 QString AuthManager::sessionUser(const QString& token) const
@@ -318,7 +326,7 @@ bool AuthManager::removeUser(const QString& username)
 
 void AuthManager::cleanExpiredSessions()
 {
-    qint64 now = currentSecsSinceEpoch();
+    qint64 now = monoSessionSecs();
     for (auto it = sessions_.begin(); it != sessions_.end();) {
         if (now >= it.value().expiry)
             it = sessions_.erase(it);
