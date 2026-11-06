@@ -901,6 +901,24 @@
             <span class="btn-icon">⌂</span>
             <span class="btn-text">主页</span>
         </button>
+        <!-- Android 专有：横竖屏切换（改 Activity.requestedOrientation，
+             画面尺寸会真实变化）。按钮文字表示"点击后将切到的方向"。 -->
+        <button class="btn" id="btn-android-orientation" style="display:none" onclick="androidToggleOrientation()">
+            <span class="btn-icon">⟲</span>
+            <span class="btn-text">横屏</span>
+        </button>
+        <!-- Android 专有：未授予「修改系统设置」时显示，一键打开系统授权页。
+             授权后（后台转屏才生效）由 android_permission_state 回执隐藏。 -->
+        <button class="btn" id="btn-android-write-settings" style="display:none" onclick="androidOpenWriteSettings()">
+            <span class="btn-icon">🔓</span>
+            <span class="btn-text">授权横屏</span>
+        </button>
+        <!-- 触屏设备专有：显式唤起本地软键盘，输入法上屏的整段文字走 input_text。
+             桌面浏览器不显示（键盘直接由物理键盘转发）。 -->
+        <button class="btn" id="btn-soft-keyboard" style="display:none" onclick="toggleSoftKeyboard()">
+            <span class="btn-icon">⌨</span>
+            <span class="btn-text">键盘</span>
+        </button>
         <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">
             <span class="btn-icon">⛶</span>
             <span class="btn-text">全屏</span>
@@ -1155,6 +1173,12 @@
             connected: false,
             screenWidth: 0,
             screenHeight: 0,
+            // Android 被控端当前是否横屏（由 screen_info 宽高推导，非本地猜测）。
+            androidLandscape: false,
+            // 「修改系统设置」授权状态（android_permission_state 回执，未知时按未授权
+            // 显示按钮，点击后轮询刷新）。
+            androidWriteSettings: false,
+            androidPermissionTimer: null,
             scaleX: 1,
             scaleY: 1,
             canvasRect: null, // getCanvasPos 用的视口矩形缓存（mousemove 120Hz）
@@ -2813,8 +2837,22 @@
                         const isAndroid = msg.platform === 'android';
                         const backBtn = document.getElementById('btn-android-back');
                         const homeBtn = document.getElementById('btn-android-home');
+                        const orientBtn = document.getElementById('btn-android-orientation');
+                        const wsBtn = document.getElementById('btn-android-write-settings');
                         if (backBtn) backBtn.style.display = isAndroid ? '' : 'none';
                         if (homeBtn) homeBtn.style.display = isAndroid ? '' : 'none';
+                        if (orientBtn) orientBtn.style.display = isAndroid ? '' : 'none';
+                        // 授权按钮按当前权限状态决定显隐，并主动查一次（用户可能
+                        // 已在设置页/通过 adb 授权过）。
+                        if (wsBtn) wsBtn.style.display = isAndroid ? '' : 'none';
+                        if (isAndroid) {
+                            updateAndroidPermissionUI(state.androidWriteSettings, { toast: false });
+                            androidRequestPermissionStatus();
+                        }
+                    }
+                    // 横竖屏按钮文案跟随真实采集尺寸（重进页面/进程重启后也能反映当前方向）。
+                    if (state.serverPlatform === 'android') {
+                        updateAndroidOrientationLabel(sw > sh);
                     }
                     // MSE 的 init segment 里写死了启动时的宽高，同一 SourceBuffer 继续
                     // 追加新尺寸的样本，浏览器解码器不会重协商 → 花屏后冻结。整条管线
@@ -2834,6 +2872,29 @@
                     // 显示给用户，而不是让点击"看起来没反应"。
                     if (!msg.ok) {
                         showTransferStatus(msg.hint || ('控制失败: ' + (msg.reason || '未知原因')), 4000);
+                    }
+                    break;
+                case 'orientation_status':
+                    // 服务端只有在手机侧采集尺寸真的变成目标方向后才回 ok（转屏是
+                    // 异步的），所以这里不会再出现"点了但画面没变"的假成功。
+                    // 后台转屏需要「修改系统设置」一次性授权，缺失时回
+                    // write_settings_required + 授权路径（msg.hint）。
+                    if (msg.ok) {
+                        updateAndroidOrientationLabel(!!msg.landscape);
+                        const size = (msg.width && msg.height)
+                            ? '（' + msg.width + '×' + msg.height + '）' : '';
+                        showTransferStatus((msg.landscape ? '已切换到横屏' : '已切换到竖屏') + size, 2500);
+                    } else {
+                        showTransferStatus(msg.hint || ('横竖屏切换失败: ' + (msg.reason || '未知原因')), 5000);
+                    }
+                    break;
+                case 'android_permission_state':
+                    // 「修改系统设置」授权回执：查询（轮询）只刷新按钮，不刷提示；
+                    // 真正打开授权页失败才显示 msg.hint。
+                    if (msg.ok === false) {
+                        showTransferStatus(msg.hint || '打开系统授权页失败，请用设置页或 adb 授权', 6000);
+                    } else {
+                        updateAndroidPermissionUI(!!msg.write_settings, { toast: true });
                     }
                     break;
                 case 'cursor_pos':
@@ -2892,6 +2953,20 @@
                             && normPathForCompare(respPath) !== normPathForCompare(fileListLastReqPath))
                             break;
                     }
+                    if (msg.error) {
+                        // 读取失败（Android 无权限目录、目录不存在等）必须明确提示，
+                        // 不能只留一个空白面板让用户以为目录是空的。
+                        const box = document.getElementById('file-list');
+                        box.innerHTML = '';
+                        const errRow = document.createElement('div');
+                        errRow.className = 'file-item';
+                        errRow.style.cursor = 'default';
+                        errRow.style.color = '#ff8a80';
+                        errRow.textContent = '⚠ ' + msg.error;
+                        box.appendChild(errRow);
+                        reportError('文件列表加载失败', msg.error);
+                        break;
+                    }
                     if (msg.items) {
                         // 先记下本列表对应的真实目录，渲染出的每一行都以它拼路径
                         lastListRealPath = msg.realPath || msg.path || '';
@@ -2904,7 +2979,8 @@
                         // 所有路径拼接/回退逻辑不变。
                         currentRemotePath = msg.realPath || msg.path || '/';
                         driveListRoot = true;
-                        document.getElementById('file-path-input').value = msg.rootLabel || '此电脑';
+                        virtualRootLabel = msg.rootLabel || '此电脑';
+                        document.getElementById('file-path-input').value = virtualRootLabel;
                     } else if (msg.path || msg.realPath) {
                         // 优先用服务端下发的真实绝对路径 realPath，避免把虚拟根下的
                         // 子目录显示成 "/Documents" 这种缺失 home 前缀的假路径。
@@ -3335,6 +3411,13 @@
         // "st" 之类的序列当成自己的快捷键。触屏设备不做（否则点画面就弹软键盘）。
         const kbdSinkFocusable = !(window.matchMedia &&
             window.matchMedia('(pointer: coarse)').matches);
+        // 触屏设备：显示「键盘」按钮，用户主动唤起本地软键盘（输入法上屏的
+        // 整段文字经 compositionend → input_text 送往 Android 被控端）。
+        // 不做默认 focus，避免每次点画面都弹软键盘、挡住画面。
+        if (!kbdSinkFocusable) {
+            const kbBtn = document.getElementById('btn-soft-keyboard');
+            if (kbBtn) kbBtn.style.display = '';
+        }
         function focusKbdSink(x, y) {
             if (!kbdSinkFocusable || !state.kbdSink) return;
             // 输入法候选窗跟随插入符：把 1px 的承接层挪到点击处，
@@ -3352,6 +3435,7 @@
         // 保证观看模式下画质/帧率/分辨率仍可调、画面仍能重建关键帧。
         const VIEW_ONLY_BLOCKED_TYPES = new Set([
             'mousemove', 'mousedown', 'mouseup', 'wheel', 'keydown', 'keyup',
+            'input_text',    // Android 输入法上屏整段文本，等同一次文本操作
             'clipboard',     // 服务端会写远端剪贴板并注入一次 Ctrl+V，等同粘贴操作
             'system_action', // 锁屏/注销/重启/关机
             'ime_cycle',     // 切换远端输入法
@@ -3381,6 +3465,78 @@
                 return;
             }
             send({ type: 'global_action', action: action });
+        }
+
+        // 按钮文案 = 点击后将切换到的方向：当前竖屏显示"横屏"，当前横屏显示"竖屏"。
+        function updateAndroidOrientationLabel(landscape) {
+            state.androidLandscape = !!landscape;
+            const btn = document.getElementById('btn-android-orientation');
+            if (!btn) return;
+            const text = btn.querySelector('.btn-text');
+            if (text) text.textContent = landscape ? '竖屏' : '横屏';
+            btn.classList.toggle('active', landscape);
+        }
+
+        function androidToggleOrientation() {
+            if (state.viewOnly) {
+                notifyViewOnlyBlocked();
+                return;
+            }
+            send({ type: 'orientation', landscape: !state.androidLandscape });
+        }
+
+        // ---- Android「修改系统设置」授权：状态查询 / 一键跳转 / 按钮刷新 ----
+        function androidRequestPermissionStatus() {
+            if (state.serverPlatform !== 'android') return;
+            send({ type: 'android_permission', action: 'status' });
+        }
+
+        function updateAndroidPermissionUI(granted, opts) {
+            const wasGranted = !!state.androidWriteSettings;
+            state.androidWriteSettings = !!granted;
+            const btn = document.getElementById('btn-android-write-settings');
+            if (btn) {
+                // 已授权即隐藏（权限可在系统里随时收回，重新查询会再次显示）。
+                btn.style.display = (state.serverPlatform === 'android' && !granted) ? '' : 'none';
+            }
+            if (granted && !wasGranted && opts && opts.toast) {
+                showTransferStatus('已授权「修改系统设置」，横屏切换可在后台生效', 3000);
+            }
+        }
+
+        function androidOpenWriteSettings() {
+            if (state.viewOnly) {
+                notifyViewOnlyBlocked();
+                return;
+            }
+            send({ type: 'android_permission', action: 'open_write_settings' });
+            showTransferStatus('已打开系统授权页：请在手机上允许「修改系统设置」，然后返回浏览器', 5000);
+            // 用户在手机上操作期间浏览器不会感知到返回：轮询 15 秒，
+            // 拿到授权后自动隐藏按钮；仍未授权则继续显示按钮并保留手动路径。
+            let polls = 0;
+            if (state.androidPermissionTimer) clearInterval(state.androidPermissionTimer);
+            state.androidPermissionTimer = setInterval(() => {
+                androidRequestPermissionStatus();
+                if (++polls >= 5) {
+                    clearInterval(state.androidPermissionTimer);
+                    state.androidPermissionTimer = null;
+                }
+            }, 3000);
+        }
+
+        // ---- 触屏设备：显式唤起本地软键盘（不改变点击画面时的默认行为）----
+        function toggleSoftKeyboard() {
+            const btn = document.getElementById('btn-soft-keyboard');
+            if (!state.kbdSink) return;
+            if (document.activeElement === state.kbdSink) {
+                try { state.kbdSink.blur(); } catch (e) {}
+                if (btn) btn.classList.remove('active');
+                return;
+            }
+            // focus 必须在用户手势内调用，浏览器才会允许弹出软键盘；
+            // 输入法上屏的整段文字随后由 compositionend 走 input_text。
+            try { state.kbdSink.focus({ preventScroll: true }); } catch (e) {}
+            if (btn) btn.classList.add('active');
         }
 
         function updateViewOnlyUI() {
@@ -4031,6 +4187,18 @@
             window.addEventListener('compositionend', (e) => {
                 // 观看模式：输入法上屏的文字同样不能发往远端
                 if (state.viewOnly) return;
+                if (!e.data) return;
+                // Android：整段上屏文本一次发走，服务端用无障碍 ACTION_SET_TEXT
+                // 直接写进当前焦点输入框，不依赖手机 IME 候选界面。
+                // 这里**不看**「中文输入」开关：该开关控制的是 Linux 的 isChar
+                // （借键码 + 改远端键盘映射）路径，Android 的文本写入不需要它；
+                // 否则用户在 Android 上必须先记得打开开关才能打中文。
+                // 中英混排：英文/数字仍由 keydown 键码路径注入，两者按 WS 顺序
+                // 落到同一个影子文本，不会互相覆盖。
+                if (state.serverPlatform === 'android') {
+                    send({ type: 'input_text', text: e.data });
+                    return;
+                }
                 // 中文输入开关关闭（默认）：不上屏。开关关闭态只允许键码注入，
                 // 这里一个 isChar 都不发 —— 服务端也就不会走 sendUnicodeChar
                 //（借键码/改远端键盘映射/定时器队列）那条路径。
@@ -4047,6 +4215,9 @@
             });
             // 承接层是隐藏 textarea：普通按键已被 keydown 的 preventDefault 挡住，
             // 但输入法上屏/粘贴仍可能写入内容，及时清空避免在不可见区域堆积。
+            // 最近一次"真实物理按键"（keyCode 32..126）的时刻：触屏软键盘的
+            // input 兜底要避开它，否则物理键盘会与键码路径重复写一遍。
+            let lastRealKeydownMs = 0;
             if (state.kbdSink) {
                 let sinkComposing = false;
                 state.kbdSink.addEventListener('compositionstart', () => { sinkComposing = true; });
@@ -4055,7 +4226,23 @@
                     state.kbdSink.value = '';
                 });
                 state.kbdSink.addEventListener('input', () => {
-                    if (!sinkComposing) state.kbdSink.value = '';
+                    if (sinkComposing) return;
+                    const typed = state.kbdSink.value;
+                    state.kbdSink.value = '';
+                    if (!typed) return;
+                    // 触屏软键盘（Gboard 等）有时不产生 composition 事件、keydown
+                    // 也只有 keyCode 229（服务端无对应字符）：直接从 input 上屏的
+                    // 文本补发 input_text。仅在 Android 被控端 + 触屏设备启用，
+                    // 且近期没有真实物理按键，避免重复写入。
+                    if (state.serverPlatform === 'android' && !kbdSinkFocusable
+                            && performance.now() - lastRealKeydownMs > 300) {
+                        send({ type: 'input_text', text: typed });
+                    }
+                });
+                // 软键盘关闭/焦点离开时同步按钮高亮（触屏设备「键盘」按钮）。
+                state.kbdSink.addEventListener('blur', () => {
+                    const kbBtn = document.getElementById('btn-soft-keyboard');
+                    if (kbBtn) kbBtn.classList.remove('active');
                 });
             }
             function isLockInputFocused() {
@@ -4080,7 +4267,7 @@
             //   · keyup 先到          → 普通英文/符号输入：补发 down+up（不丢字、无固定延迟）
             //   · compositionstart 先到 → 拼音首字母：整条丢弃（远端一个字符都收不到）
             // 挂起没有时间上限，因此与输入法快慢无关；也没有定时器，不会给正常打字加延迟。
-            // 挂起只在"中文输入"开关打开时生效（见 setChineseInput）；关闭态直接发送。
+            // 挂起在"中文输入"开关打开**或**被控端为 Android 时生效（见下方 isPlainChar）。
             const pendingKeydowns = new Map();   // code -> payload（已按下但未发往远端）
             const MODIFIER_CODES = new Set(['ControlLeft', 'ControlRight', 'ShiftLeft',
                 'ShiftRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight']);
@@ -4154,6 +4341,9 @@
 
                 // 防止远程输入重复
                 e.preventDefault();
+                // 记录真实物理按键：触屏软键盘 input 兜底据此避让（见承接层 input）
+                if (e.keyCode >= 32 && e.keyCode <= 126 && !e.isComposing)
+                    lastRealKeydownMs = performance.now();
                 // 非 repeat 的重复 keydown 只去重本地记账，但也不能再传播给页面
                 e.stopPropagation();
                 // [B18] 长按按键浏览器会发 repeat=true 的连续 keydown：这些必须继续
@@ -4177,12 +4367,15 @@
                     // "先松再按"（所有平台一致）。前端不做本地翻译、也不额外补发 keyup。
                     repeat: e.repeat === true
                 };
-                // 中文输入开关打开时，可打印单字符键（不带 Ctrl/Alt/Meta）先挂起，
-                // 由 keyup / compositionstart 定夺（见上方 [P0 IME 首键] 注释）。
-                // 关闭态（默认）直接发送，不进队列、不加任何延迟。
+                // 中文输入开关打开**或**被控端是 Android 时，可打印单字符键
+                //（不带 Ctrl/Alt/Meta）先挂起，由 keyup / compositionstart 定夺
+                //（见上方 [P0 IME 首键] 注释）。Android 即使不开开关也必须挂起：
+                // 否则拼音首字母会在组合开始前被写进手机输入框（多出一个字母）。
+                // 开关关闭且非 Android（默认桌面场景）直接发送，不进队列、无延迟。
                 const isPlainChar = !e.repeat && typeof e.key === 'string'
                     && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey
-                    && !e.isComposing && state.chineseInput;
+                    && !e.isComposing
+                    && (state.chineseInput || state.serverPlatform === 'android');
                 if (isPlainChar) {
                     pendingKeydowns.set(e.code, kd);
                 } else if (e.repeat && pendingKeydowns.has(e.code)) {
@@ -4807,6 +5000,8 @@
 
         // ==================== 文件传输 ====================
         let currentRemotePath = '/';
+        // 虚拟根的显示名：Windows =「此电脑」，Android =「本机」（服务端下发 rootLabel）。
+        let virtualRootLabel = '此电脑';
         // 最近一次 file_list 响应里服务端下发的真实目录：渲染列表与拖拽/下载都以它为
         // 基准。currentRemotePath 在响应到达前仍是请求时的旧值（初始 '/' 或快速连点），
         // 若直接用它拼行路径会得到 "/sounding_server/..." 这类虚拟路径，拖出直链 403，
@@ -5232,7 +5427,7 @@
                 path = '/';   // 「此电脑」→ 服务端的驱动器列表
             currentRemotePath = path;
             document.getElementById('file-path-input').value =
-                (path === '/' && driveListRoot) ? '此电脑' : path;
+                (path === '/' && driveListRoot) ? virtualRootLabel : path;
             clearFileFetchCache(); // 切换目录后旧的预取 blob 失效，释放内存
             fileListLastReqPath = path; // [B15] 记录最新请求，过滤乱序旧响应
             send({ type: 'file_list', path: path });
@@ -5285,11 +5480,24 @@
                 item.innerHTML = '<span class="icon">📂</span><span class="name">..</span><span class="size"></span>';
                 container.appendChild(item);
             }
+            // 空目录也要给一行提示：Android 上 SELinux 拒绝列目录时服务端会回
+            // error（上面已处理），真正空目录则显示"此目录为空"，不出现白板。
+            if (!items.length) {
+                const emptyRow = document.createElement('div');
+                emptyRow.className = 'file-item';
+                emptyRow.style.cursor = 'default';
+                emptyRow.style.opacity = '0.7';
+                emptyRow.textContent = '（此目录为空）';
+                container.appendChild(emptyRow);
+                return;
+            }
             // Dirs first, then files
             const dirs = items.filter(i => i.isDir).sort((a, b) => a.name.localeCompare(b.name));
             const files = items.filter(i => !i.isDir).sort((a, b) => a.name.localeCompare(b.name));
             for (const item of dirs) {
-                const fullPath = joinPath(basePath, item.name);
+                // Android 的虚拟根条目带绝对路径（如 /sdcard、应用私有 files），
+                // 直接用它；普通目录仍按"当前目录 + 名字"拼接。
+                const fullPath = item.path || joinPath(basePath, item.name);
                 const div = document.createElement('div');
                 div.className = 'file-item';
                 div.dataset.rpath = fullPath; // 拖拽/下载使用的真实路径
