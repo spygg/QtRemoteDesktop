@@ -24,6 +24,16 @@
 #include <wtypes.h>
 #include <cwchar>
 #include <QAbstractSocket>
+
+// 绝对坐标归一化：65535 对应最后一个像素，故除数必须用跨度 - 1；先用 64 位
+// 计算再裁剪，避免 x/y 超出屏幕（负坐标、多屏偏移）时 int 乘法溢出（UB）。
+static LONG normalizeAbsAxis(int value, int span)
+{
+    if (span <= 1)
+        return 0;
+    const qint64 scaled = static_cast<qint64>(value) * 65535 / (span - 1);
+    return static_cast<LONG>(qBound<qint64>(0, scaled, 65535));
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -385,8 +395,8 @@ bool clickScreen(int x, int y)
     const int h = GetSystemMetrics(SM_CYSCREEN);
     if (w <= 1 || h <= 1)
         return false;
-    const LONG nx = (x * 65535) / (w - 1);
-    const LONG ny = (y * 65535) / (h - 1);
+    const LONG nx = normalizeAbsAxis(x, w);
+    const LONG ny = normalizeAbsAxis(y, h);
     INPUT mv = { };
     mv.type = INPUT_MOUSE;
     mv.mi.dx = nx;
@@ -2448,8 +2458,8 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
             // 安全输入 helper（锁屏输入就此永久失效）。
             const int screenW = GetSystemMetrics(SM_CXSCREEN);
             const int screenH = GetSystemMetrics(SM_CYSCREEN);
-            in.mi.dx = screenW > 0 ? obj["x"].toInt() * 65535 / screenW : 0;
-            in.mi.dy = screenH > 0 ? obj["y"].toInt() * 65535 / screenH : 0;
+            in.mi.dx = normalizeAbsAxis(obj["x"].toInt(), screenW);
+            in.mi.dy = normalizeAbsAxis(obj["y"].toInt(), screenH);
             in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
             SendInput(1, &in, sizeof(INPUT));
         } else if (type == "mousedown" || type == "mouseup") {
@@ -2460,8 +2470,8 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
             mv.type = INPUT_MOUSE;
             const int screenW = GetSystemMetrics(SM_CXSCREEN);
             const int screenH = GetSystemMetrics(SM_CYSCREEN);
-            mv.mi.dx = screenW > 0 ? x * 65535 / screenW : 0;
-            mv.mi.dy = screenH > 0 ? y * 65535 / screenH : 0;
+            mv.mi.dx = normalizeAbsAxis(x, screenW);
+            mv.mi.dy = normalizeAbsAxis(y, screenH);
             mv.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
             SendInput(1, &mv, sizeof(INPUT));
             DWORD flags = 0;
@@ -2472,7 +2482,8 @@ int SecureInputProcess::run(int argc, char* argv[], int wsPort)
         } else if (type == "wheel") {
             INPUT in = {};
             in.type = INPUT_MOUSE;
-            in.mi.mouseData = obj["delta"].toInt() * WHEEL_DELTA;
+            in.mi.mouseData = qBound(-10 * WHEEL_DELTA,
+                obj["delta"].toInt() * WHEEL_DELTA, 10 * WHEEL_DELTA);
             in.mi.dwFlags = MOUSEEVENTF_WHEEL;
             SendInput(1, &in, sizeof(INPUT));
         }

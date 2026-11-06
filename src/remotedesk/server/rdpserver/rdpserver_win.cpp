@@ -162,10 +162,20 @@ void RDPServer::startSecureInputProcess()
         return;
     }
 
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    std::wstring cmdLine = std::wstring(exePath) + L" --secure-input " + std::to_wstring(wsPort_)
-        + (sslConfiguration_ ? L" --ssl" : L"");
+    // 路径必须加引号：CreateProcessAsUserW 的 lpApplicationName 为 NULL 时按
+    // 命令行解析，安装目录含空格（如 C:\Program Files\...）会把 exe 截断成
+    // "C:\Program"。同时用足够大的缓冲，避免 >MAX_PATH 的路径被静默截断。
+    constexpr DWORD kExePathChars = 32768;
+    wchar_t exePath[kExePathChars];
+    const DWORD exePathLen = GetModuleFileNameW(NULL, exePath, kExePathChars);
+    if (exePathLen == 0 || exePathLen >= kExePathChars) {
+        qWarning() << "GetModuleFileNameW failed:" << GetLastError();
+        CloseHandle(hDupToken);
+        CloseHandle(hProcToken);
+        return;
+    }
+    std::wstring cmdLine = L"\"" + std::wstring(exePath, exePathLen) + L"\" --secure-input "
+        + std::to_wstring(wsPort_) + (sslConfiguration_ ? L" --ssl" : L"");
 
     STARTUPINFOW si = { sizeof(si) };
     // 投放到**登录 UI 真正所在的桌面**。SendInput 只能到达调用线程所附着的桌面，

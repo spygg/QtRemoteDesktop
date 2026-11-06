@@ -56,6 +56,7 @@ static bool isRemoteControlType(const QString& type)
         || type == QLatin1String("system_action") || type == QLatin1String("ime_cycle")
         || type == QLatin1String("global_action")
         || type == QLatin1String("orientation")
+        || type == QLatin1String("android_permission")
         || type == QLatin1String("file_upload_start") || type == QLatin1String("file_upload_done")
         || type == QLatin1String("file_download");
 }
@@ -1742,8 +1743,10 @@ void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
         idle->setSingleShot(true);
         idle->start(30000);
         QObject::connect(idle, &QTimer::timeout, s, [s]() {
-            if (s->state() == QAbstractSocket::ConnectedState)
-                s->abort();
+            // abort() 不会发 disconnected()，不能只依赖 disconnected → deleteLater，
+            // 否则每个空闲连接都会永久泄漏 socket/定时器（SSL 分支同样）。
+            s->abort();
+            s->deleteLater();
         });
     };
 
@@ -1810,8 +1813,9 @@ void RDPServer::onHttpNewConnection()
     idle->setSingleShot(true);
     idle->start(30000);
     connect(idle, &QTimer::timeout, socket, [socket]() {
-        if (socket->state() == QAbstractSocket::ConnectedState)
-            socket->abort();
+        // 同上：abort() 不触发 disconnected()，必须显式销毁。
+        socket->abort();
+        socket->deleteLater();
     });
 
     connect(socket, &QTcpSocket::readyRead, this, &RDPServer::onHttpRequest);
@@ -2329,24 +2333,21 @@ void RDPServer::handleLoginPost(QTcpSocket* socket, const QByteArray& body)
 }
 
 QString RDPServer::extractSessionToken(const QByteArray& request)
-{    QString req = QString::fromUtf8(request);
-    // Check Cookie header
-    int cookieIdx = req.indexOf("Cookie:", 0, Qt::CaseInsensitive);
-    if (cookieIdx >= 0) {
-        int lineEnd = req.indexOf('\n', cookieIdx);
-        QString cookieLine = req.mid(cookieIdx, lineEnd - cookieIdx);
-        // Extract session=...;
-        int sessIdx = cookieLine.indexOf("session=", 0, Qt::CaseInsensitive);
-        if (sessIdx >= 0) {
-            sessIdx += 8; // skip "session="
-            int endIdx = cookieLine.indexOf(';', sessIdx);
-            if (endIdx < 0)
-                endIdx = cookieLine.indexOf('\r', sessIdx);
-            if (endIdx < 0)
-                endIdx = cookieLine.indexOf('\n', sessIdx);
-            if (endIdx < 0)
-                endIdx = cookieLine.length();
-            return cookieLine.mid(sessIdx, endIdx - sessIdx).trimmed();
+{
+    // 逐行精确匹配，避免 "X-Session-Cookie:" 之类的子串误命中；Cookie 内按
+    // ';' 分段后只认完整的 "session=" 名，避免 other_session= 被截取成 token。
+    const QString req = QString::fromUtf8(request);
+    const QStringList lines = req.split('\n');
+    for (QString line : lines) {
+        line = line.trimmed();
+        if (!line.startsWith(QLatin1String("Cookie:"), Qt::CaseInsensitive))
+            continue;
+        const QString cookieLine = line.mid(7).trimmed();
+        const QStringList parts = cookieLine.split(';');
+        for (const QString& part : parts) {
+            const QString kv = part.trimmed();
+            if (kv.startsWith(QLatin1String("session="), Qt::CaseInsensitive))
+                return kv.mid(8).trimmed();
         }
     }
     return QString();
@@ -2397,11 +2398,18 @@ void RDPServer::onHttpRequest()
             return;
         }
         st.headerText = QString::fromUtf8(st.buffer.left(headerEnd));
-        int clIdx = st.headerText.indexOf("Content-Length:", 0, Qt::CaseInsensitive);
-        if (clIdx >= 0) {
-            int colonIdx = st.headerText.indexOf(':', clIdx);
-            int lineEnd = st.headerText.indexOf('\n', clIdx);
-            st.contentLength = st.headerText.mid(colonIdx + 1, lineEnd - colonIdx - 1).trimmed().toInt();
+        // 逐行精确匹配：indexOf 子串会把 "X-Content-Length:" 或 URI 里的同名字样
+        // 当成长度头。解析失败（非纯数字）也必须拒绝，不能按 0 放行。
+        const QStringList headerLines = st.headerText.split('\n');
+        for (QString line : headerLines) {
+            line = line.trimmed();
+            if (!line.startsWith(QLatin1String("Content-Length:"), Qt::CaseInsensitive))
+                continue;
+            bool ok = false;
+            st.contentLength = line.mid(15).trimmed().toInt(&ok);
+            if (!ok)
+                st.contentLength = -1;
+            break;
         }
         if (st.contentLength < 0 || st.contentLength > 1048576) { // 负值或非数字会卡死 body 等待
             QByteArray resp = buildHttpResponse(400, "Bad Request", "text/plain; charset=utf-8", "invalid Content-Length");
@@ -6654,13 +6662,22 @@ void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
             }
         }
 #endif
+        // 纯 WS/MSE 客户端不在 webrtcSessions_ 里：只给尚未起播的客户端回放
+        // 缓存 IDR。此前该分支在没有 WebRTC 会话时直接 return，新接入的 WS
+        // 客户端要等自己的 request_keyframe 才能拿到首帧。
+        const QStringList ids = wsServer_->clients();
+        for (const QString& id : ids) {
+            if (!wsServer_->isVideoStarted(id) && replayCachedKeyframe(id, 0))
+                sent = true;
+        }
         if (sent) {
             lastPliReuseMs_ = now;
             if (pliReuseCount_++ % 10 == 0)
                 qInfo() << "[PLI-REUSE] replayed cached IDR (static desktop, no capture/encode)"
                         << "reuse=" << pliReuseCount_;
         }
-        // sent == false（当前无 WebRTC 会话要帧）时同样无需抓屏编码：没有人接。
+        // 没有任何待起播客户端（无 WebRTC 会话且 WS 客户端都已在收流）时同样
+        // 无需抓屏编码。
         return;
     }
     if (allowStaticReuse && pliEncodeCount_++ % 10 == 0)

@@ -204,7 +204,9 @@ int HelperProcess::run(int argc, char* argv[])
         if (doc.isObject()) {
             QJsonObject root = doc.object();
             int httpPort = root.value("httpPort").toInt(8080);
-            wsPort = httpPort + 1;
+            if (httpPort < 1 || httpPort > 65535)
+                httpPort = 8080; // 与服务端 loadServerConfig 的回落规则保持一致
+            wsPort = httpPort >= 65535 ? httpPort - 1 : httpPort + 1;
             useSsl = root.value("ssl").toBool(false);
         }
     }
