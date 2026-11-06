@@ -17,6 +17,8 @@
 #include <QJsonObject>
 #include <QLibraryInfo>
 #include <QMutexLocker>
+#include <QNetworkProxyFactory>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QTextStream>
 #include <QTimer>
@@ -95,6 +97,17 @@ void applyLogLevelFromArgs(int argc, char* argv[])
 static QString g_logRoleSuffix;
 void setLogRoleSuffix(const QString& suffix) { g_logRoleSuffix = suffix; }
 
+// 日志目录：桌面上沿用「可执行文件目录/logs」约定；Android 的应用目录
+// （applicationDirPath）位于只读的 APK 内部，必须改写到应用私有可写目录。
+static QString logsDirectory()
+{
+#if defined(Q_OS_ANDROID)
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/logs";
+#else
+    return QCoreApplication::applicationDirPath() + "/logs";
+#endif
+}
+
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
 {
     // 日志分级过滤：低于级别的消息直接丢弃。默认级别随构建类型：
@@ -135,7 +148,7 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
     static QString s_logDate;
     QDateTime dt = QDateTime::currentDateTime();
     QString date = dt.toString("yyyyMMdd");
-    QString logFile = QString("%1/logs/%2%3.txt").arg(QCoreApplication::applicationDirPath() /*QDir::currentPath()*/).arg(date).arg(g_logRoleSuffix);
+    QString logFile = QString("%1/%2%3.txt").arg(logsDirectory()).arg(date).arg(g_logRoleSuffix);
     if (!s_log.isOpen() || date != s_logDate) {
         if (s_log.isOpen())
             s_log.close();
@@ -257,7 +270,14 @@ int main(int argc, char* argv[])
         qputenv("QT_QPA_PLATFORM", "offscreen");
 #endif
 
+#if defined(Q_OS_ANDROID)
+    // Android：应用由 QtActivity 拉起，进程本身已是单实例；QLocalServer 在
+    // Android 上不可用，且应用目录只读（SingleApplication 的脚本拷贝会失败），
+    // 因此直接用 QApplication。
+    QApplication a(argc, argv);
+#else
     SingleApplication a(argc, argv);
+#endif
     QCoreApplication::setApplicationVersion("1.0.0");
 
     // 命令行解析放在单实例判断之前：已有实例运行时 --help/--version 仍可用
@@ -295,6 +315,7 @@ int main(int argc, char* argv[])
         }
     }
 
+#if !defined(Q_OS_ANDROID)
     if (a.isRunning()) {
         return 0;
     }
@@ -303,9 +324,19 @@ int main(int argc, char* argv[])
     if (a.lockFailed()) {
         return 1;
     }
+#endif
 
+#if defined(Q_OS_ANDROID)
+    // Qt 默认使用「系统代理配置」。Android 上系统代理会让 QTcpServer::listen
+    // 走代理分支，报 “The proxy type is invalid for this operation” 并绑定失败。
+    // 本服务是监听端，不需要出站代理，直接关闭系统代理探测。
+    QNetworkProxyFactory::setUseSystemConfiguration(false);
+    // Android 上没有生成/部署 SSL 证书的条件，默认走明文 HTTP/WS（8080/8081）。
+    bool useSslOverride = false;
+#else
     bool useSslOverride = !parser.isSet(noSslOption);
-    QString path = QString("%1/%2").arg(a.applicationDirPath()).arg("logs");
+#endif
+    QString path = logsDirectory();
     QDir dir(path);
     // mkpath 的返回值必须检查：安装目录只读/无权限时静默失败，随后
     // logToFile 会一直 open 失败（只有 stderr 告警），排障时看不到任何落盘日志。
@@ -316,7 +347,7 @@ int main(int argc, char* argv[])
 
     qInstallMessageHandler(logToFile);
     verifyJpegSupport();
-    Breakpad::CrashHandler::instance()->Init(QCoreApplication::applicationDirPath());
+    Breakpad::CrashHandler::instance()->Init(logsDirectory());
 
     SystemSleepBlocker blocker;
     if (!blocker.start()) {

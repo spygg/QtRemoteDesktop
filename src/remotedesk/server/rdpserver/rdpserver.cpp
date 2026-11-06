@@ -24,6 +24,7 @@
 #include <QDir>
 #include <QSaveFile>
 #include <QScopedValueRollback>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QVector>
 #include <algorithm>
@@ -114,7 +115,7 @@ static QJsonObject clipboardPayload(const QString& mime, const QByteArray& data)
 #include <tlhelp32.h>
 #endif
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDBusPendingCallWatcher>
@@ -632,16 +633,33 @@ static ProbeDefaults probeMachineDefaults()
     } else {
         d.fps = 20; d.quality = 35; d.scale = 50;
     }
+#if defined(Q_OS_ANDROID)
+    // Android（MediaProjection 采集）：浏览器 canvas 必须与手机物理分辨率一致
+    // （720x1612 这类），否则用户看到的仍是缩放后的画面，无法与手机截图对照。
+    // 帧率仍按探测结果保守起步，跟不上时服务端自适应会继续降 fps。
+    d.scale = 100;
+#endif
     qInfo() << "Machine probe: sws =" << d.swsMsPerMp << "ms/MP, jpeg =" << d.jpegMsPerMp
             << "ms/MP -> defaults fps =" << d.fps << ", scale =" << d.scale
             << ", quality =" << d.quality;
     return d;
 }
 
+// 配置文件目录：桌面端沿用可执行文件目录（与既有部署约定一致）；
+// Android 应用目录在 APK 内且只读，配置必须落到应用私有可写目录。
+static QString serverConfigDirectory()
+{
+#if defined(Q_OS_ANDROID)
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+#else
+    return QCoreApplication::applicationDirPath();
+#endif
+}
+
 void RDPServer::loadServerConfig(const QString& configPath)
 {
     QString path = configPath.isEmpty()
-        ? QCoreApplication::applicationDirPath() + "/server_config.json"
+        ? serverConfigDirectory() + "/server_config.json"
         : configPath;
 
     QJsonObject root;
@@ -778,7 +796,7 @@ void RDPServer::broadcastSystemName()
 void RDPServer::saveServerConfig(const QString& configPath)
 {
     QString path = configPath.isEmpty()
-        ? QCoreApplication::applicationDirPath() + "/server_config.json"
+        ? serverConfigDirectory() + "/server_config.json"
         : configPath;
 
     QJsonObject root;
@@ -1144,7 +1162,7 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
     connect(this, &RDPServer::fileChunkFromClient,
         fileTransferService_, &FileTransferService::processUploadChunk);
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // 远端屏幕文件拖拽侦测（Linux/X11，XDND 协议）：
     // 用户在远端桌面里拖住文件时，把可下载项广播给浏览器端 —— 指针拖到
     // 屏幕边缘即触发本机下载（Wayland 桌面无公开的拖拽侦测接口，跳过）。
@@ -1736,7 +1754,11 @@ void RDPServer::handleIncomingSslConnection(qintptr socketDescriptor)
                 qWarning() << "SSL errors (ignored, self-signed cert):" << errors;
                 sslSocket->ignoreSslErrors();
             });
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        connect(sslSocket, &QAbstractSocket::errorOccurred,
+#else
         connect(sslSocket, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+#endif
             [sslSocket](QAbstractSocket::SocketError) {
                 qWarning() << "HTTPS socket error:" << sslSocket->errorString();
             });
@@ -3355,7 +3377,7 @@ bool RDPServer::startCapture()
             st["type"] = "capture_status";
             st["available"] = false;
             st["hint"] = QString::fromUtf8(
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                 "未检测到可用的图形显示（X11/Wayland），正在后台自动重试。"
                 "WSL 请确认已启用 WSLg（Windows 11 默认）；"
                 "无头环境可安装 Xvfb 后重启服务。"
@@ -3441,7 +3463,7 @@ bool RDPServer::restartCapture()
     }
     captureAvailable_ = false;
     screenLocked_ = false;
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // Linux 锁屏会把前台切到 greeter VT，detectUserX11Env 也可能把采集源从
     // 用户桌面 :1 切到 lightdm 的 :0（"display changed" 触发本函数）。所以
     // "重启采集"绝不是解锁证据：乐观广播 locked:false 会让前端遮罩闪断。
@@ -3485,7 +3507,7 @@ void RDPServer::updateSleepInhibit(bool active)
         return;
     sleepInhibitActive_ = active;
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // [P1 perf] 原 DBus 后端链为三个 BlockWithGui(3000) 同步调用，最坏阻塞主线程
     // 9s（期间采集/WS/输入处理全部停摆）→ 改为 QDBusPendingCallWatcher 异步链：
     // 非阻塞逐级回退；每个回调里复查 sleepInhibitActive_（等待期间会话可能已
@@ -3520,7 +3542,7 @@ void RDPServer::updateSleepInhibit(bool active)
 #endif
 }
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 // ---- 防睡眠 DBus 后端异步链（[P1 perf]，原同步 BlockWithGui 链最坏阻塞主线程 9s）----
 void RDPServer::inhibitAcquireSessionManager()
 {
@@ -3651,7 +3673,7 @@ void RDPServer::inhibitRelease()
 
 void RDPServer::connectSleepSignals()
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (sleepSignalsConnected_)
         return;
     // 订阅 logind 的 PrepareForSleep(bool)：挂起/恢复时重建捕获流
@@ -3672,7 +3694,7 @@ void RDPServer::connectSleepSignals()
 
 void RDPServer::onPrepareForSleep(bool sleeping)
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     qInfo() << "PrepareForSleep:" << (sleeping ? "going to sleep" : "resumed");
     if (sleeping) {
         preparedForSleep_ = true;
@@ -3708,7 +3730,7 @@ void RDPServer::onPrepareForSleep(bool sleeping)
 // session bus，ibus/gsettings 必须以 X 会话用户身份执行（sudo -H -u <user> env ...）。
 void RDPServer::handleImeCycle(const QString& clientId)
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
         // 服务模式且有 helper 连接：helper 侧（用户会话）的 ibus 切换尚未实现
         wsServer_->sendJson(clientId, QJsonObject {
@@ -3862,7 +3884,7 @@ void RDPServer::onImeResultReady(const QString& clientId, const QJsonObject& sta
     wsServer_->sendJson(clientId, state);
 }
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 // X11 EWMH：向 root 窗口发送 _NET_SHOWING_DESKTOP client message（wmctrl -k on
 // 同款协议），不依赖 wmctrl/xdotool 是否安装；GNOME/XFCE/KDE/openbox/LXDE 等支持
 // EWMH 的 WM 都会响应。注意：GNOME(mutter) 不响应 XTEST 合成的 Super+D 快捷键
@@ -4319,7 +4341,7 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         return;
     }
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // ================= Linux 系统操作：多环境通用处理 =================
     // 不硬编码单一桌面环境。按“可用命令 → 桌面环境 → X11/Wayland”逐级探测，
     // 覆盖 LXDE / GNOME / XFCE / KDE / MATE 与 X11 / Wayland。
@@ -4482,7 +4504,7 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
                 { "type", "lock_result" }, { "ok", confirmed },
                 { "reason", reason }, { "message", msg } });
             if (confirmed) {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                 // 采集不依赖"锁屏后必然失败"，这里把已确认的锁定状态直接落地并
                 // 广播，让前端立刻出现遮罩（不依赖下一次抓帧或 VT 判定缓存）。
                 if (screenCapturer_) {
@@ -4575,7 +4597,7 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
             wsServer_->sendJson(cid, QJsonObject {
                 { "type", "unlock_result" }, { "ok", ok }, { "message", msg } });
             if (ok) {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                 // 解锁后必须回到 locked:false（并恢复采集画面）：把确认结果直接
                 // 落地并广播，避免前端遮罩因判定缓存/时序残留。
                 if (screenCapturer_) {
@@ -4830,7 +4852,7 @@ void RDPServer::onClientConnected(const QString& clientId)
             // 服务模式：分辨率列表从配置文件读取（由 helper 写入）；多屏输出列表
             // 用 helper 上报的快照 —— 服务进程在 Session 0 枚举不到用户会话的显示器，
             // 前端多屏下拉只能靠这份数据，否则永远是空的。
-            QFile file(QCoreApplication::applicationDirPath() + "/server_config.json");
+            QFile file(serverConfigDirectory() + "/server_config.json");
             if (file.open(QIODevice::ReadOnly)) {
                 QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
                 if (doc.isObject()) {
@@ -5152,7 +5174,7 @@ void RDPServer::onClientDisconnected(const QString& clientId)
     // 队列/映射清理：最后一个开了中文输入的连接断开后，把还没注入的字符作废，
     // 并还原借用的键码映射 —— 否则断开后本机物理键盘按下那颗键会继续出中文。
     // 还有别的中文输入连接在用同一个队列时不能清（那会把别人的输入一起丢掉）。
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (chineseInputClients_.isEmpty() && inputManager_)
         inputManager_->flushPendingInput();
 #endif
@@ -5168,7 +5190,7 @@ void RDPServer::onClientDisconnected(const QString& clientId)
 
     // 没有客户端了 → 暂停屏幕捕获，降低 CPU
     if (wsServer_->clientCount() == 0) {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
         // 最后一个客户端也断了：把逐键 auto-repeat 的"欠账"全部还清。有些 keyup
         // 可能从未送达（浏览器崩溃/网络瞬断），按 clientId 的按键记账只能覆盖
         // "服务端确实收到过 keydown"的那部分。此时没有任何客户端还按着键，全量
@@ -5473,7 +5495,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
                 // 中文输入开关打开时，该连接的**所有**键都走 InputManager 的同一条
                 // FIFO（含 ASCII/Enter）：否则同步注入的 ASCII 会超车排在队列里的
                 // 中文字符（"中a" 落成 "a中"）。关闭态（默认）直接同步注入，零延迟。
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                 if (chineseInputClients_.contains(clientId)) {
                     inputManager_->enqueueKeyboard(keycode, code, isDown, ctrl, alt,
                                                    shift, isChar, meta);
@@ -5569,7 +5591,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             bool shift = input["shift"].toBool();
             bool isChar = input["isChar"].toBool();
             bool meta = input["meta"].toBool();
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
             // 与直连路径同一规则：中文输入打开时走 FIFO，保证锁屏密码这类
             // "字符与键码混排"的输入不会互相超车。
             if (chineseInputClients_.contains(clientId) || isChar)
@@ -5868,7 +5890,7 @@ void RDPServer::injectPasteShortcut()
             wsServer_->sendToSecureInput(up);
         }
     } else if (inputManager_) {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
         // Linux 服务模式无 helper：本进程注入（inputManager_ 在 startCapture 时已按
         // detectUserX11Env 设置的 DISPLAY 重建，XTest 可用）
 #else

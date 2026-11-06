@@ -130,6 +130,13 @@ public:
     explicit ScreenCapturer(QObject* parent = nullptr);
     ~ScreenCapturer();
 
+#if defined(Q_OS_ANDROID)
+    // MediaProjection（CaptureService）通过 JNI 把 RGBA 帧交到这里。可从任意
+    // Java 线程调用：内部加锁保存"最新一帧"，由 captureFrameBody() 按帧率取走，
+    // 天然实现背压丢帧（不会排队堆积导致延迟增长）。
+    void submitAndroidFrame(const QImage& frame);
+#endif
+
 #ifdef Q_OS_LINUX
     // [LOCK-VT] 立刻失效缓存并重新判定一次锁屏状态（logind LockedHint +
     // 前台 VT/桌面 VT + greeter 会话交叉证据），有变化就 emit screenLocked。
@@ -224,6 +231,12 @@ public:
             && winOutputs_[winCurrentIndex_].w > 0)
             return winOutputs_[winCurrentIndex_].w;
 #endif
+#if defined(Q_OS_ANDROID)
+        // MediaProjection 的真实物理分辨率（720x1612 等）。授权前为 0，
+        // 前端据此判断当前是真实画面还是占位帧。
+        if (androidWidth_ > 0)
+            return androidWidth_;
+#endif
         return screen_ ? screen_->size().width() : 0;
     }
     int height() const {
@@ -239,6 +252,10 @@ public:
         if (winCurrentIndex_ >= 0 && winCurrentIndex_ < winOutputs_.size()
             && winOutputs_[winCurrentIndex_].h > 0)
             return winOutputs_[winCurrentIndex_].h;
+#endif
+#if defined(Q_OS_ANDROID)
+        if (androidHeight_ > 0)
+            return androidHeight_;
 #endif
         return screen_ ? screen_->size().height() : 0;
     }
@@ -349,8 +366,26 @@ private:
     // 抓取资源（DXGI/GDI 实例、winOutputs_）跨线程访问互斥：workerGrab 抓取期间持有，
     // 主线程 start/stop/refreshOutputs/切路径时也持有（低频，等一帧可接受）。
     // 递归：start() → cleanupPlatform() → switchToGdiCapture() 等会嵌套加锁。
+    // Qt6 移除了 QMutex::Recursive，改用 QRecursiveMutex（行为一致）。
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QRecursiveMutex captureResMutex_;
+#else
     QMutex captureResMutex_{ QMutex::Recursive };
+#endif
     QAtomicInt avgCaptureMs_{ 0 };
+#if defined(Q_OS_ANDROID)
+    // MediaProjection 帧槽：Java 采集线程写，GUI 线程（定时器）取。只保留最新一帧，
+    // 取走前不排队，避免慢编码时帧堆积把延迟越拉越大。
+    QMutex androidFrameMutex_;
+    QImage androidFrame_;
+    int androidWidth_ = 0;
+    int androidHeight_ = 0;
+    // 实测统计（每 5s 打一条日志，用于报告真实出帧率/帧大小）。
+    qint64 androidStatWindowStartMs_ = 0;
+    qint64 androidStatFrames_ = 0;
+    qint64 androidStatRecv_ = 0;
+    qint64 androidStatBytes_ = 0;
+#endif
     // [IDLE-WAKE] 静止降频后的即时唤醒：定时器可能还有 ~3s 才到点，这里插一次
     // 0ms 抓帧，让"闲置后第一次点击/按键"的反馈不必等满一个 idle 周期。
     QTimer* wakeTimer_ = nullptr;

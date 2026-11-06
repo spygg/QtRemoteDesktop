@@ -6,6 +6,8 @@ set(SOURCES
     $<$<PLATFORM_ID:Linux>:screencapturer_linux.cpp>
     $<$<PLATFORM_ID:Darwin>:screencapturer_mac.cpp>
     $<$<PLATFORM_ID:Android>:screencapturer_android.cpp>
+    # JNI 入口：CaptureService 的 nativeOnFrameBuffer -> ScreenCapturer::submitAndroidFrame
+    $<$<PLATFORM_ID:Android>:androidbridge.cpp>
 )
 
 # Wayland 抓屏依赖 PipeWire（libpipewire-0.3）。
@@ -34,7 +36,7 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui)
 target_link_libraries(${SCREEN_CAPTURER} PUBLIC Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui)
 # QDBus 只在 screencapturer_linux.cpp（login1 会话枚举）里用到。macOS 官方 Qt 包
 # 不发布 QtDBus，无条件 REQUIRED 会在 configure 阶段直接失败，所以按使用者门控。
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS DBus)
     target_link_libraries(${SCREEN_CAPTURER} PUBLIC Qt${QT_VERSION_MAJOR}::DBus)
 endif()

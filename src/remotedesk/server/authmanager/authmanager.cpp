@@ -57,7 +57,13 @@ static QByteArray randomBytes(int count)
 AuthManager::AuthManager(QObject* parent)
     : QObject(parent)
 {
+    // Android 的 applicationDirPath 位于只读 APK 内部，配置需落到私有可写目录。
+#if defined(Q_OS_ANDROID)
+    configPath_ = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                  + "/server_config.json";
+#else
     configPath_ = QCoreApplication::applicationDirPath() + "/server_config.json";
+#endif
     loadConfig();
 }
 

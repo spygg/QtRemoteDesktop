@@ -8,7 +8,7 @@
 
 class QTimer;
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 class QProcess;
 class QThread;
 
@@ -90,7 +90,7 @@ signals:
     // requestSetContent() 的应答
     void contentApplied(bool ok, const QString& mime, const QByteArray& data);
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // 内部：主线程 → 工作线程的读取/写入请求（不对外暴露）
     void requestCliRead();
     void requestCliWrite(const QString& mime, const QByteArray& data);
@@ -100,7 +100,7 @@ private slots:
     void onClipboardChanged();   // GUI 模式：QClipboard::dataChanged
     void flushPending();         // 去抖到期 → 去重后广播
     void pollClipboard();        // CLI 模式：轮询 X11 CLIPBOARD（只发请求，不阻塞）
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     void onCliContentRead(const QString& mime, const QByteArray& data); // 工作线程读取结果
 #endif
 
@@ -117,7 +117,7 @@ private:
     void readSystemClipboard(QString& mime, QByteArray& data) const;
     bool writeSystemClipboard(const QString& mime, const QByteArray& data);
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     bool cliMode_ = false;      // 无 QGuiApplication 时用 xclip/xsel 走 X11 CLIPBOARD
     bool cliImageCapable_ = false; // xclip 支持图片 target（xsel 不支持）
     QString clipBin_;           // xclip 或 xsel 的绝对路径

@@ -21,7 +21,7 @@ constexpr const char* kMimeImage = "image/png";
 constexpr int kCliPollMs = 1200; // CLI 模式轮询周期（X11 无剪贴板变化信号）
 }
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 // ---------------------------------------------------------------------------
 // ClipboardCliWorker：跑在 cliThread_ 里的阻塞后端
 // ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ ClipboardService::ClipboardService(QObject* parent)
 
 ClipboardService::~ClipboardService()
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // 工作线程内的阻塞调用最长 30s（大数据量管道冲刷），先让 worker 的
     // 冲刷循环看到 abort 标志并在 500ms 内返回，再停线程；wait 超时后必须
     // 继续等——销毁仍在运行的 QThread 会直接 abort 整个进程。
@@ -217,7 +217,7 @@ void ClipboardService::start()
         }
         return;
     }
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // 服务模式（QCoreApplication）：退化为 xclip/xsel 写 X11 CLIPBOARD。
     // 服务进程的 DISPLAY/XAUTHORITY 由 detectUserX11Env 设置，GUI 会话可正常读取。
     // 阻塞式 QProcess 调用全部交给工作线程，主线程只做请求/应答。
@@ -229,7 +229,7 @@ void ClipboardService::start()
 #endif
 }
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 bool ClipboardService::initCliBackend()
 {
     if (available_ || cliMode_)
@@ -293,7 +293,7 @@ void ClipboardService::setSuspended(bool s)
     if (suspended_ == s)
         return;
     suspended_ = s;
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (cliMode_ && cliPollTimer_) {
         if (s) {
             cliPollTimer_->stop();
@@ -383,12 +383,12 @@ void ClipboardService::flushPending()
 }
 
 // 实现必须全平台存在：pollClipboard() 声明在 private slots 区（无条件），
-// moc 会为所有平台生成 qt_static_metacall 调用代码；若实现被 #ifdef Q_OS_LINUX
+// moc 会为所有平台生成 qt_static_metacall 调用代码；若实现被 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 // 包住，Windows/macOS 链接期报 undefined reference。函数体内部条件编译即可——
 // 非 Linux 平台为空函数且永不触发（轮询定时器仅在 Linux CLI 模式启动）。
 void ClipboardService::pollClipboard()
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (!cliMode_ || cliReadInFlight_)
         return;
     // 只发起请求：阻塞读取在工作线程里，主线程立刻返回
@@ -397,7 +397,7 @@ void ClipboardService::pollClipboard()
 #endif
 }
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 void ClipboardService::onCliContentRead(const QString& mime, const QByteArray& data)
 {
     cliReadInFlight_ = false;
@@ -416,7 +416,7 @@ void ClipboardService::onCliContentRead(const QString& mime, const QByteArray& d
 
 void ClipboardService::requestContent()
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (!available_ && !qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
         initCliBackend();
 #endif
@@ -425,7 +425,7 @@ void ClipboardService::requestContent()
         emit contentReady(QString(), QByteArray());
         return;
     }
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (cliMode_) {
         cliPushPending_ = true;
         if (cliReadInFlight_)
@@ -443,7 +443,7 @@ void ClipboardService::requestContent()
 
 void ClipboardService::requestSetContent(const QString& mime, const QByteArray& data)
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (!available_ && !qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
         initCliBackend();
 #endif
@@ -453,7 +453,7 @@ void ClipboardService::requestSetContent(const QString& mime, const QByteArray& 
     }
     const bool isImage = (mime == QLatin1String(kMimeImage));
     if (isImage) {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
         if (cliMode_ && !cliImageCapable_) {
             qWarning("ClipboardService: image clipboard requires xclip (xsel unsupported)");
             emit contentApplied(false, mime, data);
@@ -469,7 +469,7 @@ void ClipboardService::requestSetContent(const QString& mime, const QByteArray& 
     lastMime_ = mime;
     lastData_ = data;
     pendingData_.clear();
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     if (cliMode_) {
         // 阻塞写入在工作线程执行，完成后经 contentWritten → contentApplied 应答
         emit requestCliWrite(mime, data);

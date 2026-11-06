@@ -5,6 +5,7 @@ set(SOURCES
     $<$<PLATFORM_ID:Windows>:shell_win.cpp>
     $<$<PLATFORM_ID:Linux>:shell_linux.cpp>
     $<$<PLATFORM_ID:Darwin>:shell_mac.cpp>
+    $<$<PLATFORM_ID:Android>:shell_android.cpp>
 )
 add_library(${SHELL} STATIC ${HEADERS} ${SOURCES})
 target_include_directories(${SHELL} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -196,7 +196,7 @@ QString FileTransferService::defaultUploadDir()
         return QString();
 
     QString homeDir;
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     {
         QProcess proc;
         // 单引号保护 awk 的 $3，避免被外层 /bin/sh -c 当作位置参数展开。

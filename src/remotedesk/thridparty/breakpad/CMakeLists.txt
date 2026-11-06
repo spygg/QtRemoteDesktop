@@ -32,7 +32,7 @@ target_link_libraries(radiometer_breakpad PUBLIC Qt${QT_VERSION_MAJOR}::Core)
 # 表现为 "undefined reference to symbol 'pthread_once@@GLIBC_2.2.5' /
 # DSO missing from command line"。PUBLIC 传播给用到它的三个可执行目标，
 # 不必每个目标各自补 -lpthread。
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     find_package(Threads REQUIRED)
     target_link_libraries(radiometer_breakpad PUBLIC Threads::Threads)
 endif()
@@ -74,7 +74,7 @@ endif()
 # 编不过（linux_syscall_support.h、ELF reader、breakpad_getcontext.S 都是 x86-Linux
 # 专用）。所以这里排除 APPLE：macOS 只编 crashhandler.cpp（无 handler 的空实现）。
 # ---------------------------------------------------------------
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     # breakpad_getcontext.S 为汇编源文件, 需要启用 ASM 语言
     enable_language(ASM)
 

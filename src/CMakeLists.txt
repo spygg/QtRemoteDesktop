@@ -40,7 +40,7 @@ set(PROJECT_VERSION 1.0.0)
 # 1.1.1(metaRTC DTLS) 与 1.0.x(Qt TLS) ABI 冲突导致握手静默失败。此时 webrtcsession 直接
 # 链 openssl102_install/lib 的 1.0.0 .so、metaRTC 用其头，这里也把 find_package 指过去以防
 # 其他子模块误吞系统库。
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     if(VENDOR_OPENSSL_102)
         set(_OSSL102 "${BUILD_OUTPUT_DIR}/openssl102_install")
         set(OPENSSL_ROOT_DIR "${_OSSL102}" CACHE PATH "Vendored OpenSSL 1.0.2u" FORCE)
@@ -88,7 +88,7 @@ option(USE_WEBRTC "Enable WebRTC video streaming via metaRTC (OFF=auto-detect, O
 # 三方源码（libsrtp/usrsctp/metaRTC/openh264/openssl1.0.2）只走 GNU make + GCC/Clang
 # 构建路径（openh264 用上游手写 Makefile），MSVC 无法编译。故 MSVC 下默认关闭，
 # 且即使显式 ON 也会被强制关闭（否则 configure 阶段就会失败）。
-if(MSVC)
+if(MSVC OR ANDROID)
     set(_BUILD_THIRDPARTY_DEFAULT OFF)
 else()
     set(_BUILD_THIRDPARTY_DEFAULT ON)

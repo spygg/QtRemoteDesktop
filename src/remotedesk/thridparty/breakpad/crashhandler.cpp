@@ -5,7 +5,7 @@
 #include <QtCore/QCoreApplication>
 #include <QString>
  
-#if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 #include "client/linux/handler/exception_handler.h"
 #elif defined(Q_OS_WIN32)
 #include "client/windows/handler/exception_handler.h"
@@ -16,7 +16,7 @@
 // google_breakpad::ExceptionHandler 的代码都按这个宏收起来：macOS 侧
 // InitCrashHandler 变成空操作、writeMinidump 恒返回 false，崩溃转储功能缺失，
 // 但编译与运行不受影响。
-#if defined(Q_OS_WIN32) || defined(Q_OS_LINUX)
+#if defined(Q_OS_WIN32) || (defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID))
 #define QTRD_BREAKPAD_ENABLED 1
 #endif
 
@@ -61,7 +61,7 @@ namespace Breakpad {
 #ifdef QTRD_BREAKPAD_ENABLED
 #if defined(Q_OS_WIN32)
     bool DumpCallback(const wchar_t* _dump_dir,const wchar_t* _minidump_id,void* context,EXCEPTION_POINTERS* exinfo,MDRawAssertionInfo* assertion,bool success)
-#elif defined(Q_OS_LINUX)
+#elif defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     bool DumpCallback(const google_breakpad::MinidumpDescriptor &md,void *context, bool success)
 #endif
     {
@@ -109,7 +109,7 @@ namespace Breakpad {
             0,
             true
             );
-#elif defined(Q_OS_LINUX)
+#elif defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
         std::string pathAsStr = dumpPath.toStdString();
         google_breakpad::MinidumpDescriptor md(pathAsStr);
         pHandler = new google_breakpad::ExceptionHandler(

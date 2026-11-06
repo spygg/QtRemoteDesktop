@@ -64,7 +64,7 @@ static bool isProcessRunningByName(const wchar_t* exeName)
 }
 #endif
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 // X11 EWMH 直发（显示桌面等）：helper 通过 Rdpserver/XdndMonitor PUBLIC 传递链接 X11
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -78,7 +78,7 @@ static bool isProcessRunningByName(const wchar_t* exeName)
 // 同款协议），不依赖 wmctrl/xdotool 是否安装；GNOME/XFCE/KDE/openbox/LXDE 等支持
 // EWMH 的 WM 都会响应。注意：GNOME(mutter) 不响应 XTEST 合成的 Super+D 快捷键
 // （实测 xdotool key super+d 无效），因此该协议是 Linux 显示桌面最可靠的方式。
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 static void x11ShowDesktopOnce(bool show)
 {
     static bool threadsInit = false;
@@ -1325,7 +1325,7 @@ int HelperProcess::run(int argc, char* argv[])
                                      QStringLiteral("5"), QStringLiteral("/f") },
                                    QStringLiteral("关机"));
                 }
-#elif defined(Q_OS_LINUX)
+#elif defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
                 auto findBin = [](const char* name) -> QString {
                     return QStandardPaths::findExecutable(QString::fromLatin1(name));
                 };

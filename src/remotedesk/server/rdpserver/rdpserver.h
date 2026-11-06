@@ -721,7 +721,7 @@ private:
     bool sleepSignalsConnected_ = false;
     bool sleepInhibitActive_ = false;
     bool preparedForSleep_ = false;
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     enum class InhibitBackend { None, SessionManager, ScreenSaver, Login1 };
     InhibitBackend sleepInhibitBackend_ = InhibitBackend::None;
     quint32 sleepInhibitCookie_ = 0; // org.gnome.SessionManager / ScreenSaver 返回的 cookie

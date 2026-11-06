@@ -8,7 +8,7 @@
 #include <windows.h>
 #endif
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
 typedef unsigned long X11KeySym;
 #include <QByteArray>
 #include <QDBusPendingCall>
@@ -45,7 +45,7 @@ public:
 
 
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // Switch to kernel-level uinput (works on lock screen / Wayland)
     bool initUinput();
     void destroyUinput();
@@ -82,7 +82,7 @@ private:
 
 
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     void* xDisplay_ = nullptr;
     // 打开 xDisplay_ 时使用的 DISPLAY/XAUTHORITY。服务端会动态切换这两者
     // （例如从自己拉起的虚拟屏 :99 切到用户物理会话 :0，或者换了一份 cookie），

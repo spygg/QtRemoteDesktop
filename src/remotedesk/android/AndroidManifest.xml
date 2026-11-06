@@ -1,0 +1,72 @@
+<?xml version="1.0"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.radiometer.remotedesk"
+    android:installLocation="auto"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <!-- 阶段 3：MediaProjection 屏幕共享 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <supports-screens
+        android:anyDensity="true"
+        android:largeScreens="true"
+        android:normalScreens="true"
+        android:smallScreens="true" />
+    <application
+        android:name="org.qtproject.qt.android.bindings.QtApplication"
+        android:hardwareAccelerated="true"
+        android:label="QtRemoteDesktop"
+        android:icon="@drawable/ic_stat_remotedesk"
+        android:enableOnBackInvokedCallback="false"
+        android:allowBackup="true"
+        android:fullBackupOnly="false">
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
+            android:label="QtRemoteDesktop"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+          <meta-data
+                android:name="android.app.lib_name"
+                android:value="QtRemoteDesktop" />
+
+          <meta-data
+                android:name="android.app.arguments"
+                android:value="" />
+
+          <!-- 关键：Qt for Android 默认在 Activity 退到后台时阻塞 Qt 事件循环
+               （等价 QT_BLOCK_EVENT_LOOPS_WHEN_SUSPENDED=1）。远程桌面服务必须在
+               后台继续 accept/推流，这里显式关闭该行为。
+               注意：QtLoader 从 Activity 的 meta-data 读取该键，不能放在 <application>。 -->
+          <meta-data
+                android:name="android.app.background_running"
+                android:value="true" />
+        </activity>
+
+        <!-- MediaProjection 前台服务：必须在 manifest 声明 mediaProjection 类型 -->
+        <service
+            android:name=".CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.qtprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/qtprovider_paths"/>
+        </provider>
+    </application>
+</manifest>
