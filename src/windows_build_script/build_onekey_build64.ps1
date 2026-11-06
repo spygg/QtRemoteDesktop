@@ -403,6 +403,13 @@ if (($ffmpegVer -ge [Version]'5.0') -and (-not (Find-OneVPLSource))) {
 Write-Host ""
 
 # ---- 3. Configure ----
+# 归档竞争重试前清掉 build_output64/lib 里可能半写的 .a（与 32 位脚本同一策略）。
+function Reset-Archives([string]$LibDir) {
+    if (-not (Test-Path $LibDir)) { return }
+    Get-ChildItem -LiteralPath $LibDir -Filter '*.a' -File -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+}
+
 Write-Host "[1/3] Configuring CMake (build64 / bin64 / build_output64)..."
 Invoke-StepChecked "CMake configure" {
     & $cmakeExe -G "MinGW Makefiles" -S $srcDir -B $buildDir `
@@ -421,8 +428,10 @@ Write-Host ""
 # ---- 4. Build (openh264_ep + ffmpeg_ep run before the app links) ----
 $jobs = [Math]::Max(1, [int]$env:NUMBER_OF_PROCESSORS - 1)
 Write-Host "[2/3] Building (this compiles FFmpeg $ffmpegVersion + NVENC on first run, expect tens of minutes)..."
-Invoke-StepChecked "CMake build" {
-    & $cmakeExe --build $buildDir -j $jobs 2>&1 | Format-ToolOutput
+Invoke-NativeBuildWithArchiveRetry "CMake build" {
+    & $cmakeExe --build $buildDir -j $jobs 2>&1
+} {
+    Reset-Archives (Join-Path $outDir 'lib')
 }
 Write-Host ""
 

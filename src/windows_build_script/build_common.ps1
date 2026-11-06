@@ -142,3 +142,41 @@ function Get-Toolchain([string]$repoRoot) {
     $make = Join-Path $mingwBin 'mingw32-make.exe'
     return @{ Prefix = $prefix; MakeProgram = $make; MingwBin = $mingwBin }
 }
+
+# Windows 上外部扫描器/索引器会短暂占用刚写出的静态归档，ar 因此报
+#   ar.exe: unable to rename '...\libXXX.a'; reason: Permission denied
+# 紧接着 ranlib 读到半写归档报 "Malformed archive"（2026-11-06 实测：
+# build.bat 第一次运行正是这两条，第二次才走到链接）。
+# 只对这两类指纹做有限次重试；其他构建错误照常立刻失败，不做"重试到通过"。
+function Invoke-NativeBuildWithArchiveRetry {
+    param(
+        [string]$What,
+        [scriptblock]$Body,
+        [scriptblock]$OnRetry = $null,
+        [int]$MaxAttempts = 3
+    )
+    $flaky = 'unable to rename .*\.a|Malformed archive|archive has no index|\.a: Permission denied'
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $lines = @()
+        $code = 0
+        try {
+            $lines = @(& $Body 2>&1 | ForEach-Object {
+                if ($_ -is [Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
+            })
+            if ($null -ne $LASTEXITCODE) { $code = $LASTEXITCODE }
+        } finally { $ErrorActionPreference = $prev }
+        foreach ($l in $lines) { Write-Host $l }
+        if ($code -eq 0) { return }
+        $text = ($lines | Out-String)
+        if ($attempt -lt $MaxAttempts -and $text -match $flaky) {
+            Write-Host ("[retry] {0}: archive race detected (ar/ranlib rename), retrying {1}/{2}..." -f
+                       $What, ($attempt + 1), $MaxAttempts) -ForegroundColor Yellow
+            Start-Sleep -Seconds 3
+            if ($null -ne $OnRetry) { & $OnRetry }
+            continue
+        }
+        throw "$What failed (exit $code)"
+    }
+}

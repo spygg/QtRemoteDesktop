@@ -88,6 +88,24 @@ function Format-Size([long]$Bytes) {
     return "{0:N0} bytes ({1:N2} MB)" -f $Bytes, ($Bytes / 1MB)
 }
 
+# 共享 build_output 里的 openh264 产物可能是别的构建树（64 位）写下的：
+# 本脚本第 2 步原先只判断文件"存在"就跳过重建，于是链接期出现
+#   undefined reference to `WelsCreateSVCEncoder'
+# （64 位 pe-x86-64 归档无法被 32 位 ld 使用，2026-11-06 实测）。这里用
+# 目标工具链自带的 objdump 校验归档格式，格式不符就重建。
+function Test-MingwArchive32([string]$Archive, [string]$MingwBin) {
+    if (-not (Test-Path -LiteralPath $Archive)) { return $false }
+    $objdump = Join-Path $MingwBin 'objdump.exe'
+    if (-not (Test-Path -LiteralPath $objdump)) { return $true }   # 无法校验时保持旧行为
+    # 归档里混入异架构成员时 objdump 会把错误写到 stderr；这里放宽 EAP，
+    # 只按输出内容判定，避免诊断过程本身抛异常。
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & $objdump -f $Archive 2>&1 | Out-String }
+    finally { $ErrorActionPreference = $prev }
+    return ($out -match 'file format pe-i386')
+}
+
 # ---- Shared-archive purge (R2/R3) ----
 # Both 32-bit trees put their static libs in <BUILD_OUTPUT_DIR>/lib and
 # libVideoEncoder.a embeds FFmpeg-version-specific objects, so an archive left
@@ -158,22 +176,39 @@ if (-not (Test-Path "$ffmpegSrc\configure")) {
 
 # ---- 2. Build openh264 ----
 Write-Host "[2/5] Building openh264..."
-if (-not (Test-Path "$openh264Install\lib\libopenh264.a")) {
+$openh264Archive = "$openh264Install\lib\libopenh264.a"
+if (-not (Test-MingwArchive32 $openh264Archive $mingwBin)) {
+    if (Test-Path -LiteralPath $openh264Archive) {
+        Write-Host "[2/5] existing openh264 archive is not 32-bit MinGW - rebuilding" -ForegroundColor Yellow
+        if (Test-Path $openh264Install) { Remove-Item -LiteralPath $openh264Install -Recurse -Force }
+    }
     if (Test-Path $openh264Build) { Remove-Item -LiteralPath $openh264Build -Recurse -Force }
     New-Item -ItemType Directory -Path $openh264Build -Force | Out-Null
     New-Item -ItemType Directory -Path "$openh264Install\lib" -Force | Out-Null
     New-Item -ItemType Directory -Path "$openh264Install\include\wels" -Force | Out-Null
 
     Copy-Item -Path "$openh264Src\*" -Destination $openh264Build -Recurse -Force
+    # openh264 的 Makefile 在 install 阶段调用 sh 工具链（install/sed/sort/awk），
+    # 这些只在 Git for Windows 的 usr\bin 里；不补 PATH 会报 "install: command not found"。
+    $gitUsrBin = Join-Path (Split-Path (Split-Path $gitBash -Parent) -Parent) 'usr\bin'
     Push-Location $openh264Build
+    $prevPath = $env:PATH
     try {
-        # make's install on Windows swallows backslashes; PREFIX needs forward slashes
-        $prefixFwd = $openh264Install.Replace('\', '/')
-        & make OS=mingw_nt ARCH=x86 CC=gcc AR=ar "PREFIX=$prefixFwd" DESTDIR='' all install -j4
+        $env:PATH = "$env:PATH;$gitUsrBin"
+        # 不调用 Makefile 的 install 目标：它依赖 sh 的 install/sed，在 mingw make
+        # 派生的 sh PATH 里找不到（2026-11-06 实测）。all 目标产出 libopenh264.a，
+        # 这里直接按 install 的布局手工落盘。
+        & make OS=mingw_nt ARCH=x86 CC=gcc AR=ar all -j4
         if ($LASTEXITCODE -ne 0) { throw "openh264 make failed" }
+        Copy-Item -LiteralPath (Join-Path $openh264Build 'libopenh264.a') -Destination $openh264Archive -Force
+        Copy-Item -Path (Join-Path $openh264Build 'codec\api\wels\*.h') -Destination "$openh264Install\include\wels" -Force
     } finally {
+        $env:PATH = $prevPath
         Pop-Location
     }
+}
+if (-not (Test-MingwArchive32 $openh264Archive $mingwBin)) {
+    throw "openh264 archive is not a 32-bit MinGW archive: $openh264Archive"
 }
 
 # ---- 3. Build FFmpeg ----
@@ -298,8 +333,12 @@ if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
 # ---- 5. Build project ----
 Write-Host "[5/5] Building project..."
-& cmake --build $buildDir -j4 --config Release
-if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
+Invoke-NativeBuildWithArchiveRetry "CMake build" {
+    & cmake --build $buildDir -j4 --config Release 2>&1
+} {
+    # 重试前清掉可能半写的归档，再让 make 重新归档/链接
+    Reset-SharedArchives (Join-Path $outDir 'lib')
+}
 
 Write-Host ""
 Write-Host "========================================"
