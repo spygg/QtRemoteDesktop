@@ -89,6 +89,11 @@ public class CaptureService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
+            // 进程被杀后系统以 null intent 重启服务时不能谎报"正在采集"：
+            // onCreate 已把 sRunning 置 true，这里必须回退，否则 UI/权限判断
+            // 会认为投影仍在运行，永远不再发起授权。
+            sRunning = false;
+            stopSelf();
             return START_NOT_STICKY;
         }
         // Android 8+ 起前台服务必须在 5 秒内 startForeground。

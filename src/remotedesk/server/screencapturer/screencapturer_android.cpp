@@ -154,6 +154,9 @@ void ScreenCapturer::captureFrameBody()
 
 void ScreenCapturer::cleanupPlatform()
 {
+    // Java 采集线程会持续回调 nativeOnFrameBuffer(g_androidCapturer)。对象销毁后
+    // 该裸指针悬空，MediaProjection 多存活几帧就是 use-after-free；停止时先摘掉。
+    remotedeskSetAndroidCapturer(nullptr);
 }
 
 bool ScreenCapturer::changeDisplayResolution(int, int)

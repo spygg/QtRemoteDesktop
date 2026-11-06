@@ -44,7 +44,7 @@ public class MainActivity extends QtActivity {
     /** 无障碍开启指引在本进程内只弹一次，避免每次回到前台都打扰用户。 */
     private boolean accessibilityGuideShown = false;
 
-    private static MainActivity sInstance;
+    private static volatile MainActivity sInstance;
 
     /**
      * 供 C++ 侧切换屏幕方向：landscape=true 横屏，false 竖屏。
