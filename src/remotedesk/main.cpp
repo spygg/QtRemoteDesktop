@@ -347,7 +347,11 @@ int main(int argc, char* argv[])
 
     qInstallMessageHandler(logToFile);
     verifyJpegSupport();
+#if defined(Q_OS_ANDROID)
     Breakpad::CrashHandler::instance()->Init(logsDirectory());
+#else
+    Breakpad::CrashHandler::instance()->Init(QCoreApplication::applicationDirPath());
+#endif
 
     SystemSleepBlocker blocker;
     if (!blocker.start()) {
