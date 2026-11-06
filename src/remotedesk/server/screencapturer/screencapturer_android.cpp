@@ -69,13 +69,23 @@ void ScreenCapturer::submitAndroidFrame(const QImage& frame)
 {
     if (frame.isNull())
         return;
-    QMutexLocker locker(&androidFrameMutex_);
-    androidFrame_ = frame;
-    androidStatRecv_++;
-    if (frame.width() != androidWidth_ || frame.height() != androidHeight_) {
-        androidWidth_ = frame.width();
-        androidHeight_ = frame.height();
-        qInfo() << "MediaProjection frame size:" << androidWidth_ << "x" << androidHeight_;
+    int newWidth = 0;
+    int newHeight = 0;
+    {
+        QMutexLocker locker(&androidFrameMutex_);
+        androidFrame_ = frame;
+        androidStatRecv_++;
+        if (frame.width() != androidWidth_ || frame.height() != androidHeight_) {
+            androidWidth_ = frame.width();
+            androidHeight_ = frame.height();
+            newWidth = androidWidth_;
+            newHeight = androidHeight_;
+        }
+    }
+    if (newWidth > 0) {
+        qInfo() << "MediaProjection frame size:" << newWidth << "x" << newHeight;
+        // 注意：本函数由 Java 采集线程调用，连接是 queued 的，信号会在主线程执行。
+        emit androidFrameSizeChanged(newWidth, newHeight);
     }
 }
 

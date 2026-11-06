@@ -103,6 +103,65 @@ Rules the script enforces (also documented in `build_onekey_build*.ps1`, `build.
 3. **Verify before shipping:** each exe must contain its own FFmpeg marker (`av_channel_layout_default` for 6.1.2, `avcodec_register_all` for 3.4.8), must *not* contain the other one, and must contain openh264 (`WelsCreateSVCEncoder`). The pair script does this automatically.
 4. Compare the printed SHA256 with the exe actually deployed on the target machine.
 
+### Android: one command, debug APK (Qt 6, arm64-v8a)
+
+```bat
+src\android_build_script\build_android.bat
+```
+
+The script uses the Qt 6 `android_arm64_v8a` kit via `qt-cmake` (`QT_HOST_PATH=mingw_64`) with
+`ANDROID_ABI=arm64-v8a`, `USE_FFMPEG=OFF`, `USE_WEBRTC=OFF`, `BUILD_THIRDPARTY=OFF`, builds the
+`apk` target, and finally prints the **APK path, size, SHA256 and the `adb install` command**.
+It is idempotent: an existing `build_android\` tree is reconfigured and rebuilt incrementally;
+pass `-Clean` to start over. On failure it prints the **first real error**
+(`FAILED:` / `CMake Error` / `error:`) and the full log path instead of a wall of output.
+
+Prerequisites:
+
+| Item | Requirement |
+|---|---|
+| Qt | Qt 6.x with the **android_arm64_v8a** kit **and** the matching **mingw_64** host tools (`bin\qt-cmake.bat`) |
+| Android SDK | platform-tools, build-tools, one platform, `cmake` + `ninja` |
+| NDK | r27 (`27.1.12297006` preferred; other versions can be forced with `-NdkRoot`) |
+| JDK | 17+ with `JAVA_HOME` set (Gradle requirement) |
+| Gradle | wrapper already points at the Tencent mirror; Maven Central can be accelerated with an Aliyun init script (`%USERPROFILE%\.gradle\init.gradle`) when needed |
+
+Environment overrides: `QT_ANDROID_ROOT`, `ANDROID_SDK_ROOT`, `ANDROID_NDK_ROOT`;
+script options: `-QtRoot`, `-BuildDir`, `-NdkRoot`, `-Clean`.
+
+Install and start:
+
+```bat
+adb install -r build_android\remotedesk\android-build\build\outputs\apk\debug\android-build-debug.apk
+adb shell am start -n com.radiometer.remotedesk/.MainActivity
+```
+
+Then on the phone tap **开始共享屏幕** → in the system dialog choose **整个屏幕** → **立即开始**,
+and open `http://<phone-ip>:8080` on the PC browser (`admin` / `admin`).
+
+**Two manual grants are required (no way around them):**
+
+1. **Screen capture permission** — Android 14 asks again on every app-process restart (reboot,
+   force-stop, reinstall). The in-app button starts the flow; the system dialog must be confirmed.
+2. **Accessibility service** — `设置 → 无障碍 → RemoteDesk 输入服务` (one-time, survives restarts).
+   It is required for tap / swipe / long-press / back / home. If it is off, the browser shows an
+   explicit `input_status` error and **no event is injected** (nothing is silently dropped).
+
+Supported: live view; click / swipe / long-press / back / home; portrait & landscape (the canvas and
+input mapping follow the real 720x1612 ↔ 1612x720 size); the 8080 web page stays reachable while the
+app is in the background (foreground capture service).
+
+Not supported yet: Chinese / keyboard input, multi-touch (pinch), audio, file transfer, web
+terminal, and unattended/headless operation.
+
+Evidence (real device, phone screenshot + browser screenshot):
+[before](docs/android/01-phone-settings-before.jpg) /
+[after](docs/android/02-phone-settings-after.jpg) /
+[browser](docs/android/03-browser-remote-control.jpg) /
+[swipe](docs/android/04-phone-swipe.jpg) /
+[landscape](docs/android/05-browser-landscape.jpg) /
+[accessibility guide](docs/android/06-accessibility-guide.jpg)
+
 ---
 
 ## 🔧 Build requirements
@@ -298,6 +357,63 @@ src\windows_build_script\build_32pair.bat xp       :: 只出 FFmpeg 3.4.8
 2. **每次构建前删 `build_output_win32\lib\*.a`。** 两棵 32 位树把静态库都写进同一个共享目录（`CMAKE_ARCHIVE_OUTPUT_DIRECTORY`），而 `libVideoEncoder.a` 里编进了 FFmpeg 版本相关的目标文件。后构建的树会直接链接另一棵树留下的归档：6.1.2 侧报 `undefined reference to 'avcodec_register_all'`；3.4.8 侧不报错，但产出的 exe **不含 FFmpeg**（`7,394,065` 字节，正常应约 `10.2 MB`，2026-11-04 实际发生）。
 3. **出包即校验：** exe 必须含自身版本的 FFmpeg 标记（6.1.2 为 `av_channel_layout_default`，3.4.8 为 `avcodec_register_all`），且不能含另一版本的标记，同时必须含 openh264（`WelsCreateSVCEncoder`）。双目标脚本会自动做这一步。
 4. 用打印出的 SHA256 与目标机上实际部署的 exe 比对，确认部署版就是本次出包。
+
+### Android：一条命令出 debug APK（Qt 6 / arm64-v8a）
+
+```bat
+src\android_build_script\build_android.bat
+```
+
+脚本用 Qt 6 的 `android_arm64_v8a` 套件调用 `qt-cmake`（`QT_HOST_PATH=mingw_64`），固定
+`ANDROID_ABI=arm64-v8a`、`USE_FFMPEG=OFF`、`USE_WEBRTC=OFF`、`BUILD_THIRDPARTY=OFF`，构建
+`apk` 目标，结束时打印 **APK 路径、大小、SHA256 和 `adb install` 命令**。
+脚本幂等：已有 `build_android\` 会重新配置并增量构建；要重来加 `-Clean`。
+失败时只打印**第一条真实错误**（`FAILED:` / `CMake Error` / `error:`）和完整日志路径，
+不会刷屏。
+
+构建前置：
+
+| 项目 | 要求 |
+|---|---|
+| Qt | Qt 6.x，带 **android_arm64_v8a** 套件 **和** 对应的 **mingw_64** 主机工具（`bin\qt-cmake.bat`） |
+| Android SDK | platform-tools、build-tools、一个 platform、`cmake` + `ninja` |
+| NDK | r27（优先 `27.1.12297006`，其它版本用 `-NdkRoot` 指定） |
+| JDK | 17+，且设置 `JAVA_HOME`（Gradle 要求） |
+| Gradle 镜像 | wrapper 已指向腾讯镜像；Maven Central 慢时可在 `%USERPROFILE%\.gradle\init.gradle` 里加阿里云仓库 |
+
+环境变量覆盖：`QT_ANDROID_ROOT`、`ANDROID_SDK_ROOT`、`ANDROID_NDK_ROOT`；
+脚本参数：`-QtRoot`、`-BuildDir`、`-NdkRoot`、`-Clean`。
+
+安装与启动：
+
+```bat
+adb install -r build_android\remotedesk\android-build\build\outputs\apk\debug\android-build-debug.apk
+adb shell am start -n com.radiometer.remotedesk/.MainActivity
+```
+
+然后在手机上点 **开始共享屏幕** → 系统弹窗选 **整个屏幕** → **立即开始**，
+电脑浏览器打开 `http://<手机IP>:8080`（默认 `admin` / `admin`）。
+
+**两件必须手动授权的事（无法绕过）：**
+
+1. **屏幕录制授权** —— Android 14 每次 App 进程重启（重启手机、强行停止、重装）都要重新确认一次。
+   App 内有「开始共享屏幕」按钮触发流程，系统弹窗必须点「立即开始」。
+2. **无障碍服务** —— `设置 → 无障碍 → RemoteDesk 输入服务`（一次开启，重启后保留）。
+   点击 / 滑动 / 长按 / 返回 / 主页都依赖它。未开启时浏览器会收到明确的 `input_status` 失败回执
+   并显示原因，**事件不会被静默丢弃**。
+
+已支持：实时查看；点击 / 滑动 / 长按 / 返回 / 主页；竖屏与横屏（画布和坐标映射跟随真实的
+720x1612 ↔ 1612x720）；App 退到后台后 8080 页面仍可访问（前台采集服务保活）。
+
+明确不支持：中文输入 / 键盘输入、多指手势（缩放）、音频、文件传输、网页终端、无人值守。
+
+实机验收截图（手机截图 + 浏览器截图）：
+[点击前](docs/android/01-phone-settings-before.jpg) /
+[点击后](docs/android/02-phone-settings-after.jpg) /
+[浏览器画面](docs/android/03-browser-remote-control.jpg) /
+[滑动](docs/android/04-phone-swipe.jpg) /
+[横屏](docs/android/05-browser-landscape.jpg) /
+[无障碍指引](docs/android/06-accessibility-guide.jpg)
 
 ### 直接用 CMake 构建（不用一键脚本）
 

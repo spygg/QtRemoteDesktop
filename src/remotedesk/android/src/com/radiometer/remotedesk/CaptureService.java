@@ -55,6 +55,17 @@ public class CaptureService extends Service {
     private ByteBuffer pixelBuffer;
     private int frameWidth;
     private int frameHeight;
+    private DisplayManager displayManager;
+    private DisplayManager.DisplayListener displayListener;
+    private int densityDpi;
+
+    // 旋转防抖：onDisplayChanged 连续触发时只重建一次（见 startCapture 里的监听器）。
+    private final Runnable displayChangeRunnable = new Runnable() {
+        @Override
+        public void run() {
+            handleDisplayChange();
+        }
+    };
 
     private final MediaProjection.Callback projectionCallback =
             new MediaProjection.Callback() {
@@ -122,13 +133,12 @@ public class CaptureService extends Service {
         // 必须用真实物理尺寸：Activity 的 DisplayMetrics 会扣掉状态栏/导航栏，
         // 得到 720x1516 这类裁剪值，浏览器看到的就不是整屏。
         DisplayMetrics metrics = new DisplayMetrics();
-        DisplayManager displayManager = (DisplayManager)
-                getSystemService(Context.DISPLAY_SERVICE);
+        displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
         Display defaultDisplay = displayManager.getDisplay(Display.DEFAULT_DISPLAY);
         defaultDisplay.getRealMetrics(metrics);
         frameWidth = metrics.widthPixels;
         frameHeight = metrics.heightPixels;
-        int densityDpi = metrics.densityDpi;
+        densityDpi = metrics.densityDpi;
 
         captureThread = new HandlerThread("RemoteDeskCapture");
         captureThread.start();
@@ -144,7 +154,79 @@ public class CaptureService extends Service {
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(), null, captureHandler);
 
+        // 横竖屏旋转：MediaProjection 的 VirtualDisplay 尺寸不会自动跟着转，
+        // 不处理的话旋转后画面会被压进旧尺寸，浏览器里的点击坐标也全部错位。
+        // 监听 DEFAULT_DISPLAY 变化，按真实尺寸重建 ImageReader 并 resize。
+        displayListener = new DisplayManager.DisplayListener() {
+            @Override
+            public void onDisplayAdded(int displayId) {
+            }
+
+            @Override
+            public void onDisplayRemoved(int displayId) {
+            }
+
+            @Override
+            public void onDisplayChanged(int displayId) {
+                if (displayId == Display.DEFAULT_DISPLAY && captureHandler != null) {
+                    // 旋转动画期间 onDisplayChanged 会连续触发多次：统一延后 400ms，
+                    // 等系统把最终尺寸定下来再重建，避免按中间尺寸反复切换。
+                    captureHandler.removeCallbacks(displayChangeRunnable);
+                    captureHandler.postDelayed(displayChangeRunnable, 400);
+                }
+            }
+        };
+        displayManager.registerDisplayListener(displayListener, captureHandler);
+
         Log.i(TAG, "Capture started: " + frameWidth + "x" + frameHeight + " @" + densityDpi + "dpi");
+    }
+
+    /**
+     * 屏幕方向/尺寸变化：把 VirtualDisplay 和 ImageReader 一起切到新的真实尺寸。
+     * 在 captureHandler 上执行（与 onImageAvailable 同一个线程），不会并发读旧帧。
+     */
+    private void handleDisplayChange() {
+        if (displayManager == null || virtualDisplay == null || imageReader == null
+                || projection == null) {
+            return;
+        }
+        Display display = displayManager.getDisplay(Display.DEFAULT_DISPLAY);
+        if (display == null) {
+            return;
+        }
+        DisplayMetrics metrics = new DisplayMetrics();
+        display.getRealMetrics(metrics);
+        final int w = metrics.widthPixels;
+        final int h = metrics.heightPixels;
+        final int dpi = metrics.densityDpi;
+        if (w <= 0 || h <= 0 || (w == frameWidth && h == frameHeight)) {
+            return;
+        }
+
+        ImageReader oldReader = imageReader;
+
+        // 不能对同一个 MediaProjection 再次调用 createVirtualDisplay：系统会判定
+        // token 非法并直接停掉整个投影（logcat: "Reusing token: Throw exception
+        // due to invalid projection"）。旋转只能沿用原 VirtualDisplay，
+        // 先换 surface 再 resize（resize 要求 surface 已就位）。
+        try {
+            ImageReader newReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
+            newReader.setOnImageAvailableListener(reader -> onImageAvailable(reader), captureHandler);
+            virtualDisplay.setSurface(newReader.getSurface());
+            virtualDisplay.resize(w, h, dpi);
+            imageReader = newReader;
+            frameWidth = w;
+            frameHeight = h;
+            densityDpi = dpi;
+            pixelBuffer = null;
+            Log.i(TAG, "Display changed, capture resized: " + w + "x" + h + " @" + dpi + "dpi");
+        } catch (Exception e) {
+            Log.w(TAG, "Resize capture after display change failed", e);
+            return;
+        }
+        if (oldReader != null) {
+            oldReader.close();
+        }
     }
 
     private void onImageAvailable(ImageReader reader) {
@@ -171,10 +253,20 @@ public class CaptureService extends Service {
             }
             pixelBuffer.clear();
             int rowBytes = width * 4;
+            int srcCapacity = source.capacity();
             for (int row = 0; row < height; row++) {
                 int start = row * rowStride;
+                if (start >= srcCapacity) {
+                    break;
+                }
+                // 每行必须先把 limit 复位到 capacity 再 position：横屏时
+                // rowStride 会按 64 字节对齐（1612 宽 → rowBytes=6448、
+                // rowStride=6464），上一行设过的 limit 小于下一行起点，
+                // 直接 position 会抛 IllegalArgumentException: newPosition > limit，
+                // 帧被整体丢弃（表现为旋转后画面卡死）。
+                source.limit(srcCapacity);
                 source.position(start);
-                source.limit(Math.min(source.capacity(), start + rowBytes));
+                source.limit(Math.min(srcCapacity, start + rowBytes));
                 pixelBuffer.put(source);
             }
             pixelBuffer.position(0);
@@ -226,6 +318,10 @@ public class CaptureService extends Service {
     @Override
     public void onDestroy() {
         Log.i(TAG, "Capture service destroyed");
+        if (displayManager != null && displayListener != null) {
+            displayManager.unregisterDisplayListener(displayListener);
+            displayListener = null;
+        }
         if (virtualDisplay != null) {
             virtualDisplay.release();
             virtualDisplay = null;

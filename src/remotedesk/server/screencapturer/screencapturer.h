@@ -322,6 +322,11 @@ public:
 signals:
     void frameCaptured(const QImage& frame);
     void screenLocked(bool locked);
+#if defined(Q_OS_ANDROID)
+    // MediaProjection 帧尺寸变化（横竖屏旋转/分辨率切换）：前端 canvas 与输入
+    // 坐标换算基准都必须同步更新，否则点击会系统性偏移。
+    void androidFrameSizeChanged(int width, int height);
+#endif
 
 private slots:
     void captureFrame();

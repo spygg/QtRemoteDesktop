@@ -59,6 +59,22 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <!-- 阶段 4：无障碍手势注入（点击/滑动/长按/返回/主页）。
+             开启由用户在系统设置里手动完成（设置 → 无障碍 → RemoteDesk 输入服务），
+             App 只负责引导；未开启时输入会明确失败并回执原因。 -->
+        <service
+            android:name=".InputAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.qtprovider"

@@ -34,6 +34,9 @@
             display: block;
             background: #000;
             box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            /* 触摸设备：手势完全交给下方 touch 映射，避免浏览器默认滚动/缩放
+               把点击吞掉（否则手机上滑不动/点不准）。 */
+            touch-action: none;
         }
 
         /* WebRTC H.264 视频（libdatachannel → RTP），叠加在 canvas 之上，铺满窗口 */
@@ -888,6 +891,16 @@
                 <span class="btn-text">系统</span>
             </button>
         </div>
+        <!-- Android 专有：系统级返回/主页（无障碍 performGlobalAction）。
+             仅当服务端 platform=android 时由 screen_info 显示。 -->
+        <button class="btn" id="btn-android-back" style="display:none" onclick="androidGlobalAction('back')">
+            <span class="btn-icon">◀</span>
+            <span class="btn-text">返回</span>
+        </button>
+        <button class="btn" id="btn-android-home" style="display:none" onclick="androidGlobalAction('home')">
+            <span class="btn-icon">⌂</span>
+            <span class="btn-text">主页</span>
+        </button>
         <button class="btn" id="btn-fullscreen" onclick="toggleFullscreen()">
             <span class="btn-icon">⛶</span>
             <span class="btn-text">全屏</span>
@@ -2794,6 +2807,15 @@
                     updateScale();
                     buildResolutionOptions();
                     updateDropdownActive();
+                    // 平台标识随 screen_info 下发：Android 才显示「返回/主页」按钮。
+                    if (msg.platform) {
+                        state.serverPlatform = msg.platform;
+                        const isAndroid = msg.platform === 'android';
+                        const backBtn = document.getElementById('btn-android-back');
+                        const homeBtn = document.getElementById('btn-android-home');
+                        if (backBtn) backBtn.style.display = isAndroid ? '' : 'none';
+                        if (homeBtn) homeBtn.style.display = isAndroid ? '' : 'none';
+                    }
                     // MSE 的 init segment 里写死了启动时的宽高，同一 SourceBuffer 继续
                     // 追加新尺寸的样本，浏览器解码器不会重协商 → 花屏后冻结。整条管线
                     // 拆掉重建（与 ms 被外部关闭的自愈路径同一套），并重新要关键帧。
@@ -2807,6 +2829,13 @@
                     }
                     break;
                 }
+                case 'input_status':
+                    // 服务端明确回执输入失败（Android 无障碍未开启等）。必须把原因
+                    // 显示给用户，而不是让点击"看起来没反应"。
+                    if (!msg.ok) {
+                        showTransferStatus(msg.hint || ('控制失败: ' + (msg.reason || '未知原因')), 4000);
+                    }
+                    break;
                 case 'cursor_pos':
                     updateRemoteCursor(msg.x, msg.y);
                     break;
@@ -3344,6 +3373,16 @@
             showTransferStatus('观看模式下只能查看，不能操作被控端', 2500);
         }
 
+        // Android 系统级返回/主页：服务端通过无障碍 performGlobalAction 执行。
+        // 未开启无障碍时服务端会回 input_status（见 handleJson），这里不做假成功。
+        function androidGlobalAction(action) {
+            if (state.viewOnly) {
+                notifyViewOnlyBlocked();
+                return;
+            }
+            send({ type: 'global_action', action: action });
+        }
+
         function updateViewOnlyUI() {
             const on = !!state.viewOnly;
             document.body.classList.toggle('viewonly', on);
@@ -3860,6 +3899,9 @@
             // Map 记录按下时坐标：窗口失焦时没有鼠标位置可用，必须按原按下点补发。
             const pressedButtons = new Map();
             canvas.addEventListener('mousedown', (e) => {
+                // 触摸后浏览器可能补发一套合成鼠标事件：500ms 内忽略，避免一次
+                // 点击被转发两次。
+                if (performance.now() - (state.lastTouchTs || 0) < 500) return;
                 // 观看模式：不向远端按下鼠标按钮，也不记账（否则离开观看模式后
                 // 会补发一次没有对应 mousedown 的 mouseup）
                 if (state.viewOnly) return;
@@ -3879,6 +3921,7 @@
             });
 
             canvas.addEventListener('mouseup', (e) => {
+                if (performance.now() - (state.lastTouchTs || 0) < 500) return;
                 if (state.viewOnly) return;
                 cancelPendingMove();
                 pressedButtons.delete(e.button);
@@ -3894,6 +3937,7 @@
             // [B14] 画布外松键补发：canvas mouseup 只在自己的命中区域触发，
             // 拖拽出画布（或落在叠加元素上）后松开，远端按钮会一直保持按下。
             window.addEventListener('mouseup', (e) => {
+                if (performance.now() - (state.lastTouchTs || 0) < 500) return;
                 if (state.viewOnly) return;
                 if (e.target === state.canvas) return; // canvas 监听器已处理
                 if (!pressedButtons.has(e.button)) return; // 画布上没按下的键不转发
@@ -3930,6 +3974,58 @@
                     });
                 }
             }, { passive: false });
+
+            // ==================== 触摸映射（手机/平板浏览器） ====================
+            // 桌面浏览器用鼠标事件；触摸设备把单指触摸映射成同一套
+            // mousedown/mousemove/mouseup，服务端再按位移与按住时长决定
+            // tap / swipe / longPress。多指手势不在本轮范围：只跟踪第一根手指。
+            let touchId = null;
+            let lastTouchPos = null;
+            const touchPos = (t) => getCanvasPos({ clientX: t.clientX, clientY: t.clientY });
+            canvas.addEventListener('touchstart', (e) => {
+                if (state.viewOnly) return;
+                if (touchId !== null) return;   // 已有手指在操作，忽略后续手指
+                const t = e.changedTouches[0];
+                if (!t) return;
+                // 阻止浏览器后续合成的鼠标事件与默认滚动/缩放，否则一次点击
+                // 会被转发两次（touch 一次 + 合成 mouse 一次）。
+                e.preventDefault();
+                focusKbdSink(t.clientX, t.clientY);
+                cancelPendingMove();
+                touchId = t.identifier;
+                lastTouchPos = touchPos(t);
+                state.lastTouchTs = performance.now();
+                pressedButtons.set(0, { x: Math.round(lastTouchPos.x), y: Math.round(lastTouchPos.y) });
+                send({ type: 'mousedown', x: Math.round(lastTouchPos.x), y: Math.round(lastTouchPos.y), button: 0 });
+            }, { passive: false });
+
+            canvas.addEventListener('touchmove', (e) => {
+                if (state.viewOnly || touchId === null) return;
+                const t = Array.from(e.changedTouches).find(x => x.identifier === touchId);
+                if (!t) return;
+                e.preventDefault();
+                state.lastTouchTs = performance.now();
+                const pos = touchPos(t);
+                lastTouchPos = pos;
+                // 与鼠标路径一致：滑动轨迹也发给服务端（服务端最终用按下点→
+                // 抬起点计算手势，move 只用于光标反馈与后续扩展）。
+                send({ type: 'mousemove', x: Math.round(pos.x), y: Math.round(pos.y) });
+            }, { passive: false });
+
+            const endTouch = (e) => {
+                if (touchId === null) return;
+                const t = Array.from(e.changedTouches).find(x => x.identifier === touchId);
+                if (!t) return;
+                e.preventDefault();
+                state.lastTouchTs = performance.now();
+                const pos = touchPos(t);
+                touchId = null;
+                lastTouchPos = null;
+                pressedButtons.delete(0);
+                send({ type: 'mouseup', x: Math.round(pos.x), y: Math.round(pos.y), button: 0 });
+            };
+            canvas.addEventListener('touchend', endTouch, { passive: false });
+            canvas.addEventListener('touchcancel', endTouch, { passive: false });
 
             // 键盘
             window.addEventListener('compositionend', (e) => {

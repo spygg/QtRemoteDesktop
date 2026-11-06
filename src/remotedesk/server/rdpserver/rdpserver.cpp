@@ -53,6 +53,7 @@ static bool isRemoteControlType(const QString& type)
         || type == QLatin1String("keydown") || type == QLatin1String("keyup")
         || type == QLatin1String("clipboard")
         || type == QLatin1String("system_action") || type == QLatin1String("ime_cycle")
+        || type == QLatin1String("global_action")
         || type == QLatin1String("file_upload_start") || type == QLatin1String("file_upload_done")
         || type == QLatin1String("file_download");
 }
@@ -1255,6 +1256,23 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
         screenCapturer_ = std::unique_ptr<ScreenCapturer>(new ScreenCapturer(this));
         connect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
             this, &RDPServer::onFrameCaptured);
+#if defined(Q_OS_ANDROID)
+        // 旋转/分辨率变化：帧尺寸变了，输入换算基准与前端 canvas 都要同步，
+        // 否则点击会按旧尺寸映射到错误位置。
+        connect(screenCapturer_.get(), &ScreenCapturer::androidFrameSizeChanged,
+            this, [this](int w, int h) {
+                if (inputManager_)
+                    inputManager_->setScreenSize(w, h);
+                if (wsServer_) {
+                    QJsonObject info;
+                    info["type"] = "screen_info";
+                    info["width"] = w;
+                    info["height"] = h;
+                    info["platform"] = platformTag();
+                    wsServer_->broadcastJson(info);
+                }
+            });
+#endif
         connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
             this, [this](bool locked) {
 #ifdef _WIN32
@@ -3297,6 +3315,23 @@ bool RDPServer::startCapture()
         screenCapturer_ = std::unique_ptr<ScreenCapturer>(new ScreenCapturer(this));
         connect(screenCapturer_.get(), &ScreenCapturer::frameCaptured,
             this, &RDPServer::onFrameCaptured);
+#if defined(Q_OS_ANDROID)
+        // 旋转/分辨率变化：帧尺寸变了，输入换算基准与前端 canvas 都要同步，
+        // 否则点击会按旧尺寸映射到错误位置。
+        connect(screenCapturer_.get(), &ScreenCapturer::androidFrameSizeChanged,
+            this, [this](int w, int h) {
+                if (inputManager_)
+                    inputManager_->setScreenSize(w, h);
+                if (wsServer_) {
+                    QJsonObject info;
+                    info["type"] = "screen_info";
+                    info["width"] = w;
+                    info["height"] = h;
+                    info["platform"] = platformTag();
+                    wsServer_->broadcastJson(info);
+                }
+            });
+#endif
         connect(screenCapturer_.get(), &ScreenCapturer::screenLocked,
             this, [this](bool locked) {
                 screenLocked_ = locked;
@@ -4802,6 +4837,7 @@ void RDPServer::onClientConnected(const QString& clientId)
         info["type"] = "screen_info";
         info["width"] = screenCapturer_->width();
         info["height"] = screenCapturer_->height();
+        info["platform"] = platformTag();
         wsServer_->sendJson(clientId, info);
     } else if (serviceMode_ && !lastScreenInfo_.isEmpty()) {
         wsServer_->sendJson(clientId, lastScreenInfo_);
@@ -5263,6 +5299,35 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             && !screenLocked_) {
         return;
     }
+
+#ifdef Q_OS_ANDROID
+    // Android：无障碍服务未开启时，所有会真正作用到手机的操作都必须明确失败。
+    // 静默丢弃只会让用户看到"点了没反应"；这里回执 input_status（限流 2s），
+    // 前端据此显示原因和处理路径。
+    if ((type == QLatin1String("mousedown") || type == QLatin1String("mouseup")
+         || type == QLatin1String("wheel") || type == QLatin1String("global_action"))
+            && inputManager_ && !inputManager_->androidInputReady()) {
+        static qint64 lastAndroidDenyMs = 0;
+        const qint64 nowDenyMs = monoNowMs();
+        if (lastAndroidDenyMs == 0 || nowDenyMs - lastAndroidDenyMs >= 2000) {
+            lastAndroidDenyMs = nowDenyMs;
+            qWarning() << "Android input denied: accessibility service not enabled, type =" << type;
+            wsServer_->sendJson(clientId, QJsonObject {
+                { "type", "input_status" },
+                { "ok", false },
+                { "reason", "accessibility_disabled" },
+                { "hint", QStringLiteral("远程控制需要在手机系统设置中开启无障碍服务：设置 → 无障碍 → RemoteDesk 输入服务") }
+            });
+        }
+        return;
+    }
+    // 无障碍全局动作（返回/主页）：与鼠标注入同一条路径，直接执行后返回。
+    if (type == QLatin1String("global_action")) {
+        if (inputManager_)
+            inputManager_->injectGlobalAction(input["action"].toString());
+        return;
+    }
+#endif
 
     // 长按 repeat：所有平台统一翻译成"先松再按"（见文件开头注释）。
     // 一次 repeat = 一条 keyup + 原 keydown，不依赖任何平台的自动重复：
@@ -5834,6 +5899,7 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
             info["type"] = "screen_info";
             info["width"] = screenCapturer_->width();
             info["height"] = screenCapturer_->height();
+            info["platform"] = platformTag();
             wsServer_->broadcastJson(info);
 
             QJsonObject cfg;
@@ -6266,6 +6332,7 @@ bool RDPServer::applyResolutionChange(int w, int h, const QString& clientId)
             ? screenCapturer_->height() : h;
     info["width"] = actualW;
     info["height"] = actualH;
+    info["platform"] = platformTag();
     wsServer_->broadcastJson(info);
     return true;
 }

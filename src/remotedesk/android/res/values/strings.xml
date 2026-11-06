@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_label">RemoteDesk 输入服务</string>
+    <string name="accessibility_service_description">允许电脑浏览器通过本机 8080 端口远程点击、滑动、长按手机屏幕，以及返回和回到主页。</string>
+</resources>

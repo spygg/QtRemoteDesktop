@@ -7,6 +7,9 @@ import android.content.Intent;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
 import android.util.Log;
 
 import org.qtproject.qt.android.bindings.QtActivity;
@@ -32,13 +35,35 @@ public class MainActivity extends QtActivity {
     private boolean dialogShowing = false;
     /** 是否已请求过授权（拒绝后置回 false，让用户能再次看到入口）。 */
     private boolean requestAttempted = false;
+    /** 无障碍开启指引在本进程内只弹一次，避免每次回到前台都打扰用户。 */
+    private boolean accessibilityGuideShown = false;
+
+    private static MainActivity sInstance;
+
+    /** 供 C++ 侧（无障碍未开启时）跳转到系统无障碍设置页。 */
+    public static void openAccessibilitySettings() {
+        MainActivity activity = sInstance;
+        if (activity == null) {
+            return;
+        }
+        try {
+            Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            activity.startActivity(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to open accessibility settings", e);
+        }
+    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        sInstance = this;
         requestNotificationPermission();
         // 等 QtActivity 的窗口铺好后再弹，避免对话框被内容视图盖住。
         getWindow().getDecorView().post(this::showProjectionDialog);
+        // 屏幕共享弹窗之后再给无障碍指引（两个对话框不要叠在一起）。
+        new Handler(Looper.getMainLooper()).postDelayed(this::showAccessibilityGuide, 1500);
     }
 
     @Override
@@ -66,8 +91,62 @@ public class MainActivity extends QtActivity {
                         + "注意：Android 14 每次 App 进程重启后都需要重新授权一次。")
                 .setPositiveButton("开始共享屏幕", (d, w) -> requestProjection())
                 .setNegativeButton("稍后", null)
-                .setOnDismissListener(d -> dialogShowing = false)
+                .setOnDismissListener(d -> {
+                    dialogShowing = false;
+                    // 共享弹窗关掉后再引导开启无障碍，避免两个对话框叠在一起。
+                    new Handler(Looper.getMainLooper()).postDelayed(this::showAccessibilityGuide, 600);
+                })
                 .show();
+    }
+
+    /**
+     * 无障碍开启指引：浏览器端点击/滑动/长按/返回/主页都依赖无障碍服务。
+     * 未开启时 App 必须主动告诉用户开启路径（设置 → 无障碍 → RemoteDesk 输入服务），
+     * 否则用户只会在浏览器里看到"点击没反应"。
+     */
+    private void showAccessibilityGuide() {
+        if (isFinishing() || accessibilityGuideShown)
+            return;
+        // 两种情况都不需要引导：
+        //   1) 服务已连接（isReady）；
+        //   2) 系统设置里已经勾选（服务可能正在绑定/进程刚重启），此时再弹
+        //      "去开启"只会误导用户。
+        if (InputAccessibilityService.isReady() || accessibilityEnabledInSettings()) {
+            accessibilityGuideShown = true;
+            return;
+        }
+        if (dialogShowing) {
+            // 屏幕共享弹窗还在：等它关掉后再弹（onDismiss 会再次调用本方法）
+            new Handler(Looper.getMainLooper()).postDelayed(this::showAccessibilityGuide, 800);
+            return;
+        }
+        accessibilityGuideShown = true;
+        new AlertDialog.Builder(this)
+                .setTitle("开启远程控制")
+                .setMessage("远程点击、滑动、长按和返回/主页需要无障碍服务。\n\n"
+                        + "开启步骤：\n"
+                        + "1. 点下方「去开启」进入系统无障碍设置\n"
+                        + "2. 在「已下载的服务」或「已安装的应用」中找到「RemoteDesk 输入服务」\n"
+                        + "3. 打开开关并确认「允许」\n\n"
+                        + "未开启时浏览器仍能看到画面，但所有控制会失败并提示原因。")
+                .setPositiveButton("去开启", (d, w) -> openAccessibilitySettings())
+                .setNegativeButton("稍后", null)
+                .show();
+    }
+
+    /** 系统设置里是否已勾选本应用的无障碍服务（可能尚未绑定到进程）。 */
+    private boolean accessibilityEnabledInSettings() {
+        try {
+            String enabled = Settings.Secure.getString(getContentResolver(),
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (enabled == null)
+                return false;
+            String mine = getPackageName() + "/" + InputAccessibilityService.class.getName();
+            return enabled.contains(mine);
+        } catch (Exception e) {
+            Log.w(TAG, "Read accessibility setting failed", e);
+            return false;
+        }
     }
 
     private void requestNotificationPermission() {
@@ -130,6 +209,9 @@ public class MainActivity extends QtActivity {
     protected void onDestroy() {
         // 进程内 Activity 重建时保留授权结果由系统负责；这里只清理对话框状态。
         dialogShowing = false;
+        if (sInstance == this) {
+            sInstance = null;
+        }
         super.onDestroy();
     }
 }

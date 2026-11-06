@@ -43,6 +43,15 @@ public:
     // 需要走平台层查询，如 Linux XQueryPointer）
     QPoint cursorPosition() const;
 
+#ifdef Q_OS_ANDROID
+    // 无障碍服务是否已连接。false 时注入不会生效，调用方必须把失败原因
+    // 明确回给前端（WS input_status），不能静默丢弃事件。
+    bool androidInputReady() const;
+    // 全局动作：action = "back" / "home"（Android 无系统级返回/主页键注入接口，
+    // 只能走无障碍 performGlobalAction）。
+    bool injectGlobalAction(const QString &action);
+#endif
+
 
 
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
@@ -228,6 +237,17 @@ private:
     bool altDown_   = false;
     bool shiftDown_ = false;
     bool metaDown_  = false;  // Meta/Super/Win 键状态（前端 e.metaKey 随 keydown 上报）
+#ifdef Q_OS_ANDROID
+    // 一次点击/滑动的起点：mousedown 只记录，mouseup 时按位移与按住时长
+    // 决定 tap / swipe / longPress 三种手势。
+    int androidPressX_ = 0;
+    int androidPressY_ = 0;
+    qint64 androidPressMs_ = 0;
+    int androidPressButton_ = -1;
+    // 最近一次坐标（帧像素），供 wheel 这类不带坐标的事件复用。
+    int androidLastX_ = -1;
+    int androidLastY_ = -1;
+#endif
 };
 
 #endif
