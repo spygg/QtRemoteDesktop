@@ -4,12 +4,15 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.media.projection.MediaProjectionManager;
+import android.net.Uri;
+import android.provider.Settings;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
 import android.util.Log;
 
 import org.qtproject.qt.android.bindings.QtActivity;
@@ -30,6 +33,9 @@ public class MainActivity extends QtActivity {
     private static final String TAG = "RemoteDesk";
     private static final int REQUEST_MEDIA_PROJECTION = 1001;
     private static final int REQUEST_NOTIFICATIONS = 1002;
+    /** 横竖屏选择持久化（进程重启后仍生效）。 */
+    private static final String PREFS_NAME = "remotedesk_ui";
+    private static final String PREF_LANDSCAPE = "orientation_landscape";
 
     private boolean projectionRequested = false;
     private boolean dialogShowing = false;
@@ -39,6 +45,124 @@ public class MainActivity extends QtActivity {
     private boolean accessibilityGuideShown = false;
 
     private static MainActivity sInstance;
+
+    /**
+     * 供 C++ 侧切换屏幕方向：landscape=true 横屏，false 竖屏。
+     * 必须改 Activity 的 requestedOrientation（而不是前端旋转画面），
+     * 这样 Display 尺寸才会真的变化，MediaProjection 才能按新尺寸 resize。
+     * 返回 0 = 失败；1 = 已生效；2 = 无 WRITE_SETTINGS 且 Activity 不在前台（需授权）；
+     * 3 = 已记录但未生效（兼容旧语义，实际不再返回）。
+     */
+    public static int setOrientation(boolean landscape) {
+        MainActivity activity = sInstance;
+        if (activity == null) {
+            return 0;
+        }
+        try {
+            SharedPreferences prefs = activity.getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            prefs.edit().putBoolean(PREF_LANDSCAPE, landscape).apply();
+            // 首选系统级路径：写 ACCELEROMETER_ROTATION=0 + USER_ROTATION。
+            // 这样即使 RemoteDesk 不在前台（手机放一边、全程用电脑浏览器），
+            // 显示也会真的旋转，MediaProjection 随之 resize。
+            // 副作用：会关闭系统自动旋转；需要时可在下拉快捷开关里重新打开。
+            if (Settings.System.canWrite(activity)) {
+                Settings.System.putInt(activity.getContentResolver(),
+                        Settings.System.ACCELEROMETER_ROTATION, 0);
+                Settings.System.putInt(activity.getContentResolver(),
+                        Settings.System.USER_ROTATION, landscape ? 1 : 0);
+                applyRequestedOrientation(activity, landscape);
+                return 1;
+            }
+            // 未授权特殊权限时退化到 Activity 级 requestedOrientation：
+            // 只有前台窗口才会被系统旋转，后台必须明确回执"需要授权"，不能假成功。
+            applyRequestedOrientation(activity, landscape);
+            return activity.hasWindowFocus() ? 1 : 2;
+        } catch (Exception e) {
+            Log.w(TAG, "setOrientation failed", e);
+            return 0;
+        }
+    }
+
+    /** 同步 RemoteDesk 自身窗口的方向（系统级旋转之外的补充，前台时体验一致）。 */
+    private static void applyRequestedOrientation(MainActivity activity, boolean landscape) {
+        activity.runOnUiThread(() -> {
+            try {
+                activity.setRequestedOrientation(landscape
+                        ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        : ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+            } catch (Exception e) {
+                Log.w(TAG, "setRequestedOrientation failed", e);
+            }
+        });
+    }
+
+    /** 进程重启后恢复上次的横竖屏选择；未选择过则保持系统默认。 */
+    private void restoreOrientation() {
+        try {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            if (!prefs.contains(PREF_LANDSCAPE)) {
+                return;
+            }
+            final boolean landscape = prefs.getBoolean(PREF_LANDSCAPE, false);
+            setRequestedOrientation(landscape
+                    ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    : ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+            // 已授权「修改系统设置」时一并恢复系统级旋转：进程重启后用户通常立刻
+            // 把 App 切到后台、只用浏览器操作，只写 requestedOrientation 不够。
+            if (Settings.System.canWrite(this)) {
+                Settings.System.putInt(getContentResolver(),
+                        Settings.System.ACCELEROMETER_ROTATION, 0);
+                Settings.System.putInt(getContentResolver(),
+                        Settings.System.USER_ROTATION, landscape ? 1 : 0);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "restoreOrientation failed", e);
+        }
+    }
+
+    /** 是否已授予「修改系统设置」（后台横竖屏切换依赖它）。 */
+    public static boolean hasWriteSettings() {
+        MainActivity activity = sInstance;
+        if (activity == null) {
+            return false;
+        }
+        try {
+            return Settings.System.canWrite(activity);
+        } catch (Exception e) {
+            Log.w(TAG, "read WRITE_SETTINGS state failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * 打开系统「修改系统设置」授权页（直达本应用），供浏览器工具栏一键授权。
+     * 返回是否成功发起跳转；页面是否真的弹出由系统决定。
+     */
+    public static boolean openWriteSettingsPage() {
+        MainActivity activity = sInstance;
+        if (activity == null) {
+            return false;
+        }
+        activity.runOnUiThread(() -> {
+            try {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                        Uri.parse("package:" + activity.getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activity.startActivity(intent);
+            } catch (Exception e) {
+                Log.w(TAG, "open WRITE_SETTINGS page failed", e);
+                // 个别定制系统不认带 package 的 Intent：退回权限列表页。
+                try {
+                    Intent fallback = new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS);
+                    fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    activity.startActivity(fallback);
+                } catch (Exception e2) {
+                    Log.w(TAG, "open WRITE_SETTINGS list failed", e2);
+                }
+            }
+        });
+        return true;
+    }
 
     /** 供 C++ 侧（无障碍未开启时）跳转到系统无障碍设置页。 */
     public static void openAccessibilitySettings() {
@@ -59,6 +183,7 @@ public class MainActivity extends QtActivity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         sInstance = this;
+        restoreOrientation();
         requestNotificationPermission();
         // 等 QtActivity 的窗口铺好后再弹，避免对话框被内容视图盖住。
         getWindow().getDecorView().post(this::showProjectionDialog);

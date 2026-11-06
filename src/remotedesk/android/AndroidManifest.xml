@@ -7,6 +7,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <!-- 横竖屏切换的系统级路径：写 ACCELEROMETER_ROTATION / USER_ROTATION，
+         这样 APP 不在前台时也能真正转屏（典型用法：手机放一边、全程浏览器操作）。
+         WRITE_SETTINGS 属于特殊权限，需要用户一次性授权：
+         设置 → 应用 → 特殊应用权限 → 修改系统设置 → RemoteDesk，
+         或 adb shell appops set com.radiometer.remotedesk android:write_settings allow -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <!-- 阶段 3：MediaProjection 屏幕共享 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
