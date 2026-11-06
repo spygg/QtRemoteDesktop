@@ -139,20 +139,60 @@ adb shell am start -n com.radiometer.remotedesk/.MainActivity
 Then on the phone tap **开始共享屏幕** → in the system dialog choose **整个屏幕** → **立即开始**,
 and open `http://<phone-ip>:8080` on the PC browser (`admin` / `admin`).
 
-**Two manual grants are required (no way around them):**
+**Three manual grants are required (no way around them):**
 
 1. **Screen capture permission** — Android 14 asks again on every app-process restart (reboot,
    force-stop, reinstall). The in-app button starts the flow; the system dialog must be confirmed.
 2. **Accessibility service** — `设置 → 无障碍 → RemoteDesk 输入服务` (one-time, survives restarts).
-   It is required for tap / swipe / long-press / back / home. If it is off, the browser shows an
-   explicit `input_status` error and **no event is injected** (nothing is silently dropped).
+   Required for tap / swipe / long-press / back / home **and keyboard text input** (Android does not
+   expose key injection to normal apps). If it is off, the browser shows an explicit `input_status`
+   error and **no event is injected** (nothing is silently dropped).
+3. **Modify system settings** (`WRITE_SETTINGS`) — only needed for **orientation switching while the
+   RemoteDesk app is in the background** (the normal "phone on the side, drive everything from the PC"
+   use). Without it, orientation only applies while the app window is in the foreground and the browser
+   receives `write_settings_required` with instructions. Grant once:
+   ```bash
+   adb shell appops set com.radiometer.remotedesk android:write_settings allow
+   ```
+   or on the phone: `设置 → 应用 → RemoteDesk → 特殊权限 → 修改系统设置`. The Android-only
+   **「授权横屏」** button in the browser toolbar opens that page directly (via
+   `ACTION_MANAGE_WRITE_SETTINGS`); once granted the browser hides the button and shows a
+   confirmation. Side effect: the system **auto-rotate** switch is turned off (the chosen orientation
+   is kept); re-enable it in quick settings if you want sensor rotation back.
+   Note: an app that forces its own orientation (launcher, lock screen, some media apps) overrides the
+   system rotation lock, so a switch can time out while such an app is in front — the browser shows
+   `orientation_timeout` with this reason. Open an app that follows system rotation first.
 
-Supported: live view; click / swipe / long-press / back / home; portrait & landscape (the canvas and
-input mapping follow the real 720x1612 ↔ 1612x720 size); the 8080 web page stays reachable while the
-app is in the background (foreground capture service).
+**Chinese / Unicode text input (desktop and mobile browsers):** while the browser's own IME is
+composing, nothing is forwarded; on `compositionend` the whole committed string is sent once as an
+`input_text` message and written into the focused field on the phone with the accessibility
+`ACTION_SET_TEXT` action (no dependency on the phone's IME candidates). English, digits and
+punctuation keep using the per-key path, and both paths share one shadow-text state, so
+"测试" → "中文" → "abc123中文" typed in sequence merges in order without duplication or loss.
+On a touch device the toolbar **「键盘」** button raises the local soft keyboard into a hidden
+sink (tapping the remote screen alone does not pop the keyboard); its committed text travels the
+same path. Limits: only the **currently focused editable control** receives text, protected fields
+that reject `ACTION_SET_TEXT` return `keyboard_key_failed`, no focus returns `keyboard_no_focus`
+(both shown in the browser); the phone's own candidate window is not visible/controllable from the
+PC, and keyboard shortcuts / arrow keys are still unsupported.
 
-Not supported yet: Chinese / keyboard input, multi-touch (pinch), audio, file transfer, web
-terminal, and unattended/headless operation.
+File manager on Android starts at a virtual root containing `/sdcard` (shared storage) and the app's
+private `files` directory; both list names and sizes and can be entered. Directories the app cannot read
+(for example protected system paths) return an explicit error message instead of an empty panel.
+Scoped storage may still hide some shared folders — that is reported as a permission error, not blank.
+
+Supported: live view; click / swipe / long-press / back / home; **keyboard text into the currently focused
+input** (English letters, digits, space, common punctuation, Enter, Backspace, and **Chinese / any
+Unicode text committed by the browser's IME via `input_text`**); portrait & landscape
+(the canvas and input mapping follow the real 720x1612 ↔ 1612x720, and a switch is only acknowledged
+after the captured frame size actually changes); the 8080 web page stays reachable while the app is in
+the background (foreground capture service).
+
+Not supported yet: keyboard shortcuts (Ctrl/Alt combinations), arrow/function keys, the phone's own
+IME candidate window (text is committed from the browser side instead), multi-touch (pinch), audio,
+file transfer, web terminal, and unattended/headless operation. Keyboard input only reaches editable
+fields that currently have input focus — tap the field on the phone first; otherwise the browser
+shows `keyboard_no_focus`.
 
 Evidence (real device, phone screenshot + browser screenshot):
 [before](docs/android/01-phone-settings-before.jpg) /
@@ -394,18 +434,47 @@ adb shell am start -n com.radiometer.remotedesk/.MainActivity
 然后在手机上点 **开始共享屏幕** → 系统弹窗选 **整个屏幕** → **立即开始**，
 电脑浏览器打开 `http://<手机IP>:8080`（默认 `admin` / `admin`）。
 
-**两件必须手动授权的事（无法绕过）：**
+**三件必须手动授权的事（无法绕过）：**
 
 1. **屏幕录制授权** —— Android 14 每次 App 进程重启（重启手机、强行停止、重装）都要重新确认一次。
    App 内有「开始共享屏幕」按钮触发流程，系统弹窗必须点「立即开始」。
 2. **无障碍服务** —— `设置 → 无障碍 → RemoteDesk 输入服务`（一次开启，重启后保留）。
-   点击 / 滑动 / 长按 / 返回 / 主页都依赖它。未开启时浏览器会收到明确的 `input_status` 失败回执
-   并显示原因，**事件不会被静默丢弃**。
+   点击 / 滑动 / 长按 / 返回 / 主页 **以及键盘输入**都依赖它（Android 不允许普通应用注入按键）。
+   未开启时浏览器会收到明确的 `input_status` 失败回执并显示原因，**事件不会被静默丢弃**。
+3. **修改系统设置（`WRITE_SETTINGS`）** —— 仅 **App 在后台时切换横竖屏** 需要
+   （即「手机放一边、全程用电脑浏览器操作」的典型用法）。未授权时方向只在 App 前台生效，
+   浏览器会收到 `write_settings_required` 与授权路径。一次性授权：
+   ```bash
+   adb shell appops set com.radiometer.remotedesk android:write_settings allow
+   ```
+   或手机：`设置 → 应用 → RemoteDesk → 特殊权限 → 修改系统设置`。浏览器工具栏里的
+   **「授权横屏」** 按钮（仅 Android 显示）会直接打开该页面（`ACTION_MANAGE_WRITE_SETTINGS`）；
+   授权后浏览器自动隐藏按钮并提示已授权。副作用：系统 **自动旋转** 会被关闭（保持你选定的方向）；
+   需要恢复传感器旋转时在快捷开关里重新打开。
+   注意：如果手机前台是强制自身方向的界面（桌面、锁屏、部分视频应用），它会覆盖系统旋转锁，
+   此时切换会超时并由浏览器显示 `orientation_timeout` 原因，请先切到允许旋转的应用。
 
-已支持：实时查看；点击 / 滑动 / 长按 / 返回 / 主页；竖屏与横屏（画布和坐标映射跟随真实的
-720x1612 ↔ 1612x720）；App 退到后台后 8080 页面仍可访问（前台采集服务保活）。
+**中文 / Unicode 文本输入（电脑与手机浏览器都支持）**：浏览器输入法组合过程中不发送任何按键；
+`compositionend` 时把整段已上屏文字作为一条 `input_text` 消息发往服务端，Android 侧用无障碍
+`ACTION_SET_TEXT` 直接写进当前聚焦输入框，不依赖手机输入法候选界面。英文 / 数字 / 符号仍走
+逐键路径，两条路径共用同一份影子文本，因此连续输入「测试」「中文」「abc123中文」会按顺序合并，
+不重复、不丢字。触屏设备上工具栏的 **「键盘」** 按钮用于主动唤起本机软键盘（默认点画面不会弹键盘），
+其上屏文字走同一条路径。限制：只能写进 **当前有输入焦点的可编辑控件**；拒绝 `ACTION_SET_TEXT`
+的受保护输入框回 `keyboard_key_failed`，没有焦点回 `keyboard_no_focus`（浏览器均会显示原因）；
+手机自带候选词界面无法在电脑端显示/操作；快捷键与方向键仍不支持。
 
-明确不支持：中文输入 / 键盘输入、多指手势（缩放）、音频、文件传输、网页终端、无人值守。
+Android 的文件管理从虚拟根开始：`/sdcard`（共享存储）与 App 私有 `files` 目录，均可进入并显示
+文件名与大小；App 无权限读取的目录（如受保护的系统路径）会返回明确的错误提示，而不是空白面板。
+受分区存储限制，部分共享目录仍可能不可见，但同样会以权限错误提示，不会静默空白。
+
+已支持：实时查看；点击 / 滑动 / 长按 / 返回 / 主页；**键盘文本写入当前聚焦输入框**（英文、数字、
+空格、常见标点、回车、退格，以及**浏览器输入法上屏的中文 / 任意 Unicode 文本**，走 `input_text`）；
+竖屏与横屏（画布和坐标映射跟随真实的 720x1612 ↔ 1612x720，且只有采集画面尺寸真的变化后才回执成功）；
+App 退到后台后 8080 页面仍可访问（前台采集服务保活）。
+
+明确不支持：键盘快捷键（Ctrl/Alt 组合）、方向键/功能键、手机自带输入法候选词界面（文本改由浏览器侧上屏）、
+多指手势（缩放）、音频、文件传输、网页终端、无人值守。键盘只作用于当前有输入焦点的可编辑控件——
+请先在手机画面上点中输入框，否则浏览器会收到 `keyboard_no_focus` 提示。
 
 实机验收截图（手机截图 + 浏览器截图）：
 [点击前](docs/android/01-phone-settings-before.jpg) /
