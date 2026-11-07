@@ -28,6 +28,9 @@
 #include "screencapturer_wayland.h"
 #endif
 
+#include "screencapturer_agent.h"
+#include "session_agent_client.h"
+
 static bool isFrameBlack(const QImage& frame)
 {
     // 该启发式函数原用于检测锁屏/黑屏界面，但深色桌面主题会误判。
@@ -41,11 +44,10 @@ void ScreenCapturer::cleanupPlatform()
     delete x11Capturer_;
     x11Capturer_ = nullptr;
     useX11_ = false;
-#ifdef HAVE_PIPEWIRE
+    // 该槽位现在也可能挂 AgentCapturer（会话来帧），必须与 HAVE_PIPEWIRE 无关地释放。
     delete waylandCapturer_;
     waylandCapturer_ = nullptr;
     useWayland_ = false;
-#endif
 }
 
 // 在 $XDG_RUNTIME_DIR 下探测桌面合成器的 Wayland socket（wayland-0 等）。
@@ -1130,6 +1132,24 @@ bool ScreenCapturer::start(int fps)
     // start() 时泄漏旧实例（与 Windows 版保持对等）。
     cleanupPlatform();
 
+    // 用户会话代理优先：只有代理拿到的是**真实用户桌面**（PipeWire/portal 授权
+    // 属于用户会话，root 服务自己采到的只会是 Xvnc/虚拟屏）。代理未启动或尚未
+    // 出帧时，下面 Wayland → X11 → Xvnc 的原回落链完全不变。
+    if (SessionAgentClient::shared().isStreaming()) {
+        waylandCapturer_ = new AgentCapturer();
+        useWayland_ = waylandCapturer_->initialize();
+        if (useWayland_) {
+            qInfo() << "Using session-agent capture (real user desktop)";
+            captureTimer_->start(1000 / fps);
+            qInfo() << "Screen capture started:" << width() << "x" << height()
+                    << "@" << fps << "fps";
+            return true;
+        }
+        delete waylandCapturer_;
+        waylandCapturer_ = nullptr;
+        useWayland_ = false;
+    }
+
 #ifdef HAVE_PIPEWIRE
     // 优先 Wayland PipeWire 捕获。除了显式 WAYLAND_DISPLAY，还探测
     // $XDG_RUNTIME_DIR/wayland-* socket：SSH/systemd 启动的服务进程通常缺
@@ -1299,8 +1319,8 @@ void ScreenCapturer::captureFrameBody()
         return;
     }
 
-#ifdef HAVE_PIPEWIRE
-    // Wayland：PipeWire 帧（无区域损伤信息，用校验和判变化）
+    // Wayland / 会话代理：整帧（无区域损伤信息，用校验和判变化）。
+    // AgentCapturer 复用同一槽位与同一套去重/强制帧语义。
     if (useWayland_ && waylandCapturer_) {
         QImage frame;
         bool updated = true;
@@ -1367,7 +1387,6 @@ void ScreenCapturer::captureFrameBody()
         emitCapturedFrame(frame);
         return;
     }
-#endif
 
     // 回退到Qt抓屏
     if (!screen_) return;

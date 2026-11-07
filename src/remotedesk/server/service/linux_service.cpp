@@ -1,10 +1,12 @@
 #include "linux_service.h"
 #include "rdpserver.h"
 #include "screencapturer.h"
+#include "session_agent_client.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QFileInfo>
 #include <QImageWriter>
 #include <QMessageLogContext>
 #include <QTimer>
@@ -2713,6 +2715,100 @@ static void writeUnitEnv(FILE* f, const char* name, const char* value)
     fprintf(f, "\"\n");
 }
 
+// ── 用户会话代理 unit ──
+//
+// Wayland 上 root 服务拿不到用户桌面的 PipeWire/portal 授权，必须由用户会话
+// 里的代理进程采集。这里在 install 时把 ~/.config/systemd/user/remotedesk-agent.service
+// 写好（内容直接内联，不引入新的模板文件），并尽量以用户身份 enable --now。
+// X11 机器上代理启动后会立即以 0 退出，不影响原有采集路径。
+static bool installSessionAgentUnit(const char* exePath, const char* user,
+                                    uid_t uid, gid_t gid, const char* home)
+{
+    if (!user || !user[0] || !home || !home[0])
+        return false;
+
+    const QString dir = QString::fromUtf8(home) + QStringLiteral("/.config/systemd/user");
+    QDir().mkpath(dir);
+    const QString path = dir + QStringLiteral("/remotedesk-agent.service");
+
+    FILE* f = fopen(qPrintable(path), "w");
+    if (!f) {
+        fprintf(stderr, "  warning: cannot write %s: %s\n",
+                qPrintable(path), strerror(errno));
+        return false;
+    }
+    fprintf(f, "[Unit]\n");
+    fprintf(f, "Description=Qt Remote Desktop session agent (Wayland capture + input)\n");
+    fprintf(f, "After=graphical-session.target\n");
+    fprintf(f, "PartOf=graphical-session.target\n");
+    // 不限制重启次数：崩溃/被杀后无限自愈（每次间隔 RestartSec）。默认的
+    // 5 次/10 秒上限会让持续异常的代理彻底停住，而 Wayland 机器上没人能
+    // 本地操作，只能靠这个循环恢复。
+    fprintf(f, "StartLimitIntervalSec=0\n\n");
+    fprintf(f, "[Service]\n");
+    fprintf(f, "Type=simple\n");
+    fprintf(f, "ExecStart=");
+    writeUnitQuoted(f, exePath);
+    fprintf(f, " --session-agent\n");
+    // 代理异常退出（kill -9 / 崩溃）自动拉起；正常退出（X11 机器 / 无 Wayland /
+    // portal 授权被拒）返回 0，不会进入重启循环。
+    fprintf(f, "Restart=on-failure\n");
+    fprintf(f, "RestartSec=3\n\n");
+    fprintf(f, "[Install]\n");
+    // 必须挂到 graphical-session.target 而不是 default.target：注销时 GNOME 会
+    // 停掉 graphical-session.target（PartOf 连带停掉代理），而 default.target
+    // 在用户管理器生命周期内一直 active —— 重新登录时它不会重新 start，
+    // 代理就再也不会被拉起。挂到会话目标上，每次登录都会重新启动一次。
+    fprintf(f, "WantedBy=graphical-session.target\n");
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    if (::chown(qPrintable(path), uid, gid) != 0)
+        fprintf(stderr, "  warning: cannot chown %s: %s\n", qPrintable(path), strerror(errno));
+    ::chmod(qPrintable(path), 0644);
+
+    // 旧版 unit 用 WantedBy=default.target：注销后 default.target 仍 active，
+    // 重新登录不会把这个被 PartOf 停掉的代理再拉起来。升级时清掉遗留的启用
+    // 链接，否则新旧两条链接并存，只有新的 graphical-session.target 一条有效。
+    QFile::remove(QString::fromUtf8(home)
+                  + QStringLiteral("/.config/systemd/user/default.target.wants/"
+                                   "remotedesk-agent.service"));
+
+    fprintf(stdout, "  session agent unit: %s\n", qPrintable(path));
+
+    // 只有目标用户当前有活动会话（$XDG_RUNTIME_DIR/bus 存在）时才自动启用；
+    // 否则留下手工步骤，避免在 install 阶段弹出一堆 systemctl 报错。
+    const QString bus = QStringLiteral("/run/user/%1/bus").arg(uid);
+    if (::geteuid() == 0 && QFileInfo::exists(bus)) {
+        char cmd[2048];
+        snprintf(cmd, sizeof(cmd),
+                 "runuser -u %s -- env XDG_RUNTIME_DIR=/run/user/%u "
+                 "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%u/bus "
+                 "systemctl --user daemon-reload",
+                 user, unsigned(uid), unsigned(uid));
+        const bool reloadOk = system(cmd) == 0;
+        snprintf(cmd, sizeof(cmd),
+                 "runuser -u %s -- env XDG_RUNTIME_DIR=/run/user/%u "
+                 "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%u/bus "
+                 "systemctl --user enable --now remotedesk-agent.service",
+                 user, unsigned(uid), unsigned(uid));
+        if (reloadOk && system(cmd) == 0) {
+            fprintf(stdout, "  session agent enabled for %s\n", user);
+        } else {
+            fprintf(stdout, "  tip: enable the agent manually after login:\n"
+                            "       systemctl --user daemon-reload\n"
+                            "       systemctl --user enable --now remotedesk-agent.service\n");
+        }
+    } else {
+        fprintf(stdout, "  tip: enable the agent manually after login:\n"
+                        "       systemctl --user daemon-reload\n"
+                        "       systemctl --user enable --now remotedesk-agent.service\n");
+    }
+    return true;
+}
+
+
 int LinuxService::install(int argc, char* argv[])
 {
     // 非 systemd 主机（其他 init / 部分容器）：生成 unit 文件没有任何意义，
@@ -3009,6 +3105,28 @@ int LinuxService::install(int argc, char* argv[])
         fprintf(stdout, "  sudo systemctl enable remotedesk\n");
         fprintf(stdout, "  sudo systemctl start remotedesk\n");
     }
+
+    // Wayland 上的真实桌面采集必须在用户会话里完成：把代理的 user unit 一起装。
+    // 仅在能确定桌面用户时生成（root 服务身份 + 无人登录时跳过，避免把 unit
+    // 写到错误的位置）。
+    {
+        struct DesktopUser du = resolveDesktopUser();
+        const char* agentUser = runAs[0] ? runAs : du.name;
+        struct passwd* pw = agentUser[0] ? getpwnam(agentUser) : nullptr;
+        if (pw && passwdIsDesktopUser(pw)) {
+            installSessionAgentUnit(exePath, pw->pw_name, pw->pw_uid, pw->pw_gid,
+                                    pw->pw_dir);
+            fprintf(stdout,
+                    "  tip: Wayland 桌面若要由用户会话注入输入（推荐），执行一次:\n"
+                    "       sudo usermod -aG input %s   # 随后注销并重新登录\n"
+                    "       权限不足时代理会自动降级为 root 侧注入，不需要改系统策略。\n",
+                    pw->pw_name);
+        } else {
+            fprintf(stdout,
+                    "  note: 未识别到桌面用户，未生成 session agent user unit。\n"
+                    "        登录一次桌面后重跑 --install，或用 --user=<name> 指定。\n");
+        }
+    }
     return 0;
 }
 
@@ -3120,6 +3238,11 @@ int LinuxService::run(int argc, char* argv[])
     }
     server.start();
 
+    // 用户会话代理：如果用户已登录并运行着 remotedesk-agent.service，它会在
+    // $XDG_RUNTIME_DIR 下暴露 socket。root 服务在这里开始探测；代理接管后
+    // 下方的采集会被 restartCapture() 切到"真实用户桌面"。
+    SessionAgentClient::shared().start();
+
     // 启动捕获前先探测一次 display（/proc 扫描 + /tmp/.X11-unix 枚举 + XAUTHORITY
     // 修复）：有 X 会话时首次捕获即可成功，消除服务启动后 ~3 秒的 headless 窗口
     // （此前要等下方定时器首轮探测才恢复）。探测失败保持原行为（无头 → shell 页面）。
@@ -3156,6 +3279,31 @@ int LinuxService::run(int argc, char* argv[])
         // 重入 start/restart 还会析构正在 start() 的采集器（use-after-free）。
         if (server.isCaptureStarting())
             return;
+
+        // 会话代理上/下线：代理已收到首帧 → 切到真实用户桌面；代理掉线 →
+        // 切回本地 X11/Wayland/Xvnc 回落。restartCapture 失败时保留 pending，
+        // 下一轮 3s tick 再试，不静默停在旧采集源上。
+        if (SessionAgentClient::shared().captureChangePending()) {
+            qInfo() << "Linux service: session agent capture state changed,"
+                       " restarting capture";
+            if (server.restartCapture()) {
+                SessionAgentClient::shared().clearCaptureChangePending();
+                rememberCaptureDisplay();
+            } else {
+                qWarning() << "Linux service: capture restart failed after session agent"
+                              " change, will retry";
+            }
+            return;
+        }
+
+        // 代理接管后，本地 X 探测/虚拟屏已经没有意义：帧来自真实用户桌面，
+        // 再拉一套 Xvnc+xfce4 只会白占资源，并让依赖 X 的监视器连到虚拟屏。
+        if (SessionAgentClient::shared().isStreaming()) {
+            reapPendingChildren();
+            if (g_desktopPid > 0)
+                teardownVirtualDisplay("session agent is capturing the real desktop");
+            return;
+        }
 
         // 收掉上一轮被 SIGTERM 的桌面会话子进程（否则会一直以 <defunct> 挂着）。
         reapPendingChildren();

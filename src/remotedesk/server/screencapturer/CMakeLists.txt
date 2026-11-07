@@ -4,6 +4,9 @@ set(SOURCES
     screencapturer.cpp
     $<$<PLATFORM_ID:Windows>:screencapturer_win.cpp>
     $<$<PLATFORM_ID:Linux>:screencapturer_linux.cpp>
+    # 用户会话代理：root 侧客户端 + 帧适配器（仅 Linux）
+    $<$<PLATFORM_ID:Linux>:screencapturer_agent.cpp>
+    $<$<PLATFORM_ID:Linux>:${CMAKE_CURRENT_SOURCE_DIR}/../sessionagent/session_agent_client.cpp>
     $<$<PLATFORM_ID:Darwin>:screencapturer_mac.cpp>
     $<$<PLATFORM_ID:Android>:screencapturer_android.cpp>
     # JNI 入口：CaptureService 的 nativeOnFrameBuffer -> ScreenCapturer::submitAndroidFrame
@@ -31,9 +34,17 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
 endif()
 
 add_library(${SCREEN_CAPTURER} STATIC ${HEADERS} ${SOURCES})
-target_include_directories(${SCREEN_CAPTURER} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${SCREEN_CAPTURER} PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sessionagent
+    ${CMAKE_CURRENT_SOURCE_DIR}/../inputmanger)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui)
 target_link_libraries(${SCREEN_CAPTURER} PUBLIC Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    # 会话来帧走 QLocalSocket（session_agent_client）
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Network)
+    target_link_libraries(${SCREEN_CAPTURER} PUBLIC Qt${QT_VERSION_MAJOR}::Network)
+endif()
 # QDBus 只在 screencapturer_linux.cpp（login1 会话枚举）里用到。macOS 官方 Qt 包
 # 不发布 QtDBus，无条件 REQUIRED 会在 configure 阶段直接失败，所以按使用者门控。
 if(UNIX AND NOT APPLE AND NOT ANDROID)
@@ -44,7 +55,8 @@ endif()
 if(HAVE_PIPEWIRE)
     target_include_directories(${SCREEN_CAPTURER} PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
     target_link_libraries(${SCREEN_CAPTURER} PRIVATE ${PIPEWIRE_LIBRARIES})
-    target_compile_definitions(${SCREEN_CAPTURER} PRIVATE HAVE_PIPEWIRE=1)
+    # PUBLIC：Service 里的 --session-agent 入口也要编译 WaylandCapturer 的直接使用者
+    target_compile_definitions(${SCREEN_CAPTURER} PUBLIC HAVE_PIPEWIRE=1)
 endif()
 
 # XShm（MIT-SHM）抓屏加速：装有 libXext-devel 时启用（HAVE_XSHM=1）。

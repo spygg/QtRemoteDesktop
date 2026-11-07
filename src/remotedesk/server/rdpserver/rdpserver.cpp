@@ -5,6 +5,9 @@
 #include "filetransferservice.h"
 #include "inputmanager.h"
 #include "screencapturer.h"
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+#include "session_agent_client.h"
+#endif
 #include "websocketserver.h"
 #include "xdndmonitor.h"
 
@@ -3337,6 +3340,18 @@ bool RDPServer::startCapture()
 #if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
     // Linux: DISPLAY may not have been set at init, recreate input manager
     inputManager_ = std::unique_ptr<InputManager>(new InputManager(this));
+    // 用户会话代理：输入优先在用户会话里用 uinput 注入（能作用到真实 Wayland
+    // 桌面）。isActive() 为 false 时（代理未接管 / 代理侧 uinput 不可用），
+    // InputManager 自动继续走本地 XTest/uinput 回落。
+    inputManager_->setExternalInjector(&SessionAgentClient::shared());
+    if (SessionAgentClient::shared().isStreaming()
+        && !SessionAgentClient::shared().inputActive()) {
+        // 帧来自代理，但代理侧 /dev/uinput 不可写：把 root 侧输入切到 uinput，
+        // 坐标基准用代理上报的宽高（screenW_/screenH_ 稍后由采集尺寸同步）。
+        inputManager_->setForceUinput(true);
+        qInfo() << "startCapture: session agent frames without uinput;"
+                   " using root-side uinput injection";
+    }
 #endif
 
     if (!screenCapturer_) {

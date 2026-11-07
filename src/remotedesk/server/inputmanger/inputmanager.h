@@ -18,6 +18,8 @@ typedef unsigned long X11KeySym;
 #include <QVector>
 #endif
 
+class ExternalInjector;
+
 class InputManager : public QObject {
     Q_OBJECT
 
@@ -83,6 +85,17 @@ public:
     static bool desktopSessionIsWayland();
     // 捕获启动后预热焦点窗口，避免首次按键才做窗口树遍历（造成明显首键延迟）
     void primeFocusWindow();
+    // 会话代理进程：强制走 uinput（跳过 X11 / portal 分支）。代理没有 X
+    // 连接，也不应该再发起一次 RemoteDesktop portal 授权。
+    void setForceUinput(bool v);
+    // 预创建 uinput 键盘/指针设备：Wayland 下设备是惰性创建的，首次点击
+    // 才 open() 会带来可感知的首点延迟。
+    void prewarmUinput();
+    // 键盘与绝对定位指针设备是否都已建好（会话代理用它决定是否接管输入）。
+    bool isUinputReady() const { return uinputFd_ >= 0 && uinputMouseFd_ >= 0; }
+    // 外部注入器（用户会话代理）。返回 true 表示该事件已被接管，
+    // 本地 XTest / uinput 路径必须立即放弃。
+    void setExternalInjector(ExternalInjector* injector) { externalInjector_ = injector; }
     // 屏保/锁屏状态开关：只有锁屏（或安全输入）会话才允许 focusLockScreenWindow
     // 强设焦点到全屏/置顶窗口；普通桌面不得抢走当前活动窗口的焦点。
     void setScreenLocked(bool locked) { screenLocked_ = locked; }
@@ -145,6 +158,8 @@ private:
     qint64 focusCheckedMs_ = 0;
     bool screenLocked_ = false;   // 锁屏/安全输入会话标志（决定是否允许抢焦点）
     void focusLockScreenWindow(void* dpy);
+    ExternalInjector* externalInjector_ = nullptr;
+    bool forceUinput_ = false;
     // X11 下用 XSendEvent 合成按钮事件：该板 X 服务器丢弃 XTest/uinput 的设备类
     // 按钮事件(仅 pointer motion 有效)，合成事件可直达目标窗口，绕过设备能力限制。
     bool waylandMode_ = false;  // 无 X Display（Wayland）时输入走 uinput

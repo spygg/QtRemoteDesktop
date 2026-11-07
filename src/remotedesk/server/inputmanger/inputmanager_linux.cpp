@@ -1,4 +1,5 @@
 #include "inputmanager.h"
+#include "external_injector.h"
 #include <QCursor>
 #include <QDebug>
 #include <QDateTime>
@@ -288,6 +289,9 @@ static QString keyHygieneStatePath()
 // 加锁。若未来把注入移到独立线程，必须先加同步保护。
 bool InputManager::ensureXDisplay()
 {
+    // 会话代理进程强制走 uinput：不打开 X 连接，也不做 X 相关卫生检查。
+    if (forceUinput_)
+        return false;
     // 服务端会动态切换 DISPLAY/XAUTHORITY（虚拟屏 :99 ↔ 物理会话 :0、
     // cookie 修复后换成另一个 auth 文件）。已经打开的 X 连接不会跟着换：
     // 采集重启到了新屏，注入却还留在旧屏/旧凭据上 —— 这就是"画面正常、
@@ -981,6 +985,12 @@ bool InputManager::sendUnicodeChar(unsigned int codePoint, bool isDown)
 bool InputManager::enqueueKeyboard(int keycode, const QString &code, bool isDown,
                                    bool ctrl, bool alt, bool shift, bool isChar, bool meta)
 {
+    // 代理接管时中文输入队列没有意义（代理侧不接 X 键码映射），
+    // 直接按普通键转发；非 ASCII 字符由代理侧记录一条警告后丢弃。
+    if (externalInjector_
+        && externalInjector_->injectKeyboard(keycode, code, isDown, ctrl, alt,
+                                             shift, isChar, meta))
+        return true;
     if (!ensureXDisplay())
         return false;
     PendingUnicodeKey pending;
@@ -1152,6 +1162,9 @@ void InputManager::pumpUnicodeQueue()
 
 void InputManager::injectMouseMove(int x, int y) {
     lastInjX_ = x; lastInjY_ = y;
+    // 会话代理接管：坐标就是代理采集画面坐标系，root 不加任何偏移。
+    if (externalInjector_ && externalInjector_->injectMouseMove(x, y))
+        return;
     // Wayland 门户模式：通过 RemoteDesktop D-Bus 注入
     if (waylandPortalMode_ && portalReady_) {
         // NotifyPointerMotionAbsolute(session, options, stream, x, y)
@@ -1200,6 +1213,9 @@ void InputManager::injectMouseMove(int x, int y) {
 
 QPoint InputManager::cursorPosition() const
 {
+    // 会话代理接管：代理侧 uinput 指针最后一次被驱动到的位置就是当前光标。
+    if (externalInjector_ && externalInjector_->isActive())
+        return QPoint(lastInjX_, lastInjY_);
     // Wayland 桌面：XQueryPointer 只能看到 XWayland 自己的光标（恒定不动），
     // 真实光标由本进程的 uinput 虚拟指针驱动 —— 直接回报最近一次注入坐标。
     if (waylandMode_ && uinputMouseFd_ >= 0)
@@ -1216,6 +1232,12 @@ QPoint InputManager::cursorPosition() const
 }
 
 void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
+    // 会话代理接管：一次转发带坐标，避免先移动再点击的两条消息乱序。
+    if (externalInjector_
+        && externalInjector_->injectMouseButton(x, y, button, isDown)) {
+        lastInjX_ = x; lastInjY_ = y;
+        return;
+    }
     // Wayland 门户模式
     if (waylandPortalMode_ && portalReady_) {
         injectMouseMove(x, y);
@@ -1255,6 +1277,8 @@ void InputManager::injectMouseButton(int x, int y, int button, bool isDown) {
 }
 
 void InputManager::injectWheel(int delta) {
+    if (externalInjector_ && externalInjector_->injectWheel(delta))
+        return;
     // Wayland 门户模式：NotifyPointerAxisDiscrete(session, options, axis, steps)
     if (waylandPortalMode_ && portalReady_) {
         QDBusMessage msg = QDBusMessage::createMethodCall(
@@ -1298,6 +1322,25 @@ void InputManager::primeFocusWindow() {
         return;
     if (xDisplay_)
         focusLockScreenWindow(xdisp(xDisplay_));
+}
+
+void InputManager::setForceUinput(bool v)
+{
+    forceUinput_ = v;
+    if (v) {
+        waylandMode_ = true;
+        waylandPortalMode_ = false;
+    }
+}
+
+void InputManager::prewarmUinput()
+{
+    if (!forceUinput_ && !waylandMode_)
+        return;
+    initUinput();
+    initUinputMouse();
+    if (uinputWheelFd_ < 0)
+        initUinputWheelDevice();
 }
 
 void InputManager::focusLockScreenWindow(void* dpy)
@@ -1623,9 +1666,15 @@ bool InputManager::sendUinputMouseMove(int x, int y)
 {
     if (uinputMouseFd_ < 0)
         return false;
-    // offscreen 平台下 primaryScreen 尺寸不可靠：优先用 WaylandCapturer 共享的真实分辨率
-    int sw = qEnvironmentVariableIntValue("QTRD_WAYLAND_WIDTH");
-    int sh = qEnvironmentVariableIntValue("QTRD_WAYLAND_HEIGHT");
+    // offscreen 平台下 primaryScreen 尺寸不可靠：优先用 ScreenCapturer 送给
+    // setScreenSize() 的采集尺寸（会话代理模式下就是代理上报的基准），
+    // 其次才看 WaylandCapturer 共享的 QTRD_WAYLAND_* 环境变量。
+    int sw = screenW_;
+    int sh = screenH_;
+    if (sw <= 0 || sh <= 0) {
+        sw = qEnvironmentVariableIntValue("QTRD_WAYLAND_WIDTH");
+        sh = qEnvironmentVariableIntValue("QTRD_WAYLAND_HEIGHT");
+    }
     if (sw <= 0 || sh <= 0) {
         QSize sz = QGuiApplication::primaryScreen()
             ? QGuiApplication::primaryScreen()->size() : QSize(1920, 1080);
@@ -1822,6 +1871,11 @@ unsigned short InputManager::keysymToLinuxKeycode(unsigned long ks)
 
 void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown, bool ctrl, bool alt, bool shift, bool useVkFallback, bool isChar, bool meta) {
     Q_UNUSED(useVkFallback);
+    // 会话代理接管：代理侧 InputManager 会自行做修饰键对账与 uinput 注入。
+    if (externalInjector_
+        && externalInjector_->injectKeyboard(keycode, code, isDown, ctrl, alt,
+                                             shift, isChar, meta))
+        return;
     unsigned int unicodeCp = 0;   // 非 ASCII 上屏字符的码点（0 = 没走 Unicode 路）
 
     // 惰性对账：keyup 丢失的键不会永久停在"不重复"（详见 reconcileAutoRepeatKeycodes）
@@ -2065,6 +2119,9 @@ void InputManager::injectKeyboard(int keycode, const QString& code, bool isDown,
 }
 
 void InputManager::updateModifiers(bool ctrl, bool alt, bool shift) {
+    // 代理接管时修饰键状态在代理侧维护（逐个 key 事件已带上 ctrl/alt/shift）。
+    if (externalInjector_ && externalInjector_->updateModifiers(ctrl, alt, shift))
+        return;
     // [B14] 首个按键的修饰键会被丢弃：sendXModifier 的 XTest 路径依赖 xDisplay_，
     // 旧代码在 injectSym 内才 ensureXDisplay，首个 keydown 走到这里时 display
     // 尚未打开 → 修饰键注入空转，但 ctrlDown_ 已更新（状态失同步，后续不再补发）。

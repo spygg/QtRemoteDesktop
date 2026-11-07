@@ -13,6 +13,7 @@
 #include <QDBusReply>
 #include <QDBusUnixFileDescriptor>
 #include <QEventLoop>
+#include <QFile>
 #include <QGuiApplication>
 #include <QList>
 #include <QPair>
@@ -32,6 +33,7 @@
 #include <spa/utils/result.h>
 
 #include <unistd.h>
+#include <sys/stat.h>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -386,6 +388,35 @@ void WaylandCapturer::onPipeWireStreamAdded(uint nodeId)
 // ---------------------------------------------------------------------------
 // xdg-desktop-portal ScreenCast（回退，带明确 node id）
 // ---------------------------------------------------------------------------
+static QString portalTokenFile()
+{
+    return QString::fromUtf8(qgetenv("QTRD_PORTAL_TOKEN_FILE"));
+}
+
+static QString loadPortalToken()
+{
+    const QString path = portalTokenFile();
+    if (path.isEmpty())
+        return QString();
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return QString();
+    return QString::fromUtf8(f.readAll()).trimmed();
+}
+
+static void savePortalToken(const QString& token)
+{
+    const QString path = portalTokenFile();
+    if (path.isEmpty() || token.isEmpty())
+        return;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    f.write(token.toUtf8());
+    f.close();
+    ::chmod(qPrintable(path), 0600);
+}
+
 bool WaylandCapturer::setupPortalScreenCast()
 {
     QDBusConnection bus = QDBusConnection::sessionBus();
@@ -418,6 +449,16 @@ bool WaylandCapturer::setupPortalScreenCast()
     QVariantMap selOptions;
     selOptions.insert("types", 1u);
     selOptions.insert("multiple", false);
+    // 会话代理场景（QTRD_PORTAL_TOKEN_FILE 由代理设置）才启用持久授权：
+    // 用户授权一次后，下次登录/代理重启可复用 restore_token，不再弹窗。
+    // root 服务的直采路径不设这个环境变量，行为保持原样。
+    const QString tokenFile = portalTokenFile();
+    if (!tokenFile.isEmpty()) {
+        selOptions.insert("persist_mode", 2u);   // 2 = persist until revoked
+        const QString token = loadPortalToken();
+        if (!token.isEmpty())
+            selOptions.insert("restore_token", token);
+    }
     QDBusMessage sreply = portal.call("SelectSources",
                                       QVariant::fromValue(QDBusObjectPath(sessionPath_)),
                                       selOptions);
@@ -442,6 +483,14 @@ bool WaylandCapturer::setupPortalScreenCast()
         return false;
     }
     const QVariantMap results = qdbus_cast<QVariantMap>(sargs.at(1));
+    // 持久授权 token：只在启用了 persist_mode 的代理路径写盘（0600）。
+    if (!tokenFile.isEmpty()) {
+        const QString newToken = results.value("restore_token").toString();
+        if (!newToken.isEmpty()) {
+            savePortalToken(newToken);
+            qInfo() << "WaylandCapturer: portal restore_token saved for reuse";
+        }
+    }
     // streams 是 a(ua{sv})，用 QtDBus 原生容器反序列化（QDBusArgument 只读）
     uint nodeId = 0;
     QVariantMap sprops;
