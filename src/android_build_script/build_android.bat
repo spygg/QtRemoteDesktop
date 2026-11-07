@@ -22,7 +22,7 @@ if not exist "%PS_EXE%" set "PS_EXE=powershell"
 
 echo ==========================================================
 echo  QtRemoteDesktop Android build (Qt 6 / arm64-v8a)
-echo  FFmpeg=OFF  WebRTC=OFF  ThirdParty=OFF
+echo  FFmpeg=ON (arm64-v8a, MediaCodec)  WebRTC=OFF  ThirdParty=OFF
 echo ==========================================================
 echo.
 

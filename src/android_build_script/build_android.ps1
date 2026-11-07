@@ -123,6 +123,19 @@ if ($Clean -and (Test-Path $BuildDir)) {
 New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
 Remove-Item -Path $LogFile -Force -ErrorAction SilentlyContinue
 
+# ------------------------------------------------------ FFmpeg (arm64-v8a) --
+# Cross-compiled once into build_output\ffmpeg_install-<ver>-android-arm64
+# (strictly separate from the desktop MinGW build). The script is idempotent.
+$FfmpegScript = Join-Path $PSScriptRoot 'build_ffmpeg_android.ps1'
+if (-not (Test-Path $FfmpegScript)) {
+    Stop-Build "build_ffmpeg_android.ps1 not found next to build_android.ps1"
+}
+Write-Host "[android-build] FFmpeg (arm64-v8a, MediaCodec) ..."
+& pwsh -NoProfile -ExecutionPolicy Bypass -File $FfmpegScript -NdkRoot $NdkRoot
+if ($LASTEXITCODE -ne 0) {
+    Stop-Build "FFmpeg Android cross-build failed (exit $LASTEXITCODE)."
+}
+
 # ------------------------------------------------------------- configure ------
 $configureArgs = @(
     '-S', (Join-Path $RepoRoot 'src'),
@@ -135,7 +148,7 @@ $configureArgs = @(
     '-DANDROID_ABI=arm64-v8a',
     "-DANDROID_SDK_ROOT=$SdkRoot",
     "-DANDROID_NDK_ROOT=$NdkRoot",
-    '-DUSE_FFMPEG=OFF',
+    '-DUSE_FFMPEG=ON',
     '-DUSE_WEBRTC=OFF',
     '-DBUILD_THIRDPARTY=OFF'
 )

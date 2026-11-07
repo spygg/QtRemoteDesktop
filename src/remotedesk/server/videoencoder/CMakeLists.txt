@@ -20,7 +20,9 @@ target_link_libraries(${VIDEO_ENCODER} PUBLIC Qt${QT_VERSION_MAJOR}::Core Qt${QT
 #   整机因此回退 1080p 软编 ~10fps（用户体感"卡"的真根因）。
 # 因此：能找到系统库就用系统库；否则（无系统库的交叉/其他环境）再退回自编静态库。
 # Windows/macOS 无 MPP，mppencoder.cpp 编译为空实现，保证跨平台。
-if(UNIX AND NOT APPLE)
+# Android 走 MediaCodec，不用 Rockchip MPP；同时避免误链 build_output 下
+# 桌面 Linux/ARM 构建留下的 librockchip_mpp.a（架构不匹配会直接链接失败）。
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     find_library(MPP_SYS_LIB NAMES rockchip_mpp)
     find_path(MPP_SYS_INC NAMES rockchip/rk_mpi.h)
     if(MPP_SYS_LIB AND MPP_SYS_INC)

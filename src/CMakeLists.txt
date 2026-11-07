@@ -210,7 +210,16 @@ else()
 endif()
 
 set(FFMPEG_SRC_DIR "${CMAKE_SOURCE_DIR}/remotedesk/thridparty/ffmpeg/FFmpeg-n${FFMPEG_VERSION_EFFECTIVE}")
-if(FFMPEG_VERSION_EFFECTIVE VERSION_LESS 5)
+if(ANDROID)
+    # Android 的 FFmpeg 由 src/android_build_script/build_ffmpeg_android.ps1 交叉编译
+    # （arm64-v8a + MediaCodec），目录名固定带 -android-arm64，绝不复用桌面的
+    # pe-i386 / MinGW 产物；桌面包与 Android 包严格隔离，避免误链接。
+    # 路径刻意不用 BUILD_OUTPUT_DIR：Android 构建把它缓存成 build_android/output
+    # （避免与桌面 .a 混放），而 FFmpeg 交叉产物固定放在仓库根的 build_output 下，
+    # 与 build_ffmpeg_android.ps1 的默认 InstallDir 一致。
+    set(FFMPEG_INSTALL_DIR
+        "${CMAKE_SOURCE_DIR}/../build_output/ffmpeg_install-${FFMPEG_VERSION_EFFECTIVE}-android-arm64")
+elseif(FFMPEG_VERSION_EFFECTIVE VERSION_LESS 5)
     # 3.4.8（XP 兼容）沿用老目录名：已经编好 FFmpeg 的 XP 机器不需要重编
     set(FFMPEG_INSTALL_DIR "${BUILD_OUTPUT_DIR}/ffmpeg_install")
 else()
@@ -226,7 +235,7 @@ if(EXISTS "${FFMPEG_INSTALL_DIR}/lib/libavcodec.a" AND EXISTS "${FFMPEG_INSTALL_
 elseif(MSVC AND EXISTS "${FFMPEG_INSTALL_DIR}/lib/avcodec.lib")
     set(_ffmpeg_prebuilt TRUE)
 endif()
-if(NOT _ffmpeg_prebuilt AND BUILD_THIRDPARTY AND EXISTS "${FFMPEG_SRC_DIR}/configure")
+if(NOT _ffmpeg_prebuilt AND BUILD_THIRDPARTY AND NOT ANDROID AND EXISTS "${FFMPEG_SRC_DIR}/configure")
     set(_BUILD_FFMPEG_DEFAULT ON)
 else()
     set(_BUILD_FFMPEG_DEFAULT OFF)

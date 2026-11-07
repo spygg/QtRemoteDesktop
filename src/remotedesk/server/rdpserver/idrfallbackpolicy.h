@@ -44,7 +44,10 @@ inline IdrFallbackDecision decideIdrFallback(qint64 nowMs, qint64 requestAtMs,
     const qint64 sinceReinit = nowMs - lastReinitMs;
     if (sinceReinit < cooldownMs) {
         d.action = IdrFallbackDecision::Retry;
-        d.retryMs = static_cast<int>(qBound<qint64>(50, cooldownMs - sinceReinit + 50, 60000));
+        // 三参都用 qint64：Qt 6.9+ 的 qBound 有"返回类型提升"的重载，
+        // qBound<qint64>(int, qint64, int) 在 clang 下会同时匹配两个重载而报歧义。
+        d.retryMs = static_cast<int>(
+            qBound<qint64>(qint64(50), cooldownMs - sinceReinit + 50, qint64(60000)));
         return d;
     }
 
@@ -60,7 +63,8 @@ inline IdrFallbackDecision decideIdrFallback(qint64 nowMs, qint64 requestAtMs,
     if (busyMs > 0 && nowMs - requestAtMs < hardLimit) {
         const qint64 cost = qMax<qint64>(1000, lastFrameCostMs);
         d.action = IdrFallbackDecision::Retry;
-        d.retryMs = static_cast<int>(qBound<qint64>(200, 3 * cost - busyMs, 60000));
+        d.retryMs = static_cast<int>(
+            qBound<qint64>(qint64(200), 3 * cost - busyMs, qint64(60000)));
         return d;
     }
 

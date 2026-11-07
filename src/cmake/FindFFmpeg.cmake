@@ -72,24 +72,28 @@ if(FFMPEG_FOUND)
     # FFmpeg 若带 openh264 编码器（本工程三方构建产物），需一并链接。
     # 产物不存在时（例如外部自带的 FFmpeg 未启用 openh264）不再强行引用，
     # 避免链接器报 "cannot find -lopenh264"。
-    if(MSVC)
-        set(_openh264_candidates
-            "${BUILD_OUTPUT_DIR}/openh264_install/lib/openh264.lib")
-    else()
-        set(_openh264_candidates
-            "${BUILD_OUTPUT_DIR}/openh264_install/lib/libopenh264.a"
-            "${BUILD_OUTPUT_DIR}/openh264_install/lib/openh264.lib")
-    endif()
-    set(_OPENH264_LIB "")
-    foreach(_candidate IN LISTS _openh264_candidates)
-        if(EXISTS "${_candidate}")
-            set(_OPENH264_LIB "${_candidate}")
-            break()
+    # Android 构建不含 openh264（H.264 由 MediaCodec 硬编），且 build_output 下
+    # 可能残留桌面 MinGW 的 libopenh264.a，误链会直接报架构不匹配，必须跳过。
+    if(NOT ANDROID)
+        if(MSVC)
+            set(_openh264_candidates
+                "${BUILD_OUTPUT_DIR}/openh264_install/lib/openh264.lib")
+        else()
+            set(_openh264_candidates
+                "${BUILD_OUTPUT_DIR}/openh264_install/lib/libopenh264.a"
+                "${BUILD_OUTPUT_DIR}/openh264_install/lib/openh264.lib")
         endif()
-    endforeach()
-    if(NOT _OPENH264_LIB AND FFMPEG_ASSUME_BUILT)
-        # openh264_ep 同样在业务代码编译前产出，按计划路径链接
-        list(GET _openh264_candidates 0 _OPENH264_LIB)
+        set(_OPENH264_LIB "")
+        foreach(_candidate IN LISTS _openh264_candidates)
+            if(EXISTS "${_candidate}")
+                set(_OPENH264_LIB "${_candidate}")
+                break()
+            endif()
+        endforeach()
+        if(NOT _OPENH264_LIB AND FFMPEG_ASSUME_BUILT)
+            # openh264_ep 同样在业务代码编译前产出，按计划路径链接
+            list(GET _openh264_candidates 0 _OPENH264_LIB)
+        endif()
     endif()
 
     if(WIN32)
@@ -108,6 +112,11 @@ if(FFMPEG_FOUND)
             # MinGW 运行时提供 m；iconv 仅在使用 libiconv 的 MinGW 版 FFmpeg 时需要。
             list(APPEND FFMPEG_EXTRA_LIBS iconv m)
         endif()
+    elseif(ANDROID)
+        # Android 的 FFmpeg 以 --enable-mediacodec 静态编译：libavcodec 的
+        # mediacodecenc/mediacodecdec 直接调用 NDK MediaCodec API（libmediandk），
+        # 日志走 liblog；z/m/dl 对应 configure 检测到的系统库。
+        set(FFMPEG_EXTRA_LIBS mediandk log android z m dl)
     elseif(APPLE)
         # macOS 没有 libdl（dlopen 在 libSystem 里），`-ldl` 会让链接直接失败。
         # FFmpeg 以 --enable-videotoolbox 静态编译时，hwcontext_videotoolbox.o

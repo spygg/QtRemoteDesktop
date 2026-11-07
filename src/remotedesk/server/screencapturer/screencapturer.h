@@ -236,6 +236,13 @@ public:
         // 前端据此判断当前是真实画面还是占位帧。
         if (androidWidth_ > 0)
             return androidWidth_;
+        // 首帧到达前必须按**物理**分辨率初始化编码器：QScreen::size() 是逻辑像素
+        // （806x360，dpr=2），而 MediaProjection 交付的是 1612x720 物理帧。按逻辑
+        // 尺寸建编码器会让首批真实帧全部尺寸不匹配、被迫重建一次（Android 视频
+        // 模式启动即黑屏若干秒，且旧线程退役未退会卡死重建）。
+        if (screen_)
+            return qRound(screen_->size().width() * screen_->devicePixelRatio());
+        return 0;
 #endif
         return screen_ ? screen_->size().width() : 0;
     }
@@ -256,6 +263,9 @@ public:
 #if defined(Q_OS_ANDROID)
         if (androidHeight_ > 0)
             return androidHeight_;
+        if (screen_)
+            return qRound(screen_->size().height() * screen_->devicePixelRatio());
+        return 0;
 #endif
         return screen_ ? screen_->size().height() : 0;
     }
