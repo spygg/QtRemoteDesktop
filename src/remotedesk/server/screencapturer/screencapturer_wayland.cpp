@@ -19,6 +19,7 @@
 #include <QPair>
 #include <QScreen>
 #include <QThread>
+#include <QTimer>
 #include <QVariantMap>
 
 #include <pipewire/pipewire.h>
@@ -201,7 +202,12 @@ bool WaylandCapturer::initialize()
     pw_init(nullptr, nullptr);
 
     // 1) GNOME Mutter 私有 ScreenCast（无需交互授权）
-    if (setupMutterScreenCast()) {
+    //    QTRD_FORCE_PORTAL=1 时跳过：用于在 GNOME 机器上验证非 GNOME 合成器才会走的
+    //    标准 xdg-desktop-portal ScreenCast 分支（默认为空，行为不变）。
+    const QByteArray forcePortalEnv = qgetenv("QTRD_FORCE_PORTAL");
+    const bool forcePortal = forcePortalEnv == "1"
+        || forcePortalEnv.toLower() == "true";
+    if (!forcePortal && setupMutterScreenCast()) {
         initialized_ = true;
         // offscreen 平台下 QGuiApplication 拿不到真实分辨率，共享给 InputManager 做坐标映射
         syncEnvSize();
@@ -212,7 +218,11 @@ bool WaylandCapturer::initialize()
     //    必须先拆掉 mutter 路径可能已建好的 PipeWire loop/线程与会话，否则回退后
     //    会残留一个常驻线程 + 录屏会话（mutter 失败分支已 abort，但 setupMutterScreenCast
     //    内部在 createStream 之前失败也可能留下 session）。
-    qWarning() << "WaylandCapturer: Mutter ScreenCast unavailable, falling back to portal...";
+    if (forcePortal)
+        qWarning() << "WaylandCapturer: QTRD_FORCE_PORTAL=1, skipping Mutter ScreenCast,"
+                      " using xdg-desktop-portal...";
+    else
+        qWarning() << "WaylandCapturer: Mutter ScreenCast unavailable, falling back to portal...";
     teardownPipewire();
     closeSession();
     if (setupPortalScreenCast()) {
@@ -417,6 +427,67 @@ static void savePortalToken(const QString& token)
     ::chmod(qPrintable(path), 0600);
 }
 
+// portal Request 对象路径按 handle_token 预测：
+//   /org/freedesktop/portal/desktop/request/<发送者唯一名去冒号、点换下划线>/<token>
+// 预连接可以让"方法刚返回、Response 已经发出"的极短请求不丢信号。
+static QString portalRequestPath(const QString& token)
+{
+    QString sender = QDBusConnection::sessionBus().baseService();
+    if (sender.isEmpty() || token.isEmpty())
+        return QString();
+    sender.remove(QLatin1Char(':'));
+    sender.replace(QLatin1Char('.'), QLatin1Char('_'));
+    return QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2").arg(sender, token);
+}
+
+void WaylandCapturer::onPortalResponse(const QDBusMessage& msg)
+{
+    // Response(u response_code, a{sv} results)，response_code == 0 表示成功/用户同意
+    if (msg.arguments().size() < 2) {
+        qWarning() << "WaylandCapturer: portal Response signal malformed";
+        return;
+    }
+    portalResponseCode_ = msg.arguments().at(0).toUInt();
+    portalResponseResults_ = qdbus_cast<QVariantMap>(msg.arguments().at(1));
+    portalResponseReady_ = true;
+    if (portalLoop_)
+        portalLoop_->quit();
+}
+
+bool WaylandCapturer::waitPortalResponse(const QString& requestPath, int timeoutMs,
+                                         uint* code, QVariantMap* results)
+{
+    if (requestPath.isEmpty())
+        return false;
+    QDBusConnection::sessionBus().connect(
+        QStringLiteral("org.freedesktop.portal.Desktop"), requestPath,
+        QStringLiteral("org.freedesktop.portal.Request"), QStringLiteral("Response"),
+        this, SLOT(onPortalResponse(QDBusMessage)));
+
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    portalLoop_ = &loop;
+    timer.start(timeoutMs);
+    // 预连接 + 同步 D-Bus call 内部也会跑事件循环，Response 可能已经先到了。
+    if (!portalResponseReady_)
+        loop.exec();
+    portalLoop_ = nullptr;
+    timer.stop();
+
+    if (!portalResponseReady_) {
+        qWarning() << "WaylandCapturer: portal response timeout (" << timeoutMs
+                   << "ms) for" << requestPath;
+        return false;
+    }
+    if (code)
+        *code = portalResponseCode_;
+    if (results)
+        *results = portalResponseResults_;
+    return true;
+}
+
 bool WaylandCapturer::setupPortalScreenCast()
 {
     QDBusConnection bus = QDBusConnection::sessionBus();
@@ -430,20 +501,67 @@ bool WaylandCapturer::setupPortalScreenCast()
     }
 
     // CreateSession
-    QDBusMessage creply = portal.call("CreateSession", QVariantMap());
+    // portal 的 CreateSession/SelectSources/Start 都**只**返回 Request 句柄，真正的
+    // 结果（session_handle / streams / 授权码）走该 Request 的 Response 信号。
+    // 这里按 handle_token 预测路径并预连接，避免"调用刚返回、响应已经发出"被漏听。
+    auto armRequest = [this](const QString& token) -> QString {
+        const QString path = portalRequestPath(token);
+        portalResponseReady_ = false;
+        if (!path.isEmpty()) {
+            QDBusConnection::sessionBus().connect(
+                QStringLiteral("org.freedesktop.portal.Desktop"), path,
+                QStringLiteral("org.freedesktop.portal.Request"),
+                QStringLiteral("Response"), this, SLOT(onPortalResponse(QDBusMessage)));
+        }
+        return path;
+    };
+    auto attachRequest = [this](const QString& path) {
+        if (path.isEmpty())
+            return;
+        QDBusConnection::sessionBus().connect(
+            QStringLiteral("org.freedesktop.portal.Desktop"), path,
+            QStringLiteral("org.freedesktop.portal.Request"),
+            QStringLiteral("Response"), this, SLOT(onPortalResponse(QDBusMessage)));
+    };
+
+    uint code = 2;
+    QVariantMap results;
+    QString requestPath;
+
+    const QString ctoken = QStringLiteral("qtrdcreate%1").arg(QDateTime::currentMSecsSinceEpoch());
+    const QString cpredicted = armRequest(ctoken);
+    QVariantMap copts;
+    copts.insert("handle_token", ctoken);
+    // portal 4 的 CreateSession 必须带 session_handle_token（缺了会报 "Missing token"），
+    // 它决定 Response 里 session_handle 的对象路径后缀。
+    copts.insert("session_handle_token",
+                 QStringLiteral("qtrdsession%1").arg(QDateTime::currentMSecsSinceEpoch()));
+    QDBusMessage creply = portal.call("CreateSession", copts);
     if (creply.type() != QDBusMessage::ReplyMessage) {
         qWarning() << "WaylandCapturer: portal CreateSession failed:" << creply.errorMessage();
         return false;
     }
-    const QVariantList cargs = creply.arguments();
-    if (cargs.isEmpty()) return false;
-    sessionPath_ = qdbus_cast<QDBusObjectPath>(cargs.at(0)).path();
-    if (sessionPath_.isEmpty())
-        sessionPath_ = cargs.at(0).toString();
-    if (sessionPath_.isEmpty()) {
+    requestPath = creply.arguments().value(0).value<QDBusObjectPath>().path();
+    if (requestPath.isEmpty())
+        requestPath = creply.arguments().value(0).toString();
+    if (requestPath.isEmpty()) {
         qWarning() << "WaylandCapturer: portal CreateSession empty handle";
         return false;
     }
+    if (requestPath != cpredicted)
+        attachRequest(requestPath);
+    if (!waitPortalResponse(requestPath, 15000, &code, &results) || code != 0) {
+        qWarning() << "WaylandCapturer: portal CreateSession rejected, code=" << code;
+        return false;
+    }
+    sessionPath_ = results.value("session_handle").value<QDBusObjectPath>().path();
+    if (sessionPath_.isEmpty())
+        sessionPath_ = results.value("session_handle").toString();
+    if (sessionPath_.isEmpty()) {
+        qWarning() << "WaylandCapturer: portal CreateSession returned no session handle";
+        return false;
+    }
+    qInfo() << "WaylandCapturer: portal session created:" << sessionPath_;
 
     // SelectSources: types=1(Monitor), multiple=false
     QVariantMap selOptions;
@@ -453,12 +571,15 @@ bool WaylandCapturer::setupPortalScreenCast()
     // 用户授权一次后，下次登录/代理重启可复用 restore_token，不再弹窗。
     // root 服务的直采路径不设这个环境变量，行为保持原样。
     const QString tokenFile = portalTokenFile();
+    const QString savedToken = tokenFile.isEmpty() ? QString() : loadPortalToken();
     if (!tokenFile.isEmpty()) {
         selOptions.insert("persist_mode", 2u);   // 2 = persist until revoked
-        const QString token = loadPortalToken();
-        if (!token.isEmpty())
-            selOptions.insert("restore_token", token);
+        if (!savedToken.isEmpty())
+            selOptions.insert("restore_token", savedToken);
     }
+    const QString stoken = QStringLiteral("qtrdselect%1").arg(QDateTime::currentMSecsSinceEpoch());
+    selOptions.insert("handle_token", stoken);
+    const QString spredicted = armRequest(stoken);
     QDBusMessage sreply = portal.call("SelectSources",
                                       QVariant::fromValue(QDBusObjectPath(sessionPath_)),
                                       selOptions);
@@ -466,24 +587,44 @@ bool WaylandCapturer::setupPortalScreenCast()
         qWarning() << "WaylandCapturer: portal SelectSources failed:" << sreply.errorMessage();
         return false;
     }
+    requestPath = sreply.arguments().value(0).value<QDBusObjectPath>().path();
+    if (requestPath.isEmpty())
+        requestPath = sreply.arguments().value(0).toString();
+    if (requestPath != spredicted)
+        attachRequest(requestPath);
+    if (!waitPortalResponse(requestPath, 15000, &code, &results) || code != 0) {
+        qWarning() << "WaylandCapturer: portal SelectSources rejected, code=" << code;
+        return false;
+    }
+    qInfo() << "WaylandCapturer: portal SelectSources ok (monitor, persist_mode="
+            << (tokenFile.isEmpty() ? 0 : 2) << "restore_token=" << !savedToken.isEmpty() << ")";
 
-    // Start → streams 里有 node id
+    // Start → 首次会弹共享选择窗口，等用户点“共享”；结果同样走 Response 信号
+    const QString ttoken = QStringLiteral("qtrdstart%1").arg(QDateTime::currentMSecsSinceEpoch());
+    QVariantMap startOptions;
+    startOptions.insert("handle_token", ttoken);
+    const QString tpredicted = armRequest(ttoken);
     QDBusMessage startReply = portal.call("Start",
                                           QVariant::fromValue(QDBusObjectPath(sessionPath_)),
-                                          QString(), QVariantMap());
+                                          QString(), startOptions);
     if (startReply.type() != QDBusMessage::ReplyMessage) {
         qWarning() << "WaylandCapturer: portal Start failed:" << startReply.errorMessage();
         return false;
     }
-    const QVariantList sargs = startReply.arguments();
-    if (sargs.size() < 2) return false;
-    const uint response = sargs.at(0).toUInt();
-    if (response != 0) {
-        qWarning() << "WaylandCapturer: portal Start rejected (need interactive authorization?)";
+    requestPath = startReply.arguments().value(0).value<QDBusObjectPath>().path();
+    if (requestPath.isEmpty())
+        requestPath = startReply.arguments().value(0).toString();
+    if (requestPath != tpredicted)
+        attachRequest(requestPath);
+    qInfo() << "WaylandCapturer: portal Start sent, waiting for user authorization (request="
+            << requestPath << ")";
+    if (!waitPortalResponse(requestPath, 120000, &code, &results) || code != 0) {
+        qWarning() << "WaylandCapturer: portal Start rejected, code=" << code
+                   << "(cancelled/denied by user)";
         return false;
     }
-    const QVariantMap results = qdbus_cast<QVariantMap>(sargs.at(1));
     // 持久授权 token：只在启用了 persist_mode 的代理路径写盘（0600）。
+    qInfo() << "WaylandCapturer: portal Start authorized, result keys=" << results.keys();
     if (!tokenFile.isEmpty()) {
         const QString newToken = results.value("restore_token").toString();
         if (!newToken.isEmpty()) {
@@ -530,12 +671,13 @@ bool WaylandCapturer::setupPortalScreenCast()
         }
     }
 
-    // OpenPipeWireRemote → fd
+    // OpenPipeWireRemote → fd（第二个参数是 a{sv} options，不是 parent_window）
     QDBusMessage freply = portal.call("OpenPipeWireRemote",
                                       QVariant::fromValue(QDBusObjectPath(sessionPath_)),
-                                      QString());
+                                      QVariantMap());
     if (freply.type() != QDBusMessage::ReplyMessage || freply.arguments().isEmpty()) {
-        qWarning() << "WaylandCapturer: portal OpenPipeWireRemote failed";
+        qWarning() << "WaylandCapturer: portal OpenPipeWireRemote failed:" << freply.errorMessage()
+                   << "args=" << freply.arguments().size();
         return false;
     }
     QDBusUnixFileDescriptor pfd = qdbus_cast<QDBusUnixFileDescriptor>(freply.arguments().at(0));

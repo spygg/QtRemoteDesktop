@@ -12,8 +12,11 @@
 #include <QObject>
 #include <QMutex>
 #include <QSize>
+#include <QDBusMessage>
 
 #include <atomic>
+
+class QEventLoop;
 
 struct pw_thread_loop;
 struct pw_context;
@@ -45,13 +48,25 @@ public:
 
 private slots:
     void onPipeWireStreamAdded(uint nodeId);
+    void onPortalResponse(const QDBusMessage& msg);
 
 private:
     // D-Bus / portal 会话建立
     bool setupMutterScreenCast();   // org.gnome.Mutter.ScreenCast（无交互）
     bool setupPortalScreenCast();   // org.freedesktop.portal.ScreenCast（回退）
+    // portal 的 CreateSession/SelectSources/Start 都只返回 Request 句柄，真正的
+    // 结果（session_handle / streams / 用户授权码）走该 Request 的 Response 信号。
+    // initialize() 在 Qt 事件循环起来之前执行，这里用局部 QEventLoop 同步等待。
+    bool waitPortalResponse(const QString& requestPath, int timeoutMs,
+                            uint* code, QVariantMap* results);
     bool setupPipewireMutter();     // mutter：连接默认 PipeWire remote 建流
     void closeSession();
+
+    // portal Response 等待状态（只在主线程使用）
+    bool portalResponseReady_ = false;
+    uint portalResponseCode_ = 2;
+    QVariantMap portalResponseResults_;
+    QEventLoop* portalLoop_ = nullptr;
 
 
     // PipeWire 抓帧

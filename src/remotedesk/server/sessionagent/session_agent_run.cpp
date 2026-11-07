@@ -18,6 +18,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -25,6 +26,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QObject>
+#include <QThread>
 #include <QTimer>
 
 #include <cerrno>
@@ -500,8 +502,20 @@ int SessionAgentRun::run(int argc, char* argv[])
         return 0;
     }
 
-    const int w = capturer->width();
-    const int h = capturer->height();
+    // portal 路径下 Start 结果的 streams 属性不一定带 size，真实尺寸要等 PipeWire
+    // 格式协商完成才由回调填入。这里最多等 2s，避免刚连上就误判“无几何”而退出；
+    // 还拿不到就当真的没有可用采集，保持原有的回落行为。
+    int w = capturer->width();
+    int h = capturer->height();
+    if (w <= 0 || h <= 0) {
+        QElapsedTimer timer;
+        timer.start();
+        while ((w <= 0 || h <= 0) && timer.elapsed() < 2000) {
+            QThread::msleep(100);
+            w = capturer->width();
+            h = capturer->height();
+        }
+    }
     if (w <= 0 || h <= 0) {
         qWarning() << "SessionAgent: capture negotiated no geometry; exiting";
         return 0;
