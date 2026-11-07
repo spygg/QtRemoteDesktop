@@ -99,7 +99,9 @@ Notes:
 - Fallback transition: while the agent is capturing, the local virtual display is torn down (no idle Xvnc session is kept around). A **manual** `systemctl --user stop remotedesk-agent` therefore rebuilds Xvnc + the desktop session, which shows a short black frame (about 10 s) until the fallback desktop comes up. A crash (`kill -9`) re-attaches within a few seconds and a denied portal grant never tears the display down, so neither of those leaves a black screen.
 - Input prefers the user session's `/dev/uinput`. When it is not writable, the install/startup output prints `usermod -aG input <user>` (effective at the next login; the installer never changes permissions itself) and input falls back to the root-side injector.
 - The size reported by the agent is the sole coordinate basis; the root side applies no extra scaling.
-- The portal grant is persisted in `$XDG_STATE_HOME/remotedesk/portal_token` (0600, default `~/.local/state/remotedesk/portal_token`) when the portal supports `restore_token` (Mutter ScreenCast needs no dialog).
+- Portal ScreenCast (`org.freedesktop.portal.ScreenCast`) asks the user to pick a monitor and click **Share** on first use. Persistent authorization (`restore_token`) depends on the portal backend: `xdg-desktop-portal-gnome` 41.2 does not implement it, so on such systems the dialog reappears each time the agent starts and no `$XDG_STATE_HOME/remotedesk/portal_token` (0600, default `~/.local/state/remotedesk/portal_token`) is written — the file is only created when the backend actually returns a token. Mutter ScreenCast needs no dialog.
+- If the grant is denied, the agent exits (status 0) and is not auto-restarted; the service keeps the fallback source. A new prompt appears only on the next agent start — next login or a manual `systemctl --user start remotedesk-agent`. A new client attach does **not** retry.
+- The portal path is verified end-to-end on the GNOME backend (real desktop frames, click deviation ±1 px). Backends such as wlr or KDE were not verified.
 - Kill switch: set `QTRD_DISABLE_SESSION_AGENT=1` for `remotedesk.service` to get the old single-process behavior.
 - Restart: `systemctl restart remotedesk && systemctl --user restart remotedesk-agent`; a crashed agent is restarted automatically after 3 s.
 
@@ -425,7 +427,9 @@ Wayland 下只有登录用户会话内的进程才能采到真实桌面；root �
 - 回落过渡：代理采集期间本地虚拟屏会被拆掉（不常驻一套空闲的 Xvnc 桌面）。因此**手工** `systemctl --user stop remotedesk-agent` 会重建 Xvnc + 桌面会话，约 10 秒内是过渡黑屏，之后自动回到回落桌面；崩溃（kill -9）几秒内就会重新接管，授权被拒则根本不拆虚拟屏，这两种情况都不会黑屏。
 - 输入优先用用户会话内的 `/dev/uinput`；不可写时 install/启动日志会打印 `usermod -aG input <用户>` 提示（需下次登录生效，安装程序不会擅自改权限），输入自动降级到 root 侧注入。
 - 坐标映射以代理上报的宽高为唯一基准，root 侧不再叠加补偿。
-- portal 授权在支持 `restore_token` 时持久化到 `$XDG_STATE_HOME/remotedesk/portal_token`（0600，默认 `~/.local/state/remotedesk/portal_token`）；Mutter ScreenCast 无需弹窗。
+- portal ScreenCast（`org.freedesktop.portal.ScreenCast`）首次使用会弹共享选择窗口，需要选择显示器并点「共享」。持久授权（`restore_token`）依赖 portal 后端：`xdg-desktop-portal-gnome` 41.2 未实现，因此在这类系统上每次代理启动都会重新弹窗，也不会生成 `$XDG_STATE_HOME/remotedesk/portal_token`（0600，默认 `~/.local/state/remotedesk/portal_token`）——只有后端真正返回 token 时才会写这个文件。Mutter ScreenCast 无需弹窗。
+- 授权被拒时代理以退出码 0 退出且不会自动重启，服务继续用回落源出画面；只有下次代理启动（重新登录或手工 `systemctl --user start remotedesk-agent`）才会再次弹窗。新的客户端 attach **不会**自动重试。
+- portal 路径已在 GNOME 后端实测通过（真实桌面帧、点击偏差 ±1px）；wlr/KDE 等其他后端未验证。
 - 总开关：给 `remotedesk.service` 设 `QTRD_DISABLE_SESSION_AGENT=1` 可退回旧的单进程形态。
 - 重启：`systemctl restart remotedesk && systemctl --user restart remotedesk-agent`；代理崩溃后 3 秒自动重启。
 
