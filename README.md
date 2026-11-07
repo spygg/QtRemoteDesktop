@@ -86,6 +86,23 @@ bin\QtRemoteDesktop.exe                            # Windows
 
 > Default ports: HTTP `8080`, WebSocket `8081` (= HTTP port + 1). All options: `--no-ssl`, `--log-level debug|info|warning|critical`, `--install/--uninstall/--service`, `--helper`.
 
+### Linux Wayland: systemd service + user-session agent
+
+On Wayland only a process inside the logged-in user session can capture the real desktop; a root-only service captures the virtual X display (Xvnc) instead. `--install` therefore sets up two cooperating processes:
+
+- `remotedesk.service` (system, root): ports, config, encoding, lock state, virtual-display fallback.
+- `remotedesk-agent.service` (user unit, desktop user, started at login): PipeWire ScreenCast capture and input injection; talks to the service over `$XDG_RUNTIME_DIR/remotedesk/session-agent.sock` (mode 0600), with frames in `/dev/shm/remotedesk-agent.<uid>.<pid>`.
+
+Notes:
+
+- Capture order: session agent → PipeWire (Wayland) → X11 → Xvnc. If the agent stops or its authorization is denied, the service keeps serving the fallback source instead of a black screen.
+- Fallback transition: while the agent is capturing, the local virtual display is torn down (no idle Xvnc session is kept around). A **manual** `systemctl --user stop remotedesk-agent` therefore rebuilds Xvnc + the desktop session, which shows a short black frame (about 10 s) until the fallback desktop comes up. A crash (`kill -9`) re-attaches within a few seconds and a denied portal grant never tears the display down, so neither of those leaves a black screen.
+- Input prefers the user session's `/dev/uinput`. When it is not writable, the install/startup output prints `usermod -aG input <user>` (effective at the next login; the installer never changes permissions itself) and input falls back to the root-side injector.
+- The size reported by the agent is the sole coordinate basis; the root side applies no extra scaling.
+- The portal grant is persisted in `$XDG_STATE_HOME/remotedesk/portal_token` (0600, default `~/.local/state/remotedesk/portal_token`) when the portal supports `restore_token` (Mutter ScreenCast needs no dialog).
+- Kill switch: set `QTRD_DISABLE_SESSION_AGENT=1` for `remotedesk.service` to get the old single-process behavior.
+- Restart: `systemctl restart remotedesk && systemctl --user restart remotedesk-agent`; a crashed agent is restarted automatically after 3 s.
+
 ### Windows 32-bit: one command, two packages (Win7 6.1.2 + XP 3.4.8)
 
 ```bat
@@ -110,8 +127,22 @@ src\android_build_script\build_android.bat
 ```
 
 The script uses the Qt 6 `android_arm64_v8a` kit via `qt-cmake` (`QT_HOST_PATH=mingw_64`) with
-`ANDROID_ABI=arm64-v8a`, `USE_FFMPEG=OFF`, `USE_WEBRTC=OFF`, `BUILD_THIRDPARTY=OFF`, builds the
+`ANDROID_ABI=arm64-v8a`, `USE_FFMPEG=ON`, `USE_WEBRTC=OFF`, `BUILD_THIRDPARTY=OFF`, builds the
 `apk` target, and finally prints the **APK path, size, SHA256 and the `adb install` command**.
+
+Before CMake is configured, `src\android_build_script\build_ffmpeg_android.ps1` cross-compiles
+**FFmpeg 6.1.2 for arm64-v8a** into `build_output\ffmpeg_install-6.1.2-android-arm64`
+(`--enable-mediacodec --enable-jni --enable-encoder=h264_mediacodec`, static, `-fPIC`, API 24,
+no openh264). The directory name is version/arch namespaced, so the Android libs can never be
+confused with the desktop MinGW/pe-i386 build; the step is signature-checked and skipped when the
+artifacts are already up to date (`build_ffmpeg_android.ps1 -Force` to rebuild). The first build
+takes roughly **6–12 minutes on 8 threads**; the APK grows by about **0.7 MB** (measured
+24,914,585 → 25,658,891 bytes on the arm64-v8a debug build) because libavcodec/libavutil/libswscale
+are linked in. H.264 frames are encoded by the phone's **MediaCodec**
+hardware encoder (NV12 system-memory input, no JavaVM needed). If the device exposes no H.264
+encoder, the server reports video as **unsupported** and the browser stays in JPEG mode — it never
+claims a capability the build/device cannot deliver.
+
 It is idempotent: an existing `build_android\` tree is reconfigured and rebuilt incrementally;
 pass `-Clean` to start over. On failure it prints the **first real error**
 (`FAILED:` / `CMake Error` / `error:`) and the full log path instead of a wall of output.
@@ -381,6 +412,23 @@ bin\QtRemoteDesktop.exe                            # Windows
 
 > 默认端口：HTTP `8080`，WebSocket `8081`（= HTTP 端口 + 1）。常用参数：`--no-ssl`、`--log-level debug|info|warning|critical`、`--install/--uninstall/--service`、`--helper`。
 
+### Linux Wayland：systemd 服务 + 用户会话代理
+
+Wayland 下只有登录用户会话内的进程才能采到真实桌面；root 服务单独运行时采到的是虚拟 X 屏幕（Xvnc），不是用户桌面。`--install` 会配置两个协作进程：
+
+- `remotedesk.service`（系统级，root）：端口、配置、编码、锁屏判定与虚拟显示回落。
+- `remotedesk-agent.service`（用户级，登录桌面用户，随登录自动启动）：PipeWire ScreenCast 采集 + 输入注入；通过 `$XDG_RUNTIME_DIR/remotedesk/session-agent.sock`（0600）与控制端通信，帧数据走 `/dev/shm/remotedesk-agent.<uid>.<pid>`。
+
+说明：
+
+- 采集优先链：会话代理 → Wayland（PipeWire）→ X11 → Xvnc。代理停止或授权被拒时，服务继续用回落源出画面，不会黑屏。
+- 回落过渡：代理采集期间本地虚拟屏会被拆掉（不常驻一套空闲的 Xvnc 桌面）。因此**手工** `systemctl --user stop remotedesk-agent` 会重建 Xvnc + 桌面会话，约 10 秒内是过渡黑屏，之后自动回到回落桌面；崩溃（kill -9）几秒内就会重新接管，授权被拒则根本不拆虚拟屏，这两种情况都不会黑屏。
+- 输入优先用用户会话内的 `/dev/uinput`；不可写时 install/启动日志会打印 `usermod -aG input <用户>` 提示（需下次登录生效，安装程序不会擅自改权限），输入自动降级到 root 侧注入。
+- 坐标映射以代理上报的宽高为唯一基准，root 侧不再叠加补偿。
+- portal 授权在支持 `restore_token` 时持久化到 `$XDG_STATE_HOME/remotedesk/portal_token`（0600，默认 `~/.local/state/remotedesk/portal_token`）；Mutter ScreenCast 无需弹窗。
+- 总开关：给 `remotedesk.service` 设 `QTRD_DISABLE_SESSION_AGENT=1` 可退回旧的单进程形态。
+- 重启：`systemctl restart remotedesk && systemctl --user restart remotedesk-agent`；代理崩溃后 3 秒自动重启。
+
 ### Windows 32 位：一条命令出两个包（Win7 6.1.2 + XP 3.4.8）
 
 ```bat
@@ -405,8 +453,20 @@ src\android_build_script\build_android.bat
 ```
 
 脚本用 Qt 6 的 `android_arm64_v8a` 套件调用 `qt-cmake`（`QT_HOST_PATH=mingw_64`），固定
-`ANDROID_ABI=arm64-v8a`、`USE_FFMPEG=OFF`、`USE_WEBRTC=OFF`、`BUILD_THIRDPARTY=OFF`，构建
+`ANDROID_ABI=arm64-v8a`、`USE_FFMPEG=ON`、`USE_WEBRTC=OFF`、`BUILD_THIRDPARTY=OFF`，构建
 `apk` 目标，结束时打印 **APK 路径、大小、SHA256 和 `adb install` 命令**。
+
+配置 CMake 之前，脚本会调用 `src\android_build_script\build_ffmpeg_android.ps1` 把
+**FFmpeg 6.1.2 交叉编译成 arm64-v8a** 静态库，产物在
+`build_output\ffmpeg_install-6.1.2-android-arm64`（`--enable-mediacodec --enable-jni
+--enable-encoder=h264_mediacodec`、`-fPIC`、API 24、不含 openh264）。产物目录带版本与架构后缀，
+与桌面 MinGW/pe-i386 那份严格隔离，绝不会互相误链；脚本按签名幂等，已是最新时秒退
+（要重编用 `build_ffmpeg_android.ps1 -Force`）。首次交叉编译在 8 线程下大约 **6–12 分钟**，
+APK 因静态链接 libavcodec/libavutil/libswscale 会增大 **约 0.7 MB**（实测 arm64-v8a debug
+包 24,914,585 → 25,658,891 字节）。H.264 编码走手机
+**MediaCodec 硬编**（NV12 系统内存输入，无需 JavaVM）；如果设备没有 H.264 编码器，
+服务端会如实上报「视频模式不支持」，浏览器继续用 JPEG 图片模式，不会出现假能力。
+
 脚本幂等：已有 `build_android\` 会重新配置并增量构建；要重来加 `-Clean`。
 失败时只打印**第一条真实错误**（`FAILED:` / `CMake Error` / `error:`）和完整日志路径，
 不会刷屏。
