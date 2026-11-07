@@ -322,7 +322,10 @@ RDPServer::RDPServer(QObject* parent)
                 if (monoNowMs() - videoRebuildPendingSinceMs_ >= kMaxDeferredRebuildWaitMs) {
                     qWarning() << "Retired HW encoder still running after" << kMaxDeferredRebuildWaitMs
                                << "ms; attempting deferred rebuild anyway";
-                    rebuildVideoEncoder(/*onlyIfIdle=*/false);
+                    // 仍被推迟说明墓地依旧非空（旧线程没退）。必须复位时间戳，
+                    // 否则每 500ms 重进本分支、日志无限刷屏（Android 实测刷了 4 分钟）。
+                    if (rebuildVideoEncoder(/*onlyIfIdle=*/false) == RebuildResult::Deferred)
+                        videoRebuildPendingSinceMs_ = monoNowMs();
                 }
             }
 #endif
@@ -415,6 +418,18 @@ RDPServer::RDPServer(QObject* parent)
         if (screenCapturer_)
             screenCapturer_->forceNextFrame();
     });
+
+    // [KF-DEFER] 冷却期内的 IDR 请求在冷却结束后重发一次真正的 requestKeyframe()。
+    // 不能沿用 idrFallbackTimer_：它的语义是"等不到 IDR 就重建编码器"，而这类请求
+    // 根本没下发过——直接判重建会把"编码器本来能一发 request-sync 出 IDR"的路径
+    // 白白变成一次销毁重建（Android h264_mediacodec 实测重建 50~130ms）。
+    kfDeferTimer_ = new QTimer(this);
+    kfDeferTimer_->setSingleShot(true);
+    connect(kfDeferTimer_, &QTimer::timeout, this, [this]() {
+        if (currentMode_ != ServerMode::Video || !videoEncoder_)
+            return;
+        pumpKeyframe(true);
+    });
 #endif
     webrtcKfTimer_->start();
 }
@@ -452,6 +467,7 @@ RDPServer::~RDPServer()
     if (configSaveTimer_) configSaveTimer_->stop();
 #ifdef USE_FFMPEG
     if (idrFallbackTimer_) idrFallbackTimer_->stop();
+    if (kfDeferTimer_) kfDeferTimer_->stop();
     if (retiredEncoderReapTimer_) retiredEncoderReapTimer_->stop();
 #endif
     if (webrtcKfTimer_) webrtcKfTimer_->stop();
@@ -6708,6 +6724,14 @@ void RDPServer::pumpKeyframe(bool requestNewIdr, bool allowStaticReuse)
             if (idrFallbackTimer_)
                 idrFallbackTimer_->start();
             qInfo() << "pumpKeyframe: new IDR requested";
+        } else if (kfDeferTimer_ && videoEncoder_ && videoEncoder_->hasRuntimeIdrRequest()) {
+            // Android h264_mediacodec 有真正的运行期 IDR 通道（request-sync）：冷却期内的
+            // 请求不能交给"等不到 IDR 就重建编码器"的兜底定时器——那条请求根本还没下发给
+            // 编码器，重建是纯浪费（实测重建一次 50~130ms）。延后到冷却结束重新下发即可。
+            // 不置 idrRequestMs_：它表示"已下发但没等到 IDR"，语义不同。
+            const qint64 delay = qint64(1000) - (now - lastReinitMs_);
+            kfDeferTimer_->start(qMax<qint64>(50, delay));
+            qInfo() << "pumpKeyframe: in cooldown, IDR request deferred" << delay << "ms";
         } else if (idrFallbackTimer_) {
             // 落在 1s 冷却内不等于请求可以作废：这条 request_keyframe 来自"我已经没有
             // 可用 IDR 了"的客户端（接入、重连、PLI），直接 return 会让它永远等不到
@@ -7286,9 +7310,11 @@ void RDPServer::sendVideoParamsToCaptureSource(const QString& action)
 bool RDPServer::videoModeSupported() const
 {
 #ifdef USE_FFMPEG
-    // ① 本地原始帧源可用（直连模式 / Linux 服务模式进程内捕获）→ 直接可编码
+    // ① 本地原始帧源可用（直连模式 / Linux 服务模式进程内捕获）→ 直接可编码。
+    // 还必须确认真的存在可打开的编码器：Android 只有 MediaCodec（无软编），
+    // 设备没有 H.264 编码器时必须如实上报 false，否则前端会反复进视频模式黑屏。
     if (screenCapturer_ && screenCapturer_->width() > 0 && screenCapturer_->height() > 0)
-        return true;
+        return VideoEncoder::isCodecEncodable(CodecType::H264);
 #else
     // 无 FFmpeg 构建里没有本地编码器：switchToVideoMode() 本地分支恒返回 false，
     // 本机采集只能走 JPEG。只有 helper 自带编码器（服务模式上报 video=true）时

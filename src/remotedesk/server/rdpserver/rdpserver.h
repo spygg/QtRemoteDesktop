@@ -319,6 +319,9 @@ private:
     // 不认 flush + pict_type=I 仍输出 P 帧，需要超时兜底重建编码器才能真的产出 IDR。
     qint64 idrRequestMs_ = 0;
     QTimer* idrFallbackTimer_ = nullptr;
+    // [KF-DEFER] 落在重建冷却窗口内的 IDR 请求：挂到冷却结束后重新发起真正的
+    // requestKeyframe()（而不是交给 idrFallbackTimer_ 去重建编码器）。
+    QTimer* kfDeferTimer_ = nullptr;
     // [ASYNC-RETIRE] 退役编码器的回收定时器：退役只置 abort_ 唤醒编码线程，
     // 线程真正退出后由它把墓地对象安全析构，主线程不再同步等最长 8s。
     QTimer* retiredEncoderReapTimer_ = nullptr;

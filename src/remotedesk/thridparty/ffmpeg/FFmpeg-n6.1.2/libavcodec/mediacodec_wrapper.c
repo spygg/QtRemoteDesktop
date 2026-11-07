@@ -1982,6 +1982,9 @@ typedef struct FFAMediaCodecNdk {
     // Available since API level 26.
     media_status_t (*setInputSurface)(AMediaCodec*, ANativeWindow *);
     media_status_t (*signalEndOfInputStream)(AMediaCodec *);
+
+    // Available since API level 21.
+    media_status_t (*setParameters)(AMediaCodec*, const AMediaFormat *params);
 } FFAMediaCodecNdk;
 
 static const FFAMediaFormat media_format_ndk;
@@ -2242,6 +2245,8 @@ static inline FFAMediaCodec *ndk_codec_create(int method, const char *arg) {
 
     GET_SYMBOL(setInputSurface, 0)
     GET_SYMBOL(signalEndOfInputStream, 0)
+    // 可缺省：旧设备/旧 libmediandk 没有该符号时，调用方走自己的兜底路径。
+    GET_SYMBOL(setParameters, 0)
 
 #undef GET_SYMBOL
 
@@ -2517,6 +2522,26 @@ static int mediacodec_ndk_signalEndOfInputStream(FFAMediaCodec *ctx)
     return 0;
 }
 
+static int mediacodec_ndk_setParameters(FFAMediaCodec *ctx, const FFAMediaFormat *params)
+{
+    FFAMediaCodecNdk *codec = (FFAMediaCodecNdk *)ctx;
+    const FFAMediaFormatNdk *params_ndk = (const FFAMediaFormatNdk *)params;
+    media_status_t status;
+
+    if (!codec->setParameters) {
+        av_log(codec, AV_LOG_ERROR, "setParameters unavailable\n");
+        return AVERROR_EXTERNAL;
+    }
+
+    status = codec->setParameters(codec->impl, params_ndk->impl);
+    if (status != AMEDIA_OK) {
+        av_log(codec, AV_LOG_ERROR, "setParameters failed, %d\n", status);
+        return AVERROR_EXTERNAL;
+    }
+
+    return 0;
+}
+
 static const FFAMediaFormat media_format_ndk = {
     .class = &amediaformat_ndk_class,
 
@@ -2578,6 +2603,7 @@ static const FFAMediaCodec media_codec_ndk = {
     .getConfigureFlagEncode = mediacodec_ndk_getConfigureFlagEncode,
     .cleanOutputBuffers = mediacodec_ndk_cleanOutputBuffers,
     .signalEndOfInputStream = mediacodec_ndk_signalEndOfInputStream,
+    .setParameters = mediacodec_ndk_setParameters,
 };
 
 FFAMediaFormat *ff_AMediaFormat_new(int ndk)

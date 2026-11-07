@@ -106,6 +106,10 @@ public:
     // 当前实例实际选中的是否是硬件编码器（MPP/NVENC/VAAPI/QSV/AMF/VideoToolbox）。
     // 硬编重建需要等旧实例真正释放设备，软编没有这个约束。
     bool isHardwareEncoder() const { return !hwName_.isEmpty(); }
+    // [ANDROID-KF] Android h264_mediacodec 支持运行期 IDR 请求（mediacodecenc 看到
+    // pict_type=I 会下发 AMediaCodec_setParameters("request-sync")）。上层据此判断
+    // 冷却期内的关键帧请求应当延后重新下发，而不是走"等不到 IDR 就重建编码器"。
+    bool hasRuntimeIdrRequest() const { return hwName_.contains("mediacodec"); }
 
     // 本进程中 MPP 是否被证明不可用（初始化成功但 encode 恒 null）。
     // 上层据此在前端展示"硬件编码实际未生效"，避免用户以为开着硬编。
@@ -240,6 +244,10 @@ private:
     HwEncodeMode hwMode_ = HwEncodeMode::Auto;
     QString codecName_;
     std::atomic<bool> forceKeyframe_{ false };
+    // [PARAMSET] mediacodec 只在编码器启动的首帧前附带 SPS/PPS（BUFFER_FLAG_CODEC_CONFIG），
+    // 运行期 request-sync 强制出的 IDR 不带参数集。缓存首个关键帧里的参数集，后续
+    // 缺参数集的关键帧补上，客户端中途重建解码器才建得出 avcC init segment。
+    QByteArray cachedParamSets_;
     std::atomic<bool> hasIdr_{ false }; // 自最近一次初始化以来是否产出过 IDR（一次性标志，P 帧不重置）
     std::atomic<int> pendingBitrate_{ 0 };
     // 编码线程已应用的码率，供主线程无锁读取（避免直读 codecCtx_->bit_rate 造成数据竞争）

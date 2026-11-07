@@ -107,7 +107,8 @@ enum HwBackendBit : unsigned {
     HwBitAmf = 1u << 2,
     HwBitVideoToolbox = 1u << 3,
     HwBitRkMpp = 1u << 4,
-    HwBitV4l2M2m = 1u << 5
+    HwBitV4l2M2m = 1u << 5,
+    HwBitMediaCodec = 1u << 6
 };
 static std::atomic<unsigned> g_hwBackendBlocked { 0 };
 
@@ -127,6 +128,8 @@ static unsigned hwBackendBit(const char* name)
         return HwBitRkMpp;
     if (strstr(name, "v4l2m2m"))
         return HwBitV4l2M2m;
+    if (strstr(name, "mediacodec"))
+        return HwBitMediaCodec;
     return 0;
 }
 
@@ -159,6 +162,42 @@ static const AVCodec* findSoftwareEncoder(AVCodecID id)
     if (c && hwBackendBit(c->name) != 0)
         return nullptr;
     return c;
+}
+
+// [PARAMSET] 从 Annex B 关键帧里提取开头的 SPS/PPS（类型 7/8），保持原有顺序。
+// mediacodec 的编码器只在启动后首帧附带一次参数集（BUFFER_FLAG_CODEC_CONFIG 由
+// mediacodecenc 拼到下一个包前），之后运行期 request-sync 强制的 IDR 只有 slice。
+// 浏览器 MSE 中途重建解码器时必须能从"任意一个关键帧"里拿到 SPS/PPS 才能建出
+// fMP4 init segment，否则会一直索要关键帧并保持黑屏（实测 request-sync 通道打通后
+// 才暴露出来：以前每次都靠重建编码器重新发参数集把它掩盖了）。
+static QByteArray annexbParamSets(const uint8_t* data, int size)
+{
+    QByteArray out;
+    const uint8_t* end = data + size;
+    if (size <= 0)
+        return out;
+    for (const uint8_t* p = data; p + 4 < end; ++p) {
+        if (!(p[0] == 0 && p[1] == 0 && p[2] == 1))
+            continue;
+        const uint8_t type = p[3] & 0x1f;
+        if (type == 5) // 已到 IDR slice：参数集只可能在本帧更前面
+            break;
+        if (type != 7 && type != 8)
+            continue;
+        const uint8_t* nal = p + 3;
+        const uint8_t* next = nal + 1;
+        while (next + 3 < end && !(next[0] == 0 && next[1] == 0 && next[2] == 1))
+            ++next;
+        int len = int(next - nal);
+        while (len > 0 && nal[len - 1] == 0) // 起始码的前导零不算 NAL 内容
+            --len;
+        out.append('\0');
+        out.append('\0');
+        out.append('\1');
+        out.append(reinterpret_cast<const char*>(nal), len);
+        p = next - 1;
+    }
+    return out;
 }
 
 // 依次尝试常见 DRM render node。返回的 AVBufferRef 由调用方释放（或挂到
@@ -473,6 +512,13 @@ static const char* findHwEncoder(CodecType type, HwEncodeMode mode, QString* dia
         // 的机器前面几个会被驱动库存在性/打开失败挡掉，这里才轮到 Intel QSV。
         candidates[0] = "h264_nvenc"; candidates[1] = "h264_amf";
         candidates[2] = "h264_qsv";
+#elif defined(Q_OS_ANDROID)
+        // Android 唯一可用的 H.264 硬编：FFmpeg 6.1 的 h264_mediacodec
+        // （NDK MediaCodec，支持 NV12 系统内存输入，不需要 JavaVM）。
+        // 设备没有 H.264 编码器时 open 失败会被 blockHwBackend 永久跳过；
+        // Android 构建不含软编（openh264/libx264 均未编入），最终只能退回
+        // JPEG 图片模式——videoModeSupported 会按真实能力上报。
+        candidates[0] = "h264_mediacodec";
 #elif defined(Q_OS_LINUX)
         candidates[0] = "h264_rkmpp"; candidates[1] = "h264_vaapi";
         candidates[2] = "h264_nvenc"; candidates[3] = "h264_v4l2m2m";
@@ -597,10 +643,16 @@ static void warnHwRequestedButUnavailable(const QString& why)
 static AVPixelFormat encoderPixFmt(const AVCodec* codec, const char* hwName)
 {
     if (hwName) {
+        // 必须全表优先找 NV12，不能"遇到第一个支持的就返回"：
+        // h264_mediacodec 的 pix_fmts 是 {YUV420P, NV12, MEDIACODEC}，按顺序取会拿到
+        // YUV420P → MediaCodec 用 COLOR_FormatYUV420Planar(19) 配置，MTK 等厂商编码器
+        // 只接受 COLOR_FormatYUV420SemiPlanar(NV12/21)，直接 configure failed -10000。
+        bool hasYuv420p = false;
         for (const AVPixelFormat* p = codec->pix_fmts; p && *p != AV_PIX_FMT_NONE; ++p) {
             if (*p == AV_PIX_FMT_NV12) return AV_PIX_FMT_NV12;
-            if (*p == AV_PIX_FMT_YUV420P) return AV_PIX_FMT_YUV420P;
+            if (*p == AV_PIX_FMT_YUV420P) hasYuv420p = true;
         }
+        if (hasYuv420p) return AV_PIX_FMT_YUV420P;
     }
     return AV_PIX_FMT_YUV420P;
 }
@@ -634,6 +686,13 @@ static void applyHwOpts(const QString& hwName, AVDictionary** opts)
         // 是"这帧立刻出来"，异步队列会再多压 3 帧滞后，所以取最低档并关掉并行。
         av_dict_set(opts, "preset", "veryfast", 0);
         av_dict_set(opts, "async_depth", "1", 0);
+    } else if (hwName.contains("mediacodec")) {
+        // Android 的 OMX 编码器（如 MTK OMX.MTK.VIDEO.ENCODER.AVC）要求 MediaFormat
+        // 必须带 level：ACodec::setupAVCEncoderParameters 读不到 "profile"/"level"
+        // 会直接 return -ENOSYS(-38)，对外表现为 configure failed -10000。
+        // mediacodecenc 的 level 私有项默认 0 = 不下发，所以显式给一个。
+        // 4.1 覆盖 720p/1080p30（Android 抓屏上限就是设备屏幕，远小于该上限）。
+        av_dict_set(opts, "level", "4.1", 0);
     }
     // videotoolbox / vaapi / rkmpp / v4l2m2m：默认参数即可，不额外设置
     //（v4l2m2m 的码率/GOP 由 AVCodecContext 通用字段下发，私有项只有驱动相关的
@@ -787,6 +846,7 @@ bool VideoEncoder::initialize(CodecType type, int srcW, int srcH, int encW, int 
 
     abort_ = false;
     hasIdr_.store(false);
+    cachedParamSets_.clear(); // 新编码器会有自己的 SPS/PPS，旧参数集不能跨实例回放
     frameCount_ = 0;
     startTime_ = encoderEpochMs();
     pendingBitrate_.store(0);
@@ -1880,13 +1940,25 @@ void VideoEncoder::encodingLoop()
         }
         const bool forceThisFrame = forceKeyframe_.exchange(false);
         if (forceThisFrame) {
-            qWarning() << "VideoEncoder: FORCE-KF -> flush (frameCount=" << frameCount_ << ")";
-            // libx264 运行期改 gop_size / 设 pict_type 均不可靠（旧版 ffmpeg 不认 frame->pict_type，
-            // 实测 frame=2/3/4 强制后仍输出 P 帧），用 avcodec_flush_buffers 重置编码器内部
-            // GOP 帧计数器，下一帧必为 IDR（含 SPS/PPS，MSE 可衔接解码）。
-            avcodec_flush_buffers(codecCtx_);
-            codecCtx_->gop_size = 1; // 双保险：部分编码器运行时读取
-            sendFrame->pict_type = AV_PICTURE_TYPE_I; // 双保险：新版 ffmpeg 认
+            if (hwName_.contains("mediacodec")) {
+                // MediaCodec 有真正的运行期关键帧通道，不需要销毁重建编码器：
+                // mediacodecenc 看到 pict_type=I 就会下发 AMediaCodec_setParameters
+                // ("request-sync")（Android 分支见 libavcodec/mediacodecenc.c）。
+                // 注意 request-sync 对"下一帧"生效：被标记的这一帧仍是 P，紧随其后的
+                // 下一帧才是 IDR（实测 MTK 编码器约 35~50ms）。flush 对它只是 no-op
+                // （无 flush 回调），gop_size 也只在 init 时被读取，二者都不做。
+                // 若设备不认 request-sync，mediacodecenc 打 warning、不会产出 IDR，
+                // 上层 [PLI-REUSE] 的"等不到 IDR 就重建"兜底照旧生效——不谎报成功。
+                sendFrame->pict_type = AV_PICTURE_TYPE_I;
+            } else {
+                qWarning() << "VideoEncoder: FORCE-KF -> flush (frameCount=" << frameCount_ << ")";
+                // libx264 运行期改 gop_size / 设 pict_type 均不可靠（旧版 ffmpeg 不认 frame->pict_type，
+                // 实测 frame=2/3/4 强制后仍输出 P 帧），用 avcodec_flush_buffers 重置编码器内部
+                // GOP 帧计数器，下一帧必为 IDR（含 SPS/PPS，MSE 可衔接解码）。
+                avcodec_flush_buffers(codecCtx_);
+                codecCtx_->gop_size = 1; // 双保险：部分编码器运行时读取
+                sendFrame->pict_type = AV_PICTURE_TYPE_I; // 双保险：新版 ffmpeg 认
+            }
         } else {
             sendFrame->pict_type = AV_PICTURE_TYPE_NONE; // 防残留：非强制帧不继承上一帧的 I 标记
         }
@@ -1957,6 +2029,19 @@ void VideoEncoder::encodingLoop()
             if (isKeyframe)
                 hasIdr_.store(true);
             QByteArray data(reinterpret_cast<char*>(pkt->data), pkt->size);
+            // [PARAMSET] mediacodec 的首次关键帧带 SPS/PPS（缓存下来），后续 request-sync
+            // 强制出的 IDR 不带；缺参数集的 IDR 会让中途重建解码器的客户端永远建不出
+            // avcC init segment（黑屏 + 无限索要关键帧）。只对 mediacodec 生效，软编
+            // （x264/openh264）本来就在每个 IDR 前自带参数集，不改动其码流。
+            if (isKeyframe && hwName_.contains("mediacodec")) {
+                const QByteArray ps = annexbParamSets(reinterpret_cast<const uint8_t*>(pkt->data),
+                                                      pkt->size);
+                if (!ps.isEmpty()) {
+                    cachedParamSets_ = ps;
+                } else if (!cachedParamSets_.isEmpty()) {
+                    data.prepend(cachedParamSets_);
+                }
+            }
             qint64 timestamp = monotonicMs() - startTime_;
 
             emit encodedFrame(data, isKeyframe, timestamp);
@@ -2104,11 +2189,21 @@ bool VideoEncoder::beginRetire(bool onlyIfIdle)
     // 与 retireIfIdle 相同的锁契约，但完全不等待线程：主线程切换模式/重建时
     // 不再被卡死的驱动调用拖住最长 8s。线程退出后由调用方（墓地 + 回收定时器）
     // 通过 threadStopped() 判断何时安全析构。
-    QMutexLocker locker(&mutex_);
-    if (onlyIfIdle && inFlightStartMs_.load(std::memory_order_relaxed) != 0)
-        return false;
-    abort_ = true;
-    condition_.wakeAll();
+    {
+        QMutexLocker locker(&mutex_);
+        if (onlyIfIdle && inFlightStartMs_.load(std::memory_order_relaxed) != 0)
+            return false;
+        abort_ = true;
+        condition_.wakeAll();
+    }
+    // 只置 abort_ 只能让 encodingLoop 这个槽函数返回；QThread 默认的 run() 在本槽
+    // 返回后会进入 exec() 事件循环并一直存活，isRunning() 恒为真。于是上层
+    // threadStopped()/waitStopped() 永远等不到"线程已退出"，退役对象被永久卡在
+    // 墓地、重建被无限推迟（Android 实测：每 500ms 刷一条
+    // "attempting deferred rebuild anyway"，画面永久黑屏）。
+    // 必须在退役时同时 quit()，让事件循环也退出（Qt 会记住这次的退出请求，
+    // 即使 exec() 尚未开始也会立刻返回）。
+    encoderThread_.quit();
     return true;
 }
 

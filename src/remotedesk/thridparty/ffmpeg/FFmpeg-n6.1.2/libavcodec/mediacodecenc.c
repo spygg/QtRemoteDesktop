@@ -453,6 +453,39 @@ static void copy_frame_to_buffer(AVCodecContext *avctx, const AVFrame *frame, ui
                    avctx->pix_fmt, avctx->width, avctx->height);
 }
 
+/*
+ * 请求编码器把"下一帧"编成 IDR（MediaCodec.setParameters("request-sync")）。
+ *
+ * mediacodecenc 原本没有运行期强制关键帧的通道：flush 无回调、pict_type 被忽略、
+ * gop_size 只在 init 生效，上层只能销毁重建编码器才能拿到 IDR（实测 50~130ms）。
+ * FFmpeg 6.1.2 的 wrapper 也没有暴露 setParameters，所以在 wrapper 里补齐了
+ * AMediaCodec_setParameters（仅 NDK 实现）。这里约定：调用方把输入帧的
+ * pict_type 置为 I 即表示"请尽快出 IDR"，编码器据此下发 request-sync。
+ * 实测（MTK OMX/VPUD）request-sync 排入编码器后作用于**下一帧**：被标记的
+ * 当前帧仍按 P 输出，紧随其后的一帧才是 IDR（约 35~50ms）。
+ * 设备/OMX 不认这个参数时返回错误，上层仍走重建兜底（不会假装成功）。
+ */
+static int mediacodec_request_sync(AVCodecContext *avctx)
+{
+    MediaCodecEncContext *s = avctx->priv_data;
+    FFAMediaFormat *params = ff_AMediaFormat_new(s->use_ndk_codec);
+    int ret;
+
+    if (!params)
+        return AVERROR(ENOMEM);
+
+    ff_AMediaFormat_setInt32(params, "request-sync", 0);
+    ret = ff_AMediaCodec_setParameters(s->codec, params);
+    ff_AMediaFormat_delete(params);
+
+    if (ret < 0)
+        av_log(avctx, AV_LOG_WARNING, "request-sync unsupported (%d), fallback needed\n", ret);
+    else
+        av_log(avctx, AV_LOG_DEBUG, "request-sync sent to MediaCodec encoder\n");
+
+    return ret;
+}
+
 static int mediacodec_send(AVCodecContext *avctx,
                            const AVFrame *frame) {
     MediaCodecEncContext *s = avctx->priv_data;
@@ -490,6 +523,13 @@ static int mediacodec_send(AVCodecContext *avctx,
 
     if (frame) {
         input_buf = ff_AMediaCodec_getInputBuffer(codec, index, &input_size);
+
+        // 上层把 pict_type 置 I = "请出 IDR"（见 mediacodec_request_sync 注释）。
+        // 在入队前下发：该参数作用于编码器随后处理的那一帧（本帧仍按 P 输出，
+        // 下一帧才变 IDR），所以调用方不能指望本帧的包就是关键帧。
+        if (frame->pict_type == AV_PICTURE_TYPE_I)
+            mediacodec_request_sync(avctx);
+
         copy_frame_to_buffer(avctx, frame, input_buf, input_size);
 
         pts = av_rescale_q(frame->pts, avctx->time_base, AV_TIME_BASE_Q);

@@ -219,6 +219,10 @@ struct FFAMediaCodec {
 
     // For encoder with FFANativeWindow as input.
     int (*signalEndOfInputStream)(FFAMediaCodec *);
+
+    // 运行期下发参数（MediaCodec.setParameters 的等价物）。仅 NDK 实现提供；
+    // JNI 实现为 NULL，调用方拿到 AVERROR(ENOSYS) 后退回自己的兜底策略。
+    int (*setParameters)(FFAMediaCodec *codec, const FFAMediaFormat *params);
 };
 
 static inline char *ff_AMediaCodec_getName(FFAMediaCodec *codec)
@@ -341,6 +345,13 @@ static inline int ff_AMediaCodec_cleanOutputBuffers(FFAMediaCodec *codec)
 static inline int ff_AMediaCodec_signalEndOfInputStream(FFAMediaCodec *codec)
 {
     return codec->signalEndOfInputStream(codec);
+}
+
+static inline int ff_AMediaCodec_setParameters(FFAMediaCodec *codec, const FFAMediaFormat *params)
+{
+    if (!codec->setParameters)
+        return AVERROR(ENOSYS);
+    return codec->setParameters(codec, params);
 }
 
 int ff_Build_SDK_INT(AVCodecContext *avctx);
