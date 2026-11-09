@@ -267,5 +267,10 @@ if(ANDROID AND QT_VERSION_MAJOR EQUAL 6)
         # androiddeployqt 会先铺 Qt 默认模板，再用该目录覆盖同名文件。
         QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android"
     )
+    # APK 签名不在这里：Qt 6 的 CMake 流程把 gradle 的 android-build-release-unsigned.apk
+    # 原样交出来，QT_ANDROID_KEYSTORE_* 那几个属性只有 Qt5/qmake 的模板会读（在 Qt6 里是
+    # 死配置）。签名由 src/android_build_script/build_android.ps1 用仓库内置的
+    # debug.keystore（别名 androiddebugkey / 口令 android，公开身份，不是商店签名）
+    # zipalign + apksigner 显式完成，本机和 CI 因此出同一个签名。
     qt_finalize_executable(${PROJECT_NAME})
 endif()

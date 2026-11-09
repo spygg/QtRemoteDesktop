@@ -1144,19 +1144,281 @@ jobs:
           path: ${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
 
+  # ==========================================================================
+  # Android（arm64-v8a，Qt 6 + NDK 交叉编译）
+  # ==========================================================================
+  # 桌面三条腿 + macOS 都建立在 Qt 5.15 上，Android 端要求 Qt 6（qt_finalize_executable
+  # + androiddeployqt 的 Gradle 工程模板），所以不能并进 build 矩阵，单独一个 job。
+  # FFmpeg 源码已入库（src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2，8190 个文件），
+  # 这里不下载；build_ffmpeg_android.ps1 用 NDK 的 clang 交叉编出 arm64 静态库，
+  # 只启 mediacodec/jni/h264_mediacodec + h264_metadata BSF。
+  # APK 是签名后才能装的：Qt 6 的 CMake 流程不签（androiddeployqt 只交 gradle 的
+  # android-build-release-unsigned.apk，QT_ANDROID_KEYSTORE_* 属性只有 Qt5/qmake 模板读），
+  # 所以打包脚本自己 zipalign + apksigner，签名身份取仓库内的
+  # src/android_build_script/debug.keystore（公开 debug 身份，不是商店签名），
+  # 末尾再用 apksigner verify 复检，验不过直接判失败。
+  build-android:
+    name: Android arm64-v8a
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      QT_ANDROID_VER: '6.11.1'
+      # 这三个版本由 Qt 6.11.1 自己写进生成的 gradle.properties（androidBuildToolsVersion /
+      # androidCompileSdkVersion / androidNdkVersion），换 Qt 版本要跟着改，否则 Gradle
+      # 报 "Failed to find Build Tools revision ..."。
+      ANDROID_BUILD_TOOLS: '37.0.0'
+      ANDROID_PLATFORM: 'android-36'
+      ANDROID_NDK_VER: '27.1.12297006'
+      ARTIFACT_NAME: QtRemoteDesktop-android-arm64-v8a.apk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 两个组件缺一不可：android_arm64_v8a 是被编译的 kit，桌面 kit 是 QT_HOST_PATH
+      # （moc/uic/rcc/androiddeployqt 都是主机可执行文件）。tools_mingw1310 只为
+      # FFmpeg 的交叉编译提供 mingw32-make —— NDK 和 Git 都不带 GNU make。
+      - name: Install Qt 6 host kit (MinGW)
+        id: qt_host
+        continue-on-error: true
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_ANDROID_VER }}
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          tools: tools_mingw1310
+          cache: false
+
+      - name: Retry Install Qt 6 host kit
+        if: steps.qt_host.outcome == 'failure'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_ANDROID_VER }}
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          tools: tools_mingw1310
+          cache: false
+
+      - name: Install Qt 6 android kit
+        id: qt_android
+        continue-on-error: true
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_ANDROID_VER }}
+          host: windows
+          target: android
+          arch: android_arm64_v8a
+          cache: false
+
+      - name: Retry Install Qt 6 android kit
+        if: steps.qt_android.outcome == 'failure'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_ANDROID_VER }}
+          host: windows
+          target: android
+          arch: android_arm64_v8a
+          cache: false
+
+      - name: JDK 17 (Gradle)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # install-qt-action 把 QT_ROOT_DIR 指向它刚装的那个 kit，而脚本要的是同时装着
+      # android_arm64_v8a 与桌面 kit 的版本根目录；make 也是同样道理，工具链目录名
+      # 随上游变化，按实际文件找而不是写死。
+      - name: Export Qt roots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $verRoot = Split-Path $env:QT_ROOT_DIR -Parent
+          if (-not (Test-Path (Join-Path $verRoot 'android_arm64_v8a\bin\qt-cmake.bat'))) {
+            Write-Host "::error::$verRoot 下没有 android_arm64_v8a kit"
+            exit 1
+          }
+          "QT_ANDROID_ROOT=$verRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Qt 版本根目录: $verRoot"
+          $toolRoots = @($env:IQTA_TOOLS, (Join-Path (Split-Path $verRoot -Parent) 'Tools')) |
+                      Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          $make = @(foreach ($r in $toolRoots) {
+            Get-ChildItem $r -Directory -Filter 'mingw*_64' -ErrorAction SilentlyContinue |
+              ForEach-Object { Join-Path $_.FullName 'bin\mingw32-make.exe' } |
+              Where-Object { Test-Path $_ } | Sort-Object | Select-Object -Last 1
+          }) | Select-Object -First 1
+          if (-not $make) {
+            Write-Host "::error::找不到 mingw32-make.exe（tools_mingw1310 未装上？IQTA_TOOLS=$env:IQTA_TOOLS）"
+            exit 1
+          }
+          Write-Host "GNU make: $make"
+          Split-Path $make -Parent | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # FFmpeg 的 configure 用 Get-Command sh / perl 找 POSIX 工具；Git for Windows 把它们
+      # 放在 usr\bin，而 runner 默认 PATH 只有 Git\cmd 与 Git\bin。后面 GITHUB_PATH 里
+      # 追加的目录排在最前，会盖住同名工具，这里只补这一个目录、不整块改 PATH。
+      - name: Expose Git's usr\bin (sh + perl)
+        shell: bash
+        run: |
+          sh_path=$(command -v sh || true)
+          perl_path=$(command -v perl || true)
+          [ -n "$sh_path" ] && [ -n "$perl_path" ] || { echo "::error::Git 的 sh/perl 未找到"; exit 1; }
+          cygpath -w "$(dirname "$sh_path")" >> "$GITHUB_PATH"
+          ls -l "$sh_path" "$perl_path"
+
+      # FFmpeg configure 在库里是 100644（Git for Windows 不看模式位，本机跑得起来），
+      # CI checkout 后 sh 直接 exec 会 Permission denied。
+      - name: Mark FFmpeg configure executable
+        shell: bash
+        run: |
+          set -e
+          f=src/remotedesk/thridparty/ffmpeg/FFmpeg-n6.1.2/configure
+          test -f "$f" || { echo "::error::$f 不在库里"; exit 1; }
+          chmod +x "$f"
+          ls -l "$f"
+
+      - name: Install Android SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ProgressPreference = 'SilentlyContinue'
+          $sdk = Join-Path $env:RUNNER_TEMP 'android-sdk'
+          $mgr = Join-Path $sdk 'cmdline-tools\latest\bin\sdkmanager.bat'
+          if (-not (Test-Path $mgr)) {
+            $zip = Join-Path $env:RUNNER_TEMP 'cmdline-tools.zip'
+            $stage = Join-Path $env:RUNNER_TEMP 'cmdline-tools-stage'
+            # 取最新一版 cmdline-tools：build-tools;37.0.0 / platforms;android-36 是 2025 年
+            # 之后才出现的包，老 sdkmanager 解析不了新仓库元数据
+            $url = 'https://dl.google.com/android/repository/commandlinetools-win-16111833_latest.zip'
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+                break
+              } catch {
+                Write-Host "第 $i 次取 cmdline-tools 失败：$($_.Exception.Message)"
+                Start-Sleep -Seconds (10 * $i)
+              }
+            }
+            if (-not (Test-Path $zip)) { Write-Host '::error::cmdline-tools 三次都没取到'; exit 1 }
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Expand-Archive -Path $zip -DestinationPath $stage -Force
+            # zip 里的根目录就叫 cmdline-tools，而 sdkmanager 要求 …/cmdline-tools/latest/bin
+            $latest = Join-Path $sdk 'cmdline-tools\latest'
+            Remove-Item $latest -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force -Path (Split-Path $latest) | Out-Null
+            Move-Item -Path (Join-Path $stage 'cmdline-tools') -Destination $latest -Force
+          }
+          if (-not (Test-Path $mgr)) { Write-Host "::error::sdkmanager.bat 未就位：$mgr"; exit 1 }
+          # license 不先签下来，--install 会在第一个需要授权的包上非零退出
+          (1..30 | ForEach-Object { 'y' }) | & $mgr --licenses --sdk_root=$sdk | Select-Object -Last 2
+          & $mgr --sdk_root=$sdk --install `
+              "platform-tools" "platforms;$env:ANDROID_PLATFORM" `
+              "build-tools;$env:ANDROID_BUILD_TOOLS" "ndk;$env:ANDROID_NDK_VER" "cmake;3.31.6"
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::sdkmanager --install 失败 (exit $LASTEXITCODE)"; exit 1 }
+          foreach ($need in @("ndk\$env:ANDROID_NDK_VER\ndk-build.cmd",
+                              "build-tools\$env:ANDROID_BUILD_TOOLS\apksigner.bat",
+                              "platforms\$env:ANDROID_PLATFORM\android.jar",
+                              'cmake\3.31.6\bin\ninja.exe')) {
+            if (-not (Test-Path (Join-Path $sdk $need))) {
+              Write-Host "::error::SDK 缺 $need"; exit 1
+            }
+          }
+          "ANDROID_SDK_ROOT=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # AGP 8 只认 ANDROID_HOME（ANDROID_SDK_ROOT 已废弃）；androiddeployqt 生成的
+          # local.properties 里 sdk.dir 也来自这个根目录，两个变量都给同一份 SDK
+          "ANDROID_HOME=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Android SDK: $sdk"
+
+      - name: Build APK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # 构建脚本自己写日志（build_android\android_build-<时间戳>.log），这里只做透传；
+          # 步骤退出码必须原样交给 Actions，否则门槛会被 tee 的 0 覆盖
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File src/android_build_script/build_android.ps1 `
+              -DeploymentType Release -BuildDir (Join-Path $env:GITHUB_WORKSPACE 'build_android')
+          exit $LASTEXITCODE
+
+      - name: Collect APK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # 只认脚本 zipalign+apksigner 之后落地的正式名字；android-build 目录里还有
+          # gradle 自己产出的 -unsigned 和 androiddeployqt 拷的 QtRemoteDesktop.apk，
+          # 那两个装了会报 INSTALL_PARSE_FAILED_NOT_APK
+          $apk = Get-ChildItem -Path build_android -Filter 'android-build-release.apk' -Recurse -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $apk) { Write-Host '::error::没找到已签名的 android-build-release.apk'; exit 1 }
+          Write-Host "APK: $($apk.FullName) ($($apk.Length) bytes)"
+          Copy-Item $apk.FullName $env:ARTIFACT_NAME -Force
+          Get-Item $env:ARTIFACT_NAME | Select-Object Name, Length
+          exit 0
+
+      - name: Verify artifact exists
+        shell: bash
+        run: |
+          test -f "$ARTIFACT_NAME" || { echo "::error::产物缺失: $ARTIFACT_NAME"; exit 1; }
+          ls -la "$ARTIFACT_NAME"
+
+      - name: Dump logs to logs branch
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          BR="logs-android-arm64-v8a"
+          git config user.email "ci@remotedesk.local"
+          git config user.name "remotedesk-ci"
+          git fetch origin "$BR" 2>/dev/null || true
+          git checkout -B "$BR" "origin/$BR" 2>/dev/null || git checkout -B "$BR"
+          mkdir -p ci-logs
+          {
+            echo "=== pwd: $(pwd)"
+            echo "=== env ==="
+            env | grep -iE 'qt_|android|java' | sort
+            for f in build_output/ffmpeg_build-6.1.2-android-arm64/configure.log \
+                     build_output/ffmpeg_build-6.1.2-android-arm64/make.log; do
+              echo "=== $f ==="
+              cat "$f" 2>/dev/null || echo "(不存在)"
+            done
+            # 日志名带时间戳（gradle daemon 会长期占住固定名字的写句柄），全部收进来
+            for f in build_android/android_build*.log; do
+              [ -f "$f" ] || continue
+              echo "=== $f ==="
+              tail -c 400000 "$f" || true
+            done
+            echo "=== 错误摘要 ==="
+            grep -inE "error|undefined|cannot find|No such file|Permission denied|FAILED:|fatal" \
+              build_android/android_build*.log 2>/dev/null | tail -250
+          } > ci-logs/all.log
+          # .gitignore 里有 build*/，必须 -f 才加得进来
+          git add -f ci-logs/all.log
+          git commit -m "ci logs: Android arm64-v8a run ${{ github.run_id }} $(date -u +%Y%m%d%H%M%S)" || true
+          git push --force origin "$BR"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64-v8a
+          path: ${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
+
   # 汇总发布：各 job 并发往同一个 release 传文件会互相覆盖（release 是同一个对象），
   # 所以改成各 job 只交产物，由这一个 job 一次性上传。
   release:
     name: Publish release
-    needs: [build, build-macos]
+    needs: [build, build-macos, build-android]
     # macOS 刚接入，链接级问题可能还要几轮才能清干净，所以它不参与发布门槛：
     # Windows/Linux 全绿就照发，macOS 失败时那个 asset 自然不存在（glob 落空不影响发布）。
+    # Android 反过来：APK 一旦进不了门槛，release 又会变成"看起来有产物但没有安装包"
+    # （v1.5.2 之前就是这个状态），所以它的 result 必须是 success。
     # always() + !cancelled() 是为了让 mac job 跑完（成功或失败）而不是把它当不存在；
-    # 真正的门槛仍然是 needs.build.result == 'success'。
     if: >-
       always() && !cancelled() &&
       startsWith(github.ref, 'refs/tags/') &&
-      needs.build.result == 'success'
+      needs.build.result == 'success' &&
+      needs['build-android'].result == 'success'
     runs-on: ubuntu-22.04
     steps:
       - name: Download artifacts
@@ -1176,3 +1438,4 @@ jobs:
           files: |
             release-assets/*/*.zip
             release-assets/*/*.tar.gz
+            release-assets/*/*.apk

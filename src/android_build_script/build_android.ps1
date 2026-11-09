@@ -1,9 +1,11 @@
 # ============================================================================
 # QtRemoteDesktop Android one-key build (Qt 6 + arm64-v8a)
 #
-# Produces a debug APK from src/ with:
+# Produces a signed APK from src/ with:
 #   Qt 6.x android_arm64_v8a kit, ANDROID_ABI=arm64-v8a,
-#   USE_FFMPEG=OFF, USE_WEBRTC=OFF, BUILD_THIRDPARTY=OFF.
+#   USE_FFMPEG=ON (MediaCodec cross-build), USE_WEBRTC=OFF, BUILD_THIRDPARTY=OFF.
+#   Deployment type defaults to Release (what CI publishes); pass -DeploymentType
+#   Debug for a debuggable package.
 #
 # Usage:
 #   build_android.bat
@@ -24,6 +26,8 @@ param(
     [string]$BuildDir = "",
     [string]$SdkRoot = $env:ANDROID_SDK_ROOT,
     [string]$NdkRoot = $env:ANDROID_NDK_ROOT,
+    [ValidateSet('Release', 'Debug')]
+    [string]$DeploymentType = 'Release',
     [switch]$Clean
 )
 
@@ -32,7 +36,6 @@ param(
 # terminating NativeCommandError. Keep it 'Continue' and check $LASTEXITCODE.
 $ErrorActionPreference = 'Continue'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$LogFile = if ($BuildDir) { Join-Path $BuildDir 'android_build.log' } else { Join-Path $env:TEMP 'rd_android_build.log' }
 
 function Stop-Build([string]$Message) {
     Write-Host ""
@@ -66,10 +69,25 @@ if (-not $QtRoot) {
     Stop-Build "Qt for Android not found. Set QT_ANDROID_ROOT, e.g. -QtRoot E:\programes\Qt\Qt\6.11.1"
 }
 $QtAndroid = Join-Path $QtRoot 'android_arm64_v8a'
-$QtHost = Join-Path $QtRoot 'mingw_64'
 $QtCmake = Join-Path $QtAndroid 'bin\qt-cmake.bat'
 if (-not (Test-Path $QtCmake)) { Stop-Build "Missing Qt kit: $QtCmake (expected android_arm64_v8a)" }
-if (-not (Test-Path $QtHost)) { Stop-Build "Missing Qt host tools: $QtHost (expected mingw_64)" }
+# QT_HOST_PATH must be a desktop kit: androiddeployqt/moc/rcc are host executables and
+# live there, not in the android kit. The offline installer calls it mingw_64 while other
+# Qt 6 layouts use win64_mingw, and a runner may only have the MSVC one - accept any kit
+# dir that actually carries androiddeployqt.
+$QtHost = $null
+foreach ($name in @('mingw_64', 'win64_mingw', 'msvc2022_64')) {
+    $cand = Join-Path $QtRoot $name
+    if (Test-Path (Join-Path $cand 'bin\androiddeployqt.exe')) { $QtHost = $cand; break }
+}
+if (-not $QtHost) {
+    $QtHost = Get-ChildItem $QtRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'bin\androiddeployqt.exe') } |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $QtHost) {
+    Stop-Build "No desktop Qt kit with androiddeployqt.exe found under $QtRoot (QT_HOST_PATH is required)."
+}
 
 # --------------------------------------------------------------- locate SDK --
 if (-not $SdkRoot) {
@@ -105,15 +123,17 @@ if (-not $env:JAVA_HOME -or -not (Test-Path $env:JAVA_HOME)) {
 }
 
 if (-not $BuildDir) { $BuildDir = Join-Path $RepoRoot 'build_android' }
-$LogFile = Join-Path $BuildDir 'android_build.log'
-$ApkRel = 'remotedesk\android-build\build\outputs\apk\debug\android-build-debug.apk'
-$ApkPath = Join-Path $BuildDir $ApkRel
+# Per-run log name: the Gradle daemon spawned by the build step inherits the write
+# handle that Tee-Object opens and keeps it for hours (idle timeout), so a fixed name
+# is unopenable for the next run and every Tee in this run starts warning.
+$LogFile = Join-Path $BuildDir ("android_build-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 Write-Host "Qt kit     : $QtAndroid"
 Write-Host "Qt host    : $QtHost"
 Write-Host "Android SDK: $SdkRoot"
 Write-Host "Android NDK: $NdkRoot"
 Write-Host "Build dir  : $BuildDir"
+Write-Host "Deploy type: $DeploymentType"
 Write-Host ""
 
 if ($Clean -and (Test-Path $BuildDir)) {
@@ -143,7 +163,7 @@ $configureArgs = @(
     '-G', 'Ninja',
     '-DCMAKE_BUILD_TYPE=Release',
     "-DQT_HOST_PATH=$QtHost",
-    '-DQT_ANDROID_DEPLOYMENT_TYPE=Debug',
+    "-DQT_ANDROID_DEPLOYMENT_TYPE=$DeploymentType",
     '-DQT_ANDROID_ABIS=arm64-v8a',
     '-DANDROID_ABI=arm64-v8a',
     "-DANDROID_SDK_ROOT=$SdkRoot",
@@ -172,15 +192,71 @@ if ($LASTEXITCODE -ne 0) {
     Stop-Build "Gradle/CMake build failed (exit $LASTEXITCODE). Full log: $LogFile"
 }
 
-# ------------------------------------------------------------- summary -------
-if (-not (Test-Path $ApkPath)) {
+# ------------------------------------------------ sign + verify + summary --
+# 按「最新写出的 android-build*.apk」取包，不预设路径：上一轮签好的
+# android-build-release.apk 会一直留在原地，先匹配预期路径就等于反复签同一个旧包。
+$found = Get-ChildItem -Path $BuildDir -Filter 'android-build*.apk' -Recurse -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $found) {
     $found = Get-ChildItem -Path $BuildDir -Filter '*.apk' -Recurse -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($found) { $ApkPath = $found.FullName }
 }
-if (-not (Test-Path $ApkPath)) {
+if (-not $found) {
     Stop-Build "Build reported success but no APK was found under $BuildDir."
 }
+$ApkPath = $found.FullName
+
+$buildToolsDir = Find-NewestDir (Join-Path $SdkRoot 'build-tools')
+$apksigner = if ($buildToolsDir) { Join-Path $buildToolsDir 'apksigner.bat' } else { $null }
+if (-not $apksigner -or -not (Test-Path $apksigner)) {
+    Stop-Build "apksigner.bat not found under $SdkRoot\build-tools. Install a Build-Tools package via SDK Manager."
+}
+
+# Qt 6 的 androiddeployqt/CMake 流程不签 release 包（QT_ANDROID_KEYSTORE_* 那几个属性
+# 只有 Qt5 + qmake 的 gradle 模板会读），交出来的是 android-build-release-unsigned.apk。
+# 这里用仓库内置的 debug.keystore 显式签名，本机和 CI 才是同一个签名身份，老包才能
+# 覆盖升级。zipalign 必须在 sign 之前：APK Signing Block 一写进去，再对齐就作废签名。
+# Debug 包由 gradle 用「这台机器自动生成」的 debug keystore 签，只适合本机调试，不发布。
+if ($DeploymentType -eq 'Release') {
+    $keystore = Join-Path $PSScriptRoot 'debug.keystore'
+    if (-not (Test-Path $keystore)) {
+        Stop-Build "src/android_build_script/debug.keystore is missing; the release APK cannot be signed."
+    }
+    $zipalign = Join-Path $buildToolsDir 'zipalign.exe'
+    if (-not (Test-Path $zipalign)) {
+        Stop-Build "zipalign.exe not found in $buildToolsDir."
+    }
+    $aligned = "$ApkPath.aligned"
+    $signed = Join-Path (Split-Path $ApkPath -Parent) ((Split-Path $ApkPath -Leaf) -replace '-unsigned', '')
+    Write-Host "[android-build] zipalign + apksigner (debug.keystore)..."
+    # 不能再 Tee 进 $LogFile：gradle daemon 继承了前面 Tee-Object 打开的写句柄并一直持有，
+    # 追加会报 "being used by another process"。这两个工具只在失败时才有诊断价值。
+    $alignOut = & $zipalign -f 4 $ApkPath $aligned 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $alignOut | ForEach-Object { Write-Host $_ }
+        Stop-Build "zipalign failed (exit $LASTEXITCODE) on $ApkPath"
+    }
+    $signOut = & $apksigner sign --ks $keystore --ks-pass 'pass:android' --key-pass 'pass:android' `
+        --ks-key-alias androiddebugkey --out $signed $aligned 2>&1
+    Remove-Item $aligned -Force -ErrorAction SilentlyContinue
+    # apksigner 会在输出旁边留一份增量签名缓存，只对本机重签有用，不该混进产物目录
+    Remove-Item "$signed.idsig" -Force -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -ne 0) {
+        $signOut | ForEach-Object { Write-Host $_ }
+        Stop-Build "apksigner sign failed (exit $LASTEXITCODE)."
+    }
+    if ($signed -ne $ApkPath) { Remove-Item $ApkPath -Force -ErrorAction SilentlyContinue }
+    $ApkPath = $signed
+}
+
+# A release APK that silently ends up unsigned installs nowhere, so verify the
+# signature here and fail the build - CI gates the release on this job.
+$verifyOut = & $apksigner verify --print-certs --min-sdk-version 29 $ApkPath 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $verifyOut | ForEach-Object { Write-Host $_ }
+    Stop-Build "APK signature verification failed (exit $LASTEXITCODE): $ApkPath"
+}
+$verifyOut | Select-String -Pattern 'DN:|Verified using' | ForEach-Object { Write-Host " $($_.Line.Trim())" }
 
 $size = (Get-Item $ApkPath).Length
 # Compute SHA256 via .NET: Get-FileHash relies on module autoloading and is not

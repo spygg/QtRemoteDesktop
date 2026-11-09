@@ -158,15 +158,28 @@ Rules the script enforces (also documented in `build_onekey_build*.ps1`, `build.
 3. **Verify before shipping:** each exe must contain its own FFmpeg marker (`av_channel_layout_default` for 6.1.2, `avcodec_register_all` for 3.4.8), must *not* contain the other one, and must contain openh264 (`WelsCreateSVCEncoder`). The pair script does this automatically.
 4. Compare the printed SHA256 with the exe actually deployed on the target machine.
 
-### Android: one command, debug APK (Qt 6, arm64-v8a)
+### Android: one command, signed APK (Qt 6, arm64-v8a)
 
 ```bat
 src\android_build_script\build_android.bat
 ```
 
-The script uses the Qt 6 `android_arm64_v8a` kit via `qt-cmake` (`QT_HOST_PATH=mingw_64`) with
+The script uses the Qt 6 `android_arm64_v8a` kit via `qt-cmake` (`QT_HOST_PATH` = whichever desktop
+kit carries `androiddeployqt.exe`: `mingw_64`, `win64_mingw` or `msvc2022_64`) with
 `ANDROID_ABI=arm64-v8a`, `USE_FFMPEG=ON`, `USE_WEBRTC=OFF`, `BUILD_THIRDPARTY=OFF`, builds the
-`apk` target, and finally prints the **APK path, size, SHA256 and the `adb install` command**.
+`apk` target, **signs** it and finally prints the **APK path, size, SHA256 and the `adb install`
+command**.
+
+Deployment type defaults to `Release` (what CI publishes); `-DeploymentType Debug` produces a
+debuggable package. Qt 6's CMake flow does **not** sign anything — `androiddeployqt` hands over
+`android-build-release-unsigned.apk`, and `QT_ANDROID_KEYSTORE_*` properties are only read by the
+Qt 5/qmake Gradle template. So the script zipaligns and runs `apksigner sign` itself with the
+keystore committed at `src\android_build_script\debug.keystore` (alias `androiddebugkey`,
+password `android`), then re-checks with `apksigner verify` and **fails the build** if the package
+is not verifiably signed. That keystore is the community debug identity, i.e. its private key is
+public — it makes the signature stable across machines so `adb install -r` upgrades in place, but
+it is not a store publishing key. A `-DeploymentType Debug` package is signed by Gradle's
+per-machine debug keystore, so it cannot be upgraded by the Release APK without uninstalling first.
 
 Before CMake is configured, `src\android_build_script\build_ffmpeg_android.ps1` cross-compiles
 **FFmpeg 6.1.2 for arm64-v8a** into `build_output\ffmpeg_install-6.1.2-android-arm64`
@@ -190,20 +203,24 @@ Prerequisites:
 | Item | Requirement |
 |---|---|
 | Qt | Qt 6.x with the **android_arm64_v8a** kit **and** the matching **mingw_64** host tools (`bin\qt-cmake.bat`) |
-| Android SDK | platform-tools, build-tools, one platform, `cmake` + `ninja` |
+| Android SDK | platform-tools, build-tools (with `apksigner` + `zipalign`), one platform, `cmake` + `ninja` |
 | NDK | r27 (`27.1.12297006` preferred; other versions can be forced with `-NdkRoot`) |
 | JDK | 17+ with `JAVA_HOME` set (Gradle requirement) |
 | Gradle | wrapper already points at the Tencent mirror; Maven Central can be accelerated with an Aliyun init script (`%USERPROFILE%\.gradle\init.gradle`) when needed |
 
 Environment overrides: `QT_ANDROID_ROOT`, `ANDROID_SDK_ROOT`, `ANDROID_NDK_ROOT`;
-script options: `-QtRoot`, `-BuildDir`, `-NdkRoot`, `-Clean`.
+script options: `-QtRoot`, `-BuildDir`, `-NdkRoot`, `-DeploymentType`, `-Clean`.
 
 Install and start:
 
 ```bat
-adb install -r build_android\remotedesk\android-build\build\outputs\apk\debug\android-build-debug.apk
+adb install -r build_android\remotedesk\android-build\build\outputs\apk\release\android-build-release.apk
 adb shell am start -n com.radiometer.remotedesk/.MainActivity
 ```
+
+Tagged GitHub Releases also carry the same package as `QtRemoteDesktop-android-arm64-v8a.apk`
+(Android API 29+ / arm64-v8a only); the Android build is part of the release gate, so if that job
+fails no Release is published at all.
 
 Then on the phone tap **开始共享屏幕** → in the system dialog choose **整个屏幕** → **立即开始**,
 and open `http://<phone-ip>:8080` on the PC browser (`admin` / `admin`).
@@ -516,15 +533,25 @@ src\windows_build_script\build_32pair.bat xp       :: 只出 FFmpeg 3.4.8
 3. **出包即校验：** exe 必须含自身版本的 FFmpeg 标记（6.1.2 为 `av_channel_layout_default`，3.4.8 为 `avcodec_register_all`），且不能含另一版本的标记，同时必须含 openh264（`WelsCreateSVCEncoder`）。双目标脚本会自动做这一步。
 4. 用打印出的 SHA256 与目标机上实际部署的 exe 比对，确认部署版就是本次出包。
 
-### Android：一条命令出 debug APK（Qt 6 / arm64-v8a）
+### Android：一条命令出已签名 APK（Qt 6 / arm64-v8a）
 
 ```bat
 src\android_build_script\build_android.bat
 ```
 
-脚本用 Qt 6 的 `android_arm64_v8a` 套件调用 `qt-cmake`（`QT_HOST_PATH=mingw_64`），固定
+脚本用 Qt 6 的 `android_arm64_v8a` 套件调用 `qt-cmake`（`QT_HOST_PATH` 取带
+`androiddeployqt.exe` 的那个桌面套件：`mingw_64`、`win64_mingw` 或 `msvc2022_64`），固定
 `ANDROID_ABI=arm64-v8a`、`USE_FFMPEG=ON`、`USE_WEBRTC=OFF`、`BUILD_THIRDPARTY=OFF`，构建
-`apk` 目标，结束时打印 **APK 路径、大小、SHA256 和 `adb install` 命令**。
+`apk` 目标，**签名**，结束时打印 **APK 路径、大小、SHA256 和 `adb install` 命令**。
+
+部署类型默认 `Release`（CI 发布的就是它），`-DeploymentType Debug` 出可调试包。Qt 6 的 CMake
+流程**不做任何签名**：`androiddeployqt` 交出来的是 `android-build-release-unsigned.apk`，
+而 `QT_ANDROID_KEYSTORE_*` 那几个属性只有 Qt5/qmake 的 Gradle 模板会读。所以脚本自己
+zipalign + `apksigner sign`，签名身份用入库的 `src\android_build_script\debug.keystore`
+（别名 `androiddebugkey`、口令 `android`），随后 `apksigner verify` 复检，验不过直接判构建失败。
+这份 keystore 就是社区通用的 debug 身份、私钥是公开的——它只保证换机器签名不变、
+`adb install -r` 能覆盖升级，不是上架商店用的正式签名。`-DeploymentType Debug` 的包由 Gradle
+用「这台机器自动生成」的 debug keystore 签名，签名不同，Release 包必须先卸载才能装上去。
 
 配置 CMake 之前，脚本会调用 `src\android_build_script\build_ffmpeg_android.ps1` 把
 **FFmpeg 6.1.2 交叉编译成 arm64-v8a** 静态库，产物在
@@ -546,20 +573,23 @@ APK 因静态链接 libavcodec/libavutil/libswscale 会增大 **约 0.7 MB**（�
 | 项目 | 要求 |
 |---|---|
 | Qt | Qt 6.x，带 **android_arm64_v8a** 套件 **和** 对应的 **mingw_64** 主机工具（`bin\qt-cmake.bat`） |
-| Android SDK | platform-tools、build-tools、一个 platform、`cmake` + `ninja` |
+| Android SDK | platform-tools、build-tools（含 `apksigner` + `zipalign`）、一个 platform、`cmake` + `ninja` |
 | NDK | r27（优先 `27.1.12297006`，其它版本用 `-NdkRoot` 指定） |
 | JDK | 17+，且设置 `JAVA_HOME`（Gradle 要求） |
 | Gradle 镜像 | wrapper 已指向腾讯镜像；Maven Central 慢时可在 `%USERPROFILE%\.gradle\init.gradle` 里加阿里云仓库 |
 
 环境变量覆盖：`QT_ANDROID_ROOT`、`ANDROID_SDK_ROOT`、`ANDROID_NDK_ROOT`；
-脚本参数：`-QtRoot`、`-BuildDir`、`-NdkRoot`、`-Clean`。
+脚本参数：`-QtRoot`、`-BuildDir`、`-NdkRoot`、`-DeploymentType`、`-Clean`。
 
 安装与启动：
 
 ```bat
-adb install -r build_android\remotedesk\android-build\build\outputs\apk\debug\android-build-debug.apk
+adb install -r build_android\remotedesk\android-build\build\outputs\apk\release\android-build-release.apk
 adb shell am start -n com.radiometer.remotedesk/.MainActivity
 ```
+
+打 tag 的 GitHub Release 里也带同一份包，文件名 `QtRemoteDesktop-android-arm64-v8a.apk`
+（仅 Android API 29+ / arm64-v8a）。Android 腿在发布门槛内：这条 job 失败就**不出 Release**。
 
 然后在手机上点 **开始共享屏幕** → 系统弹窗选 **整个屏幕** → **立即开始**，
 电脑浏览器打开 `http://<手机IP>:8080`（默认 `admin` / `admin`）。
