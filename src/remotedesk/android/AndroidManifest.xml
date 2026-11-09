@@ -1,9 +1,15 @@
 <?xml version="1.0"?>
+<!-- versionCode / versionName 用 Qt 官方模板里的占位符原文，不要写成字面量，也不要删掉：
+     androiddeployqt 是先把 Qt 模板铺到 android-build/、再用本目录覆盖同名文件、最后对
+     输出目录里那份 manifest 做占位符替换（见 qtbase tools/androiddeployqt 的
+     updateAndroidManifest）。所以占位符在这里照样会被换成 QT_ANDROID_VERSION_NAME /
+     QT_ANDROID_VERSION_CODE（来自 src/CMakeLists.txt 的 PROJECT_VERSION）；一旦写成字面量
+     或整行删除，替换就找不到目标，历史上 APK 恒显示 1.0.0 就是字面量盖掉了这条链路。 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.radiometer.remotedesk"
     android:installLocation="auto"
-    android:versionCode="1"
-    android:versionName="1.0.0">
+    android:versionCode="-- %%INSERT_VERSION_CODE%% --"
+    android:versionName="-- %%INSERT_VERSION_NAME%% --">
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />

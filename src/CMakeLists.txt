@@ -8,7 +8,10 @@ endif()
 
 # 同时启用 C：三方源码（srtp/usrsctp/ffmpeg）是 C，且 cmake 的 GCC 版本判断
 # （如 FFmpeg 的 GCC13 补丁）依赖 CMAKE_C_COMPILER_ID/VERSION。
-project(QtRemoteDesktop C CXX)
+# VERSION 必须写在 project() 里：project() 会把 PROJECT_VERSION 设成同名普通变量，
+# 之后 set(PROJECT_VERSION ...) 会被它盖掉（空值），Android versionName 与 macOS bundle
+# 版本都取自这里，写在外面等于没写。发版时和 tag 一起改这一行。
+project(QtRemoteDesktop VERSION 1.5.4 LANGUAGES C CXX)
 
 # 单配置生成器（Makefiles/Ninja）未指定类型时不带 -O2，性能会明显变差；
 # 默认 Release。多配置生成器（Visual Studio 等）由 --config 决定，跳过。
@@ -31,7 +34,21 @@ if(WIN32 AND NOT MSVC AND CMAKE_CXX_COMPILER)
     endif()
 endif()
 
-set(PROJECT_VERSION 1.0.0)
+# versionCode 由版本号算出来（1.5.4 -> 10504），不再硬编 1：版本号不同但 versionCode 相同
+# 的两个包，在 Android 上无法互相覆盖升级。
+math(EXPR APP_VERSION_CODE
+    "${PROJECT_VERSION_MAJOR} * 10000 + ${PROJECT_VERSION_MINOR} * 100 + ${PROJECT_VERSION_PATCH}")
+
+# APP_VERSION 给 main.cpp 的 --version。另外两个给 res/main.rc 的 VERSIONINFO：那里数值形式
+# （FILEVERSION 1,5,4,0）和字符串形式（"FileVersion"）都要，windres 只做文本替换，宏体里的逗号合法；
+# 字符串由 .rc 里的 STR() 串化，不能在这里带引号 —— `\"1.5.4.0\"` 这种写法 gcc/cl 能消化，
+# windres 会当成语法错误（mingw530 与 mingw810 两版 windres 实测都这样）。
+# 发布链上只有这两个 windres，MSVC 的 rc.exe 不参与。
+add_compile_definitions(
+    APP_VERSION="${PROJECT_VERSION}"
+    APP_VER_NUM=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0
+    APP_VER_PLAIN=${PROJECT_VERSION}.0
+)
 
 # ---- OpenSSL 解析策略 ----
 # 默认：强制系统 OpenSSL（243 上即 1.1.1 / 90 上即 3.0），旧逻辑。

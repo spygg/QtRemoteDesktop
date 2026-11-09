@@ -261,7 +261,7 @@ if(ANDROID AND QT_VERSION_MAJOR EQUAL 6)
         QT_ANDROID_ABIS "arm64-v8a"
         QT_ANDROID_PACKAGE_NAME "com.radiometer.remotedesk"
         QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
-        QT_ANDROID_VERSION_CODE "1"
+        QT_ANDROID_VERSION_CODE "${APP_VERSION_CODE}"
         QT_ANDROID_MIN_SDK_VERSION "29"
         # 自定义包源目录：MainActivity / CaptureService（MediaProjection）+ Manifest。
         # androiddeployqt 会先铺 Qt 默认模板，再用该目录覆盖同名文件。

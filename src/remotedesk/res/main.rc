@@ -2,9 +2,15 @@
 IDI_ICON1       ICON      "main.ico"
 1 24 DISCARDABLE "uac.manifest"
 
+// 版本三处（FILEVERSION/PRODUCTVERSION 数值、FileVersion/ProductVersion 字符串）都来自
+// src/CMakeLists.txt 的 APP_VER_NUM / APP_VER_PLAIN，发版只改 project(... VERSION) 一行。
+// 字符串走串化而不是带引号的宏：值里带 \" 的 -D 写法 gcc/cl 能消化，windres 会报语法错误。
+#define RD_STR2(x) #x
+#define RD_STR(x) RD_STR2(x)
+
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION APP_VER_NUM
+ PRODUCTVERSION APP_VER_NUM
  FILEFLAGS 0x0L
  FILEFLAGSMASK 0x3fL
  FILEOS 0x00040004L
@@ -17,12 +23,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", ""
             VALUE "FileDescription", "QtRemoteDesktop"
-            VALUE "FileVersion", "1.0.0.0"
+            VALUE "FileVersion", RD_STR(APP_VER_PLAIN)
             VALUE "LegalCopyright", "Copyright (C) 2020"
             VALUE "InternalName", "QtRemoteDesktop App"
             VALUE "OriginalFilename", "QtRemoteDesktop.exe"
             VALUE "ProductName", "QtRemoteDesktop"
-            VALUE "ProductVersion", "1.0.0.0"
+            VALUE "ProductVersion", RD_STR(APP_VER_PLAIN)
         END
     END
     BLOCK "VarFileInfo"

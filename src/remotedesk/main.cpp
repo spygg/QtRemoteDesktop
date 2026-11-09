@@ -278,7 +278,7 @@ int main(int argc, char* argv[])
 #else
     SingleApplication a(argc, argv);
 #endif
-    QCoreApplication::setApplicationVersion("1.0.0");
+    QCoreApplication::setApplicationVersion(APP_VERSION);
 
     // 命令行解析放在单实例判断之前：已有实例运行时 --help/--version 仍可用
     QCommandLineParser parser;
