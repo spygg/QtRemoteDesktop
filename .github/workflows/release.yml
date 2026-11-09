@@ -1352,6 +1352,17 @@ jobs:
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $apk) { Write-Host '::error::没找到已签名的 android-build-release.apk'; exit 1 }
           Write-Host "APK: $($apk.FullName) ($($apk.Length) bytes)"
+          # 步骤日志要 admin 权限才读得到，annotation 不用——发布判据是「大小 + 签名身份」，
+          # 所以把这两条做成 annotation，下一轮不用找人帮忙贴日志。
+          $bt = Get-ChildItem -Path (Join-Path $env:ANDROID_HOME 'build-tools') -Directory -ErrorAction SilentlyContinue |
+                 Sort-Object Name -Descending | Select-Object -First 1
+          $signer = 'unknown'
+          if ($bt) {
+            $vout = & (Join-Path $bt.FullName 'apksigner.bat') verify --print-certs $apk.FullName 2>&1
+            $vline = $vout | Select-String -Pattern 'certificate DN' | Select-Object -First 1
+            if ($vline) { $signer = $vline.ToString().Trim() }
+          }
+          Write-Host "::notice::APK=$($apk.Length)B signer=$signer"
           Copy-Item $apk.FullName $env:ARTIFACT_NAME -Force
           Get-Item $env:ARTIFACT_NAME | Select-Object Name, Length
           exit 0
