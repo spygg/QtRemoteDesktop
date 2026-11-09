@@ -1178,49 +1178,28 @@ jobs:
       # 两个组件缺一不可：android_arm64_v8a 是被编译的 kit，桌面 kit 是 QT_HOST_PATH
       # （moc/uic/rcc/androiddeployqt 都是主机可执行文件）。tools_mingw1310 只为
       # FFmpeg 的交叉编译提供 mingw32-make —— NDK 和 Git 都不带 GNU make。
-      - name: Install Qt 6 host kit (MinGW)
-        id: qt_host
-        continue-on-error: true
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_ANDROID_VER }}
-          host: windows
-          target: desktop
-          arch: win64_mingw
-          tools: tools_mingw1310
-          cache: false
-
-      - name: Retry Install Qt 6 host kit
-        if: steps.qt_host.outcome == 'failure'
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_ANDROID_VER }}
-          host: windows
-          target: desktop
-          arch: win64_mingw
-          tools: tools_mingw1310
-          cache: false
-
-      - name: Install Qt 6 android kit
-        id: qt_android
-        continue-on-error: true
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_ANDROID_VER }}
-          host: windows
-          target: android
-          arch: android_arm64_v8a
-          cache: false
-
-      - name: Retry Install Qt 6 android kit
-        if: steps.qt_android.outcome == 'failure'
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_ANDROID_VER }}
-          host: windows
-          target: android
-          arch: android_arm64_v8a
-          cache: false
+      #
+      # 这里不走 jurplel/install-qt-action：它默认的 aqtinstall 3.3.* 还按 Qt 6.9 的
+      # 仓库路径找包，6.11 起桌面 kit 变成 qt6_6111/qt6_6111_mingw/、移动 kit 整体搬到
+      # all_os/android/，aqt 直接报 "Failed to locate XML data for Qt version"（v1.5.3
+      # 的这条腿就是挂在这）。上游修好了但没发版，所以用仓库内的镜像安装器，
+      # 它读 Updates.xml 自己拼 URL，并按官方 .sha1 校验每个归档。
+      - name: Install Qt 6 from mirror
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # 装到 RUNNER_TEMP 而不是工作区里：这份 Qt 有 3G+，留在 checkout 目录里会污染
+          # 后面"Dump logs to logs branch"那步的 git 视角
+          $qtRoot = Join-Path $env:RUNNER_TEMP 'Qt'
+          "QT_MIRROR_ROOT=$qtRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          for ($i = 1; $i -le 2; $i++) {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File src/android_build_script/install_qt_mirror.ps1 `
+                -Version $env:QT_ANDROID_VER -OutDir $qtRoot
+            if ($LASTEXITCODE -eq 0) { break }
+            Write-Host "镜像安装第 $i 次失败 (exit $LASTEXITCODE)"
+            Start-Sleep -Seconds (15 * $i)
+          }
+          if ($LASTEXITCODE -ne 0) { Write-Host '::error::Qt 镜像安装两次都失败'; exit 1 }
 
       - name: JDK 17 (Gradle)
         uses: actions/setup-java@v4
@@ -1228,33 +1207,30 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # install-qt-action 把 QT_ROOT_DIR 指向它刚装的那个 kit，而脚本要的是同时装着
-      # android_arm64_v8a 与桌面 kit 的版本根目录；make 也是同样道理，工具链目录名
-      # 随上游变化，按实际文件找而不是写死。
+      # 安装器把 kit 摆在 <OutDir>\<版本>\<kit>，和官方安装目录同构，所以这里给脚本的是
+      # 版本根目录（build_android.ps1 要在里面同时找 android kit 和桌面 kit）；
+      # make 的目录名随上游变化，按实际文件找而不是写死。
       - name: Export Qt roots
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $verRoot = Split-Path $env:QT_ROOT_DIR -Parent
-          if (-not (Test-Path (Join-Path $verRoot 'android_arm64_v8a\bin\qt-cmake.bat'))) {
-            Write-Host "::error::$verRoot 下没有 android_arm64_v8a kit"
-            exit 1
+          $verRoot = Join-Path $env:QT_MIRROR_ROOT $env:QT_ANDROID_VER
+          foreach ($need in @('android_arm64_v8a\bin\qt-cmake.bat', 'mingw_64\bin\androiddeployqt.exe')) {
+            if (-not (Test-Path (Join-Path $verRoot $need))) {
+              Write-Host "::error::$verRoot 下没有 $need"
+              exit 1
+            }
           }
           "QT_ANDROID_ROOT=$verRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Qt 版本根目录: $verRoot"
-          $toolRoots = @($env:IQTA_TOOLS, (Join-Path (Split-Path $verRoot -Parent) 'Tools')) |
-                      Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
-          $make = @(foreach ($r in $toolRoots) {
-            Get-ChildItem $r -Directory -Filter 'mingw*_64' -ErrorAction SilentlyContinue |
-              ForEach-Object { Join-Path $_.FullName 'bin\mingw32-make.exe' } |
-              Where-Object { Test-Path $_ } | Sort-Object | Select-Object -Last 1
-          }) | Select-Object -First 1
+          $make = @(Get-ChildItem (Join-Path $env:QT_MIRROR_ROOT 'Tools') -Recurse -Filter 'mingw32-make.exe' -ErrorAction SilentlyContinue |
+              Sort-Object FullName | Select-Object -Last 1) | Select-Object -First 1
           if (-not $make) {
-            Write-Host "::error::找不到 mingw32-make.exe（tools_mingw1310 未装上？IQTA_TOOLS=$env:IQTA_TOOLS）"
+            Write-Host "::error::找不到 mingw32-make.exe（tools_mingw1310 未装上？）"
             exit 1
           }
-          Write-Host "GNU make: $make"
-          Split-Path $make -Parent | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "GNU make: $($make.FullName)"
+          $make.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # FFmpeg 的 configure 用 Get-Command sh / perl 找 POSIX 工具；Git for Windows 把它们
       # 放在 usr\bin，而 runner 默认 PATH 只有 Git\cmd 与 Git\bin。后面 GITHUB_PATH 里
