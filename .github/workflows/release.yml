@@ -1289,16 +1289,41 @@ jobs:
           if (-not (Test-Path $mgr)) { Write-Host "::error::sdkmanager.bat 未就位：$mgr"; exit 1 }
           # license 不先签下来，--install 会在第一个需要授权的包上非零退出
           (1..30 | ForEach-Object { 'y' }) | & $mgr --licenses --sdk_root=$sdk | Select-Object -Last 2
-          & $mgr --sdk_root=$sdk --install `
-              "platform-tools" "platforms;$env:ANDROID_PLATFORM" `
-              "build-tools;$env:ANDROID_BUILD_TOOLS" "ndk;$env:ANDROID_NDK_VER" "cmake;3.31.6"
-          if ($LASTEXITCODE -ne 0) { Write-Host "::error::sdkmanager --install 失败 (exit $LASTEXITCODE)"; exit 1 }
+          # 逐包安装而不是一把梭：sdkmanager 整条命令返回 0 但某个包没落地是可能发生的
+          # （dispatch run 42574044435 就是 ndk 没装上却 exit 0），一次一个才能把
+          # --verbose 的输出对到具体包上，也才知道该重试谁。
+          $diskFree = [math]::Round((Get-PSDrive $sdk.Substring(0, 1)).Free / 1GB, 1)
+          Write-Host "安装前 $env:RUNNER_TEMP 所在盘剩余: $diskFree GB"
+          $pkgs = @('platform-tools', "platforms;$env:ANDROID_PLATFORM",
+                    "build-tools;$env:ANDROID_BUILD_TOOLS", "ndk;$env:ANDROID_NDK_VER", 'cmake;3.31.6')
+          foreach ($p in $pkgs) {
+            $tag = $p -replace '[^A-Za-z0-9._-]', '_'
+            $log = Join-Path $env:RUNNER_TEMP "sdkmanager-$tag.log"
+            $ok = $false
+            for ($i = 1; $i -le 2; $i++) {
+              & $mgr --sdk_root=$sdk --verbose --install $p 2>&1 | Tee-Object -FilePath $log | Out-Null
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Write-Host "包 $p 第 $i 次安装失败 (exit $LASTEXITCODE)"
+              Start-Sleep -Seconds (10 * $i)
+            }
+            if (-not $ok) {
+              Write-Host "::error::sdkmanager 装 $p 两次都失败，$log 最后 40 行："
+              if (Test-Path $log) { Get-Content $log -Tail 40 }
+              exit 1
+            }
+            Write-Host "已装: $p"
+          }
+          Write-Host ("安装后剩余: {0} GB" -f [math]::Round((Get-PSDrive $sdk.Substring(0, 1)).Free / 1GB, 1))
           foreach ($need in @("ndk\$env:ANDROID_NDK_VER\ndk-build.cmd",
                               "build-tools\$env:ANDROID_BUILD_TOOLS\apksigner.bat",
                               "platforms\$env:ANDROID_PLATFORM\android.jar",
                               'cmake\3.31.6\bin\ninja.exe')) {
             if (-not (Test-Path (Join-Path $sdk $need))) {
-              Write-Host "::error::SDK 缺 $need"; exit 1
+              Write-Host "::error::SDK 缺 $need"
+              # sdkmanager 说成功但东西不在时，目录树就是唯一的线索
+              Get-ChildItem (Split-Path (Join-Path $sdk $need) -Parent) -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "  $($_.Name)" }
+              exit 1
             }
           }
           "ANDROID_SDK_ROOT=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
