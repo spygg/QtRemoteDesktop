@@ -183,7 +183,13 @@ if ($LASTEXITCODE -ne 0) {
 
 # --------------------------------------------------------------- build -------
 Write-Host "[android-build] Build (target apk)..."
-& cmake --build $BuildDir --target apk 2>&1 | Tee-Object -FilePath $LogFile -Append
+# 这一行不能走 Tee/管道。gradle 客户端把 daemon 分出去（detached）之后自己就退了，但
+# daemon 继承了这根 stdout 并一持有就是几小时（本机见过它锁住日志文件），PowerShell 等不
+# 到 EOF，整步就永远停在 "Android package built successfully" 之后 —— CI run
+# 42576449148 正是这个形状：日志不再动，步骤 in_progress 到作业超时。
+# cmd 的重定向交给子进程的是一个真文件句柄，PowerShell 只等 cmd 退出，daemon 持有日志
+# 文件也不会把步骤吊住（实测同一场景：管道 40s 不返回，cmd 形式 0.5s 返回）。
+cmd /c "cmake --build `"$BuildDir`" --target apk > `"$LogFile`" 2>&1"
 if ($LASTEXITCODE -ne 0) {
     $firstError = Get-Content $LogFile -Tail 300 |
         Select-String -Pattern '^(FAILED:|ninja: error|CMake Error)|error: ' |
@@ -191,6 +197,8 @@ if ($LASTEXITCODE -ne 0) {
     if ($firstError) { Stop-Build $firstError.Line.Trim() }
     Stop-Build "Gradle/CMake build failed (exit $LASTEXITCODE). Full log: $LogFile"
 }
+# 输出不再实时透传，收尾时把尾部交回调用方（CI 日志里至少能看到 gradle 的结论）
+Get-Content $LogFile -Tail 25 | ForEach-Object { Write-Host $_ }
 
 # ------------------------------------------------ sign + verify + summary --
 # 按「最新写出的 android-build*.apk」取包，不预设路径：上一轮签好的
