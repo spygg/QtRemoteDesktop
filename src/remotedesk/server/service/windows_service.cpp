@@ -467,6 +467,30 @@ static void syncExistingServiceConfig(SC_HANDLE svc, const wchar_t* cmdLine)
     if (!samePath) {
         const std::wstring wcmd = QString::fromWCharArray(cmdLine).toStdWString();
         wprintf(L"  binary path updated to: %ls\n", wcmd.c_str());
+
+        // 改的正是映像路径 → 此刻还在跑的进程属于旧 exe（换目录升级）。不停它，
+        // 后面的 startInstalledService 只会看到 "already running" 并报告成功，
+        // 对外服务的仍然是旧版本。只动启动类型（同映像）时不重启，免得无谓打断会话。
+        SERVICE_STATUS st;
+        ZeroMemory(&st, sizeof(st));
+        if (QueryServiceStatus(svc, &st)
+            && st.dwCurrentState != SERVICE_STOPPED
+            && st.dwCurrentState != SERVICE_STOP_PENDING) {
+            if (!ControlService(svc, SERVICE_CONTROL_STOP, &st)) {
+                wprintf(L"  warning: cannot stop the previous instance: %lu"
+                        L" - the OLD executable keeps serving until it is restarted\n",
+                        GetLastError());
+            } else {
+                wprintf(L"  stopping the previous instance so the new one takes over...\n");
+                for (int i = 0; i < 100 && st.dwCurrentState != SERVICE_STOPPED; ++i) {
+                    Sleep(200);
+                    if (!QueryServiceStatus(svc, &st))
+                        break;
+                }
+                if (st.dwCurrentState != SERVICE_STOPPED)
+                    wprintf(L"  warning: the previous instance did not stop within 20s\n");
+            }
+        }
     }
     if (!autoStart)
         wprintf(L"  start type set to automatic.\n");
@@ -676,7 +700,7 @@ bool WindowsService::install()
         // 旧目录一删服务永久起不来，而用户看到的仍然是"装了但打不开"。
         wprintf(L"Service already registered; reconciling its configuration...\n");
         svc = OpenServiceW(scm, SERVICE_NAME,
-                           SERVICE_START | SERVICE_QUERY_STATUS |
+                           SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
                            SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG);
         if (!svc) {
             wprintf(L"OpenServiceW failed: %lu\n", GetLastError());

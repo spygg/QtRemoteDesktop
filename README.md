@@ -101,7 +101,9 @@ It then performs four steps in order:
 2. Prints the commands it is about to execute (`sc create …`, `net start …`) so they can be
    reviewed or handed to an administrator.
 3. Registers `QtRemoteDesktop` as an auto-start service. If the service already exists but points
-   at a different executable (the usual shape of an upgrade into a new folder), the path is corrected.
+   at a different executable (the usual shape of an upgrade into a new folder), the path is corrected
+   and the instance that is still running the *old* executable is stopped, so the new build is what
+   actually serves.
 4. Starts the service, waits until it reports RUNNING, and prints the address to open — the scheme
    depends on the package: builds with a usable TLS runtime serve `https://` (self-signed, so
    approve the browser warning once), the rest fall back to plain `http://`.
@@ -461,7 +463,8 @@ QtRemoteDesktop.exe --install
 1. 自查管理员权限。不是管理员时用同样的参数把自己重新拉起一次（弹一次 UAC，点「是」），
    而不是只打一行错误码就走 —— 那是「装完没报错、网页却打不开」最常见的来源。
 2. 打印即将执行的命令（`sc create …`、`net start …`），便于对照，也便于转交管理员代跑。
-3. 注册为开机自启服务。若同名服务已存在但指向另一个 exe（换了目录做升级就是这样），会校正路径。
+3. 注册为开机自启服务。若同名服务已存在但指向另一个 exe（换了目录做升级就是这样），会校正路径，
+   并停掉仍在跑旧映像的实例，让新版本真正接管对外服务。
 4. 立即启动并等到 RUNNING，然后打印真正可访问的地址。协议取决于包里有没有可用的 TLS 运行库：
    有就是 `https://`（自签证书，浏览器告警选「继续访问」一次即可），没有则自动降级为 `http://`。
 
