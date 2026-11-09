@@ -9,6 +9,13 @@ public:
     static bool uninstall();
     static int run(int argc, char* argv[]);
 
+    // 非管理员时把完全相同的参数交给一个提权进程执行并等它结束。
+    // 返回 true 表示调用方应直接以 *outExitCode 作为退出码返回（安装/卸载已在子进程里做完）；
+    // 返回 false 表示当前已是管理员，调用方继续在本进程执行。
+    // 背景：--install 只需要一次管理员权限，但现场几乎都是从普通 cmd 敲的 ——
+    // OpenSCManagerW 静默失败只打印一行错误码，用户看到的是"没报错但页面打不开"。
+    static bool relaunchElevatedIfNeeded(int argc, char* argv[], int* outExitCode);
+
 private:
     static bool isAdmin();
     // outProcess 非空时返回已打开的进程句柄（调用方负责 CloseHandle）。

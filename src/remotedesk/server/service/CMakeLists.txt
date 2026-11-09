@@ -26,6 +26,8 @@ if(WIN32)
         SecureInputProcess
         Rdpserver
         wtsapi32
+        # ShellExecuteExW(runas)：--install/--uninstall 缺管理员权限时自我提权
+        shell32
         radiometer_breakpad
     )
 endif()

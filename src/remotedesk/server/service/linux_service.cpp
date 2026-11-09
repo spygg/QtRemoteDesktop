@@ -6,9 +6,14 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QImageWriter>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMessageLogContext>
+#include <QSslSocket>
+#include <QStringList>
 #include <QTimer>
 
 #include <cerrno>
@@ -2809,6 +2814,117 @@ static bool installSessionAgentUnit(const char* exePath, const char* user,
 }
 
 
+// ---------------------------------------------------------------------------
+// --install 的交付物是"服务在跑"，不是"unit 文件写好了"。
+// 以前非 root 跑 install 只把 unit 落到当前目录，再打印三行 sudo 提示：看上去成功、
+// 实际什么都没装（和 Windows 上"注册完不启动"是同一个坑）。现在和 Windows 走同一套
+// 流程：权限自查 → 打印要执行的命令 → 执行安装 → 执行启动并复核状态。
+// ---------------------------------------------------------------------------
+
+// 执行一条命令并等它结束，返回退出码；-1 = 起不来或超时被杀。
+static int runAndWaitArgv(char* const argv[], int timeoutMs)
+{
+    const pid_t pid = fork();
+    if (pid == 0) {
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    if (pid < 0)
+        return -1;
+
+    int status = 0;
+    const int stepMs = 100;
+    for (int waited = 0; waited < timeoutMs; waited += stepMs) {
+        const pid_t done = waitpid(pid, &status, WNOHANG);
+        if (done == pid)
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (done < 0)
+            return -1;
+        usleep(stepMs * 1000);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    return -1;
+}
+
+// 服务真正会用的 scheme/端口：判定与 RDPServer::loadServerConfig 一致 —— 配置文件
+// 缺失用默认值（ssl + 8080），运行环境没有可用 TLS 库时服务端自己降级成明文。
+// 打印错协议等于当场制造一次"连得上但看不到页面、原因还不明显"的失败。
+// exeDir 由调用方用 readlink(/proc/self/exe) 反推：安装路径上没有 QCoreApplication，
+// applicationDirPath() 会直接失败。
+static void printAccessUrls(const char* exeDir)
+{
+    bool ssl = true;
+    int port = 8080;
+    char cfgPath[4608] = {};
+    snprintf(cfgPath, sizeof(cfgPath), "%s/server_config.json", exeDir);
+
+    QFile file(QString::fromLocal8Bit(cfgPath));
+    if (file.open(QIODevice::ReadOnly)) {
+        const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+        if (root.contains(QStringLiteral("ssl")))
+            ssl = root.value(QStringLiteral("ssl")).toBool();
+        if (root.contains(QStringLiteral("httpPort")))
+            port = root.value(QStringLiteral("httpPort")).toInt();
+    }
+    if (ssl && !QSslSocket::supportsSsl())
+        ssl = false;
+    if (port <= 0 || port > 65535)
+        port = 8080;
+
+    printf("\nOpen in a browser (default account: admin / admin):\n");
+    const QStringList ips = RDPServer::getLocalIpAddr();
+    for (const QString& ip : ips)
+        printf("    %s://%s:%d\n", ssl ? "https" : "http", ip.toUtf8().constData(), port);
+    if (ssl)
+        printf("  Self-signed certificate: the browser warning is expected, choose \"Continue\".\n");
+}
+
+// 非 root 时把完全相同的参数交给 sudo/pkexec 重跑本程序。用 execv 替换当前进程：
+// 输出继续落在用户自己的终端，密码提示也能正常显示，不需要父进程复述结果。
+static int relaunchWithPrivilegesIfNeeded(int argc, char* argv[], const char* exePath)
+{
+    static const char* const kRunners[] = { "/usr/bin/sudo", "/bin/sudo",
+                                            "/usr/bin/pkexec", nullptr };
+    const char* runner = nullptr;
+    for (int i = 0; kRunners[i]; ++i) {
+        if (access(kRunners[i], X_OK) == 0) {
+            runner = kRunners[i];
+            break;
+        }
+    }
+
+    // argv = runner + 绝对路径的 exe + 原参数（argv[0] 可能是相对路径，提权后不可靠）
+    char* args[64];
+    int n = 0;
+    if (runner)
+        args[n++] = const_cast<char*>(runner);
+    args[n++] = const_cast<char*>(exePath);
+    for (int i = 1; i < argc && n < 62; ++i)
+        args[n++] = argv[i];
+    args[n] = nullptr;
+
+    printf("[0] This needs root; re-running the same command elevated:\n      ");
+    for (int i = 0; args[i]; ++i)
+        printf("%s ", args[i]);
+    printf("\n");
+
+    if (!runner) {
+        fprintf(stderr, "remotedesk: neither sudo nor pkexec is available."
+                        " Run the install as root yourself:\n      %s --install\n", exePath);
+        fflush(nullptr);
+        return 1;
+    }
+    // execv 用新程序替换当前进程，进程不会正常退出，stdio 缓冲也就不会被 flush。
+    fflush(nullptr);
+    execv(runner, args);   // 成功则不再返回
+    fprintf(stderr, "remotedesk: cannot execute %s: %s\n", runner, strerror(errno));
+    fprintf(stderr, "run the install as root yourself:\n      %s --install\n", exePath);
+    fflush(nullptr);
+    return 1;
+}
+
+
 int LinuxService::install(int argc, char* argv[])
 {
     // 非 systemd 主机（其他 init / 部分容器）：生成 unit 文件没有任何意义，
@@ -2819,7 +2935,6 @@ int LinuxService::install(int argc, char* argv[])
         return 1;
     }
 
-    (void)argc;
     char exePath[4096] = {};
     ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
     if (len > 0)
@@ -2828,6 +2943,11 @@ int LinuxService::install(int argc, char* argv[])
         snprintf(exePath, sizeof(exePath), "%s", argv[0]);
     else
         snprintf(exePath, sizeof(exePath), "/usr/local/bin/QtRemoteDesktop");
+
+    // 权限自查：unit 要写进 /etc/systemd/system，服务要交给 systemd 拉起，两者都得是
+    // root。非 root 以前只是把 unit 落在当前目录 + 打印提示，现在直接提权重跑同参数。
+    if (geteuid() != 0)
+        return relaunchWithPrivilegesIfNeeded(argc, argv, exePath);
 
     // 服务运行用户：
     //   默认 root —— 这是"接管任意用户会话"唯一可行的方式（/run/lightdm/root/:0
@@ -3093,17 +3213,73 @@ int LinuxService::install(int argc, char* argv[])
         fprintf(stdout, "  sudo chown -R %s:%s %s   # 让服务能写 logs/ 与 server_config.json\n",
                 runAs, runGroup[0] ? runGroup : runAs, appDir);
     }
-    if (installToEtc) {
-        fprintf(stdout, "  unit installed: %s\n", finalPath);
-        fprintf(stdout, "  sudo systemctl daemon-reload\n");
-        fprintf(stdout, "  sudo systemctl enable remotedesk\n");
-        fprintf(stdout, "  sudo systemctl start remotedesk\n");
-    } else {
-        fprintf(stdout, "  unit generated: %s\n", finalPath);
-        fprintf(stdout, "  sudo cp %s /etc/systemd/system/\n", finalPath);
-        fprintf(stdout, "  sudo systemctl daemon-reload\n");
-        fprintf(stdout, "  sudo systemctl enable remotedesk\n");
-        fprintf(stdout, "  sudo systemctl start remotedesk\n");
+    if (!installToEtc) {
+        // 已经是 root 却写不进 /etc/systemd/system（只读根等特殊环境）：这一步做不下去
+        // 就明确失败，别再打印一串"看起来像成功"的 sudo 提示。
+        fprintf(stderr, "remotedesk: cannot write /etc/systemd/system (unit went to %s).\n",
+                finalPath);
+        fprintf(stderr, "put it in place and start it by hand:\n");
+        fprintf(stderr, "      sudo cp %s /etc/systemd/system/\n", finalPath);
+        fprintf(stderr, "      sudo systemctl daemon-reload\n");
+        fprintf(stderr, "      sudo systemctl enable --now remotedesk\n");
+        return 1;
+    }
+
+    fprintf(stdout, "  unit installed: %s\n", finalPath);
+
+    // 先声明再执行：这三条就是本次安装真正跑的命令，也是转给别人代跑或事后复现的依据。
+    fprintf(stdout, "[1/3] systemctl daemon-reload\n");
+    fprintf(stdout, "[2/3] systemctl enable remotedesk.service\n");
+    fprintf(stdout, "[3/3] systemctl start remotedesk.service\n");
+
+    char* const argvReload[] = { const_cast<char*>("systemctl"),
+                                 const_cast<char*>("daemon-reload"), nullptr };
+    char* const argvEnable[] = { const_cast<char*>("systemctl"),
+                                 const_cast<char*>("enable"),
+                                 const_cast<char*>("remotedesk.service"), nullptr };
+    char* const argvStart[] = { const_cast<char*>("systemctl"),
+                                const_cast<char*>("start"),
+                                const_cast<char*>("remotedesk.service"), nullptr };
+    char* const argvActive[] = { const_cast<char*>("systemctl"),
+                                 const_cast<char*>("is-active"),
+                                 const_cast<char*>("--quiet"),
+                                 const_cast<char*>("remotedesk.service"), nullptr };
+
+    int rc = runAndWaitArgv(argvReload, 30000);
+    if (rc != 0) {
+        fprintf(stderr, "systemctl daemon-reload failed (exit %d)\n", rc);
+        return 1;
+    }
+    rc = runAndWaitArgv(argvEnable, 30000);
+    if (rc != 0) {
+        fprintf(stderr, "systemctl enable remotedesk.service failed (exit %d)\n", rc);
+        fprintf(stderr, "inspect it with: systemctl status remotedesk / journalctl -u remotedesk\n");
+        return 1;
+    }
+    // --delay 会生成 ExecStartPre=-/bin/sleep N，start 要等它跑完才返回；
+    // 客户端超时用默认 60s 会把还在正常启动的 job 误判成失败。
+    rc = runAndWaitArgv(argvStart, (startDelaySec + 90) * 1000);
+    if (rc != 0) {
+        fprintf(stderr, "systemctl start remotedesk.service failed (exit %d)\n", rc);
+        fprintf(stderr, "inspect it with: systemctl status remotedesk / journalctl -u remotedesk\n");
+        return 1;
+    }
+    // Type=simple 的 start 返回 0 只说明 job 成功派发，不等于进程还活着，再问一次实际状态。
+    if (runAndWaitArgv(argvActive, 10000) != 0) {
+        fprintf(stderr, "remotedesk.service is not active after start "
+                        "(it may have crashed on launch).\n");
+        fprintf(stderr, "inspect it with: systemctl status remotedesk / journalctl -u remotedesk -n 50\n");
+        return 1;
+    }
+    fprintf(stdout, "remotedesk.service is running.\n");
+
+    {
+        char exeDir[4096];
+        snprintf(exeDir, sizeof(exeDir), "%s", exePath);
+        char* dirSlash = strrchr(exeDir, '/');
+        if (dirSlash)
+            *dirSlash = '\0';
+        printAccessUrls(exeDir);
     }
 
     // Wayland 上的真实桌面采集必须在用户会话里完成：把代理的 user unit 一起装。

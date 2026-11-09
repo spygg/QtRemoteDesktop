@@ -86,6 +86,40 @@ bin\QtRemoteDesktop.exe                            # Windows
 
 > Default ports: HTTP `8080`, WebSocket `8081` (= HTTP port + 1). All options: `--no-ssl`, `--log-level debug|info|warning|critical`, `--install/--uninstall/--service`, `--helper`.
 
+### Windows: install as a service (optional)
+
+Run from the extracted folder — a plain shell is enough, no need to elevate first:
+
+```bat
+QtRemoteDesktop.exe --install
+```
+
+It then performs four steps in order:
+
+1. Checks whether the shell has administrator privileges; if not, it re-runs the same command
+   elevated (one UAC prompt) instead of failing with a single unreadable error line.
+2. Prints the commands it is about to execute (`sc create …`, `net start …`) so they can be
+   reviewed or handed to an administrator.
+3. Registers `QtRemoteDesktop` as an auto-start service. If the service already exists but points
+   at a different executable (the usual shape of an upgrade into a new folder), the path is corrected.
+4. Starts the service, waits until it reports RUNNING, and prints the address to open — the scheme
+   depends on the package: builds with a usable TLS runtime serve `https://` (self-signed, so
+   approve the browser warning once), the rest fall back to plain `http://`.
+
+`QtRemoteDesktop.exe --uninstall` removes it and also auto-elevates. Running the exe directly keeps
+working and needs no install at all.
+
+### Linux: install as a service
+
+```bash
+./bin/QtRemoteDesktop --install
+```
+
+Same shape as Windows: without root it re-runs the identical command under `sudo` (or `pkexec`),
+then prints `systemctl daemon-reload`, `systemctl enable remotedesk.service` and
+`systemctl start remotedesk.service` before actually executing them, and finally reports whether the
+unit is active together with the address to open.
+
 ### Linux Wayland: systemd service + user-session agent
 
 On Wayland only a process inside the logged-in user session can capture the real desktop; a root-only service captures the virtual X display (Xvnc) instead. `--install` therefore sets up two cooperating processes:
@@ -413,6 +447,35 @@ bin\QtRemoteDesktop.exe                            # Windows
 4. 完成，浏览器即开始控制远端桌面。🎉
 
 > 默认端口：HTTP `8080`，WebSocket `8081`（= HTTP 端口 + 1）。常用参数：`--no-ssl`、`--log-level debug|info|warning|critical`、`--install/--uninstall/--service`、`--helper`。
+
+### Windows：装成服务（可选，开机自启）
+
+在解压目录里直接执行，普通 cmd 就够，不需要事先提权：
+
+```bat
+QtRemoteDesktop.exe --install
+```
+
+它按四步走完：
+
+1. 自查管理员权限。不是管理员时用同样的参数把自己重新拉起一次（弹一次 UAC，点「是」），
+   而不是只打一行错误码就走 —— 那是「装完没报错、网页却打不开」最常见的来源。
+2. 打印即将执行的命令（`sc create …`、`net start …`），便于对照，也便于转交管理员代跑。
+3. 注册为开机自启服务。若同名服务已存在但指向另一个 exe（换了目录做升级就是这样），会校正路径。
+4. 立即启动并等到 RUNNING，然后打印真正可访问的地址。协议取决于包里有没有可用的 TLS 运行库：
+   有就是 `https://`（自签证书，浏览器告警选「继续访问」一次即可），没有则自动降级为 `http://`。
+
+卸载：`QtRemoteDesktop.exe --uninstall`（同样自动提权）。不装服务、直接双击或前台运行一样可用。
+
+### Linux：装成服务
+
+```bash
+./bin/QtRemoteDesktop --install
+```
+
+与 Windows 同一套流程：不是 root 时先用 `sudo`（或 `pkexec`）把同样的参数重跑一次；然后打印
+`systemctl daemon-reload`、`systemctl enable remotedesk.service`、`systemctl start remotedesk.service`
+三条命令并真的执行它们；最后复核 unit 是否 active，并打印真正可访问的地址。
 
 ### Linux Wayland：systemd 服务 + 用户会话代理
 

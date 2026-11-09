@@ -300,7 +300,7 @@ int main(int argc, char* argv[])
     // 以下选项由 service 层（platformMain）在进入 main 前处理并提前退出，
     // 此处注册仅为让 --help 完整展示全部能力；重复传入不会产生副作用。
     parser.addOption(QCommandLineOption("service", "以系统服务方式运行（由 service 层处理）"));
-    parser.addOption(QCommandLineOption("install", "安装系统服务（由 service 层处理）"));
+    parser.addOption(QCommandLineOption("install", "安装并立即启动系统服务；权限不足时自动提权重跑（由 service 层处理）"));
     parser.addOption(QCommandLineOption("uninstall", "卸载系统服务（由 service 层处理）"));
     parser.addOption(QCommandLineOption("helper", "以 helper 进程运行，连接服务端 WS 端口 <wsPort>（Windows）", "wsPort"));
     parser.addOption(QCommandLineOption("secure-input", "以安全输入 helper 运行，监听 <wsPort>（Windows）", "wsPort"));

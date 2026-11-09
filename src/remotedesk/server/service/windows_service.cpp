@@ -6,11 +6,17 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMessageLogContext>
+#include <QSslSocket>
+#include <QStringList>
 #include <QTimer>
 
 #include <string>
+#include <cstring>
 #include <wchar.h>
+#include <shellapi.h>
 #include <winsvc.h>
 #include <wtsapi32.h>
 
@@ -18,6 +24,8 @@ void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg)
 void applyLogLevelFromArgs(int argc, char* argv[]);
 // 安装目录 ACL 固化（定义在 install() 之后，见下方说明）
 static bool ensureInstallDirAcl(QString* why);
+// exe 所在目录（同文件下方定义）
+static QString exeDirPath();
 
 #define SERVICE_NAME L"QtRemoteDesktop"
 
@@ -385,6 +393,238 @@ bool WindowsService::isAdmin()
     return !!admin;
 }
 
+// 服务真正会用的 scheme/端口，判定与 RDPServer::loadServerConfig 一致：
+//   配置文件缺失 → 默认 ssl=true、端口 8080；
+//   目标机没有可用的 TLS 运行库 → 服务端自己降级成明文。
+// 装完打印错协议等于把用户引向一次"连得上但没有页面、且看不出原因"的失败，
+// 所以这里宁可把服务端的判定重算一遍，而不是照抄 README 里的 http://。
+static void resolveListenEndpoint(bool* useSsl, quint16* port)
+{
+    bool ssl = true;
+    int httpPort = 8080;
+
+    QFile file(exeDirPath() + QStringLiteral("/server_config.json"));
+    if (file.open(QIODevice::ReadOnly)) {
+        const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+        if (root.contains(QStringLiteral("ssl")))
+            ssl = root.value(QStringLiteral("ssl")).toBool();
+        if (root.contains(QStringLiteral("httpPort")))
+            httpPort = root.value(QStringLiteral("httpPort")).toInt();
+    }
+    if (ssl && !QSslSocket::supportsSsl())
+        ssl = false;
+
+    *useSsl = ssl;
+    *port = (httpPort > 0 && httpPort < 65536) ? static_cast<quint16>(httpPort) : 8080;
+}
+
+static void printAccessUrls()
+{
+    bool useSsl = false;
+    quint16 port = 8080;
+    resolveListenEndpoint(&useSsl, &port);
+
+    const std::wstring scheme = (useSsl ? QStringLiteral("https") : QStringLiteral("http")).toStdWString();
+    wprintf(L"\n");
+    wprintf(L"Open in a browser (default account: admin / admin):\n");
+    const QStringList ips = RDPServer::getLocalIpAddr();
+    for (const QString& ip : ips) {
+        const std::wstring wip = ip.toStdWString();
+        wprintf(L"    %ls://%ls:%u\n", scheme.c_str(), wip.c_str(), static_cast<unsigned>(port));
+    }
+    if (useSsl)
+        wprintf(L"  Self-signed certificate: the browser warning is expected, choose \"Continue\".\n");
+}
+
+// 已注册服务的配置对不上本次安装时改写。查询/改写失败都只告警：路径本来就一致的
+// 占多数，剩下的是管理员手工调过服务配置的情形，覆盖它反而不对。
+static void syncExistingServiceConfig(SC_HANDLE svc, const wchar_t* cmdLine)
+{
+    std::wstring buf;
+    buf.resize(4096);
+    DWORD needed = 0;
+    QUERY_SERVICE_CONFIGW* cfg = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(&buf[0]);
+    if (!QueryServiceConfigW(svc, cfg, static_cast<DWORD>(buf.size() * sizeof(wchar_t)), &needed)) {
+        wprintf(L"  warning: QueryServiceConfigW failed: %lu (leaving the service as is)\n",
+                GetLastError());
+        return;
+    }
+
+    const bool samePath = cfg->lpBinaryPathName && _wcsicmp(cfg->lpBinaryPathName, cmdLine) == 0;
+    const bool autoStart = cfg->dwStartType == SERVICE_AUTO_START;
+    if (samePath && autoStart) {
+        wprintf(L"  existing service already points at this executable; nothing to change.\n");
+        return;
+    }
+
+    if (!ChangeServiceConfigW(svc, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
+                              SERVICE_ERROR_NORMAL, cmdLine, NULL, NULL, NULL, NULL, NULL, NULL)) {
+        wprintf(L"  warning: ChangeServiceConfigW failed: %lu (service keeps its old configuration)\n",
+                GetLastError());
+        return;
+    }
+
+    if (!samePath) {
+        const std::wstring wcmd = QString::fromWCharArray(cmdLine).toStdWString();
+        wprintf(L"  binary path updated to: %ls\n", wcmd.c_str());
+    }
+    if (!autoStart)
+        wprintf(L"  start type set to automatic.\n");
+}
+
+// 注册只是"下次开机自启"，装完那一刻并没有任何进程在监听；这里真正把它拉起来并等到
+// RUNNING，失败时把原因（含"起来就退"这种）说清楚。
+static bool startInstalledService(QString* why)
+{
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!scm) {
+        *why = QStringLiteral("OpenSCManagerW failed: %1").arg(GetLastError());
+        return false;
+    }
+    SC_HANDLE svc = OpenServiceW(scm, SERVICE_NAME, SERVICE_START | SERVICE_QUERY_STATUS);
+    if (!svc) {
+        *why = QStringLiteral("OpenServiceW failed: %1").arg(GetLastError());
+        CloseServiceHandle(scm);
+        return false;
+    }
+
+    bool running = false;
+    SERVICE_STATUS ss;
+    ZeroMemory(&ss, sizeof(ss));
+    if (QueryServiceStatus(svc, &ss) && ss.dwCurrentState == SERVICE_RUNNING) {
+        running = true;
+    } else if (!StartServiceW(svc, 0, NULL)) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_SERVICE_ALREADY_RUNNING)
+            running = true;
+        else
+            *why = QStringLiteral("StartServiceW failed: %1").arg(err);
+    } else {
+        // 最多等 20s：服务初始化要建采集/编码上下文，START_PENDING 期间不能判失败。
+        for (int i = 0; i < 100; ++i) {
+            if (!QueryServiceStatus(svc, &ss)) {
+                *why = QStringLiteral("QueryServiceStatus failed: %1").arg(GetLastError());
+                break;
+            }
+            if (ss.dwCurrentState == SERVICE_RUNNING) {
+                running = true;
+                break;
+            }
+            if (ss.dwCurrentState == SERVICE_STOPPED) {
+                *why = QStringLiteral("the service stopped immediately after starting "
+                                      "(wrong Qt runtime/PE bitness, or port 8080 already busy)");
+                break;
+            }
+            Sleep(200);
+        }
+        if (!running && why->isEmpty())
+            *why = QStringLiteral("service did not reach RUNNING within 20s (last state=%1)")
+                       .arg(ss.dwCurrentState);
+    }
+
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return running;
+}
+
+// 本次安装等价的手工命令。提权分支里由父进程先打一遍：子进程有它自己的控制台窗口，
+// 成功时一闪而过，用户必须在自己的终端里看得见"接下来跑什么"。
+static void printInstallPlan(const wchar_t* cmdLine)
+{
+    wprintf(L"[1/2] Install the service (auto-start at boot). Equivalent command:\n");
+    wprintf(L"      sc create %ls binPath= \"%ls\" start= auto\n", SERVICE_NAME, cmdLine);
+    wprintf(L"[2/2] Start it now. Equivalent command:\n");
+    wprintf(L"      net start %ls\n\n", SERVICE_NAME);
+}
+
+// ---------------------------------------------------------------------------
+// 安装/卸载的公共前置：权限自查 + 提权重跑
+//
+// 「只注册不启动」+「失败只打印一行错误码」是现场"install 没报错但页面打不开"的直接
+// 来源：CreateServiceW 写的是开机自启，装完那一刻没有任何进程在监听 8080。现在把整条
+// 链补全：权限不够 → 用同参数把自己提权重跑；注册完 → 立刻启动到 RUNNING；
+// 启动完 → 打印真正可访问的地址。
+// ---------------------------------------------------------------------------
+bool WindowsService::relaunchElevatedIfNeeded(int argc, char* argv[], int* outExitCode)
+{
+    *outExitCode = 0;
+    if (isAdmin())
+        return false;
+
+    wchar_t exePath[MAX_PATH] = { 0 };
+    if (!GetModuleFileNameW(NULL, exePath, MAX_PATH)) {
+        wprintf(L"GetModuleFileNameW failed: %lu\n", GetLastError());
+        *outExitCode = 1;
+        return true;
+    }
+
+    // 原参数原样带给提权后的自身，附加选项（--log-level 之类）不会在提权这一步丢掉。
+    QString params;
+    for (int i = 1; i < argc; ++i) {
+        const QString a = QString::fromLocal8Bit(argv[i]);
+        if (a.isEmpty())
+            continue;
+        params += a.contains(QLatin1Char(' ')) ? QLatin1Char('"') + a + QLatin1Char('"') : a;
+        params += QLatin1Char(' ');
+    }
+    std::wstring wparams = params.toStdWString();
+    const std::wstring wexe = QString::fromWCharArray(exePath).toStdWString();
+
+    // 安装类操作先把计划打印在本终端，再去提权窗口里执行（否则用户看不见要跑什么）。
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--install") == 0) {
+            wchar_t cmdLine[MAX_PATH + 32];
+            swprintf(cmdLine, L"\"%ls\" --service", exePath);
+            printInstallPlan(cmdLine);
+            break;
+        }
+    }
+
+    wprintf(L"This operation needs administrator privileges; the current shell is not elevated.\n");
+    wprintf(L"Re-running the same command elevated - accept the UAC prompt:\n");
+    wprintf(L"    \"%ls\" %ls\n\n", wexe.c_str(), wparams.c_str());
+
+    SHELLEXECUTEINFOW sei;
+    ZeroMemory(&sei, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = exePath;
+    sei.lpParameters = wparams.empty() ? NULL : &wparams[0];
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_CANCELLED)
+            wprintf(L"UAC prompt declined: nothing was changed.\n");
+        else
+            wprintf(L"ShellExecuteExW(runas) failed: %lu\n", err);
+        *outExitCode = 1;
+        return true;
+    }
+
+    WaitForSingleObject(sei.hProcess, 5 * 60 * 1000);
+    DWORD code = 1;
+    GetExitCodeProcess(sei.hProcess, &code);
+    CloseHandle(sei.hProcess);
+    if (code != 0) {
+        *outExitCode = 1;
+        wprintf(L"Elevated run failed (exit code %lu); see the messages in that window.\n", code);
+        return true;
+    }
+    *outExitCode = 0;
+
+    // 提权子进程有它自己的控制台窗口，成功时一闪而过；这里在本终端复述结论，
+    // 免得用户只看到黑框闪现，还得猜到底装没装好。
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--install") == 0) {
+            wprintf(L"Service '%ls' installed and started.\n", SERVICE_NAME);
+            printAccessUrls();
+            break;
+        }
+    }
+    return true;
+}
+
 bool WindowsService::install()
 {
     wchar_t path[MAX_PATH];
@@ -405,6 +645,10 @@ bool WindowsService::install()
     // 传入 wchar_t* 是 UB，服务安装路径会损坏（MinGW 下同样不可依赖）。
     swprintf(cmdLine, L"\"%ls\" --service", path);
 
+    // 先声明再执行：授权受限、只能把命令转给管理员代跑的环境需要能对照，
+    // 出问题时这些命令也是逐条复现的依据（本程序走同一套 SCM API，不落 sc.exe）。
+    printInstallPlan(cmdLine);
+
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
     if (!scm) {
         wprintf(L"OpenSCManagerW failed: %lu\n", GetLastError());
@@ -421,14 +665,40 @@ bool WindowsService::install()
 
     if (svc) {
         wprintf(L"Service '%ls' installed successfully.\n", SERVICE_NAME);
-        CloseServiceHandle(svc);
-        CloseServiceHandle(scm);
-        return TRUE;
+    } else {
+        const DWORD err = GetLastError();
+        if (err != ERROR_SERVICE_EXISTS) {
+            wprintf(L"CreateServiceW failed: %lu\n", err);
+            CloseServiceHandle(scm);
+            return FALSE;
+        }
+        // 已存在：换目录重装（升级最常见的形态）时 ImagePath 还指着旧 exe，
+        // 旧目录一删服务永久起不来，而用户看到的仍然是"装了但打不开"。
+        wprintf(L"Service already registered; reconciling its configuration...\n");
+        svc = OpenServiceW(scm, SERVICE_NAME,
+                           SERVICE_START | SERVICE_QUERY_STATUS |
+                           SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG);
+        if (!svc) {
+            wprintf(L"OpenServiceW failed: %lu\n", GetLastError());
+            CloseServiceHandle(scm);
+            return FALSE;
+        }
+        syncExistingServiceConfig(svc, cmdLine);
+    }
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+
+    QString why;
+    if (!startInstalledService(&why)) {
+        const std::wstring wwhy = why.toStdWString();
+        wprintf(L"Service is registered but FAILED to start: %ls\n", wwhy.c_str());
+        wprintf(L"Check <install dir>\\logs\\, or start it by hand: net start %ls\n", SERVICE_NAME);
+        return FALSE;
     }
 
-    wprintf(L"CreateServiceW failed: %lu\n", GetLastError());
-    CloseServiceHandle(scm);
-    return FALSE;
+    wprintf(L"Service '%ls' is running.\n", SERVICE_NAME);
+    printAccessUrls();
+    return TRUE;
 }
 
 // ---------------------------------------------------------------------------
