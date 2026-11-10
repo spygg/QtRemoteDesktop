@@ -6241,7 +6241,8 @@ void RDPServer::onFrameCaptured(const QImage& frame)
                 if (nowMs - lastSizeReinitMs_ > 3000) {
                     lastSizeReinitMs_ = nowMs;
                     qInfo() << "Capture size changed, reinitializing video encoder";
-                    reinitVideoEncoderForScale();
+                    // 以触发不符的这一帧为准重建，而不是捕获器可能滞后的记录尺寸。
+                    reinitVideoEncoderForScale(frame.width(), frame.height());
                 }
             } else {
                 // 缩放已在编码线程 sws_scale 完成，主线程不再做全帧缩放（避免阻塞输入处理）
@@ -6336,6 +6337,11 @@ void RDPServer::onEncodedFrame(const QByteArray& data, bool isKeyframe, qint64 t
     // 模式门：编码线程与主线程异步，切回图片模式后仍在途的编码帧不能广播，
     // 否则前端会收到无解码器对应的 0x01/0x02 视频帧（花屏/误触发降级）。
     if (currentMode_ != ServerMode::Video)
+        return;
+    // 空包（编码器重建/flush 时的 CSD 或 0 长度输出）必须丢弃：前端会把它当成
+    // 一帧视频喂给 WebCodecs，VideoDecoder 报 "Null or empty decoder buffer" 后
+    // 粘性停摆，转屏等重建场景下直接黑屏。
+    if (data.isEmpty())
         return;
     // [A2] 出站时间戳单调化。两个来源会让客户端看到的帧时间线倒退：
     //   1) 缓存 IDR 回放（replayCachedKeyframe 用旧 ts）；
@@ -7040,9 +7046,9 @@ void RDPServer::createVideoEncoder()
         });
 }
 
-void RDPServer::reinitVideoEncoderForScale()
+void RDPServer::reinitVideoEncoderForScale(int srcW, int srcH)
 {
-    rebuildVideoEncoder(/*onlyIfIdle=*/false);
+    rebuildVideoEncoder(/*onlyIfIdle=*/false, srcW, srcH);
 #ifdef USE_FFMPEG
     // 配置变更触发的重建：把编码器实际跑起来的协议广播出去，客户端据此对齐解码器。
     // 请求 hevc 而本机没有 hevc 编码器时会静默回退 h264，前端若仍按 hevc 配置解码器，
@@ -7138,7 +7144,7 @@ void RDPServer::reapRetiredEncoders()
 // 返回 Deferred 表示"因有在飞帧而推迟"，未对编码器做任何改动；NotApplicable 表示
 // 当前没有可重建的编码器/捕获源（重试也不会成功）；其余情况（含初始化失败回退
 // 图片模式）都算已处理，返回 Done。
-RDPServer::RebuildResult RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
+RDPServer::RebuildResult RDPServer::rebuildVideoEncoder(bool onlyIfIdle, int srcW, int srcH)
 {
     if (!screenCapturer_)
         return RebuildResult::NotApplicable;
@@ -7154,7 +7160,11 @@ RDPServer::RebuildResult RDPServer::rebuildVideoEncoder(bool onlyIfIdle)
     }
 
     const bool wasHardware = videoEncoder_ && videoEncoder_->isHardwareEncoder();
-    int sw = screenCapturer_->width(), sh = screenCapturer_->height();
+    // 尺寸不符时必须以那一帧的真实尺寸重建：捕获器的 width()/height() 可能滞后
+    // 一拍（转屏过程中 MediaProjection 的 buffer 尺寸与记录值不同步），
+    // 用旧值重建会继续不符 → 每 3s 重建一次、帧全被丢弃（转屏后黑屏）。
+    int sw = srcW > 0 ? srcW : screenCapturer_->width();
+    int sh = srcH > 0 ? srcH : screenCapturer_->height();
     int ew = sw, eh = sh;
     if (configScale_ < 100) {
         int tw = ew * configScale_ / 100, th = eh * configScale_ / 100;

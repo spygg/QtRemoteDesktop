@@ -570,7 +570,9 @@ private:
 
     void switchToImageMode();
     bool switchToVideoMode();
-    void reinitVideoEncoderForScale();
+    // srcW/srcH > 0 时以调用方给的源尺寸重建（触发尺寸不符的那一帧），
+    // 否则沿用捕获器当前尺寸。
+    void reinitVideoEncoderForScale(int srcW = 0, int srcH = 0);
     // 退役当前编码器并重建（reinitVideoEncoderForScale 的通用实现）。
     // onlyIfIdle=true 时先做原子空闲判定：有在飞帧则不做任何改动、返回 Deferred，
     // 由调用方稍后重试（IDR 兜底定时器用，避免主线程白等一整帧）。
@@ -579,7 +581,7 @@ private:
     enum class RebuildResult { Done,
         Deferred,
         NotApplicable };
-    RebuildResult rebuildVideoEncoder(bool onlyIfIdle);
+    RebuildResult rebuildVideoEncoder(bool onlyIfIdle, int srcW = 0, int srcH = 0);
     bool hwEncodeAvailable() const;
     // 服务端能否进入视频模式（H.264 编码）：
     //  ① 本地原始帧源可用（直连 / Linux 服务模式进程内捕获）→ 支持；
