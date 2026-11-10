@@ -2343,6 +2343,17 @@
                 send({ type: 'request_keyframe' });
             }
 
+            // 横竖屏切换专用：分辨率/SPS/PPS 变了，旧解码器继续解新尺寸的流会报错
+            // 并粘性停摆（旧实现只重建 MSE，走 WebCodecs 的客户端会一直黑屏）。
+            // 转屏是正常操作，不计入 resetAndRecover 的失败降级计数。
+            resetForResolutionChange() {
+                try { if (this.decoder) this.decoder.close(); } catch (e) {}
+                this.decoder = this.createDecoder();
+                this.configured = false;
+                this.lastKeyframeReqMs = Date.now();
+                send({ type: 'request_keyframe' });
+            }
+
             configure(extraData) {
                 // 已 configured 的解码器再次 configure 在部分浏览器会抛
                 // InvalidStateError（旧实现被 onmessage 的 catch 静默吞掉，
@@ -2363,6 +2374,10 @@
             }
 
             decode(data, isKeyframe, timestamp) {
+                // 空载荷不是可解码帧（编码器重建/flush 期间会短暂产出零长度包）。
+                // 喂给 VideoDecoder 会抛 "Null or empty decoder buffer" 并让解码器
+                // 粘性停摆，转屏/重建场景下表现为黑屏。
+                if (!data || data.length === 0) return;
                 if (!this.supported) {
                     // 无 WebCodecs 无法解码 WS H.264。但若 WebRTC 是活动/意图中的视频路径，
                     // 帧走 RTP、不应经 WS 0x01/0x02 到达此处；即便竞态漏入也绝不能触发
@@ -2400,7 +2415,17 @@
                     }
                 }
 
-                if (!this.configured) return;
+                if (!this.configured) {
+                    // 转屏/解码自愈后重建的解码器要等关键帧才能 configure。
+                    // 若这一次 request_keyframe 正好落在服务端切图片模式的空窗里被丢弃，
+                    // 静态桌面下前端会永久黑屏，故对 P 帧限频重试（1s 一次）。
+                    const nowReq = Date.now();
+                    if (nowReq - (this.lastKeyframeReqMs || 0) > 1000) {
+                        this.lastKeyframeReqMs = nowReq;
+                        send({ type: 'request_keyframe' });
+                    }
+                    return;
+                }
 
                 // 背压：解码队列持续增长说明解码跟不上出帧，继续无脑 decode 只会
                 // 让延迟/内存单调上升（远程桌面场景宁可丢 P 帧看最新的画面）。
@@ -2864,6 +2889,11 @@
                         if (msePlayer.start('h264')) {
                             send({ type: 'request_keyframe' });
                         }
+                    } else if (sizeChanged && state.decoder && state.decoder.supported &&
+                               !webrtcState.active && !webrtcState.intending) {
+                        // WebCodecs 路径同理：新尺寸的码流要换 SPS/PPS，旧解码器会报错停摆。
+                        console.log('WebCodecs rebuild after resolution change -> ' + sw + 'x' + sh);
+                        state.decoder.resetForResolutionChange();
                     }
                     break;
                 }
