@@ -11,7 +11,7 @@ endif()
 # VERSION 必须写在 project() 里：project() 会把 PROJECT_VERSION 设成同名普通变量，
 # 之后 set(PROJECT_VERSION ...) 会被它盖掉（空值），Android versionName 与 macOS bundle
 # 版本都取自这里，写在外面等于没写。发版时和 tag 一起改这一行。
-project(QtRemoteDesktop VERSION 1.5.4 LANGUAGES C CXX)
+project(QtRemoteDesktop VERSION 1.5.5 LANGUAGES C CXX)
 
 # 单配置生成器（Makefiles/Ninja）未指定类型时不带 -O2，性能会明显变差；
 # 默认 Release。多配置生成器（Visual Studio 等）由 --config 决定，跳过。
