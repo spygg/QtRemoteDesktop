@@ -508,6 +508,10 @@ private:
     QString sysActionPendingAction_;
     int sysActionPendingSeq_ = 0;
     int sysActionSeq_ = 0;
+    // [PRIVACY] 隐私屏：被控端显示器是否被本功能熄灭。实测关屏期间采集是黑帧
+    // (GDI)/冻帧(DXGI)，所以这个标志同时决定"远端输入要不要先点亮面板"。
+    // 只代表本功能下发的状态：本地手动关屏或面板自己恢复都不会自动更新它。
+    bool monitorOff_ = false;
     // [SYS-ACT] logout 专用：ACK 之后继续等"会话开始销毁"的证据。baseline 在
     // 下发 logout 时记录（当时若已锁屏，LogonUI 可能已在跑，就不能再拿它当信号）。
     bool logoutConfirmPending_ = false;
@@ -641,9 +645,19 @@ private:
 
     // ---- 系统操作（快捷键面板） ----
     // 执行被控端系统动作：lock/show_desktop/task_manager/logout/reboot/poweroff
+    //                     /monitor_off/monitor_on
     void handleSystemAction(const QString& action, const QString& clientId,
                             const QString& password = QString(),
                             const QString& username = QString());
+    // [PRIVACY] 隐私屏：关闭/恢复被控端显示器（Windows DPMS、Linux X11 xset）。
+    // 熄灭期间远端画面本身会变黑/冻帧，所以调用方要接受"黑一会儿"这个代价。
+    // Wayland / macOS / Android 没有可靠且可恢复的机制 —— 如实回 unsupported，
+    // 不做静默无操作。服务模式且 helper 在线时转发 helper 在用户会话执行。
+    void handleMonitorPower(const QString& action, const QString& clientId);
+    // 隐私屏熄灭期间，远端键鼠输入进来时先点亮面板（限流 1 次/秒）。
+    // 带 clientId：点亮结果要用 monitor_result 回报给这个连接，前端才能把按钮
+    // 文案从「恢复显示器」改回来。
+    void wakeMonitorIfOff(const QString& clientId, const QString& why);
 #ifdef _WIN32
     // [LOCK] Windows 的 lock 三态：helper 在 → 转发 + ack/超时；helper 不在 →
     // 立即 no_helper（绝不退回 Session 0）；非服务模式 → 本会话直接执行。

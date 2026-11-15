@@ -102,6 +102,47 @@ static void x11ShowDesktopOnce(bool show)
     XSync(dpy, False);
     XCloseDisplay(dpy);
 }
+
+// [PRIVACY] 与服务端 x11MonitorPower 同一实现（本工程 Linux X 工具一贯就地各留一份，
+// 参考 x11ShowDesktopOnce）。两个实测坑：无 DPMS 扩展时 `xset dpms force off` 打印
+// "server does not have extension for dpms option" 却返回退出码 0；`unable to open
+// display` 同样 0。所以先用 `xset q` 探扩展，再决定执行还是回不支持。
+// 返回 1 = 已执行；0 = 没有 DPMS 扩展/连不上 X；-1 = 命令失败。
+static int x11MonitorPower(bool off, QString* detail)
+{
+    const QString xset = QStandardPaths::findExecutable(QStringLiteral("xset"));
+    if (xset.isEmpty()) {
+        if (detail) *detail = QStringLiteral("系统里没有 xset（x11-utils / xorg-x11-utils）");
+        return -1;
+    }
+    QProcess q;
+    q.start(xset, { QStringLiteral("q") });
+    if (!q.waitForStarted(1500) || !q.waitForFinished(2000)) {
+        if (detail) *detail = QStringLiteral("xset q 无法执行：%1").arg(q.errorString());
+        return -1;
+    }
+    const QString probe = QString::fromUtf8(q.readAllStandardOutput())
+                        + QString::fromUtf8(q.readAllStandardError());
+    if (probe.contains(QStringLiteral("unable to open display"))) {
+        if (detail) *detail = QStringLiteral("打不开 X 显示（DISPLAY/XAUTHORITY 不可用）");
+        return 0;
+    }
+    if (probe.contains(QStringLiteral("does not have the DPMS Extension"))) {
+        if (detail) *detail = QStringLiteral("这台 X 服务器没有 DPMS 扩展（无头/Xvfb 或被禁用）");
+        return 0;
+    }
+    QProcess p;
+    p.start(xset, { QStringLiteral("dpms"), QStringLiteral("force"),
+                    off ? QStringLiteral("off") : QStringLiteral("on") });
+    if (!p.waitForStarted(1500) || !p.waitForFinished(2000) || p.exitCode() != 0) {
+        if (detail)
+            *detail = QStringLiteral("xset dpms force %1 失败（退出码 %2，%3）")
+                          .arg(off ? QStringLiteral("off") : QStringLiteral("on"))
+                          .arg(p.exitCode()).arg(QString::fromUtf8(p.readAllStandardError()));
+        return -1;
+    }
+    return 1;
+}
 #endif
 
 void logToFile(QtMsgType type, const QMessageLogContext& lg, const QString& msg);
@@ -1315,6 +1356,33 @@ int HelperProcess::run(int argc, char* argv[])
                     }
                 } else if (action == "task_manager") {
                     QProcess::startDetached(QStringLiteral("taskmgr"));
+                } else if (action == "monitor_off" || action == "monitor_on") {
+                    // [PRIVACY] 隐私屏：关屏/点亮必须在交互桌面上发（服务进程在
+                    // Session 0 组播只作用于服务窗口站，屏幕不动、还回不了回执）。
+                    // SC_MONITORPOWER：2 = 关，-1 = 开。HWND_BROADCAST 组播里必然
+                    // 混有不响应的高权限窗口，实测（探针）err=5 但返回值 1 且关屏/
+                    // 点亮都真的生效 —— 所以只按"有没有窗口应答"判成败，不看
+                    // GetLastError；返回 0 才是真的未知（unconfirmed）。
+                    const bool off = (action == QLatin1String("monitor_off"));
+                    const LRESULT responded = SendMessageTimeoutA(
+                        HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER,
+                        (LPARAM)(off ? 2 : -1), SMTO_ABORTIFHUNG | SMTO_NORMAL, 1000, NULL);
+                    qInfo() << "Helper: SC_MONITORPOWER" << (off ? "OFF(2)" : "ON(-1)")
+                            << "responded =" << (responded != 0);
+                    QJsonObject ack;
+                    ack["type"] = "system_action_result";
+                    ack["action"] = action;
+                    ack["ok"] = (responded != 0);
+                    if (responded == 0)
+                        ack["reason"] = QStringLiteral("unconfirmed");
+                    if (obj.contains("seq"))
+                        ack["seq"] = obj["seq"];
+                    ack["detail"] = responded != 0
+                        ? QStringLiteral("窗口站已接受 SC_MONITORPOWER %1")
+                              .arg(off ? QStringLiteral("(off)") : QStringLiteral("(on)"))
+                        : QStringLiteral("SC_MONITORPOWER 组播 1s 内没有任何窗口应答");
+                    ws.sendTextMessage(QString::fromUtf8(
+                        QJsonDocument(ack).toJson(QJsonDocument::Compact)));
                 } else if (action == "logout") {
                     runShutdownAck({ QStringLiteral("/l"), QStringLiteral("/f") },
                                    QStringLiteral("注销"));
@@ -1371,6 +1439,34 @@ int HelperProcess::run(int argc, char* argv[])
                                            "gnome-system-monitor", "ksysguard", "plasma-systemmonitor" });
                     if (!tm.isEmpty())
                         launch(tm);
+                } else if (action == "monitor_off" || action == "monitor_on") {
+                    // [PRIVACY] X11 走 xset dpms force off/on；Wayland 下客户端无权
+                    // 控制 DPMS（XWayland 里的 xset 返回成功但屏幕不会灭），必须如实
+                    // 报 unsupported，不能假装成功。helper 就在用户会话里，这里的
+                    // 会话类型判断比服务进程那侧可靠。
+                    QJsonObject ack;
+                    ack["type"] = "system_action_result";
+                    ack["action"] = action;
+                    if (obj.contains("seq"))
+                        ack["seq"] = obj["seq"];
+                    const bool off = (action == QLatin1String("monitor_off"));
+                    if (InputManager::desktopSessionIsWayland()) {
+                        // XWayland 里 xset 可能"成功"但屏幕不动 —— 宁可拒绝。
+                        ack["ok"] = false;
+                        ack["reason"] = QStringLiteral("unsupported");
+                        ack["detail"] = QStringLiteral("被控端是 Wayland 会话，DPMS 不由客户端控制");
+                    } else {
+                        QString detail;
+                        const int rc = x11MonitorPower(off, &detail);
+                        ack["ok"] = (rc == 1);
+                        if (rc == 0)
+                            ack["reason"] = QStringLiteral("unsupported");
+                        else if (rc == -1)
+                            ack["reason"] = QStringLiteral("dpms_failed");
+                        ack["detail"] = detail;
+                    }
+                    ws.sendTextMessage(QString::fromUtf8(
+                        QJsonDocument(ack).toJson(QJsonDocument::Compact)));
                 } else if (action == "logout") {
                     QString lo = firstOf({ "lxsession-logout", "lxde-logout", "gnome-session-quit",
                                            "xfce4-session-logout" });

@@ -1523,6 +1523,39 @@ bool RDPServer::initialize(const QString& configPath, bool useSslOverride, bool 
                                                   .arg(label)
                                                   .arg(detail.isEmpty() ? QStringLiteral("shutdown 返回失败")
                                                                         : detail) } });
+                    } else if (sysActionPending_ && act == sysActionPendingAction_
+                               && (act == QLatin1String("monitor_off")
+                                   || act == QLatin1String("monitor_on"))) {
+                        // [PRIVACY] helper 执行关屏/点亮后的回执。ok 由 helper 按
+                        // "命令是否被窗口站接受"给出，detail 带失败原因。
+                        const QString cid = sysActionPendingClientId_;
+                        const QString actName = sysActionPendingAction_;
+                        const QString detail = msg["detail"].toString();
+                        sysActionPending_ = false;
+                        sysActionPendingClientId_.clear();
+                        sysActionPendingAction_.clear();
+                        if (ok)
+                            monitorOff_ = (actName == QLatin1String("monitor_off"));
+                        if (!cid.isEmpty())
+                            wsServer_->sendJson(cid, QJsonObject {
+                                { "type", QStringLiteral("monitor_result") },
+                                { "action", actName },
+                                { "ok", ok },
+                                { "reason", ok
+                                        ? (actName == QLatin1String("monitor_off")
+                                               ? QStringLiteral("off") : QStringLiteral("on"))
+                                        : (msg.contains(QStringLiteral("reason"))
+                                               ? msg[QStringLiteral("reason")].toString()
+                                               : QStringLiteral("exec_failed")) },
+                                { "message", ok
+                                        ? QStringLiteral("显示器已%1")
+                                              .arg(actName == QLatin1String("monitor_off")
+                                                       ? QStringLiteral("熄灭")
+                                                       : QStringLiteral("点亮"))
+                                        : QStringLiteral("失败：%1")
+                                              .arg(detail.isEmpty()
+                                                       ? QStringLiteral("用户会话返回失败")
+                                                       : detail) } });
                     }
                     return;
                 } else if (t == "capture_adapt") {
@@ -4273,6 +4306,14 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
 {
     qInfo() << "System action requested:" << action << "from" << clientId.left(8);
 
+    // [PRIVACY] 隐私屏（关闭/恢复被控端显示器）单独成支，且必须排在通用的
+    // "服务模式 → 转发 helper" 之前：Wayland/macOS/Android 没有可靠机制，
+    // 转给 helper 只会变成"点了没反应、也没有回执"。本分支统一给 monitor_result。
+    if (action == QLatin1String("monitor_off") || action == QLatin1String("monitor_on")) {
+        handleMonitorPower(action, clientId);
+        return;
+    }
+
 #ifdef Q_OS_WIN32
     if (action == "login_screen") {
         // 登录界面远程登录：与 unlock_screen 是两条链路。
@@ -4825,6 +4866,196 @@ void RDPServer::handleSystemAction(const QString& action, const QString& clientI
         qWarning() << "Unknown system action:" << action;
     }
 #endif
+}
+
+#if defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+// Linux 的 DPMS 通路：`xset dpms force off/on`。两个坑是实测出来的（WSL 里
+// Xvfb :99，无 DPMS 扩展的服务器）：
+//   · 不支持时 `xset dpms force off` 打印 "server does not have extension for
+//     dpms option"，但退出码是 0 —— 只看 rc 会把"什么都没做"报成成功；
+//   · 所以先用 `xset q` 确认扩展存在，再决定是否执行。
+// 返回 1 = 已执行；0 = 这台 X 服务器没有 DPMS（不支持，别当成失败重试）；
+// -1 = 命令没跑成（detail 给出原因）。DISPLAY/XAUTHORITY 由子进程继承
+// （detectUserX11Env 已为本进程设好，与 show_desktop 等分支同一套环境）。
+static int x11MonitorPower(bool off, QString* detail)
+{
+    const QString xset = QStandardPaths::findExecutable(QStringLiteral("xset"));
+    if (xset.isEmpty()) {
+        if (detail) *detail = QStringLiteral("系统里没有 xset（x11-utils / xorg-x11-utils）");
+        return -1;
+    }
+    QProcess q;
+    q.start(xset, { QStringLiteral("q") });
+    if (!q.waitForStarted(1500) || !q.waitForFinished(2000)) {
+        if (detail) *detail = QStringLiteral("xset q 无法执行：%1").arg(q.errorString());
+        return -1;
+    }
+    const QString probe = QString::fromUtf8(q.readAllStandardOutput())
+                        + QString::fromUtf8(q.readAllStandardError());
+    if (probe.contains(QStringLiteral("unable to open display"))) {
+        // 会话里根本没有可用的 X（真 Wayland 原生会话就是这样）→ 归到"不支持"，
+        // 不是"命令失败"，前端文案与服务端 reason 要能区分这两者。
+        if (detail) *detail = QStringLiteral("打不开 X 显示（DISPLAY/XAUTHORITY 不可用）");
+        return 0;
+    }
+    if (probe.contains(QStringLiteral("does not have the DPMS Extension"))) {
+        if (detail) *detail = QStringLiteral("这台 X 服务器没有 DPMS 扩展（无头/Xvfb 或被禁用）");
+        return 0;
+    }
+    QProcess p;
+    p.start(xset, { QStringLiteral("dpms"), QStringLiteral("force"),
+                    off ? QStringLiteral("off") : QStringLiteral("on") });
+    if (!p.waitForStarted(1500) || !p.waitForFinished(2000) || p.exitCode() != 0) {
+        if (detail)
+            *detail = QStringLiteral("xset dpms force %1 失败（退出码 %2，%3）")
+                          .arg(off ? QStringLiteral("off") : QStringLiteral("on"))
+                          .arg(p.exitCode()).arg(QString::fromUtf8(p.readAllStandardError()));
+        return -1;
+    }
+    return 1;
+}
+#endif
+
+// ==================== [PRIVACY] 隐私屏：关闭 / 恢复被控端显示器 ====================
+// 机制与代价是实测出来的（探针 .workbuddy/tmp/dpms_probe，本机 1920x1080，
+// 10Hz 重绘的动画窗口 + GDI BitBlt 与 DXGI Desktop Duplication 同时取帧）：
+//   显示器点亮      gdi mean≈228 每帧变化 / dxgi 每帧新内容           → 画面正常
+//   SC_MONITORPOWER 关：gdi mean=0（全黑）；dxgi 要么 ACCESS_LOST，
+//                        要么给出最后 1 帧之后一直 WAIT_TIMEOUT（冻帧）
+//   期间每帧重申 ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED：
+//     关屏依然生效（防熄屏 keep-awake 拦不住显式关屏），也不会把面板顶亮回去
+// 也就是说 DPMS 是"面板和远端一起黑"，不是"只有面板黑"。所以必须配
+// wakeMonitorIfOff：远端任意键鼠输入先点亮再注入，否则操作者对着黑屏盲操作。
+// "只有面板黑、远端仍可见"的正解是亮度归零（DDC/CI 或 WMI）：本机 DDC/CI 直接
+// 不支持（GetMonitorBrightness err=50），WMI 亮度可用但要走 COM，且"亮度 0 时
+// 采集仍是真实画面"还没在解锁会话上实测 —— 本版不做，避免写一条没验证过的通路。
+void RDPServer::handleMonitorPower(const QString& action, const QString& clientId)
+{
+    // 不用 kLockAckTimeoutMs：那个常量定义在 Windows 分支里，Linux/macOS 编不到。
+    static const int kMonitorAckTimeoutMs = 3000;
+    const bool off = (action == QLatin1String("monitor_off"));
+    const QString label = off ? QStringLiteral("关闭显示器") : QStringLiteral("恢复显示器");
+    // clientId 为空 = 内部调用（唤醒路径），只做事不回报。
+    auto reply = [this, clientId, action, label](bool ok, const QString& reason,
+                                                 const QString& message) {
+        if (clientId.isEmpty())
+            return;
+        wsServer_->sendJson(clientId, QJsonObject {
+            { "type", QStringLiteral("monitor_result") },
+            { "action", action },
+            { "ok", ok },
+            { "reason", reason },
+            { "message", message.isEmpty() ? QStringLiteral("%1：%2").arg(label, reason) : message } });
+    };
+
+    // 服务模式且 helper 在线：必须在用户会话里执行（Session 0 的关屏命令作用于
+    // 不可见的服务窗口站）。回执走 system_action_result，见消息处理分支。
+    if (serviceMode_ && wsServer_->isCaptureSourceConnected()) {
+        if (sysActionPending_) {
+            reply(false, QStringLiteral("busy"),
+                  QStringLiteral("上一轮系统操作仍在等待结果，请稍后再试"));
+            return;
+        }
+        const int seq = ++sysActionSeq_;
+        sysActionPending_ = true;
+        sysActionPendingClientId_ = clientId;
+        sysActionPendingAction_ = action;
+        sysActionPendingSeq_ = seq;
+        qInfo() << "Privacy:" << action << "forwarded to helper, seq =" << seq;
+        wsServer_->sendToCaptureSource(QJsonObject {
+            { "type", QStringLiteral("system_action") },
+            { "action", action }, { "seq", seq } });
+        QTimer::singleShot(kMonitorAckTimeoutMs, this, [this, seq, clientId, action, label]() {
+            if (!sysActionPending_ || seq != sysActionPendingSeq_
+                || sysActionPendingClientId_ != clientId)
+                return;   // helper 已 ack
+            sysActionPending_ = false;
+            sysActionPendingClientId_.clear();
+            sysActionPendingAction_.clear();
+            qWarning() << "Privacy:" << action << "helper did not ack in"
+                       << kMonitorAckTimeoutMs << "ms";
+            if (!clientId.isEmpty())
+                wsServer_->sendJson(clientId, QJsonObject {
+                    { "type", QStringLiteral("monitor_result") },
+                    { "action", action }, { "ok", false },
+                    { "reason", QStringLiteral("timeout") },
+                    { "message", QStringLiteral("用户会话没有在 3s 内确认「%1」，状态未知")
+                                     .arg(label) } });
+        });
+        return;
+    }
+
+    // —— 以下为本会话直接执行（非服务模式 / 无 helper）——
+#if defined(Q_OS_ANDROID)
+    reply(false, QStringLiteral("unsupported"),
+          QStringLiteral("Android 无法从应用内关闭显示器（需系统级 DEVICE_POWER 权限），"
+                         "本功能不适用于被控端为 Android 的场景"));
+    Q_UNUSED(off)
+#elif defined(Q_OS_MACOS)
+    reply(false, QStringLiteral("unsupported"),
+          QStringLiteral("macOS 的 pmset displaysleepnow 需要 root 且没有对应的"
+                         "\"点亮\"接口，无法保证可恢复，本版本不支持"));
+    Q_UNUSED(off)
+#elif defined(Q_OS_LINUX)
+    if (InputManager::desktopSessionIsWayland()) {
+        // Wayland 合成器不让客户端动 DPMS；XWayland 下的 xset 是 no-op
+        // （命令返回成功但屏幕不会灭），必须明确拒绝而不是假装成功。
+        reply(false, QStringLiteral("unsupported"),
+              QStringLiteral("被控端运行在 Wayland 会话，DPMS 不由客户端控制，无法关闭显示器"));
+        return;
+    }
+    QString detail;
+    const int rc = x11MonitorPower(off, &detail);
+    qInfo() << "Privacy: xset dpms force" << (off ? "off" : "on") << "rc =" << rc
+            << "detail =" << detail;
+    if (rc == 1) {
+        monitorOff_ = off;
+        reply(true, off ? QStringLiteral("off") : QStringLiteral("on"),
+              QStringLiteral("显示器已%1").arg(off ? QStringLiteral("熄灭")
+                                                    : QStringLiteral("点亮")));
+    } else if (rc == 0) {
+        reply(false, QStringLiteral("unsupported"), detail);
+    } else {
+        reply(false, QStringLiteral("dpms_failed"), detail);
+    }
+#elif defined(_WIN32)
+    // SC_MONITORPOWER：2 = 关闭，-1 = 开启。HWND_BROADCAST 组播里必然混有
+    // 不响应的高权限窗口，SendMessageTimeout 会以 err=5 返回 0/非 0 ——
+    // 实测（探针）返回 1 且关屏/点亮都真实生效，因此只按"有没有收到应答"判，
+    // 不把 GetLastError 当失败。返回 0 = 没有任何窗口应答，状态未知。
+    LRESULT responded = SendMessageTimeoutA(HWND_BROADCAST, WM_SYSCOMMAND,
+                                            SC_MONITORPOWER, (LPARAM)(off ? 2 : -1),
+                                            SMTO_ABORTIFHUNG | SMTO_NORMAL, 1000, NULL);
+    qInfo() << "Privacy: SC_MONITORPOWER" << (off ? "OFF(2)" : "ON(-1)")
+            << "responded =" << (responded != 0);
+    if (responded != 0)
+        monitorOff_ = off;
+    reply(responded != 0,
+          responded != 0 ? (off ? QStringLiteral("off") : QStringLiteral("on"))
+                         : QStringLiteral("unconfirmed"),
+          responded != 0
+              ? QStringLiteral("显示器已%1").arg(off ? QStringLiteral("熄灭")
+                                                     : QStringLiteral("点亮"))
+              : QStringLiteral("窗口站没有应答，显示器状态未知"));
+#endif
+}
+
+// 隐私屏熄灭期间，远端的键鼠输入先负责把面板点亮。点亮是异步的（面板从 DPMS
+// 恢复要 1~3s），这里不等它 —— 输入照常注入，画面晚一点才亮。
+// 必须带着 clientId 走正常回执：前端据此把按钮从「恢复显示器」改回「关闭显示器」，
+// 否则它以为自己还熄着屏，下一刀就发成了 monitor_on（空操作）。
+void RDPServer::wakeMonitorIfOff(const QString& clientId, const QString& why)
+{
+    if (!monitorOff_)
+        return;
+    static qint64 lastWakeMs = 0;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (nowMs - lastWakeMs < 1000)
+        return;   // mousemove 是高频事件，点亮命令每次输入脉冲发一次就够
+    lastWakeMs = nowMs;
+    qInfo() << "Privacy: waking display before injected input, client =" << clientId.left(8)
+            << "type =" << why;
+    handleMonitorPower(QStringLiteral("monitor_on"), clientId);
 }
 
 void RDPServer::onClientConnected(const QString& clientId)
@@ -5381,6 +5612,18 @@ void RDPServer::onInputReceived(const QString& clientId, const QJsonObject& inpu
         }
         return;
     }
+
+    // [PRIVACY] 隐私屏熄灭期间的输入要先负责点亮：实测关屏时 GDI 采到全黑、
+    // DXGI 只剩冻帧（见 handleMonitorPower 的探针结论），不点亮的后果是操作者
+    // 对着黑屏盲操作。放在观看模式拦截之后 —— 只读连接既然注入不了东西，
+    // 也就不该有资格点亮屏幕。
+    if (monitorOff_ && (type == QLatin1String("mousemove")
+                        || type == QLatin1String("mousedown")
+                        || type == QLatin1String("mouseup")
+                        || type == QLatin1String("wheel")
+                        || type == QLatin1String("keydown")
+                        || type == QLatin1String("keyup")))
+        wakeMonitorIfOff(clientId, type);
 
     // ---- 中文输入（IME 上屏）门禁 ----
     // 只有前端声明过的连接（set_chinese_input:true）才允许 isChar。默认关闭，

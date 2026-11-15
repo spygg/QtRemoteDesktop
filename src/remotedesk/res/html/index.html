@@ -934,6 +934,10 @@
         <button onclick="cycleIme(); document.getElementById('sys-menu').classList.remove('open');"><span class="sys-icon">文</span>输入法<span class="sys-shortcut">Ctrl+Alt+I</span></button>
         <button onclick="systemAction('show_desktop')"><span class="sys-icon">🖥️</span>显示桌面</button>
         <button onclick="systemAction('task_manager')"><span class="sys-icon">⚙️</span>任务管理器</button>
+        <!-- [PRIVACY] 隐私屏：熄灭/恢复被控端本机显示器。实测（DPMS 探针）关屏期间
+             采集侧 GDI 是全黑、DXGI 是冻帧，所以这是"面板和远端一起黑"，靠远端输入点亮
+             （服务端收到键鼠输入会自动发 monitor_on）。按钮文案随当前状态切换。 -->
+        <button id="sys-monitor-btn" onclick="toggleMonitorPower()"><span class="sys-icon">⬛</span><span id="sys-monitor-label">关闭显示器</span></button>
         <button id="sys-logout-btn" onclick="systemAction('logout')"><span class="sys-icon">🚪</span>注销</button>
         <div class="sep"></div>
         <button id="sys-reboot-btn" class="danger" onclick="systemAction('reboot')"><span class="sys-icon">🔄</span>重启</button>
@@ -973,6 +977,18 @@
             <div class="dropdown-title">中文输入</div>
             <div class="dropdown-note">默认关闭：仅发送键码，中文无法上屏（英文/数字/长按更快）。开启后走 Unicode 注入，支持输入法上屏的中文</div>
             <div class="dropdown-options" data-key="chineseinput">
+                <button data-value="off">关闭</button>
+                <button data-value="on">开启</button>
+            </div>
+        </div>
+        <!-- [PRIVACY] 隐私屏：连接建立（认证完成）后自动熄灭被控端显示器。
+             默认关闭 —— 这条路径会让远端画面一起变黑（DPMS 关屏期间 GDI 全黑、
+             DXGI 冻帧，见系统菜单「关闭显示器」的说明），只有动手操作才恢复，
+             所以必须是用户显式选择，不能在登录后默认就把画面弄黑。 -->
+        <div class="dropdown-section">
+            <div class="dropdown-title">登录后关闭显示器（隐私屏）</div>
+            <div class="dropdown-note">默认关闭。开启后每次连接成功会自动熄灭被控端显示器：旁边的人看不到内容，被控端仍在运行、可继续操作。注意熄灭期间远端画面也会一起变黑，动一下鼠标或按键即恢复（面板点亮约需 1~3 秒）</div>
+            <div class="dropdown-options" data-key="privacyoff">
                 <button data-value="off">关闭</button>
                 <button data-value="on">开启</button>
             </div>
@@ -1233,6 +1249,13 @@
             // 每条连接建立时通过 set_chinese_input 声明（服务端按 clientId 记账，
             // 老客户端不带该字段 → 服务端按"关闭"处理）。
             chineseInput: (localStorage.getItem('rd_chinese_input') === '1'),
+            // [PRIVACY] 隐私屏。privacyOff = 「连接成功后自动熄灭被控端显示器」的
+            // 偏好，默认关闭（localStorage 无值 → false），开启与否都不影响服务端配置。
+            // monitorOff = 本连接是否已把显示器关掉（只跟踪自己发的命令：本地手动
+            // 关屏、显示器自己超时熄灭、被别人点亮都不会更新它，所以它只用于按钮文案
+            // 和"输入唤醒"语义，不代表物理事实）。
+            privacyOff: (localStorage.getItem('rd_privacy_off') === '1'),
+            monitorOff: false,
             // 共享剪贴板状态。核心难点：**本机剪贴板往往非空但内容陈旧**（上一次 Ctrl+C
             // 的残留），远端刚复制的内容又常常因为非安全上下文而写不进本机剪贴板。
             // 因此除内容本身外还要记录“谁更新得晚”，粘贴时据此仲裁优先级。
@@ -2558,6 +2581,15 @@
                 // 处理，行为与旧版一致（只走键码注入）。
                 send({ type: 'set_chinese_input', enabled: state.chineseInput });
 
+                // [PRIVACY] 隐私屏：本连接的显示器状态重新开始跟踪（重连期间被控端
+                // 可能已被本地输入点亮，不能沿用上一轮的判断）。
+                state.monitorOff = false;
+                setMonitorButton();
+                // 偏好开启时，认证成功后立即熄灭（等价于手点「关闭显示器」）。
+                if (state.privacyOff && !state.viewOnly) {
+                    send({ type: 'system_action', action: 'monitor_off' });
+                }
+
                 // 连接后立即加载远端文件列表（同时获取服务端下发的桌面路径 desktopPath，
                 // 作为本机拖入文件的默认落点）。
                 refreshFileList();
@@ -3200,6 +3232,36 @@
                         showTransferStatus(text, 6000);
                     }
                     break;
+                case 'monitor_result': {
+                    // [PRIVACY] 关屏/点亮的回执。只按结构化 reason 下结论：
+                    // unsupported（Wayland/macOS/Android 没有可靠机制）、
+                    // unconfirmed（组播无人应答）、timeout（helper 没回执）、
+                    // busy、unsupported/dpms_failed/exec_failed —— 这些都必须明说，
+                    // 绝不能显示"已熄灭"。
+                    monitorPending = false;
+                    if (msg.ok)
+                        state.monitorOff = (msg.action === 'monitor_off');
+                    setMonitorButton();
+                    if (msg.ok) {
+                        showTransferStatus(msg.action === 'monitor_off'
+                            ? (msg.message || '显示器已熄灭')
+                                  + '（远端画面也会变黑，动一下鼠标即恢复）'
+                            : (msg.message || '显示器已点亮'), 6000);
+                    } else {
+                        const reason = msg.reason || '';
+                        let text = msg.message || '显示器操作失败';
+                        if (reason === 'unsupported')
+                            text = '被控端不支持关闭显示器：' + (msg.message || '');
+                        else if (reason === 'timeout')
+                            text = '未收到被控端确认，显示器状态未知';
+                        else if (reason === 'unconfirmed')
+                            text = '命令已发出但被控端没有应答，显示器状态未知';
+                        else if (reason === 'busy')
+                            text = '上一轮系统操作仍在等待结果，请稍后再试';
+                        showTransferStatus(text, 6000);
+                    }
+                    break;
+                }
                 case 'logout_result':
                 case 'reboot_result':
                 case 'poweroff_result': {
@@ -3716,6 +3778,50 @@
                 if (sysActionHtml[action]) btn.innerHTML = sysActionHtml[action];
                 delete sysActionHtml[action];
             }
+        }
+
+        // [PRIVACY] 隐私屏按钮：文案随"本连接是否已熄灭显示器"切换，等待回执期间
+        // 置灰，7s 安全网兜底（服务端 helper 回执预算 3s + 命令本身 1s 超时）。
+        var monitorPending = false;
+        var monitorSafetyTimer = null;
+        function setMonitorButton() {
+            const btn = document.getElementById('sys-monitor-btn');
+            const lab = document.getElementById('sys-monitor-label');
+            if (!btn || !lab) return;
+            btn.disabled = monitorPending;
+            lab.textContent = monitorPending ? '处理中…'
+                : (state.monitorOff ? '恢复显示器' : '关闭显示器');
+        }
+        function toggleMonitorPower() {
+            if (state.viewOnly) { notifyViewOnlyBlocked(); return; }
+            if (monitorPending) return;
+            monitorPending = true;
+            setMonitorButton();
+            send({ type: 'system_action',
+                   action: state.monitorOff ? 'monitor_on' : 'monitor_off' });
+            document.getElementById('sys-menu').classList.remove('open');
+            if (monitorSafetyTimer) clearTimeout(monitorSafetyTimer);
+            monitorSafetyTimer = setTimeout(function () {
+                monitorSafetyTimer = null;
+                if (!monitorPending) return;
+                monitorPending = false;
+                setMonitorButton();
+                showTransferStatus('未收到服务端回执，显示器状态未知', 6000);
+            }, 7000);
+        }
+        // 隐私屏偏好（登录后自动熄灭）：纯前端 localStorage，不写 server_config.json。
+        // 开启只影响下次连接；关闭时如果本连接已经把屏幕熄了，顺手恢复 ——
+        // 否则用户取消勾选后会被留在自己不再预期的黑屏里。
+        function setPrivacyOff(on) {
+            state.privacyOff = !!on;
+            localStorage.setItem('rd_privacy_off', state.privacyOff ? '1' : '0');
+            updateDropdownActive();
+            if (!state.privacyOff && state.monitorOff && state.connected) {
+                send({ type: 'system_action', action: 'monitor_on' });
+            }
+            showTransferStatus(state.privacyOff
+                ? '已开启：下次连接成功后自动关闭被控端显示器'
+                : '已关闭：下次连接不再自动熄灭显示器', 5000);
         }
 
         function systemAction(action) {
@@ -4797,7 +4903,10 @@
                                 // 中文输入同样是纯前端状态（服务端只记每连接标记）
                                 : (key === 'chineseinput')
                                     ? (state.chineseInput ? 'on' : 'off')
-                                    : String(cfg[key]);
+                                    // [PRIVACY] 隐私屏偏好同样是纯前端状态（localStorage）
+                                    : (key === 'privacyoff')
+                                        ? (state.privacyOff ? 'on' : 'off')
+                                        : String(cfg[key]);
                 group.querySelectorAll('button').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.value === val);
                 });
@@ -4848,6 +4957,11 @@
                 // 中文输入：纯前端开关 + 每连接声明（见 setChineseInput）
                 setChineseInput(val === 'on');
                 return; // setChineseInput 内部已刷新高亮
+            }
+            if (key === 'privacyoff') {
+                // [PRIVACY] 登录后自动熄灭显示器：纯前端偏好（见 setPrivacyOff）
+                setPrivacyOff(val === 'on');
+                return;
             }
             if (key === 'quality') {
                 const fps = state.currentConfig.fps;
